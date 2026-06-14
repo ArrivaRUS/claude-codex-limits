@@ -347,9 +347,9 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2) 
 
     let two = products.count >= 2
     let rowH = two ? H / 2 : H
-    let iconSz: CGFloat = (two ? 12 : 15) * s
-    let gapIcon: CGFloat = (two ? 2.5 : 3) * s
-    let font = ctFont((two ? 9 : 12) * s, two ? .regular : .semibold)
+    let iconSz: CGFloat = (two ? 12 : 19) * s    // single product → fill the bar
+    let gapIcon: CGFloat = (two ? 2.5 : 4) * s
+    let font = ctFont((two ? 9 : 14.5) * s, two ? .regular : .medium)
 
     let lines = products.map { CTLineCreateWithAttributedString(groupString($0.0, dark: dark, font: font)) }
     let textW = lines.map { ceil(lineWidth($0)) }.max() ?? 0
@@ -583,10 +583,9 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage"))
     }
 
-    // header (icon + subtitle reflect what's present)
-    let headerIcon = prods.first?.2 ?? "claude_128.png"
+    // header — the app's OWN icon + subtitle of present products
     let subtitle = prods.isEmpty ? "не найдено" : prods.map { $0.1 }.joined(separator: " · ")
-    if let img = loadCGImage(assetPath(headerIcon)) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
+    if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr("Лимиты", 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
     let rfRect = rectTL(W - pad - 24, pad - 2, 24, 24)
