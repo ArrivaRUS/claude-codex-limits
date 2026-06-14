@@ -1,0 +1,98 @@
+# Claude Codex Limits
+
+**English** · [Русский](README.ru.md)
+
+A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
+usage limits you have left — at a glance, right in the top tray.
+
+Each row shows `session% / weekly%` (the rolling 5‑hour window and the 7‑day window),
+with the product's icon to its left. Click the tray icon for a detailed popover.
+
+<p align="center">
+  <img src="docs/menubar-dark.png" width="180" alt="Menu bar (dark)">
+  &nbsp;&nbsp;
+  <img src="docs/panel.png" width="320" alt="Popover">
+</p>
+
+## Features
+
+- **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
+- **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
+- **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
+- **Click a card** to open the relevant limits page in your browser.
+- **Refresh interval** — 1 / 5 / 15 minutes, your choice.
+- **Light & dark** menu bar, retina‑crisp.
+- **Launch at login**, no Dock icon, no dependencies beyond what macOS already ships.
+
+## How it works
+
+**Claude Code** (subscription limits). The app reads your existing Claude Code OAuth
+credentials from the macOS Keychain (`Claude Code-credentials`), refreshing the access
+token the same way the Claude Code CLI does when it expires, and calls Anthropic's
+usage endpoint `GET /api/oauth/usage`. **This does not consume any of your quota** — it
+only reads `five_hour.utilization` (session) and `seven_day.utilization` (weekly).
+
+**Codex** (OpenAI). Codex writes its rate limits into its local session logs
+(`~/.codex/sessions/**/rollout-*.jsonl`). The app reads the most recent `rate_limits`
+record: `primary` = 5‑hour window, `secondary` = 7‑day window. These values are only as
+fresh as your last Codex request — if you haven't run Codex in a while, the popover says so.
+
+Nothing is sent anywhere except the authenticated usage request to Anthropic (as you).
+No telemetry, no third‑party services. Runtime cache and a Keychain backup live under
+`~/.claude-limits-monitor/`.
+
+## Install
+
+### From the .dmg
+
+1. Download `ClaudeCodexLimits-1.0.dmg` from the [Releases](../../releases) page.
+2. Open it and drag **Claude Codex Limits** into **Applications**.
+3. Launch it. Because the build isn't notarized, the first time you may need to
+   right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
+4. The icon appears at the top‑right of your menu bar.
+
+### From source
+
+```bash
+git clone https://github.com/ArrivaRUS/claude-codex-limits.git
+cd claude-codex-limits
+./install.sh        # builds, installs to /Applications, enables launch-at-login, starts it
+```
+
+Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages to install.
+
+## Usage
+
+- **Left‑click** the tray icon → open/close the popover.
+- **Click a card** → open that product's limits page in the browser.
+- **Refresh button** (top‑right of the popover) → refresh now.
+- **Interval pills** (bottom) → 1 / 5 / 15 minutes.
+- **Power button** (bottom‑right) → quit.
+- **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
+
+## Build a release
+
+```bash
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.0.dmg
+```
+
+## Project layout
+
+```
+Sources/LimitsMonitor.swift   the whole app (Foundation + AppKit + CoreText)
+Resources/*.png               brand icons
+build.sh                      build the .app into dist/
+install.sh                    build + install + launch-at-login
+scripts/make-dmg.sh           package a .dmg
+docs/                         screenshots
+```
+
+## Privacy & security
+
+The app only ever reads **your own** local credentials and logs, and only talks to
+Anthropic's API authenticated as you. It never embeds or transmits secrets. The source
+is a single readable Swift file — read it. Use at your own discretion.
+
+## License
+
+[MIT](LICENSE) © 2026 Alex Kovalev

@@ -1,0 +1,17 @@
+# build output
+dist/
+*.dmg
+
+# macOS
+.DS_Store
+
+# editor / tooling
+.claude/
+*.swiftmodule
+*.o
+
+# runtime data (never commit — may contain credentials/usage)
+cache.json
+app.lock
+build.log
+backups/
