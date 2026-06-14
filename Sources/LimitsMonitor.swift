@@ -79,6 +79,7 @@ struct LimitData {
     var error: String?
     var stale = false
     var fromCache = false
+    var present = true         // false → product not set up on this Mac (hide its row/card)
 }
 
 // MARK: - Date helpers
@@ -102,6 +103,7 @@ func parseISOmillisZ(_ s: String) -> Date? {
 func fetchClaude() -> LimitData {
     var d = LimitData()
     let kc = shell("/usr/bin/security", ["find-generic-password", "-s", KC_SERVICE, "-w"])
+    if kc.code == 44 { d.present = false; return d }   // keychain item not found → Claude Code not set up
     guard kc.code == 0,
           let data = kc.out.data(using: .utf8),
           var creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -171,7 +173,7 @@ func fetchCodex() -> LimitData {
     var d = LimitData()
     let base = HOME + "/.codex/sessions"
     let fm = FileManager.default
-    guard let en = fm.enumerator(atPath: base) else { d.error = "нет сессий Codex"; return d }
+    guard let en = fm.enumerator(atPath: base) else { d.present = false; return d }   // no ~/.codex → Codex not set up
     var files: [(String, Date)] = []
     for case let rel as String in en {
         if rel.hasSuffix(".jsonl"), rel.contains("rollout-") {
@@ -244,14 +246,14 @@ func applyCache(_ claude: inout LimitData, _ codex: inout LimitData) {
     var cache: [String: Any] = [:]
     if let cd = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
        let cj = (try? JSONSerialization.jsonObject(with: cd)) as? [String: Any] { cache = cj }
-    if claude.error != nil, let cm = cache["claude"] as? [String: Any] {
+    if claude.present, claude.error != nil, let cm = cache["claude"] as? [String: Any] {
         let e = claude.error; claude = dict2ld(cm); claude.error = e
     }
-    if codex.error != nil, let cm = cache["codex"] as? [String: Any] {
+    if codex.present, codex.error != nil, let cm = cache["codex"] as? [String: Any] {
         let e = codex.error; codex = dict2ld(cm); codex.error = e
     }
-    if claude.error == nil { cache["claude"] = ld2dict(claude) }
-    if codex.error == nil { cache["codex"] = ld2dict(codex) }
+    if claude.present, claude.error == nil { cache["claude"] = ld2dict(claude) }
+    if codex.present, codex.error == nil { cache["codex"] = ld2dict(codex) }
     if let outD = try? JSONSerialization.data(withJSONObject: cache) {
         try? outD.write(to: URL(fileURLWithPath: CACHE_PATH))
     }
@@ -323,47 +325,60 @@ func loadCGImage(_ path: String) -> CGImage? {
     return CGImageSourceCreateImageAtIndex(src, 0, nil)
 }
 
-/// Two-row menu-bar strip — Claude over Codex — transparent bg, supersample `s` (2 = retina).
-/// Compact: small thin font + small icons, total height = the menu-bar height so both rows fit.
-func renderStrip(_ claude: LimitData, _ codex: LimitData, dark: Bool, s: CGFloat = 2) -> CGImage? {
+/// Menu-bar strip for the products that are present — transparent bg, supersample `s` (2 = retina).
+/// Two products → two compact stacked rows; one product → a single larger row; none → a dim "—".
+func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2) -> CGImage? {
     let H: CGFloat = 22 * s            // full menu-bar height
-    let rowH = H / 2                   // one stacked row
-    let iconSz: CGFloat = 12 * s
-    let gapIcon: CGFloat = 2.5 * s, padX: CGFloat = 1 * s
-    let font = ctFont(9 * s, .regular)
+    let padX: CGFloat = 1 * s
+    let fg = cg(dark ? .white : .black)
 
-    let cLine = CTLineCreateWithAttributedString(groupString(claude, dark: dark, font: font))
-    let xLine = CTLineCreateWithAttributedString(groupString(codex, dark: dark, font: font))
-    let textW = ceil(max(lineWidth(cLine), lineWidth(xLine)))
+    if products.isEmpty {
+        let font = ctFont(12 * s, .regular)
+        let line = CTLineCreateWithAttributedString(ctAttr("—", font, fg))
+        let W = ceil(lineWidth(line)) + 8 * s
+        guard let ctx = bitmapContext(Int(W), Int(H)) else { return nil }
+        ctx.textMatrix = .identity
+        var a: CGFloat = 0, dd: CGFloat = 0
+        _ = CTLineGetTypographicBounds(line, &a, &dd, nil)
+        ctx.textPosition = CGPoint(x: 4 * s, y: (H - a - dd) / 2 + dd)
+        CTLineDraw(line, ctx)
+        return ctx.makeImage()
+    }
+
+    let two = products.count >= 2
+    let rowH = two ? H / 2 : H
+    let iconSz: CGFloat = (two ? 12 : 15) * s
+    let gapIcon: CGFloat = (two ? 2.5 : 3) * s
+    let font = ctFont((two ? 9 : 12) * s, two ? .regular : .semibold)
+
+    let lines = products.map { CTLineCreateWithAttributedString(groupString($0.0, dark: dark, font: font)) }
+    let textW = lines.map { ceil(lineWidth($0)) }.max() ?? 0
     let textX = padX + iconSz + gapIcon
     let W = ceil(textX + textW + padX)
 
     guard let ctx = bitmapContext(Int(W), Int(H)) else { return nil }
     ctx.interpolationQuality = .high
     ctx.textMatrix = .identity
-
     var asc: CGFloat = 0, desc: CGFloat = 0
-    _ = CTLineGetTypographicBounds(cLine, &asc, &desc, nil)
+    _ = CTLineGetTypographicBounds(lines[0], &asc, &desc, nil)
 
-    // CG origin is bottom-left → top row sits at y in [rowH, H], bottom row at [0, rowH].
-    func drawRow(_ line: CTLine, _ icon: String, topRow: Bool) {
-        let y0 = topRow ? rowH : 0
+    // CG origin is bottom-left → first product on top.
+    for (i, prod) in products.enumerated() {
+        let y0 = two ? (i == 0 ? rowH : 0) : 0
         let iconY = (y0 + (rowH - iconSz) / 2).rounded()
-        if let img = loadCGImage(assetPath(icon)) {
+        if let img = loadCGImage(assetPath(prod.1)) {
             ctx.draw(img, in: CGRect(x: padX, y: iconY, width: iconSz, height: iconSz))
         }
         let baseY = (y0 + (rowH - asc - desc) / 2 + desc).rounded()
         ctx.textPosition = CGPoint(x: textX, y: baseY)
-        CTLineDraw(line, ctx)
+        CTLineDraw(lines[i], ctx)
     }
-    drawRow(cLine, "claude_128.png", topRow: true)   // Claude Code on top
-    drawRow(xLine, "codex_128.png", topRow: false)   // Codex below
     return ctx.makeImage()
 }
 
 /// Renders the strip onto a menu-bar-like background and saves a PNG (for `--preview`).
-func writePreview(_ claude: LimitData, _ codex: LimitData, dark: Bool, to path: String) {
-    guard let strip = renderStrip(claude, codex, dark: dark, s: 6) else { return }
+func writePreview(_ products: [(LimitData, String)], dark: Bool, to path: String) {
+    guard let strip = renderStrip(products, dark: dark, s: 6) else { return }
     let pad = 12 * 6, barH = 24 * 6
     let W = strip.width + pad * 2, H = barH
     guard let ctx = bitmapContext(W, H) else { return }
@@ -439,8 +454,9 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-let APP_VERSION = "1.0"
+let APP_VERSION = "1.1"
 let APP_AUTHOR = "Alex Kovalev"
+let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
 func gray(_ w: CGFloat, _ a: CGFloat) -> NSColor { NSColor(white: w, alpha: a) }
 
@@ -558,10 +574,21 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
     let pad: CGFloat = 16
 
-    // header
-    if let img = loadCGImage(assetPath("claude_128.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
+    // which products are present
+    var prods: [(LimitData, String, String, String)] = []   // (data, name, icon, url)
+    if claude.present {
+        prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage"))
+    }
+    if codex.present {
+        prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage"))
+    }
+
+    // header (icon + subtitle reflect what's present)
+    let headerIcon = prods.first?.2 ?? "claude_128.png"
+    let subtitle = prods.isEmpty ? "не найдено" : prods.map { $0.1 }.joined(separator: " · ")
+    if let img = loadCGImage(assetPath(headerIcon)) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr("Лимиты", 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
-    text(attr("Claude Code · Codex", 11, .regular, textLo), x: pad + 40, topY: pad + 17)
+    text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
     let rfRect = rectTL(W - pad - 24, pad - 2, 24, 24)
     drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 4, dy: 4), textMid, weight: .semibold)
     hits.append(Hit(id: "refresh", rect: rfRect))
@@ -570,15 +597,15 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let cardsTop: CGFloat = 58, cardH: CGFloat = 152, gap: CGFloat = 12
     let cardW = (W - pad * 2 - gap) / 2
 
-    func drawCard(_ x: CGFloat, _ d: LimitData, name: String, icon: String, url: String) {
-        let r = rectTL(x, cardsTop, cardW, cardH)
+    func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String) {
+        let r = rectTL(x, cardsTop, w, cardH)
         roundFill(r, 14, gray(1, 0.04)); roundStroke(r, 14, gray(1, 0.06), 1)
         hits.append(Hit(id: "open:\(url)", rect: r))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
-        drawSF(ctx, "arrow.up.forward", in: rectTL(x + cardW - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
+        drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
 
-        let cx = x + cardW / 2, cyTop = cardsTop + 84
+        let cx = x + w / 2, cyTop = cardsTop + 84
         let sCol = metricColor(blue, d.session), wCol = metricColor(purple, d.weekly)
         gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
         gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
@@ -589,15 +616,20 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         let lx = x + 16, l1 = cardsTop + 124, l2 = cardsTop + 139
         dot(lx, centerTopY: l1 + 5, sCol)
         text(attr("Сессия", 10.5, .regular, textMid), x: lx + 11, topY: l1)
-        text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + cardW - 14, topY: l1, align: 2)
+        text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
         dot(lx, centerTopY: l2 + 5, wCol)
         text(attr("Неделя", 10.5, .regular, textMid), x: lx + 11, topY: l2)
-        text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + cardW - 14, topY: l2, align: 2)
+        text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
     }
-    drawCard(pad, claude, name: "Claude Code", icon: "claude_128.png",
-             url: "https://claude.ai/settings/usage")
-    drawCard(pad + cardW + gap, codex, name: "Codex", icon: "codex_128.png",
-             url: "https://chatgpt.com/codex/cloud/settings/analytics#usage")
+
+    if prods.count >= 2 {
+        drawCard(pad, cardW, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
+        drawCard(pad + cardW + gap, cardW, prods[1].0, name: prods[1].1, icon: prods[1].2, url: prods[1].3)
+    } else if prods.count == 1 {
+        drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
+    } else {
+        text(attr("Claude Code и Codex не найдены", 12, .regular, textMid), x: W / 2, topY: cardsTop + 70, align: 1)
+    }
 
     // footer
     let footTop = cardsTop + cardH + 14
@@ -619,12 +651,20 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         text(attr("обновлено " + clockText(u), 10, .regular, textLo), x: W - pad - 32, topY: footTop + 7, align: 2)
     }
 
-    // credit line (authorship + version), like the reference app
+    // credit line (authorship + version + clickable GitHub), like the reference app
     let divY = H - 256
     ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
     ctx.beginPath(); ctx.move(to: CGPoint(x: pad, y: divY)); ctx.addLine(to: CGPoint(x: W - pad, y: divY)); ctx.strokePath()
-    text(attr("Claude Codex Limits \(APP_VERSION) · by \(APP_AUTHOR)", 9.5, .regular, gray(1, 0.32)),
-         x: W / 2, topY: 265, align: 1)
+    let creditPre = attr("Claude Codex Limits \(APP_VERSION) · by \(APP_AUTHOR) · ", 9.5, .regular, gray(1, 0.32))
+    let creditLink = attr("GitHub", 9.5, .semibold, NSColor(srgbRed: 0.42, green: 0.62, blue: 0.96, alpha: 0.95))
+    let preW = lineWidth(CTLineCreateWithAttributedString(creditPre))
+    let linkW = lineWidth(CTLineCreateWithAttributedString(creditLink))
+    let creditX = (W - preW - linkW) / 2
+    let creditTop: CGFloat = 265
+    text(creditPre, x: creditX, topY: creditTop)
+    text(creditLink, x: creditX + preW, topY: creditTop)
+    hits.append(Hit(id: "open:\(REPO_URL)",
+                    rect: CGRect(x: creditX + preW - 3, y: H - creditTop - 13, width: linkW + 6, height: 16)))
 
     return hits
 }
@@ -774,7 +814,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func render(_ claude: LimitData, _ codex: LimitData) {
         last = (claude, codex)
-        if let cgImg = renderStrip(claude, codex, dark: isDark(), s: 2), let btn = statusItem.button {
+        var products: [(LimitData, String)] = []
+        if claude.present { products.append((claude, "claude_128.png")) }
+        if codex.present { products.append((codex, "codex_128.png")) }
+        if let cgImg = renderStrip(products, dark: isDark(), s: 2), let btn = statusItem.button {
             let img = NSImage(cgImage: cgImg, size: NSSize(width: CGFloat(cgImg.width) / 2,
                                                            height: CGFloat(cgImg.height) / 2))
             img.isTemplate = false
@@ -798,6 +841,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else {
             if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: Date()) }
             panelCtrl.show(below: btn)
+            refreshNow()   // force fresh readings the moment the panel opens
         }
     }
 
@@ -822,28 +866,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 if CommandLine.arguments.contains("--preview") {
     var c = fetchClaude(); var x = fetchCodex(); applyCache(&c, &x)
-    writePreview(c, x, dark: true,  to: "/tmp/limits_preview_dark.png")
-    writePreview(c, x, dark: false, to: "/tmp/limits_preview_light.png")
+    let cP = (c, "claude_128.png"), xP = (x, "codex_128.png")
+    writePreview([cP, xP], dark: true,  to: "/tmp/limits_preview_dark.png")
+    writePreview([cP, xP], dark: false, to: "/tmp/limits_preview_light.png")
+    writePreview([cP], dark: true, to: "/tmp/limits_preview_claude.png")   // single-product look
+    writePreview([xP], dark: true, to: "/tmp/limits_preview_codex.png")
     print("preview written"); exit(0)
 }
 
 if CommandLine.arguments.contains("--panel-preview") {
     var c = fetchClaude(); var x = fetchCodex(); applyCache(&c, &x)
     let s: CGFloat = 2
-    if let ctx = bitmapContext(Int(PANEL_W * s), Int(PANEL_H * s)) {
+    func renderPanel(_ cl: LimitData, _ cx: LimitData, _ path: String) {
+        guard let ctx = bitmapContext(Int(PANEL_W * s), Int(PANEL_H * s)) else { return }
         ctx.scaleBy(x: s, y: s)
         _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: PANEL_H),
-                      claude: c, codex: x, interval: 60, updated: Date())
-        if let img = ctx.makeImage() {
-            let data = NSMutableData()
-            if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, img, nil)
-                if CGImageDestinationFinalize(dest) {
-                    try? (data as Data).write(to: URL(fileURLWithPath: "/tmp/panel_preview.png"))
-                }
-            }
+                      claude: cl, codex: cx, interval: 60, updated: Date())
+        guard let img = ctx.makeImage() else { return }
+        let data = NSMutableData()
+        if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, img, nil)
+            if CGImageDestinationFinalize(dest) { try? (data as Data).write(to: URL(fileURLWithPath: path)) }
         }
     }
+    var xAbsent = x; xAbsent.present = false
+    var cAbsent = c; cAbsent.present = false
+    renderPanel(c, x, "/tmp/panel_preview.png")
+    renderPanel(c, xAbsent, "/tmp/panel_claude_only.png")
+    renderPanel(cAbsent, x, "/tmp/panel_codex_only.png")
     print("panel preview written"); exit(0)
 }
 

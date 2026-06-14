@@ -20,9 +20,18 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
 - **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
 - **Click a card** to open the relevant limits page in your browser.
+- **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
+- **Opening the popover forces a fresh reading** right then.
 - **Refresh interval** — 1 / 5 / 15 minutes, your choice.
 - **Light & dark** menu bar, retina‑crisp.
 - **Launch at login**, no Dock icon, no dependencies beyond what macOS already ships.
+
+<p align="center">
+  <img src="docs/menubar-single.png" width="140" alt="Single product (menu bar)">
+  &nbsp;&nbsp;
+  <img src="docs/panel-single.png" width="300" alt="Single product (popover)">
+</p>
+<p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
 ## How it works
 
@@ -45,7 +54,7 @@ No telemetry, no third‑party services. Runtime cache and a Keychain backup liv
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-1.0.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-1.1.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -73,7 +82,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.0.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.1.dmg
 ```
 
 ## Project layout
