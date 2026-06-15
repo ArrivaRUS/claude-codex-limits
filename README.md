@@ -17,6 +17,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 ## Features
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
+- **Live data** — both are pulled from the same backends their CLIs use, so Codex matches its web page (not a stale local cache).
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
 - **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
 - **Click a card** to open the relevant limits page in your browser.
@@ -41,12 +42,12 @@ token the same way the Claude Code CLI does when it expires, and calls Anthropic
 usage endpoint `GET /api/oauth/usage`. **This does not consume any of your quota** — it
 only reads `five_hour.utilization` (session) and `seven_day.utilization` (weekly).
 
-**Codex** (OpenAI). When you open the popover (or hit refresh), the app fetches **live**
-usage from the same backend the Codex CLI uses — `GET /backend-api/wham/usage` —
-authenticated with your local `~/.codex/auth.json` token (auto‑refreshed via OpenAI's
-token endpoint when expired). `primary_window` = 5‑hour, `secondary_window` = 7‑day. The
-background ticks don't call out — between popovers they fall back to the most recent local
-session log (`~/.codex/sessions/**/rollout-*.jsonl`).
+**Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
+uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 1/5/15‑min timer,
+and popover open), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
+via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
+= 7‑day. If a live call fails it falls back to the most recent local session log
+(`~/.codex/sessions/**/rollout-*.jsonl`).
 
 Nothing is sent anywhere except the authenticated usage requests to Anthropic and OpenAI
 (as you). No telemetry, no third‑party services. Runtime cache and a Keychain backup live
@@ -56,7 +57,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-1.4.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-1.5.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -84,7 +85,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.4.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.5.dmg
 ```
 
 ## Project layout

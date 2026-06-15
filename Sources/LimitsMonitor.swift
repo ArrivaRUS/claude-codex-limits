@@ -549,7 +549,7 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-let APP_VERSION = "1.4"
+let APP_VERSION = "1.5"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
