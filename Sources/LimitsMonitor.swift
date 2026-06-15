@@ -300,7 +300,7 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
 
 func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString {
     let neutral = cg(dark ? .white : .black)
-    let dim = cg((dark ? NSColor.white : NSColor.black).withAlphaComponent(0.5))
+    let dim = cg((dark ? NSColor.white : NSColor.black).withAlphaComponent(0.95))
     let isErr = d.error != nil
     let sCol = isErr ? neutral : cg(sevColor(severity(d.session), dark: dark))
     let wCol = isErr ? neutral : cg(sevColor(severity(d.weekly), dark: dark))
@@ -454,7 +454,7 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-let APP_VERSION = "1.2"
+let APP_VERSION = "1.3"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
