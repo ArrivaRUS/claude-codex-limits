@@ -169,7 +169,7 @@ func fetchClaude() -> LimitData {
 
 // MARK: - Codex
 
-func fetchCodex() -> LimitData {
+func codexFromRollout() -> LimitData {
     var d = LimitData()
     let base = HOME + "/.codex/sessions"
     let fm = FileManager.default
@@ -215,6 +215,101 @@ func fetchCodex() -> LimitData {
     d.asOf = parseISOmillisZ(bestTs)
     if let a = d.asOf, Date().timeIntervalSince(a) > 2 * 3600 { d.stale = true }
     return d
+}
+
+// MARK: - Codex live usage (same backend the Codex CLI uses)
+
+let CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"   // openai/codex login::CLIENT_ID
+let CODEX_AUTH_PATH = HOME + "/.codex/auth.json"
+
+func jwtExp(_ jwt: String) -> Double? {
+    let parts = jwt.split(separator: ".")
+    guard parts.count >= 2 else { return nil }
+    var p = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    while p.count % 4 != 0 { p += "=" }
+    guard let data = Data(base64Encoded: p),
+          let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+    return j["exp"] as? Double
+}
+
+/// Reads a valid Codex access token from ~/.codex/auth.json, refreshing it via
+/// the official OpenAI token endpoint (and persisting back) if it has expired.
+func codexAccessToken() -> (token: String, account: String)? {
+    guard let data = FileManager.default.contents(atPath: CODEX_AUTH_PATH),
+          var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          var tokens = root["tokens"] as? [String: Any],
+          let acc = tokens["account_id"] as? String,
+          let at = tokens["access_token"] as? String else { return nil }
+
+    if let exp = jwtExp(at), exp > Date().timeIntervalSince1970 + 60 {
+        return (at, acc)                         // still valid
+    }
+    guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else { return nil }
+    let body = try? JSONSerialization.data(withJSONObject: [
+        "client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt])
+    let resp = http("https://auth.openai.com/oauth/token", method: "POST",
+                    headers: ["Content-Type": "application/json", "Accept": "application/json",
+                              "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal"],
+                    body: body)
+    guard resp.status == 200, let rd = resp.data,
+          let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
+          let newAt = tok["access_token"] as? String else { return nil }
+    tokens["access_token"] = newAt
+    if let v = tok["id_token"] as? String { tokens["id_token"] = v }
+    if let v = tok["refresh_token"] as? String { tokens["refresh_token"] = v }
+    root["tokens"] = tokens
+    root["last_refresh"] = ISO8601DateFormatter().string(from: Date())
+    if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]) {
+        try? out.write(to: URL(fileURLWithPath: CODEX_AUTH_PATH))
+    }
+    return (newAt, acc)
+}
+
+/// Live Codex usage from `GET /backend-api/wham/usage` (nil on any failure → fall back to local).
+func codexUsageLive() -> LimitData? {
+    guard let (at, acc) = codexAccessToken() else { return nil }
+    let resp = http("https://chatgpt.com/backend-api/wham/usage", method: "GET",
+                    headers: ["Authorization": "Bearer \(at)", "chatgpt-account-id": acc,
+                              "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal",
+                              "originator": "codex_cli_rs", "Accept": "application/json"], body: nil)
+    guard resp.status == 200, let rd = resp.data,
+          let obj = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
+          let rl = obj["rate_limit"] as? [String: Any] else { return nil }
+    var d = LimitData(); d.present = true
+    if let p = rl["primary_window"] as? [String: Any] {
+        d.session = p["used_percent"] as? Double
+        if let r = p["reset_at"] as? Double { d.sessionReset = Date(timeIntervalSince1970: r) }
+    }
+    if let s = rl["secondary_window"] as? [String: Any] {
+        d.weekly = s["used_percent"] as? Double
+        if let r = s["reset_at"] as? Double { d.weeklyReset = Date(timeIntervalSince1970: r) }
+    }
+    d.plan = obj["plan_type"] as? String
+    d.asOf = Date()
+    return d
+}
+
+func loadCodexCache() -> LimitData? {
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
+          let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let cm = j["codex"] as? [String: Any] else { return nil }
+    return dict2ld(cm)
+}
+
+/// Codex limits. `live` (panel-open / manual refresh) hits the ChatGPT backend;
+/// otherwise uses the freshest of the local rollout files and the last cached reading.
+func fetchCodex(live: Bool) -> LimitData {
+    let rollout = codexFromRollout()
+    if !rollout.present { return rollout }              // Codex not set up
+    if live, let liveD = codexUsageLive() { return liveD }
+    var best = rollout
+    if let cached = loadCodexCache() {
+        let b = best.asOf?.timeIntervalSince1970 ?? 0
+        let c = cached.asOf?.timeIntervalSince1970 ?? 0
+        if c > b { best = cached; best.present = true; best.fromCache = false }
+    }
+    if let a = best.asOf, Date().timeIntervalSince(a) > 2 * 3600 { best.stale = true }
+    return best
 }
 
 // MARK: - Cache
@@ -454,7 +549,7 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-let APP_VERSION = "1.3"
+let APP_VERSION = "1.4"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -770,7 +865,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         panelCtrl = PanelController()
         panelCtrl.onInterval = { [weak self] sec in self?.setInterval(sec) }
-        panelCtrl.onRefresh = { [weak self] in self?.refreshNow() }
+        panelCtrl.onRefresh = { [weak self] in self?.doRefresh(live: true) }
         panelCtrl.onQuit = { NSApp.terminate(nil) }
         panelCtrl.onOpenURL = { [weak self] url in
             if let u = URL(string: url) { NSWorkspace.shared.open(u) }
@@ -782,12 +877,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
 
         startTimer()
-        refreshNow()
+        doRefresh(live: false)   // launch: local only (no background ChatGPT calls)
     }
 
     func startTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.refreshNow() }
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.doRefresh(live: false) }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -798,14 +893,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func refreshNow() {
+    /// `live` = hit the ChatGPT backend for Codex (panel-open / manual refresh only).
+    func doRefresh(live: Bool) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var claude = fetchClaude()
-            var codex = fetchCodex()
+            var codex = fetchCodex(live: live)
             applyCache(&claude, &codex)
             DispatchQueue.main.async { self?.render(claude, codex) }
         }
     }
+
+    @objc func refreshNow() { doRefresh(live: true) }   // user-initiated → live Codex
 
     func isDark() -> Bool {
         NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -840,7 +938,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else {
             if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: Date()) }
             panelCtrl.show(below: btn)
-            refreshNow()   // force fresh readings the moment the panel opens
+            doRefresh(live: true)   // panel open: pull live Codex from the ChatGPT backend
         }
     }
 
@@ -864,7 +962,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - Single instance (flock) + launch
 
 if CommandLine.arguments.contains("--preview") {
-    var c = fetchClaude(); var x = fetchCodex(); applyCache(&c, &x)
+    var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)
     let cP = (c, "claude_128.png"), xP = (x, "codex_128.png")
     writePreview([cP, xP], dark: true,  to: "/tmp/limits_preview_dark.png")
     writePreview([cP, xP], dark: false, to: "/tmp/limits_preview_light.png")
@@ -874,7 +972,7 @@ if CommandLine.arguments.contains("--preview") {
 }
 
 if CommandLine.arguments.contains("--panel-preview") {
-    var c = fetchClaude(); var x = fetchCodex(); applyCache(&c, &x)
+    var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)
     let s: CGFloat = 2
     func renderPanel(_ cl: LimitData, _ cx: LimitData, _ path: String) {
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(PANEL_H * s)) else { return }
@@ -894,6 +992,14 @@ if CommandLine.arguments.contains("--panel-preview") {
     renderPanel(c, xAbsent, "/tmp/panel_claude_only.png")
     renderPanel(cAbsent, x, "/tmp/panel_codex_only.png")
     print("panel preview written"); exit(0)
+}
+
+if CommandLine.arguments.contains("--codex-live") {
+    let local = fetchCodex(live: false)
+    let live = fetchCodex(live: true)
+    print("local : session=\(local.session.map{Int($0)} ?? -1)% weekly=\(local.weekly.map{Int($0)} ?? -1)% asOf=\(local.asOf?.description ?? "nil")")
+    print("live  : session=\(live.session.map{Int($0)} ?? -1)% weekly=\(live.weekly.map{Int($0)} ?? -1)% plan=\(live.plan ?? "nil")")
+    exit(0)
 }
 
 let lockFD = open(LOCK_PATH, O_CREAT | O_RDWR, 0o644)

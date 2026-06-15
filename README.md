@@ -41,20 +41,22 @@ token the same way the Claude Code CLI does when it expires, and calls Anthropic
 usage endpoint `GET /api/oauth/usage`. **This does not consume any of your quota** — it
 only reads `five_hour.utilization` (session) and `seven_day.utilization` (weekly).
 
-**Codex** (OpenAI). Codex writes its rate limits into its local session logs
-(`~/.codex/sessions/**/rollout-*.jsonl`). The app reads the most recent `rate_limits`
-record: `primary` = 5‑hour window, `secondary` = 7‑day window. These values are only as
-fresh as your last Codex request — if you haven't run Codex in a while, the popover says so.
+**Codex** (OpenAI). When you open the popover (or hit refresh), the app fetches **live**
+usage from the same backend the Codex CLI uses — `GET /backend-api/wham/usage` —
+authenticated with your local `~/.codex/auth.json` token (auto‑refreshed via OpenAI's
+token endpoint when expired). `primary_window` = 5‑hour, `secondary_window` = 7‑day. The
+background ticks don't call out — between popovers they fall back to the most recent local
+session log (`~/.codex/sessions/**/rollout-*.jsonl`).
 
-Nothing is sent anywhere except the authenticated usage request to Anthropic (as you).
-No telemetry, no third‑party services. Runtime cache and a Keychain backup live under
-`~/.claude-limits-monitor/`.
+Nothing is sent anywhere except the authenticated usage requests to Anthropic and OpenAI
+(as you). No telemetry, no third‑party services. Runtime cache and a Keychain backup live
+under `~/.claude-limits-monitor/`.
 
 ## Install
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-1.3.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-1.4.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -82,7 +84,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.3.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.4.dmg
 ```
 
 ## Project layout
@@ -99,8 +101,9 @@ docs/                         screenshots
 ## Privacy & security
 
 The app only ever reads **your own** local credentials and logs, and only talks to
-Anthropic's API authenticated as you. It never embeds or transmits secrets. The source
-is a single readable Swift file — read it. Use at your own discretion.
+Anthropic's and OpenAI's APIs authenticated as you (the same endpoints their own CLIs use).
+It never embeds or transmits secrets. The source is a single readable Swift file — read it.
+Use at your own discretion.
 
 ## License
 
