@@ -549,7 +549,8 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-let APP_VERSION = "1.5"
+enum PanelMode { case main, settings }
+let APP_VERSION = "1.6"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -686,6 +687,9 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let rfRect = rectTL(W - pad - 24, pad - 2, 24, 24)
     drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 4, dy: 4), textMid, weight: .semibold)
     hits.append(Hit(id: "refresh", rect: rfRect))
+    let gearRect = rectTL(W - pad - 24 - 26, pad - 2, 24, 24)
+    drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
+    hits.append(Hit(id: "settings", rect: gearRect))
 
     // cards
     let cardsTop: CGFloat = 58, cardH: CGFloat = 152, gap: CGFloat = 12
@@ -763,6 +767,144 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     return hits
 }
 
+// MARK: - Settings screen (same panel, same design language)
+
+func drawSettings(_ ctx: CGContext, size: CGSize) -> [Hit] {
+    let W = size.width, H = size.height
+    var hits: [Hit] = []
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let textHi = gray(1, 0.95), textMid = gray(1, 0.5), textLo = gray(1, 0.34)
+    let orange = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
+    let d = UserDefaults.standard
+
+    func rectTL(_ x: CGFloat, _ topY: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: x, y: H - topY - h, width: w, height: h)
+    }
+    func attr(_ s: String, _ sz: CGFloat, _ weight: NSFont.Weight, _ color: NSColor) -> NSAttributedString {
+        ctAttr(s, ctFont(sz, weight), cg(color))
+    }
+    func text(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
+        var dx = x
+        if align == 1 { dx = x - w / 2 } else if align == 2 { dx = x - w }
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - topY - asc)
+        CTLineDraw(line, ctx)
+    }
+    func roundFill(_ r: CGRect, _ rad: CGFloat, _ color: NSColor) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setFillColor(cg(color)); ctx.fillPath()
+    }
+    func roundStroke(_ r: CGRect, _ rad: CGFloat, _ color: NSColor, _ lw: CGFloat) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setStrokeColor(cg(color)); ctx.setLineWidth(lw); ctx.strokePath()
+    }
+    func hdiv(_ x0: CGFloat, _ x1: CGFloat, _ topY: CGFloat) {
+        ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
+        ctx.beginPath(); ctx.move(to: CGPoint(x: x0, y: H - topY)); ctx.addLine(to: CGPoint(x: x1, y: H - topY)); ctx.strokePath()
+    }
+    func drawToggle(_ r: CGRect, _ on: Bool) {
+        let rad = r.height / 2
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setFillColor(cg(on ? orange : gray(1, 0.18))); ctx.fillPath()
+        let kd = r.height - 6
+        let kx = on ? (r.maxX - 3 - kd) : (r.minX + 3)
+        ctx.setFillColor(cg(.white)); ctx.fillEllipse(in: CGRect(x: kx, y: r.minY + 3, width: kd, height: kd))
+    }
+
+    // background — identical to the main panel
+    let bgPath = CGPath(roundedRect: CGRect(x: 0.5, y: 0.5, width: W - 1, height: H - 1), cornerWidth: 18, cornerHeight: 18, transform: nil)
+    ctx.saveGState(); ctx.addPath(bgPath); ctx.clip()
+    if let g = CGGradient(colorsSpace: cs, colors: [cg(gray(0.16, 1)), cg(gray(0.075, 1))] as CFArray, locations: [0, 1]) {
+        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: H), end: CGPoint(x: 0, y: 0), options: [])
+    }
+    if let glow = CGGradient(colorsSpace: cs, colors: [cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0.10)), cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0))] as CFArray, locations: [0, 1]) {
+        ctx.drawRadialGradient(glow, startCenter: CGPoint(x: 54, y: H - 26), startRadius: 0, endCenter: CGPoint(x: 54, y: H - 26), endRadius: 170, options: [])
+    }
+    ctx.restoreGState()
+    ctx.addPath(bgPath); ctx.setStrokeColor(cg(gray(1, 0.08))); ctx.setLineWidth(1); ctx.strokePath()
+
+    let pad: CGFloat = 16, cardX: CGFloat = 16, cardW = W - 32
+
+    // header: back + title
+    let backRect = rectTL(pad - 4, pad - 4, 28, 28)
+    drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
+    hits.append(Hit(id: "back", rect: backRect))
+    text(attr("Настройки", 16, .semibold, textHi), x: pad + 24, topY: pad)
+
+    // section 1 — reset-sound master toggles
+    text(attr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", 9.5, .semibold, textLo), x: pad + 2, topY: 50)
+    let c1top: CGFloat = 66, rowH: CGFloat = 44, c1H = rowH * 2
+    roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
+    func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
+        drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
+        text(attr(label, 13, .regular, textHi), x: cardX + 42, topY: rowTop + (rowH - 13) / 2 - 1)
+        let tw: CGFloat = 38, th: CGFloat = 22
+        let tRect = rectTL(cardX + cardW - 14 - tw, rowTop + (rowH - th) / 2, tw, th)
+        drawToggle(tRect, d.bool(forKey: key))
+        hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
+    }
+    toggleRow(c1top, "clock", "5-часовой лимит (сессия)", "sound5h")
+    hdiv(cardX + 42, cardX + cardW, c1top + rowH)
+    toggleRow(c1top + rowH, "calendar", "Недельный лимит", "sound7d")
+
+    // section 2 — per-event sound choice (two radio columns: 5h | weekly)
+    let cap2 = c1top + c1H + 14
+    text(attr("ЗВУК", 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
+    let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
+    text(attr("5ч", 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
+    text(attr("нед", 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
+    let c2top = cap2 + 16, sRowH: CGFloat = 33, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
+    roundFill(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.06), 1)
+    func dot(_ cx: CGFloat, _ centerTop: CGFloat, _ on: Bool) {
+        let r: CGFloat = 7, rect = CGRect(x: cx - r, y: H - centerTop - r, width: 2 * r, height: 2 * r)
+        if on { ctx.setFillColor(cg(orange)); ctx.fillEllipse(in: rect) }
+        else { ctx.setStrokeColor(cg(gray(1, 0.32))); ctx.setLineWidth(1.5); ctx.strokeEllipse(in: rect.insetBy(dx: 0.75, dy: 0.75)) }
+    }
+    let cur5 = sound5hId(), cur7 = sound7dId()
+    for (i, s) in RESET_SOUNDS.enumerated() {
+        let rt = c2top + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
+        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
+        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
+        drawSF(ctx, "play.fill", in: CGRect(x: playcx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
+        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, playcx + 8 - cardX, sRowH)))
+        dot(dot5cx, cTop, s.id == cur5)
+        hits.append(Hit(id: "set5:\(s.id)", rect: CGRect(x: dot5cx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        dot(dot7cx, cTop, s.id == cur7)
+        hits.append(Hit(id: "set7:\(s.id)", rect: CGRect(x: dot7cx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        if i < RESET_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
+    }
+
+    // section 3 — limit-reached sound (any 5h/weekly limit hit)
+    let capC = c2top + c2H + 14
+    text(attr("ПРИ ДОСТИЖЕНИИ ЛИМИТА (5ч ИЛИ НЕД)", 9.5, .semibold, textLo), x: pad + 2, topY: capC)
+    let c3top = capC + 16, toggleH: CGFloat = 44, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
+    roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
+    drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
+    text(attr("Звук при достижении лимита", 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
+    do {
+        let tw: CGFloat = 38, th: CGFloat = 22
+        drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
+        hits.append(Hit(id: "toggle:reachedOn", rect: rectTL(cardX, c3top, cardW, toggleH)))
+    }
+    hdiv(cardX + 14, cardX + cardW, c3top + toggleH)
+    let curR = reachedId(), rDotcx = cardX + cardW - 22, rPlaycx = cardX + cardW - 52
+    for (i, s) in REACHED_SOUNDS.enumerated() {
+        let rt = c3top + toggleH + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
+        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
+        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
+        drawSF(ctx, "play.fill", in: CGRect(x: rPlaycx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
+        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, rPlaycx + 8 - cardX, sRowH)))
+        dot(rDotcx, cTop, s.id == curR)
+        hits.append(Hit(id: "setR:\(s.id)", rect: CGRect(x: rDotcx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        if i < REACHED_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
+    }
+
+    return hits
+}
+
 // MARK: - Panel view + window
 
 final class LimitsPanelView: NSView {
@@ -774,18 +916,64 @@ final class LimitsPanelView: NSView {
     var onRefresh: (() -> Void)?
     var onQuit: (() -> Void)?
     var onOpenURL: ((String) -> Void)?
+    var onPreview: ((String) -> Void)?
+    var mode: PanelMode = .main
     override var isFlipped: Bool { false }
+
+    func setMode(_ m: PanelMode) {
+        mode = m
+        let targetH = (m == .settings) ? settingsTotalHeight() : PANEL_H
+        if let win = window {
+            let f = win.frame
+            var ny = f.maxY - targetH                              // keep the top edge anchored
+            if let scr = win.screen { ny = max(scr.visibleFrame.minY + 8, ny) }
+            win.setFrame(NSRect(x: f.minX, y: ny, width: PANEL_W, height: targetH), display: true)
+        }
+        needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated)
+        if mode == .settings {
+            hits = drawSettings(ctx, size: bounds.size)
+        } else {
+            hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated)
+        }
     }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         for h in hits where h.rect.contains(p) {
-            if h.id == "refresh" { onRefresh?() }
-            else if h.id == "quit" { onQuit?() }
-            else if h.id.hasPrefix("iv"), let v = Double(h.id.dropFirst(2)) { onInterval?(v) }
-            else if h.id.hasPrefix("open:") { onOpenURL?(String(h.id.dropFirst(5))) }
+            switch h.id {
+            case "refresh": onRefresh?()
+            case "quit": onQuit?()
+            case "settings": setMode(.settings)
+            case "back": setMode(.main)
+            default:
+                if h.id.hasPrefix("toggle:") {
+                    let key = String(h.id.dropFirst(7))
+                    let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
+                    needsDisplay = true
+                } else if h.id.hasPrefix("preview:") {
+                    onPreview?(String(h.id.dropFirst(8)))
+                } else if h.id.hasPrefix("set5:") {
+                    let id = String(h.id.dropFirst(5))
+                    UserDefaults.standard.set(id, forKey: "sound5hChoice")
+                    onPreview?(id); needsDisplay = true
+                } else if h.id.hasPrefix("set7:") {
+                    let id = String(h.id.dropFirst(5))
+                    UserDefaults.standard.set(id, forKey: "sound7dChoice")
+                    onPreview?(id); needsDisplay = true
+                } else if h.id.hasPrefix("setR:") {
+                    let id = String(h.id.dropFirst(5))
+                    UserDefaults.standard.set(id, forKey: "reachedChoice")
+                    onPreview?(id); needsDisplay = true
+                } else if h.id.hasPrefix("iv"), let v = Double(h.id.dropFirst(2)) {
+                    onInterval?(v)
+                } else if h.id.hasPrefix("open:") {
+                    onOpenURL?(String(h.id.dropFirst(5)))
+                }
+            }
             return
         }
     }
@@ -822,17 +1010,19 @@ final class PanelController {
     }
 
     func show(below button: NSStatusBarButton) {
+        view.mode = .main   // always open on the main screen
+        var origin = NSPoint(x: 200, y: 200)
         if let win = button.window {
             let bf = button.frame
             let pt = win.convertPoint(toScreen: NSPoint(x: bf.midX, y: bf.minY))
-            var origin = NSPoint(x: pt.x - PANEL_W / 2, y: pt.y - PANEL_H - 6)
+            origin = NSPoint(x: pt.x - PANEL_W / 2, y: pt.y - PANEL_H - 6)
             if let scr = win.screen ?? NSScreen.main {
                 let v = scr.visibleFrame
                 origin.x = max(v.minX + 8, min(origin.x, v.maxX - PANEL_W - 8))
                 origin.y = max(v.minY + 8, origin.y)
             }
-            panel.setFrameOrigin(origin)
         }
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: PANEL_W, height: PANEL_H)), display: false)
         view.needsDisplay = true
         panel.orderFrontRegardless()
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -846,6 +1036,42 @@ final class PanelController {
     }
 }
 
+// MARK: - Reset sounds
+
+struct ResetSound { let id: String; let name: String; let file: String }
+let RESET_SOUNDS: [ResetSound] = [
+    ResetSound(id: "rise",      name: "Восход",     file: "snd-rise"),
+    ResetSound(id: "drop",      name: "Капля",      file: "snd-drop"),
+    ResetSound(id: "celebrate", name: "Праздник",   file: "snd-celebrate"),
+    ResetSound(id: "coin",      name: "Монетка",    file: "snd-coin"),
+    ResetSound(id: "victory",   name: "Победа",     file: "snd-victory"),
+    ResetSound(id: "chime",     name: "Перезвон",   file: "snd-chime"),
+    ResetSound(id: "hop",       name: "Прыжок",     file: "snd-hop"),
+]
+let REACHED_SOUNDS: [ResetSound] = [
+    ResetSound(id: "outage",  name: "Отбой",    file: "snd-outage"),
+    ResetSound(id: "sunset",  name: "Закат",    file: "snd-sunset"),
+    ResetSound(id: "fadeout", name: "Угасание", file: "snd-fadeout"),
+]
+func validSound(_ v: String?, _ pool: [ResetSound], _ fallback: String) -> String {
+    let id = v ?? fallback
+    return pool.contains { $0.id == id } ? id : fallback
+}
+func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "sound5hChoice"), RESET_SOUNDS, "rise") }
+func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
+func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
+func settingsTotalHeight() -> CGFloat {
+    let cardBbottom = 178 + 33 * CGFloat(RESET_SOUNDS.count)
+    let c3top = cardBbottom + 14 + 16
+    let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
+    return cardCbottom + 16
+}
+func soundURL(_ file: String) -> URL? {
+    if let u = Bundle.main.url(forResource: file, withExtension: "wav") { return u }
+    let p = DATA_DIR + "/assets/\(file).wav"
+    return FileManager.default.fileExists(atPath: p) ? URL(fileURLWithPath: p) : nil
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -855,6 +1081,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ? UserDefaults.standard.double(forKey: "interval") : 60
     var last: (LimitData, LimitData)?
     var panelCtrl: PanelController!
+    var resetSound: NSSound?
+    var soundBaseline = false
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -871,18 +1099,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let u = URL(string: url) { NSWorkspace.shared.open(u) }
             self?.panelCtrl.hide()
         }
+        panelCtrl.view.onPreview = { [weak self] id in self?.playSound(id) }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
 
         startTimer()
-        doRefresh(live: false)   // launch: local only (no background ChatGPT calls)
+        doRefresh(live: true)   // live Codex from launch, then on every timer tick
     }
 
     func startTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.doRefresh(live: false) }
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.doRefresh(live: true) }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -922,6 +1151,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             btn.title = ""
         }
         panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: Date())
+        checkAlarms(claude, codex)
+    }
+
+    // MARK: Reset sounds
+
+    func playSound(_ id: String) {
+        guard let s = (RESET_SOUNDS + REACHED_SOUNDS).first(where: { $0.id == id }),
+              let u = soundURL(s.file), let snd = NSSound(contentsOf: u, byReference: true) else { return }
+        resetSound = snd
+        snd.play()
+    }
+
+    /// Fires chimes on window rollover (reset) and a sad sound when a limit is first reached.
+    func checkAlarms(_ claude: LimitData, _ codex: LimitData) {
+        let d = UserDefaults.standard
+        // reset rollovers (resets_at jumps forward)
+        let resetWins: [(key: String, date: Date?, is5h: Bool)] = [
+            ("rst_c5", claude.sessionReset, true), ("rst_x5", codex.sessionReset, true),
+            ("rst_c7", claude.weeklyReset, false), ("rst_x7", codex.weeklyReset, false),
+        ]
+        var fired5 = false, fired7 = false
+        for w in resetWins {
+            guard let date = w.date else { continue }
+            let newV = date.timeIntervalSince1970, oldV = d.double(forKey: w.key)
+            if soundBaseline, oldV > 0, newV > oldV + 60 { if w.is5h { fired5 = true } else { fired7 = true } }
+            d.set(newV, forKey: w.key)
+        }
+        // limit reached (usage crosses to 100%)
+        let reachWins: [(key: String, used: Double?)] = [
+            ("rch_c5", claude.session), ("rch_x5", codex.session),
+            ("rch_c7", claude.weekly), ("rch_x7", codex.weekly),
+        ]
+        var firedReached = false
+        for w in reachWins {
+            let nowR = (w.used ?? 0) >= 100
+            let wasR = d.bool(forKey: w.key)
+            if soundBaseline, nowR, !wasR { firedReached = true }
+            d.set(nowR, forKey: w.key)
+        }
+        if !soundBaseline { soundBaseline = true; return }   // first reading → just establish baseline
+        if fired5, d.bool(forKey: "sound5h") { playSound(sound5hId()) }
+        else if fired7, d.bool(forKey: "sound7d") { playSound(sound7dId()) }
+        if firedReached, d.bool(forKey: "reachedOn") { playSound(reachedId()) }
     }
 
     func setInterval(_ sec: TimeInterval) {
@@ -992,6 +1264,25 @@ if CommandLine.arguments.contains("--panel-preview") {
     renderPanel(c, xAbsent, "/tmp/panel_claude_only.png")
     renderPanel(cAbsent, x, "/tmp/panel_codex_only.png")
     print("panel preview written"); exit(0)
+}
+
+if CommandLine.arguments.contains("--settings-preview") {
+    let d = UserDefaults.standard
+    let s5 = d.bool(forKey: "sound5h"); d.set(true, forKey: "sound5h")   // show one toggle on
+    let s: CGFloat = 2, sh = settingsTotalHeight()
+    if let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) {
+        ctx.scaleBy(x: s, y: s)
+        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh))
+        if let img = ctx.makeImage() {
+            let data = NSMutableData()
+            if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(dest, img, nil)
+                if CGImageDestinationFinalize(dest) { try? (data as Data).write(to: URL(fileURLWithPath: "/tmp/settings_preview.png")) }
+            }
+        }
+    }
+    d.set(s5, forKey: "sound5h")
+    print("settings preview written"); exit(0)
 }
 
 if CommandLine.arguments.contains("--codex-live") {

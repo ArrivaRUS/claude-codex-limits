@@ -24,6 +24,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover forces a fresh reading** right then.
 - **Refresh interval** — 1 / 5 / 15 minutes, your choice.
+- **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when one is *reached*; choose a sound per event in the in‑app settings (⚙).
 - **Light & dark** menu bar, retina‑crisp.
 - **Launch at login**, no Dock icon, no dependencies beyond what macOS already ships.
 
@@ -33,6 +34,9 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
   <img src="docs/panel-single.png" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
+
+<p align="center"><img src="docs/settings.png" width="240" alt="Settings screen"></p>
+<p align="center"><sub>The in‑app settings screen (⚙): pick a sound per event — resets and limit‑reached.</sub></p>
 
 ## How it works
 
@@ -57,7 +61,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-1.5.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-1.6.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -85,7 +89,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.5.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.6.dmg
 ```
 
 ## Project layout
