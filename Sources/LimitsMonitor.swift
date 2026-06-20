@@ -550,7 +550,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings }
-let APP_VERSION = "1.7"
+let APP_VERSION = "1.8"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -905,7 +905,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     // section 4 — about / check for updates
     let capD = c3top + c3H + 14
     text(attr("О ПРИЛОЖЕНИИ", 9.5, .semibold, textLo), x: pad + 2, topY: capD)
-    let c4top = capD + 16, c4H: CGFloat = 66
+    let c4top = capD + 16, c4H: CGFloat = 44
     roundFill(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.06), 1)
     drawSF(ctx, "info.circle", in: rectTL(cardX + 15, c4top + (44 - 16) / 2, 16, 16), textMid)
     text(attr("Версия \(about.version)", 13, .regular, textHi), x: cardX + 42, topY: c4top + (44 - 13) / 2 - 1)
@@ -925,10 +925,12 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     } else {
         pill("Проверить обновление", "checkupdate", false)
     }
+    // status line below the card (only when there is something to say)
+    let lineY = c4top + c4H + 7
     if let av = about.availVersion {
-        text(attr("Доступна версия \(av) — нажмите «Обновить»", 11.5, .regular, NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)), x: cardX + 42, topY: c4top + 45)
+        text(attr("Доступна версия \(av) — нажмите «Обновить»", 11.5, .regular, NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)), x: cardX + 4, topY: lineY)
     } else if !about.status.isEmpty {
-        text(attr(about.status, 11.5, .regular, textLo), x: cardX + 42, topY: c4top + 45)
+        text(attr(about.status, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
     }
 
     return hits
@@ -954,10 +956,15 @@ final class LimitsPanelView: NSView {
 
     func setMode(_ m: PanelMode) {
         mode = m
-        let targetH = (m == .settings) ? settingsTotalHeight() : PANEL_H
+        resizeToContent()
+    }
+
+    /// Resize the panel (anchored at its top edge) to fit the current mode/state.
+    func resizeToContent() {
+        let targetH = (mode == .settings) ? settingsTotalHeight(about) : PANEL_H
         if let win = window {
             let f = win.frame
-            var ny = f.maxY - targetH                              // keep the top edge anchored
+            var ny = f.maxY - targetH
             if let scr = win.screen { ny = max(scr.visibleFrame.minY + 8, ny) }
             win.setFrame(NSRect(x: f.minX, y: ny, width: PANEL_W, height: targetH), display: true)
         }
@@ -1094,12 +1101,13 @@ func validSound(_ v: String?, _ pool: [ResetSound], _ fallback: String) -> Strin
 func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "sound5hChoice"), RESET_SOUNDS, "rise") }
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
-func settingsTotalHeight() -> CGFloat {
+func settingsTotalHeight(_ about: AboutState) -> CGFloat {
     let cardBbottom = 178 + 33 * CGFloat(RESET_SOUNDS.count)
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
-    return c4top + 66 + 16
+    let needsLine = about.availVersion != nil || !about.status.isEmpty
+    return c4top + 44 + (needsLine ? 22 : 0) + 16
 }
 func soundURL(_ file: String) -> URL? {
     if let u = Bundle.main.url(forResource: file, withExtension: "wav") { return u }
@@ -1278,7 +1286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func checkForUpdate() {
         let v = panelCtrl.view
         v.about.checking = true; v.about.status = ""; v.about.availVersion = nil; v.about.availURL = nil
-        v.needsDisplay = true
+        v.resizeToContent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let r = latestRelease()
             DispatchQueue.main.async {
@@ -1293,7 +1301,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     v.about.status = "Не удалось проверить обновление"
                 }
-                v.needsDisplay = true
+                v.resizeToContent()
             }
         }
     }
@@ -1302,12 +1310,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// app bundle and relaunches once this instance quits.
     func performUpdate(_ urlStr: String) {
         let v = panelCtrl.view
-        v.about.status = "Загрузка…"; v.about.availVersion = nil; v.needsDisplay = true
+        v.about.status = "Загрузка…"; v.about.availVersion = nil; v.resizeToContent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let resp = http(urlStr, method: "GET", headers: ["User-Agent": "ClaudeCodexLimits"], body: nil, timeout: 120)
             guard resp.status == 200, let data = resp.data, data.count > 100_000 else {
                 DispatchQueue.main.async {
-                    self?.panelCtrl.view.about.status = "Ошибка загрузки"; self?.panelCtrl.view.needsDisplay = true
+                    self?.panelCtrl.view.about.status = "Ошибка загрузки"; self?.panelCtrl.view.resizeToContent()
                 }
                 return
             }
@@ -1411,10 +1419,11 @@ if CommandLine.arguments.contains("--panel-preview") {
 if CommandLine.arguments.contains("--settings-preview") {
     let d = UserDefaults.standard
     let s5 = d.bool(forKey: "sound5h"); d.set(true, forKey: "sound5h")   // show one toggle on
-    let s: CGFloat = 2, sh = settingsTotalHeight()
+    let about = AboutState()
+    let s: CGFloat = 2, sh = settingsTotalHeight(about)
     if let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) {
         ctx.scaleBy(x: s, y: s)
-        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: AboutState())
+        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: about)
         if let img = ctx.makeImage() {
             let data = NSMutableData()
             if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {

@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="1.7"
+VERSION="1.8"
 APP="$DIR/dist/$APP_NAME.app"
 
 echo "==> building $APP_NAME.app"
