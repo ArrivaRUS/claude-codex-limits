@@ -49,9 +49,9 @@ func shell(_ path: String, _ args: [String]) -> (code: Int32, out: String, err: 
 
 // MARK: - HTTP (synchronous; call off the main thread)
 
-func http(_ url: String, method: String, headers: [String: String], body: Data?) -> (status: Int, data: Data?, err: String?) {
+func http(_ url: String, method: String, headers: [String: String], body: Data?, timeout: Double = 15) -> (status: Int, data: Data?, err: String?) {
     guard let u = URL(string: url) else { return (0, nil, "bad url") }
-    var r = URLRequest(url: u, timeoutInterval: 15)
+    var r = URLRequest(url: u, timeoutInterval: timeout)
     r.httpMethod = method
     for (k, v) in headers { r.setValue(v, forHTTPHeaderField: k) }
     r.httpBody = body
@@ -63,7 +63,7 @@ func http(_ url: String, method: String, headers: [String: String], body: Data?)
         dat = d
         sem.signal()
     }.resume()
-    if sem.wait(timeout: .now() + 20) == .timedOut { return (0, nil, "timeout") }
+    if sem.wait(timeout: .now() + timeout + 5) == .timedOut { return (0, nil, "timeout") }
     return (st, dat, er)
 }
 
@@ -550,7 +550,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings }
-let APP_VERSION = "1.6"
+let APP_VERSION = "1.7"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -769,7 +769,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
 // MARK: - Settings screen (same panel, same design language)
 
-func drawSettings(_ ctx: CGContext, size: CGSize) -> [Hit] {
+func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -902,6 +902,35 @@ func drawSettings(_ ctx: CGContext, size: CGSize) -> [Hit] {
         if i < REACHED_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
     }
 
+    // section 4 — about / check for updates
+    let capD = c3top + c3H + 14
+    text(attr("О ПРИЛОЖЕНИИ", 9.5, .semibold, textLo), x: pad + 2, topY: capD)
+    let c4top = capD + 16, c4H: CGFloat = 66
+    roundFill(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.06), 1)
+    drawSF(ctx, "info.circle", in: rectTL(cardX + 15, c4top + (44 - 16) / 2, 16, 16), textMid)
+    text(attr("Версия \(about.version)", 13, .regular, textHi), x: cardX + 42, topY: c4top + (44 - 13) / 2 - 1)
+    func pill(_ label: String, _ id: String, _ accent: Bool) {
+        let f = ctFont(11.5, .medium)
+        let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, f, cg(.white)))))
+        let w = lw + 24, h: CGFloat = 26
+        let r = rectTL(cardX + cardW - 14 - w, c4top + (44 - h) / 2, w, h)
+        roundFill(r, 8, accent ? orange : gray(1, 0.14))
+        text(attr(label, 11.5, .medium, accent ? gray(0.10, 1) : textHi), x: r.midX, topY: c4top + 16, align: 1)
+        hits.append(Hit(id: id, rect: r))
+    }
+    if about.checking {
+        text(attr("Проверка…", 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
+    } else if about.availVersion != nil {
+        pill("Обновить", "update", true)
+    } else {
+        pill("Проверить обновление", "checkupdate", false)
+    }
+    if let av = about.availVersion {
+        text(attr("Доступна версия \(av) — нажмите «Обновить»", 11.5, .regular, NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)), x: cardX + 42, topY: c4top + 45)
+    } else if !about.status.isEmpty {
+        text(attr(about.status, 11.5, .regular, textLo), x: cardX + 42, topY: c4top + 45)
+    }
+
     return hits
 }
 
@@ -917,6 +946,9 @@ final class LimitsPanelView: NSView {
     var onQuit: (() -> Void)?
     var onOpenURL: ((String) -> Void)?
     var onPreview: ((String) -> Void)?
+    var about = AboutState()
+    var onCheckUpdate: (() -> Void)?
+    var onUpdate: ((String) -> Void)?
     var mode: PanelMode = .main
     override var isFlipped: Bool { false }
 
@@ -935,7 +967,7 @@ final class LimitsPanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         if mode == .settings {
-            hits = drawSettings(ctx, size: bounds.size)
+            hits = drawSettings(ctx, size: bounds.size, about: about)
         } else {
             hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated)
         }
@@ -949,6 +981,8 @@ final class LimitsPanelView: NSView {
             case "quit": onQuit?()
             case "settings": setMode(.settings)
             case "back": setMode(.main)
+            case "checkupdate": onCheckUpdate?()
+            case "update": if let u = about.availURL { onUpdate?(u) }
             default:
                 if h.id.hasPrefix("toggle:") {
                     let key = String(h.id.dropFirst(7))
@@ -1064,12 +1098,53 @@ func settingsTotalHeight() -> CGFloat {
     let cardBbottom = 178 + 33 * CGFloat(RESET_SOUNDS.count)
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
-    return cardCbottom + 16
+    let c4top = cardCbottom + 14 + 16
+    return c4top + 66 + 16
 }
 func soundURL(_ file: String) -> URL? {
     if let u = Bundle.main.url(forResource: file, withExtension: "wav") { return u }
     let p = DATA_DIR + "/assets/\(file).wav"
     return FileManager.default.fileExists(atPath: p) ? URL(fileURLWithPath: p) : nil
+}
+
+// MARK: - Update check / self-update
+
+struct AboutState {
+    var version: String = APP_VERSION
+    var checking = false
+    var status = ""
+    var availVersion: String?
+    var availURL: String?
+}
+
+func versionGreater(_ a: String, _ b: String) -> Bool {
+    let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+    let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+    for i in 0 ..< max(pa.count, pb.count) {
+        let x = i < pa.count ? pa[i] : 0, y = i < pb.count ? pb[i] : 0
+        if x != y { return x > y }
+    }
+    return false
+}
+
+/// Latest GitHub release as (version, dmgURL), or nil on failure.
+func latestRelease() -> (version: String, dmgURL: String)? {
+    let resp = http("https://api.github.com/repos/ArrivaRUS/claude-codex-limits/releases/latest",
+                    method: "GET",
+                    headers: ["User-Agent": "ClaudeCodexLimits", "Accept": "application/vnd.github+json"],
+                    body: nil)
+    guard resp.status == 200, let d = resp.data,
+          let j = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+          let tag = j["tag_name"] as? String else { return nil }
+    let ver = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+    var dmg: String?
+    if let assets = j["assets"] as? [[String: Any]] {
+        for a in assets where (a["name"] as? String)?.hasSuffix(".dmg") == true {
+            dmg = a["browser_download_url"] as? String; break
+        }
+    }
+    guard let u = dmg else { return nil }
+    return (ver, u)
 }
 
 // MARK: - App
@@ -1100,6 +1175,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.panelCtrl.hide()
         }
         panelCtrl.view.onPreview = { [weak self] id in self?.playSound(id) }
+        panelCtrl.view.onCheckUpdate = { [weak self] in self?.checkForUpdate() }
+        panelCtrl.view.onUpdate = { [weak self] url in self?.performUpdate(url) }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),
@@ -1196,6 +1273,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if firedReached, d.bool(forKey: "reachedOn") { playSound(reachedId()) }
     }
 
+    // MARK: Updates
+
+    @objc func checkForUpdate() {
+        let v = panelCtrl.view
+        v.about.checking = true; v.about.status = ""; v.about.availVersion = nil; v.about.availURL = nil
+        v.needsDisplay = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let r = latestRelease()
+            DispatchQueue.main.async {
+                guard let v = self?.panelCtrl.view else { return }
+                v.about.checking = false
+                if let (ver, url) = r {
+                    if versionGreater(ver, APP_VERSION) {
+                        v.about.availVersion = ver; v.about.availURL = url; v.about.status = ""
+                    } else {
+                        v.about.status = "Установлена последняя версия (\(APP_VERSION))"
+                    }
+                } else {
+                    v.about.status = "Не удалось проверить обновление"
+                }
+                v.needsDisplay = true
+            }
+        }
+    }
+
+    /// Downloads the release .dmg and hands off to a detached updater that swaps the
+    /// app bundle and relaunches once this instance quits.
+    func performUpdate(_ urlStr: String) {
+        let v = panelCtrl.view
+        v.about.status = "Загрузка…"; v.about.availVersion = nil; v.needsDisplay = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let resp = http(urlStr, method: "GET", headers: ["User-Agent": "ClaudeCodexLimits"], body: nil, timeout: 120)
+            guard resp.status == 200, let data = resp.data, data.count > 100_000 else {
+                DispatchQueue.main.async {
+                    self?.panelCtrl.view.about.status = "Ошибка загрузки"; self?.panelCtrl.view.needsDisplay = true
+                }
+                return
+            }
+            let dmg = NSTemporaryDirectory() + "ccl-update.dmg"
+            try? data.write(to: URL(fileURLWithPath: dmg))
+            let appPath = Bundle.main.bundlePath
+            let sp = NSTemporaryDirectory() + "ccl-update.sh"
+            let script = """
+            #!/bin/bash
+            sleep 1.5
+            DMG="\(dmg)"
+            APP="\(appPath)"
+            MP=$(/usr/bin/hdiutil attach "$DMG" -nobrowse -noverify 2>/dev/null | grep '/Volumes/' | sed -n 's/.*\\(\\/Volumes\\/.*\\)/\\1/p' | tail -1)
+            SRC="$MP/Claude Codex Limits.app"
+            if [ -n "$MP" ] && [ -d "$SRC" ]; then
+              /bin/rm -rf "$APP"
+              /bin/cp -R "$SRC" "$APP"
+              /usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null
+              /usr/bin/hdiutil detach "$MP" >/dev/null 2>&1
+              /usr/bin/open "$APP"
+            fi
+            /bin/rm -f "$DMG" "\(sp)"
+            """
+            try? script.write(toFile: sp, atomically: true, encoding: .utf8)
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = [sp]
+            try? p.run()
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }
+    }
+
     func setInterval(_ sec: TimeInterval) {
         interval = sec
         UserDefaults.standard.set(sec, forKey: "interval")
@@ -1272,7 +1414,7 @@ if CommandLine.arguments.contains("--settings-preview") {
     let s: CGFloat = 2, sh = settingsTotalHeight()
     if let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) {
         ctx.scaleBy(x: s, y: s)
-        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh))
+        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: AboutState())
         if let img = ctx.makeImage() {
             let data = NSMutableData()
             if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
@@ -1283,6 +1425,14 @@ if CommandLine.arguments.contains("--settings-preview") {
     }
     d.set(s5, forKey: "sound5h")
     print("settings preview written"); exit(0)
+}
+
+if CommandLine.arguments.contains("--check-update") {
+    if let (ver, url) = latestRelease() {
+        print("latest=\(ver) current=\(APP_VERSION) newer=\(versionGreater(ver, APP_VERSION))")
+        print("dmg=\(url)")
+    } else { print("check failed") }
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--codex-live") {
