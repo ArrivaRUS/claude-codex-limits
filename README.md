@@ -2,6 +2,10 @@
 
 **English** · [Русский](README.ru.md)
 
+<p align="center">
+  <img src="docs/banner.png" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
+</p>
+
 A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
 usage limits you have left — at a glance, right in the top tray.
 

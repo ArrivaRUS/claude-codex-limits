@@ -2,6 +2,10 @@
 
 [English](README.md) · **Русский**
 
+<p align="center">
+  <img src="docs/banner.png" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
+</p>
+
 Маленькое приложение для строки меню macOS, которое показывает, сколько у вас осталось
 лимитов **Claude Code** и **Codex** — одним взглядом, прямо в верхнем трее.
 
