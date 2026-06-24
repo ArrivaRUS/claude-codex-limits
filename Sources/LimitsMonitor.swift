@@ -550,7 +550,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings }
-let APP_VERSION = "1.8"
+let APP_VERSION = "1.9"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -1251,17 +1251,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Fires chimes on window rollover (reset) and a sad sound when a limit is first reached.
     func checkAlarms(_ claude: LimitData, _ codex: LimitData) {
         let d = UserDefaults.standard
-        // reset rollovers (resets_at jumps forward)
-        let resetWins: [(key: String, date: Date?, is5h: Bool)] = [
-            ("rst_c5", claude.sessionReset, true), ("rst_x5", codex.sessionReset, true),
-            ("rst_c7", claude.weeklyReset, false), ("rst_x7", codex.weeklyReset, false),
+        // A reset is the moment a window rolls over — NOT merely "usage is 0". We require all of:
+        //   • resets_at jumped forward (a new window boundary appeared),
+        //   • we had actually used something in the old window (oldUsed > 0),
+        //   • usage did not climb (newUsed <= oldUsed) — it drops to ~0 at a real reset.
+        // So sitting at a constant level (including 0% while idle) never chimes, a slowly
+        // creeping resets_at can't false-fire, and a genuine rollover chimes exactly once.
+        let resetWins: [(rkey: String, ukey: String, date: Date?, used: Double?, is5h: Bool)] = [
+            ("rst_c5", "use_c5", claude.sessionReset, claude.session, true),
+            ("rst_x5", "use_x5", codex.sessionReset,  codex.session,  true),
+            ("rst_c7", "use_c7", claude.weeklyReset,  claude.weekly,  false),
+            ("rst_x7", "use_x7", codex.weeklyReset,   codex.weekly,   false),
         ]
         var fired5 = false, fired7 = false
         for w in resetWins {
             guard let date = w.date else { continue }
-            let newV = date.timeIntervalSince1970, oldV = d.double(forKey: w.key)
-            if soundBaseline, oldV > 0, newV > oldV + 60 { if w.is5h { fired5 = true } else { fired7 = true } }
-            d.set(newV, forKey: w.key)
+            let newR = date.timeIntervalSince1970
+            let oldR = d.double(forKey: w.rkey)
+            let rolled = oldR > 0 && newR > oldR + 60
+            if let newU = w.used {
+                let oldU = d.double(forKey: w.ukey)          // 0 if never stored yet
+                if soundBaseline, rolled, oldU > 0, newU <= oldU + 0.5 {
+                    if w.is5h { fired5 = true } else { fired7 = true }
+                }
+                d.set(newU, forKey: w.ukey)
+            }
+            d.set(newR, forKey: w.rkey)
         }
         // limit reached (usage crosses to 100%)
         let reachWins: [(key: String, used: Double?)] = [
