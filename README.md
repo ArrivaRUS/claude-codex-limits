@@ -15,7 +15,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 <p align="center">
   <img src="docs/menubar-dark.png" width="180" alt="Menu bar (dark)">
   &nbsp;&nbsp;
-  <img src="docs/panel.png" width="320" alt="Popover">
+  <img src="docs/panel-en.png" width="320" alt="Popover">
 </p>
 
 ## Features
@@ -37,12 +37,15 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 <p align="center">
   <img src="docs/menubar-single.png" width="140" alt="Single product (menu bar)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single.png" width="300" alt="Single product (popover)">
+  <img src="docs/panel-single-en.png" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
-<p align="center"><img src="docs/settings.png" width="240" alt="Settings screen"></p>
-<p align="center"><sub>The in‑app settings screen (⚙): pick a sound per event — resets and limit‑reached.</sub></p>
+<p align="center"><img src="docs/settings-en.png" width="250" alt="Settings screen"></p>
+<p align="center"><sub>Settings (⚙): interface language · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
+
+<p align="center"><img src="docs/whatsnew-en.png" width="320" alt="What's new screen"></p>
+<p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
 
 ## How it works
 

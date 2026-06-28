@@ -1896,6 +1896,71 @@ if CommandLine.arguments.contains("--settings-preview") {
     print("settings preview written"); exit(0)
 }
 
+// Regenerate all docs/ screenshots (RU + EN) from the live draw code. Run from the repo root.
+if CommandLine.arguments.contains("--screenshots") {
+    let s2: CGFloat = 2
+    func savePNG(_ ctx: CGContext, _ path: String) {
+        guard let img = ctx.makeImage() else { return }
+        let data = NSMutableData()
+        if let dst = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dst, img, nil)
+            if CGImageDestinationFinalize(dst) { try? (data as Data).write(to: URL(fileURLWithPath: path)) }
+        }
+    }
+    func demo(_ sess: Double, _ wk: Double, _ srOff: TimeInterval, _ wrOff: TimeInterval) -> LimitData {
+        var d = LimitData(); d.present = true; d.session = sess; d.weekly = wk
+        d.sessionReset = Date().addingTimeInterval(srOff); d.weeklyReset = Date().addingTimeInterval(wrOff); d.asOf = Date()
+        return d
+    }
+    let claude = demo(24, 58, 2 * 3600, 4 * 86400)        // blue / amber
+    let codex  = demo(76, 43, 3 * 3600 + 1800, 2 * 86400) // amber / blue
+    let claudeOnly = claude; var noCodex = codex; noCodex.present = false
+
+    // menu-bar strips (language-neutral)
+    writePreview([(claude, "claude_128.png"), (codex, "codex_128.png")], dark: true,  to: "docs/menubar-dark.png")
+    writePreview([(claude, "claude_128.png"), (codex, "codex_128.png")], dark: false, to: "docs/menubar-light.png")
+    writePreview([(claudeOnly, "claude_128.png")], dark: true, to: "docs/menubar-single.png")
+
+    let notes = [
+        ReleaseNote(version: "2.2", date: "2026-06-28", body: "<!--RU-->\n**Язык интерфейса.**\n- Русский и английский, по умолчанию русский\n- Релиз-ноуты на выбранном языке\n<!--EN-->\n**Interface language.**\n- Russian and English, Russian by default\n- Release notes in the chosen language"),
+        ReleaseNote(version: "2.1", date: "2026-06-28", body: "<!--RU-->\n**Экран «Что нового».**\nЗаметки за все пропущенные версии, с прокруткой.\n<!--EN-->\n**\"What's new\" screen.**\nNotes for every version you skipped, scrollable."),
+        ReleaseNote(version: "2.0", date: "2026-06-28", body: "<!--RU-->\n**Автообновления.**\nФоновая проверка, скачивание с прогрессом, установка с перезапуском.\n<!--EN-->\n**Automatic updates.**\nBackground checks, download with progress, install & relaunch."),
+    ]
+    func renderPanel(_ c: LimitData, _ x: LimitData, _ about: AboutState, _ path: String) {
+        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(PANEL_H * s2)) else { return }
+        ctx.scaleBy(x: s2, y: s2)
+        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: PANEL_H), claude: c, codex: x, interval: 60, updated: Date(), about: about)
+        savePNG(ctx, path)
+    }
+    func renderSettings(_ about: AboutState, _ path: String) {
+        let sh = settingsTotalHeight(about)
+        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(sh * s2)) else { return }
+        ctx.scaleBy(x: s2, y: s2)
+        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: about)
+        savePNG(ctx, path)
+    }
+    func renderWhatsNew(_ about: AboutState, _ path: String) {
+        let ch = notesContentHeight(notesAttributedString(notes), width: WN_CONTENT_W)
+        let th = min(540, WN_HEADER + WN_FOOTER + ch), vpH = th - WN_HEADER - WN_FOOTER
+        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(th * s2)) else { return }
+        ctx.scaleBy(x: s2, y: s2)
+        _ = drawWhatsNew(ctx, size: CGSize(width: PANEL_W, height: th), notes: notes, loading: false, error: "", scroll: 0, contentH: ch, viewportH: vpH, about: about)
+        savePNG(ctx, path)
+    }
+    let dd = UserDefaults.standard, savedLang = dd.string(forKey: "lang")
+    var wnAbout = AboutState(); wnAbout.availVersion = "2.2.2"; wnAbout.availURL = "x"
+    for lang in ["ru", "en"] {
+        dd.set(lang, forKey: "lang")
+        let sfx = lang == "en" ? "-en" : ""
+        renderPanel(claude, codex, AboutState(), "docs/panel\(sfx).png")
+        renderPanel(claudeOnly, noCodex, AboutState(), "docs/panel-single\(sfx).png")
+        renderSettings(AboutState(), "docs/settings\(sfx).png")
+        renderWhatsNew(wnAbout, "docs/whatsnew\(sfx).png")
+    }
+    dd.set(savedLang, forKey: "lang")
+    print("screenshots written to docs/"); exit(0)
+}
+
 if CommandLine.arguments.contains("--check-update") {
     if let (ver, url) = latestRelease() {
         print("latest=\(ver) current=\(APP_VERSION) newer=\(versionGreater(ver, APP_VERSION))")
