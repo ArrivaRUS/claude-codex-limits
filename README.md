@@ -29,7 +29,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Opening the popover forces a fresh reading** right then.
 - **Refresh interval** — 1 / 5 / 15 minutes, your choice.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when one is *reached*; choose a sound per event in the in‑app settings (⚙).
-- **Built‑in updates** — the settings screen shows the version and a *Check for updates* button; if a newer release exists, one click downloads the `.dmg`, swaps the app and relaunches.
+- **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings: **Download** → live progress bar → **Install & Relaunch**. No Sparkle, no notarization required.
 - **Light & dark** menu bar, retina‑crisp.
 - **Launch at login**, no Dock icon, no dependencies beyond what macOS already ships.
 
@@ -66,7 +66,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-1.9.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.0.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -94,7 +94,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-1.9.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.0.dmg
 ```
 
 ## Project layout

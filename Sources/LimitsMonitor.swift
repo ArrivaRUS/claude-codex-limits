@@ -422,7 +422,7 @@ func loadCGImage(_ path: String) -> CGImage? {
 
 /// Menu-bar strip for the products that are present — transparent bg, supersample `s` (2 = retina).
 /// Two products → two compact stacked rows; one product → a single larger row; none → a dim "—".
-func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2) -> CGImage? {
+func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, badge: Bool = false) -> CGImage? {
     let H: CGFloat = 22 * s            // full menu-bar height
     let padX: CGFloat = 1 * s
     let fg = cg(dark ? .white : .black)
@@ -449,7 +449,9 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2) 
     let lines = products.map { CTLineCreateWithAttributedString(groupString($0.0, dark: dark, font: font)) }
     let textW = lines.map { ceil(lineWidth($0)) }.max() ?? 0
     let textX = padX + iconSz + gapIcon
-    let W = ceil(textX + textW + padX)
+    let dotR: CGFloat = 2.4 * s
+    let dotZone: CGFloat = badge ? (dotR * 2 + 5 * s) : 0   // "update available" dot to the right
+    let W = ceil(textX + textW + padX + dotZone)
 
     guard let ctx = bitmapContext(Int(W), Int(H)) else { return nil }
     ctx.interpolationQuality = .high
@@ -467,6 +469,11 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2) 
         let baseY = (y0 + (rowH - asc - desc) / 2 + desc).rounded()
         ctx.textPosition = CGPoint(x: textX, y: baseY)
         CTLineDraw(lines[i], ctx)
+    }
+    if badge {
+        let cxd = W - padX - dotR
+        ctx.setFillColor(cg(NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)))
+        ctx.fillEllipse(in: CGRect(x: cxd - dotR, y: H / 2 - dotR, width: dotR * 2, height: dotR * 2))
     }
     return ctx.makeImage()
 }
@@ -550,7 +557,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings }
-let APP_VERSION = "1.9"
+let APP_VERSION = "2.0"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -590,7 +597,7 @@ func drawPower(_ ctx: CGContext, _ r: CGRect, _ color: NSColor) {
 
 @discardableResult
 func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
-               interval: TimeInterval, updated: Date?) -> [Hit] {
+               interval: TimeInterval, updated: Date?, about: AboutState) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -690,6 +697,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let gearRect = rectTL(W - pad - 24 - 26, pad - 2, 24, 24)
     drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
     hits.append(Hit(id: "settings", rect: gearRect))
+    // badge: an update is available / downloading / ready → flag the gear
+    if about.availVersion != nil || about.phase != .idle {
+        let badge = CGRect(x: gearRect.maxX - 6, y: gearRect.maxY - 6, width: 7, height: 7)
+        ctx.setFillColor(cg(gray(0.10, 1))); ctx.fillEllipse(in: badge.insetBy(dx: -1.5, dy: -1.5))   // dark halo for contrast
+        ctx.setFillColor(cg(NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1))); ctx.fillEllipse(in: badge)
+    }
 
     // cards
     let cardsTop: CGFloat = 58, cardH: CGFloat = 152, gap: CGFloat = 12
@@ -918,17 +931,33 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         text(attr(label, 11.5, .medium, accent ? gray(0.10, 1) : textHi), x: r.midX, topY: c4top + 16, align: 1)
         hits.append(Hit(id: id, rect: r))
     }
-    if about.checking {
-        text(attr("Проверка…", 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
-    } else if about.availVersion != nil {
-        pill("Обновить", "update", true)
-    } else {
-        pill("Проверить обновление", "checkupdate", false)
+    switch about.phase {
+    case .downloading:
+        // progress bar where the action pill normally sits
+        let bw: CGFloat = 150, bh: CGFloat = 7
+        let track = rectTL(cardX + cardW - 14 - bw, c4top + (44 - bh) / 2, bw, bh)
+        roundFill(track, bh / 2, gray(1, 0.16))
+        let fw = max(bh, bw * CGFloat(max(0, min(1, about.progress))))
+        roundFill(CGRect(x: track.minX, y: track.minY, width: fw, height: bh), bh / 2, orange)
+    case .ready:
+        pill("Установить и перезапустить", "install", true)
+    case .idle:
+        if about.checking {
+            text(attr("Проверка…", 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
+        } else if about.availVersion != nil {
+            pill("Скачать", "update", true)
+        } else {
+            pill("Проверить обновление", "checkupdate", false)
+        }
     }
     // status line below the card (only when there is something to say)
     let lineY = c4top + c4H + 7
-    if let av = about.availVersion {
-        text(attr("Доступна версия \(av) — нажмите «Обновить»", 11.5, .regular, NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)), x: cardX + 4, topY: lineY)
+    if about.phase == .ready {
+        text(attr(about.status.isEmpty ? "Готово — нажмите «Установить и перезапустить»" : about.status, 11.5, .regular, orange), x: cardX + 4, topY: lineY)
+    } else if about.phase == .downloading {
+        text(attr(about.status.isEmpty ? "Загрузка…" : about.status, 11.5, .regular, textMid), x: cardX + 4, topY: lineY)
+    } else if let av = about.availVersion {
+        text(attr("Доступна версия \(av) — нажмите «Скачать»", 11.5, .regular, orange), x: cardX + 4, topY: lineY)
     } else if !about.status.isEmpty {
         text(attr(about.status, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
     }
@@ -951,6 +980,7 @@ final class LimitsPanelView: NSView {
     var about = AboutState()
     var onCheckUpdate: (() -> Void)?
     var onUpdate: ((String) -> Void)?
+    var onInstall: (() -> Void)?
     var mode: PanelMode = .main
     override var isFlipped: Bool { false }
 
@@ -976,7 +1006,7 @@ final class LimitsPanelView: NSView {
         if mode == .settings {
             hits = drawSettings(ctx, size: bounds.size, about: about)
         } else {
-            hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated)
+            hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
     }
 
@@ -990,6 +1020,7 @@ final class LimitsPanelView: NSView {
             case "back": setMode(.main)
             case "checkupdate": onCheckUpdate?()
             case "update": if let u = about.availURL { onUpdate?(u) }
+            case "install": onInstall?()
             default:
                 if h.id.hasPrefix("toggle:") {
                     let key = String(h.id.dropFirst(7))
@@ -1106,7 +1137,7 @@ func settingsTotalHeight(_ about: AboutState) -> CGFloat {
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
-    let needsLine = about.availVersion != nil || !about.status.isEmpty
+    let needsLine = about.availVersion != nil || !about.status.isEmpty || about.phase != .idle
     return c4top + 44 + (needsLine ? 22 : 0) + 16
 }
 func soundURL(_ file: String) -> URL? {
@@ -1117,12 +1148,17 @@ func soundURL(_ file: String) -> URL? {
 
 // MARK: - Update check / self-update
 
+enum UpdatePhase { case idle, downloading, ready }
+
 struct AboutState {
     var version: String = APP_VERSION
     var checking = false
     var status = ""
     var availVersion: String?
     var availURL: String?
+    var phase: UpdatePhase = .idle   // idle → downloading → ready (downloaded, awaiting install)
+    var progress: Double = 0         // 0…1 while downloading
+    var dmgPath: String?             // local path of the downloaded .dmg when ready
 }
 
 func versionGreater(_ a: String, _ b: String) -> Bool {
@@ -1155,6 +1191,38 @@ func latestRelease() -> (version: String, dmgURL: String)? {
     return (ver, u)
 }
 
+/// Downloads a file with progress callbacks. Keep a strong reference until `onDone` fires.
+final class UpdateDownloader: NSObject, URLSessionDownloadDelegate {
+    var onProgress: ((Double) -> Void)?
+    var onDone: ((URL?) -> Void)?
+    private var session: URLSession?
+
+    func start(_ url: URL) {
+        session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
+        var req = URLRequest(url: url)
+        req.setValue("ClaudeCodexLimits", forHTTPHeaderField: "User-Agent")
+        session?.downloadTask(with: req).resume()
+    }
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didWriteData _: Int64,
+                    totalBytesWritten written: Int64, totalBytesExpectedToWrite total: Int64) {
+        guard total > 0 else { return }
+        let p = Double(written) / Double(total)
+        DispatchQueue.main.async { self.onProgress?(p) }
+    }
+    func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // `location` is deleted when this returns — move it to a stable path now.
+        let dest = URL(fileURLWithPath: NSTemporaryDirectory() + "ccl-update.dmg")
+        try? FileManager.default.removeItem(at: dest)
+        let ok = (try? FileManager.default.moveItem(at: location, to: dest)) != nil
+        let result: URL? = ok ? dest : nil
+        DispatchQueue.main.async { self.onDone?(result) }
+    }
+    func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if error != nil { DispatchQueue.main.async { self.onDone?(nil) } }
+        s.finishTasksAndInvalidate()
+    }
+}
+
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -1166,6 +1234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panelCtrl: PanelController!
     var resetSound: NSSound?
     var soundBaseline = false
+    var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
+    var updateTimer: Timer?
+    var downloader: UpdateDownloader?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1184,7 +1255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         panelCtrl.view.onPreview = { [weak self] id in self?.playSound(id) }
         panelCtrl.view.onCheckUpdate = { [weak self] in self?.checkForUpdate() }
-        panelCtrl.view.onUpdate = { [weak self] url in self?.performUpdate(url) }
+        panelCtrl.view.onUpdate = { [weak self] url in self?.startDownload(url) }
+        panelCtrl.view.onInstall = { [weak self] in self?.installAndRelaunch() }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),
@@ -1192,6 +1264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         startTimer()
         doRefresh(live: true)   // live Codex from launch, then on every timer tick
+        startUpdateChecks()     // background update check shortly after launch + every 6h
     }
 
     func startTimer() {
@@ -1225,18 +1298,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func render(_ claude: LimitData, _ codex: LimitData) {
         last = (claude, codex)
+        applyTrayImage(claude, codex)
+        panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: Date())
+        checkAlarms(claude, codex)
+    }
+
+    /// (Re)build just the menu-bar image — used by render() and by the update badge refresh.
+    func applyTrayImage(_ claude: LimitData, _ codex: LimitData) {
         var products: [(LimitData, String)] = []
         if claude.present { products.append((claude, "claude_128.png")) }
         if codex.present { products.append((codex, "codex_128.png")) }
-        if let cgImg = renderStrip(products, dark: isDark(), s: 2), let btn = statusItem.button {
+        if let cgImg = renderStrip(products, dark: isDark(), s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
             let img = NSImage(cgImage: cgImg, size: NSSize(width: CGFloat(cgImg.width) / 2,
                                                            height: CGFloat(cgImg.height) / 2))
             img.isTemplate = false
             btn.image = img
             btn.title = ""
         }
-        panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: Date())
-        checkAlarms(claude, codex)
     }
 
     // MARK: Reset sounds
@@ -1300,65 +1378,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func checkForUpdate() {
         let v = panelCtrl.view
+        // a manual check resets any prior download state
         v.about.checking = true; v.about.status = ""; v.about.availVersion = nil; v.about.availURL = nil
+        v.about.phase = .idle; v.about.dmgPath = nil; v.about.progress = 0
         v.resizeToContent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let r = latestRelease()
             DispatchQueue.main.async {
-                guard let v = self?.panelCtrl.view else { return }
+                guard let self = self else { return }
+                let v = self.panelCtrl.view
                 v.about.checking = false
                 if let (ver, url) = r {
                     if versionGreater(ver, APP_VERSION) {
                         v.about.availVersion = ver; v.about.availURL = url; v.about.status = ""
+                        self.availableUpdate = (ver, url)
                     } else {
                         v.about.status = "Установлена последняя версия (\(APP_VERSION))"
+                        self.availableUpdate = nil
                     }
                 } else {
                     v.about.status = "Не удалось проверить обновление"
                 }
+                self.refreshTray()
                 v.resizeToContent()
             }
         }
     }
 
-    /// Downloads the release .dmg and hands off to a detached updater that swaps the
-    /// app bundle and relaunches once this instance quits.
-    func performUpdate(_ urlStr: String) {
-        let v = panelCtrl.view
-        v.about.status = "Загрузка…"; v.about.availVersion = nil; v.resizeToContent()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let resp = http(urlStr, method: "GET", headers: ["User-Agent": "ClaudeCodexLimits"], body: nil, timeout: 120)
-            guard resp.status == 200, let data = resp.data, data.count > 100_000 else {
-                DispatchQueue.main.async {
-                    self?.panelCtrl.view.about.status = "Ошибка загрузки"; self?.panelCtrl.view.resizeToContent()
+    /// Re-render the tray so the "update available" badge appears/clears promptly.
+    func refreshTray() { if let (c, x) = last { applyTrayImage(c, x) } }
+
+    /// Background update checking: once shortly after launch, then every 6 hours.
+    func startUpdateChecks() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self] in self?.autoCheck() }
+        let t = Timer(timeInterval: 6 * 3600, repeats: true) { [weak self] _ in self?.autoCheck() }
+        RunLoop.main.add(t, forMode: .common)
+        updateTimer = t
+    }
+
+    /// Silent check; if a newer release exists, surface the tray badge + settings prompt.
+    func autoCheck() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let r = latestRelease(), versionGreater(r.version, APP_VERSION) else { return }
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.availableUpdate = (r.version, r.dmgURL)
+                let v = self.panelCtrl.view
+                if v.about.phase == .idle {        // don't disturb an in-progress download
+                    v.about.availVersion = r.version; v.about.availURL = r.dmgURL
+                    if v.mode == .settings { v.resizeToContent() }
                 }
-                return
+                self.refreshTray()
+                if self.panelCtrl.isVisible { v.needsDisplay = true }
             }
-            let dmg = NSTemporaryDirectory() + "ccl-update.dmg"
-            try? data.write(to: URL(fileURLWithPath: dmg))
-            let appPath = Bundle.main.bundlePath
-            let sp = NSTemporaryDirectory() + "ccl-update.sh"
-            let script = """
-            #!/bin/bash
-            sleep 1.5
-            DMG="\(dmg)"
-            APP="\(appPath)"
-            MP=$(/usr/bin/hdiutil attach "$DMG" -nobrowse -noverify 2>/dev/null | grep '/Volumes/' | sed -n 's/.*\\(\\/Volumes\\/.*\\)/\\1/p' | tail -1)
-            SRC="$MP/Claude Codex Limits.app"
-            if [ -n "$MP" ] && [ -d "$SRC" ]; then
-              /bin/rm -rf "$APP"
-              /bin/cp -R "$SRC" "$APP"
-              /usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null
-              /usr/bin/hdiutil detach "$MP" >/dev/null 2>&1
-              /usr/bin/open "$APP"
-            fi
-            /bin/rm -f "$DMG" "\(sp)"
-            """
-            try? script.write(toFile: sp, atomically: true, encoding: .utf8)
-            let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = [sp]
-            try? p.run()
-            DispatchQueue.main.async { NSApp.terminate(nil) }
         }
+    }
+
+    /// Step 1 — download the release .dmg with a live progress bar (does not install yet).
+    func startDownload(_ urlStr: String) {
+        guard let url = URL(string: urlStr) else { return }
+        let v = panelCtrl.view
+        v.about.phase = .downloading; v.about.progress = 0
+        v.about.status = "Загрузка… 0%"; v.about.availVersion = nil
+        v.resizeToContent(); v.needsDisplay = true
+        let dl = UpdateDownloader()
+        dl.onProgress = { [weak self] p in
+            guard let self = self else { return }
+            let v = self.panelCtrl.view
+            v.about.progress = p; v.about.status = "Загрузка… \(Int(p * 100))%"
+            if self.panelCtrl.isVisible { v.needsDisplay = true }
+        }
+        dl.onDone = { [weak self] fileURL in
+            guard let self = self else { return }
+            let v = self.panelCtrl.view
+            var sizeOK = false
+            if let f = fileURL, let attrs = try? FileManager.default.attributesOfItem(atPath: f.path),
+               let sz = attrs[.size] as? Int, sz > 100_000 { sizeOK = true }
+            if sizeOK, let f = fileURL {
+                v.about.phase = .ready; v.about.dmgPath = f.path; v.about.progress = 1
+                v.about.status = "Готово — нажмите «Установить и перезапустить»"
+            } else {
+                v.about.phase = .idle; v.about.status = "Ошибка загрузки"
+                if let u = self.availableUpdate { v.about.availVersion = u.version; v.about.availURL = u.url }
+            }
+            v.resizeToContent(); if self.panelCtrl.isVisible { v.needsDisplay = true }
+            self.downloader = nil
+        }
+        downloader = dl
+        dl.start(url)
+    }
+
+    /// Step 2 — swap the bundle from the downloaded .dmg via a detached helper, then relaunch.
+    func installAndRelaunch() {
+        let v = panelCtrl.view
+        guard let dmg = v.about.dmgPath else { return }
+        v.about.status = "Установка…"; v.needsDisplay = true
+        let appPath = Bundle.main.bundlePath
+        let sp = NSTemporaryDirectory() + "ccl-update.sh"
+        let script = """
+        #!/bin/bash
+        sleep 1.5
+        DMG="\(dmg)"
+        APP="\(appPath)"
+        MP=$(/usr/bin/hdiutil attach "$DMG" -nobrowse -noverify 2>/dev/null | grep '/Volumes/' | sed -n 's/.*\\(\\/Volumes\\/.*\\)/\\1/p' | tail -1)
+        SRC="$MP/Claude Codex Limits.app"
+        if [ -n "$MP" ] && [ -d "$SRC" ]; then
+          /bin/rm -rf "$APP"
+          /bin/cp -R "$SRC" "$APP"
+          /usr/bin/xattr -dr com.apple.quarantine "$APP" 2>/dev/null
+          /usr/bin/hdiutil detach "$MP" >/dev/null 2>&1
+          /usr/bin/open "$APP"
+        fi
+        /bin/rm -f "$DMG" "\(sp)"
+        """
+        try? script.write(toFile: sp, atomically: true, encoding: .utf8)
+        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash"); p.arguments = [sp]
+        try? p.run()
+        NSApp.terminate(nil)
     }
 
     func setInterval(_ sec: TimeInterval) {
@@ -1415,7 +1551,7 @@ if CommandLine.arguments.contains("--panel-preview") {
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(PANEL_H * s)) else { return }
         ctx.scaleBy(x: s, y: s)
         _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: PANEL_H),
-                      claude: cl, codex: cx, interval: 60, updated: Date())
+                      claude: cl, codex: cx, interval: 60, updated: Date(), about: AboutState())
         guard let img = ctx.makeImage() else { return }
         let data = NSMutableData()
         if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
