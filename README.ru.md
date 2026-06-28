@@ -67,7 +67,7 @@ Anthropic `GET /api/oauth/usage`. **Это не тратит вашу квоту
 
 ### Из .dmg
 
-1. Скачайте `ClaudeCodexLimits-2.2.1.dmg` со страницы [Releases](../../releases).
+1. Скачайте `ClaudeCodexLimits-2.2.2.dmg` со страницы [Releases](../../releases).
 2. Откройте и перетащите **Claude Codex Limits** в **Applications**.
 3. Запустите. Сборка не нотаризована, поэтому в первый раз может понадобиться
    правый клик → **Открыть** или разрешение в **Системных настройках → Конфиденциальность и безопасность**.
@@ -95,7 +95,7 @@ cd claude-codex-limits
 ## Сборка релиза
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.2.1.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.2.2.dmg
 ```
 
 ## Структура проекта

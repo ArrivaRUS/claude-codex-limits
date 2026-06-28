@@ -67,7 +67,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-2.2.1.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.2.2.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -95,7 +95,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.2.1.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.2.2.dmg
 ```
 
 ## Project layout

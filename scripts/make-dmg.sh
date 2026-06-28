@@ -4,7 +4,7 @@ set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="Claude Codex Limits"
-VERSION="2.2.1"
+VERSION="2.2.2"
 APP="$DIR/dist/$APP_NAME.app"
 DMG="$DIR/dist/ClaudeCodexLimits-$VERSION.dmg"
 STAGE="$(mktemp -d)/dmg"

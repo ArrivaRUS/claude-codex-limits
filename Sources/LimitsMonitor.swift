@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.2.1"
+let APP_VERSION = "2.2.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -995,8 +995,15 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         text(attr(tr("Загрузка…", "Downloading…") + " \(Int(about.progress * 100))%", 11.5, .regular, textMid), x: cardX + 4, topY: lineY)
     } else if let av = about.availVersion {
         text(attr(tr("Доступна версия \(av) — нажмите «Скачать»", "Version \(av) available — tap «Download»"), 11.5, .regular, orange), x: cardX + 4, topY: lineY)
-    } else if !about.status.isEmpty {
-        text(attr(about.status, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
+    } else if about.msg != .none {
+        let m: String
+        switch about.msg {
+        case .upToDate:       m = tr("Установлена последняя версия (\(about.version))", "You're on the latest version (\(about.version))")
+        case .checkFailed:    m = tr("Не удалось проверить обновление", "Couldn't check for updates")
+        case .downloadFailed: m = tr("Ошибка загрузки", "Download failed")
+        case .none:           m = ""
+        }
+        text(attr(m, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
     }
 
     return hits
@@ -1069,7 +1076,8 @@ func drawWhatsNew(_ ctx: CGContext, size: CGSize, notes: [ReleaseNote], loading:
     if loading {
         text(attr(tr("Загрузка заметок…", "Loading notes…"), 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
     } else if notes.isEmpty {
-        text(attr(error.isEmpty ? tr("Нет заметок", "No notes") : error, 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
+        _ = error   // (kept for signature symmetry; the message is localized live below)
+        text(attr(tr("Пока нет заметок о новых версиях", "No notes for newer versions yet"), 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
     } else {
         let maxScroll = max(0, contentH - vp.height)
         let sc = max(0, min(scroll, maxScroll))             // defensive clamp
@@ -1327,7 +1335,7 @@ func settingsTotalHeight(_ about: AboutState) -> CGFloat {
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
-    let needsLine = about.availVersion != nil || !about.status.isEmpty || about.phase != .idle
+    let needsLine = about.availVersion != nil || about.msg != .none || about.phase != .idle
     return c4top + 44 + (needsLine ? 22 : 0) + 16
 }
 func soundURL(_ file: String) -> URL? {
@@ -1339,11 +1347,12 @@ func soundURL(_ file: String) -> URL? {
 // MARK: - Update check / self-update
 
 enum UpdatePhase { case idle, downloading, ready }
+enum AboutMsg { case none, upToDate, checkFailed, downloadFailed }   // stored as a kind, localized at draw time
 
 struct AboutState {
     var version: String = APP_VERSION
     var checking = false
-    var status = ""
+    var msg: AboutMsg = .none        // result of a manual check / a failed download
     var availVersion: String?
     var availURL: String?
     var phase: UpdatePhase = .idle   // idle → downloading → ready (downloaded, awaiting install)
@@ -1660,7 +1669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func checkForUpdate() {
         let v = panelCtrl.view
         // a manual check resets any prior download state
-        v.about.checking = true; v.about.status = ""; v.about.availVersion = nil; v.about.availURL = nil
+        v.about.checking = true; v.about.msg = .none; v.about.availVersion = nil; v.about.availURL = nil
         v.about.phase = .idle; v.about.dmgPath = nil; v.about.progress = 0
         v.resizeToContent()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -1671,14 +1680,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 v.about.checking = false
                 if let (ver, url) = r {
                     if versionGreater(ver, APP_VERSION) {
-                        v.about.availVersion = ver; v.about.availURL = url; v.about.status = ""
+                        v.about.availVersion = ver; v.about.availURL = url; v.about.msg = .none
                         self.availableUpdate = (ver, url)
                     } else {
-                        v.about.status = tr("Установлена последняя версия (\(APP_VERSION))", "You're on the latest version (\(APP_VERSION))")
+                        v.about.msg = .upToDate
                         self.availableUpdate = nil
                     }
                 } else {
-                    v.about.status = tr("Не удалось проверить обновление", "Couldn't check for updates")
+                    v.about.msg = .checkFailed
                 }
                 self.refreshTray()
                 v.resizeToContent()
@@ -1699,7 +1708,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard let v = self?.panelCtrl.view else { return }
                     v.notes = ns; v.notesLoading = false
-                    if ns.isEmpty { v.notesError = tr("Пока нет заметок о новых версиях", "No notes for newer versions yet") }
                     v.resizeToContent(); v.needsDisplay = true
                 }
             }
@@ -1740,13 +1748,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let url = URL(string: urlStr) else { return }
         let v = panelCtrl.view
         v.about.phase = .downloading; v.about.progress = 0
-        v.about.status = tr("Загрузка…", "Downloading…") + " 0%"; v.about.availVersion = nil
+        v.about.msg = .none; v.about.availVersion = nil
         v.resizeToContent(); v.needsDisplay = true
         let dl = UpdateDownloader()
         dl.onProgress = { [weak self] p in
             guard let self = self else { return }
             let v = self.panelCtrl.view
-            v.about.progress = p; v.about.status = tr("Загрузка…", "Downloading…") + " \(Int(p * 100))%"
+            v.about.progress = p
             if self.panelCtrl.isVisible { v.needsDisplay = true }
         }
         dl.onDone = { [weak self] fileURL in
@@ -1757,9 +1765,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                let sz = attrs[.size] as? Int, sz > 100_000 { sizeOK = true }
             if sizeOK, let f = fileURL {
                 v.about.phase = .ready; v.about.dmgPath = f.path; v.about.progress = 1
-                v.about.status = tr("Готово — нажмите «Установить и перезапустить»", "Ready — tap «Install & Relaunch»")
+                v.about.msg = .none
             } else {
-                v.about.phase = .idle; v.about.status = tr("Ошибка загрузки", "Download failed")
+                v.about.phase = .idle; v.about.msg = .downloadFailed
                 if let u = self.availableUpdate { v.about.availVersion = u.version; v.about.availURL = u.url }
             }
             v.resizeToContent(); if self.panelCtrl.isVisible { v.needsDisplay = true }
@@ -1773,7 +1781,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func installAndRelaunch() {
         let v = panelCtrl.view
         guard let dmg = v.about.dmgPath else { return }
-        v.about.status = tr("Установка…", "Installing…"); v.needsDisplay = true
+        v.needsDisplay = true
         let appPath = Bundle.main.bundlePath
         let sp = NSTemporaryDirectory() + "ccl-update.sh"
         let script = """
