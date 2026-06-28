@@ -376,6 +376,12 @@ func numText(_ v: Double?) -> String {
     return String(Int(v.rounded()))
 }
 
+// MARK: - Localization (RU default, EN optional)
+
+func appLang() -> String { UserDefaults.standard.string(forKey: "lang") == "en" ? "en" : "ru" }
+/// Pick the string for the current UI language. Default is Russian.
+func tr(_ ru: String, _ en: String) -> String { appLang() == "en" ? en : ru }
+
 func cg(_ c: NSColor) -> CGColor {
     let r = c.usingColorSpace(.sRGB) ?? c
     return CGColor(srgbRed: r.redComponent, green: r.greenComponent, blue: r.blueComponent, alpha: r.alphaComponent)
@@ -506,7 +512,7 @@ func menuIcon(_ name: String, _ pt: CGFloat) -> NSImage? {
 
 func fmtReset(_ d: Date?) -> String {
     guard let d = d else { return "—" }
-    let df = DateFormatter(); df.locale = Locale.current
+    let df = DateFormatter(); df.locale = Locale(identifier: appLang() == "en" ? "en_US" : "ru_RU")
     if Calendar.current.isDateInToday(d) { df.setLocalizedDateFormatFromTemplate("HH:mm") }
     else { df.setLocalizedDateFormatFromTemplate("d MMM HH:mm") }
     return df.string(from: d)
@@ -557,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.1"
+let APP_VERSION = "2.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -687,9 +693,9 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     }
 
     // header — the app's OWN icon + subtitle of present products
-    let subtitle = prods.isEmpty ? "не найдено" : prods.map { $0.1 }.joined(separator: " · ")
+    let subtitle = prods.isEmpty ? tr("не найдено", "not found") : prods.map { $0.1 }.joined(separator: " · ")
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
-    text(attr("Лимиты", 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
+    text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
     let rfRect = rectTL(W - pad - 24, pad - 2, 24, 24)
     drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 4, dy: 4), textMid, weight: .semibold)
@@ -726,10 +732,10 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
         let lx = x + 16, l1 = cardsTop + 124, l2 = cardsTop + 139
         dot(lx, centerTopY: l1 + 5, sCol)
-        text(attr("Сессия", 10.5, .regular, textMid), x: lx + 11, topY: l1)
+        text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
         text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
         dot(lx, centerTopY: l2 + 5, wCol)
-        text(attr("Неделя", 10.5, .regular, textMid), x: lx + 11, topY: l2)
+        text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
         text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
     }
 
@@ -739,12 +745,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     } else if prods.count == 1 {
         drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
     } else {
-        text(attr("Claude Code и Codex не найдены", 12, .regular, textMid), x: W / 2, topY: cardsTop + 70, align: 1)
+        text(attr(tr("Claude Code и Codex не найдены", "Claude Code and Codex not found"), 12, .regular, textMid), x: W / 2, topY: cardsTop + 70, align: 1)
     }
 
     // footer
     let footTop = cardsTop + cardH + 14
-    let segs: [(String, Double)] = [("1м", 60), ("5м", 300), ("15м", 900)]
+    let segs: [(String, Double)] = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
     let segW: CGFloat = 40, segH: CGFloat = 24
     roundFill(rectTL(pad, footTop, segW * 3, segH), 8, gray(1, 0.06))
     for (i, seg) in segs.enumerated() {
@@ -759,7 +765,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     drawPower(ctx, pwrRect.insetBy(dx: 4, dy: 4), gray(1, 0.6))
     hits.append(Hit(id: "quit", rect: pwrRect))
     if let u = updated {
-        text(attr("обновлено " + clockText(u), 10, .regular, textLo), x: W - pad - 32, topY: footTop + 7, align: 2)
+        text(attr(tr("обновлено ", "updated ") + clockText(u), 10, .regular, textLo), x: W - pad - 32, topY: footTop + 7, align: 2)
     }
 
     // credit line (authorship + version + clickable GitHub), like the reference app
@@ -845,11 +851,30 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     let backRect = rectTL(pad - 4, pad - 4, 28, 28)
     drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
     hits.append(Hit(id: "back", rect: backRect))
-    text(attr("Настройки", 16, .semibold, textHi), x: pad + 24, topY: pad)
+    text(attr(tr("Настройки", "Settings"), 16, .semibold, textHi), x: pad + 24, topY: pad)
+
+    // section 0 — interface language
+    text(attr(tr("ЯЗЫК", "LANGUAGE"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
+    let langTop: CGFloat = 66, langH: CGFloat = 44
+    roundFill(rectTL(cardX, langTop, cardW, langH), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, langTop, cardW, langH), 12, gray(1, 0.06), 1)
+    do {
+        let cur = appLang(), segGap: CGFloat = 7
+        let segW = (cardW - 14 * 2 - segGap) / 2
+        func langSeg(_ i: Int, _ code: String, _ label: String) {
+            let x = cardX + 14 + CGFloat(i) * (segW + segGap)
+            let r = rectTL(x, langTop + 7, segW, langH - 14)
+            let active = cur == code
+            if active { roundFill(r, 8, orange) } else { roundStroke(r, 8, gray(1, 0.12), 1) }
+            text(attr(label, 12.5, active ? .semibold : .regular, active ? gray(0.10, 1) : textHi), x: r.midX, topY: langTop + (langH - 12.5) / 2 - 1, align: 1)
+            hits.append(Hit(id: "lang:\(code)", rect: r))
+        }
+        langSeg(0, "ru", "Русский")
+        langSeg(1, "en", "English")
+    }
 
     // section 1 — reset-sound master toggles
-    text(attr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", 9.5, .semibold, textLo), x: pad + 2, topY: 50)
-    let c1top: CGFloat = 66, rowH: CGFloat = 44, c1H = rowH * 2
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 124)
+    let c1top: CGFloat = 140, rowH: CGFloat = 44, c1H = rowH * 2
     roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
@@ -859,16 +884,16 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         drawToggle(tRect, d.bool(forKey: key))
         hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
     }
-    toggleRow(c1top, "clock", "5-часовой лимит (сессия)", "sound5h")
+    toggleRow(c1top, "clock", tr("5-часовой лимит (сессия)", "5-hour limit (session)"), "sound5h")
     hdiv(cardX + 42, cardX + cardW, c1top + rowH)
-    toggleRow(c1top + rowH, "calendar", "Недельный лимит", "sound7d")
+    toggleRow(c1top + rowH, "calendar", tr("Недельный лимит", "Weekly limit"), "sound7d")
 
     // section 2 — per-event sound choice (two radio columns: 5h | weekly)
     let cap2 = c1top + c1H + 14
-    text(attr("ЗВУК", 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
+    text(attr(tr("ЗВУК", "SOUND"), 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
     let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
-    text(attr("5ч", 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
-    text(attr("нед", 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
+    text(attr(tr("5ч", "5h"), 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
+    text(attr(tr("нед", "wk"), 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
     let c2top = cap2 + 16, sRowH: CGFloat = 33, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
     roundFill(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.06), 1)
     func dot(_ cx: CGFloat, _ centerTop: CGFloat, _ on: Bool) {
@@ -892,11 +917,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
 
     // section 3 — limit-reached sound (any 5h/weekly limit hit)
     let capC = c2top + c2H + 14
-    text(attr("ПРИ ДОСТИЖЕНИИ ЛИМИТА (5ч ИЛИ НЕД)", 9.5, .semibold, textLo), x: pad + 2, topY: capC)
+    text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛИМИТА (5ч ИЛИ НЕД)", "WHEN A LIMIT IS REACHED (5H / WEEKLY)"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
     let c3top = capC + 16, toggleH: CGFloat = 44, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
     roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
     drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
-    text(attr("Звук при достижении лимита", 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
+    text(attr(tr("Звук при достижении лимита", "Sound when a limit is reached"), 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
     do {
         let tw: CGFloat = 38, th: CGFloat = 22
         drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
@@ -917,11 +942,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
 
     // section 4 — about / check for updates
     let capD = c3top + c3H + 14
-    text(attr("О ПРИЛОЖЕНИИ", 9.5, .semibold, textLo), x: pad + 2, topY: capD)
+    text(attr(tr("О ПРИЛОЖЕНИИ", "ABOUT"), 9.5, .semibold, textLo), x: pad + 2, topY: capD)
     let c4top = capD + 16, c4H: CGFloat = 44
     roundFill(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.06), 1)
     drawSF(ctx, "info.circle", in: rectTL(cardX + 15, c4top + (44 - 16) / 2, 16, 16), textMid)
-    text(attr("Версия \(about.version)", 13, .regular, textHi), x: cardX + 42, topY: c4top + (44 - 13) / 2 - 1)
+    text(attr(tr("Версия", "Version") + " \(about.version)", 13, .regular, textHi), x: cardX + 42, topY: c4top + (44 - 13) / 2 - 1)
     func pill(_ label: String, _ id: String, _ accent: Bool) {
         let f = ctFont(11.5, .medium)
         let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, f, cg(.white)))))
@@ -951,25 +976,25 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         let fw = max(bh, bw * CGFloat(max(0, min(1, about.progress))))
         roundFill(CGRect(x: track.minX, y: track.minY, width: fw, height: bh), bh / 2, orange)
     case .ready:
-        pill("Установить и перезапустить", "install", true)
+        pill(tr("Установить и перезапустить", "Install & Relaunch"), "install", true)
     case .idle:
         if about.checking {
-            text(attr("Проверка…", 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
+            text(attr(tr("Проверка…", "Checking…"), 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
         } else if about.availVersion != nil {
-            let wDl = pillR(cardX + cardW - 14, "Скачать", "update", true)
-            _ = pillR(cardX + cardW - 14 - wDl - 8, "Что нового", "whatsnew", false)
+            let wDl = pillR(cardX + cardW - 14, tr("Скачать", "Download"), "update", true)
+            _ = pillR(cardX + cardW - 14 - wDl - 8, tr("Что нового", "What's new"), "whatsnew", false)
         } else {
-            pill("Проверить обновление", "checkupdate", false)
+            pill(tr("Проверить обновление", "Check for updates"), "checkupdate", false)
         }
     }
     // status line below the card (only when there is something to say)
     let lineY = c4top + c4H + 7
     if about.phase == .ready {
-        text(attr(about.status.isEmpty ? "Готово — нажмите «Установить и перезапустить»" : about.status, 11.5, .regular, orange), x: cardX + 4, topY: lineY)
+        text(attr(tr("Готово — нажмите «Установить и перезапустить»", "Ready — tap «Install & Relaunch»"), 11.5, .regular, orange), x: cardX + 4, topY: lineY)
     } else if about.phase == .downloading {
-        text(attr(about.status.isEmpty ? "Загрузка…" : about.status, 11.5, .regular, textMid), x: cardX + 4, topY: lineY)
+        text(attr(tr("Загрузка…", "Downloading…") + " \(Int(about.progress * 100))%", 11.5, .regular, textMid), x: cardX + 4, topY: lineY)
     } else if let av = about.availVersion {
-        text(attr("Доступна версия \(av) — нажмите «Скачать»", 11.5, .regular, orange), x: cardX + 4, topY: lineY)
+        text(attr(tr("Доступна версия \(av) — нажмите «Скачать»", "Version \(av) available — tap «Download»"), 11.5, .regular, orange), x: cardX + 4, topY: lineY)
     } else if !about.status.isEmpty {
         text(attr(about.status, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
     }
@@ -1030,19 +1055,21 @@ func drawWhatsNew(_ ctx: CGContext, size: CGSize, notes: [ReleaseNote], loading:
     let backRect = rectTL(pad - 4, pad - 4, 28, 28)
     drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
     hits.append(Hit(id: "backsettings", rect: backRect))
-    text(attr("Что нового", 16, .semibold, textHi), x: pad + 24, topY: pad)
+    text(attr(tr("Что нового", "What's new"), 16, .semibold, textHi), x: pad + 24, topY: pad)
     if !notes.isEmpty {
         let n = notes.count
-        let sub = n == 1 ? "1 версия" : (n < 5 ? "\(n) версии" : "\(n) версий")
+        let sub = appLang() == "en"
+            ? (n == 1 ? "1 version" : "\(n) versions")
+            : (n == 1 ? "1 версия" : (n < 5 ? "\(n) версии" : "\(n) версий"))
         text(attr(sub, 11, .regular, textLo), x: W - pad, topY: pad + 3, align: 2)
     }
 
     // scrollable notes viewport
     let vp = CGRect(x: WN_PAD, y: WN_FOOTER, width: W - WN_PAD * 2 - 8, height: max(0, H - WN_HEADER - WN_FOOTER))
     if loading {
-        text(attr("Загрузка заметок…", 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
+        text(attr(tr("Загрузка заметок…", "Loading notes…"), 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
     } else if notes.isEmpty {
-        text(attr(error.isEmpty ? "Нет заметок" : error, 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
+        text(attr(error.isEmpty ? tr("Нет заметок", "No notes") : error, 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
     } else {
         let maxScroll = max(0, contentH - vp.height)
         let sc = max(0, min(scroll, maxScroll))             // defensive clamp
@@ -1082,12 +1109,12 @@ func drawWhatsNew(_ ctx: CGContext, size: CGSize, notes: [ReleaseNote], loading:
         roundFill(track, bh / 2, gray(1, 0.16))
         let fw = max(bh, bw * CGFloat(min(1, max(0, about.progress))))
         roundFill(CGRect(x: track.minX, y: track.minY, width: fw, height: bh), bh / 2, orange)
-        text(attr(about.status.isEmpty ? "Загрузка…" : about.status, 11.5, .regular, textMid), x: WN_PAD, topY: pillTopY + 8)
+        text(attr(tr("Загрузка…", "Downloading…") + " \(Int(about.progress * 100))%", 11.5, .regular, textMid), x: WN_PAD, topY: pillTopY + 8)
     case .ready:
-        footPill(W - WN_PAD, "Установить и перезапустить", "install", true)
-        text(attr("Готово", 11.5, .regular, orange), x: WN_PAD, topY: pillTopY + 8)
+        footPill(W - WN_PAD, tr("Установить и перезапустить", "Install & Relaunch"), "install", true)
+        text(attr(tr("Готово", "Ready"), 11.5, .regular, orange), x: WN_PAD, topY: pillTopY + 8)
     case .idle:
-        footPill(W - WN_PAD, about.availVersion.map { "Обновить до \($0)" } ?? "Скачать", "update", true)
+        footPill(W - WN_PAD, about.availVersion.map { tr("Обновить до", "Update to") + " \($0)" } ?? tr("Скачать", "Download"), "update", true)
     }
 
     return hits
@@ -1181,7 +1208,10 @@ final class LimitsPanelView: NSView {
             case "update": if let u = about.availURL { onUpdate?(u) }
             case "install": onInstall?()
             default:
-                if h.id.hasPrefix("toggle:") {
+                if h.id.hasPrefix("lang:") {
+                    UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "lang")
+                    resizeToContent()        // relayout + redraw in the chosen language
+                } else if h.id.hasPrefix("toggle:") {
                     let key = String(h.id.dropFirst(7))
                     let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
                     needsDisplay = true
@@ -1269,20 +1299,21 @@ final class PanelController {
 
 // MARK: - Reset sounds
 
-struct ResetSound { let id: String; let name: String; let file: String }
+struct ResetSound { let id: String; let ru: String; let en: String; let file: String
+    var name: String { tr(ru, en) } }
 let RESET_SOUNDS: [ResetSound] = [
-    ResetSound(id: "rise",      name: "Восход",     file: "snd-rise"),
-    ResetSound(id: "drop",      name: "Капля",      file: "snd-drop"),
-    ResetSound(id: "celebrate", name: "Праздник",   file: "snd-celebrate"),
-    ResetSound(id: "coin",      name: "Монетка",    file: "snd-coin"),
-    ResetSound(id: "victory",   name: "Победа",     file: "snd-victory"),
-    ResetSound(id: "chime",     name: "Перезвон",   file: "snd-chime"),
-    ResetSound(id: "hop",       name: "Прыжок",     file: "snd-hop"),
+    ResetSound(id: "rise",      ru: "Восход",   en: "Sunrise",   file: "snd-rise"),
+    ResetSound(id: "drop",      ru: "Капля",    en: "Droplet",   file: "snd-drop"),
+    ResetSound(id: "celebrate", ru: "Праздник", en: "Celebrate", file: "snd-celebrate"),
+    ResetSound(id: "coin",      ru: "Монетка",  en: "Coin",      file: "snd-coin"),
+    ResetSound(id: "victory",   ru: "Победа",   en: "Victory",   file: "snd-victory"),
+    ResetSound(id: "chime",     ru: "Перезвон", en: "Chime",     file: "snd-chime"),
+    ResetSound(id: "hop",       ru: "Прыжок",   en: "Hop",       file: "snd-hop"),
 ]
 let REACHED_SOUNDS: [ResetSound] = [
-    ResetSound(id: "outage",  name: "Отбой",    file: "snd-outage"),
-    ResetSound(id: "sunset",  name: "Закат",    file: "snd-sunset"),
-    ResetSound(id: "fadeout", name: "Угасание", file: "snd-fadeout"),
+    ResetSound(id: "outage",  ru: "Отбой",    en: "Lights out", file: "snd-outage"),
+    ResetSound(id: "sunset",  ru: "Закат",    en: "Sunset",     file: "snd-sunset"),
+    ResetSound(id: "fadeout", ru: "Угасание", en: "Fade out",   file: "snd-fadeout"),
 ]
 func validSound(_ v: String?, _ pool: [ResetSound], _ fallback: String) -> String {
     let id = v ?? fallback
@@ -1292,7 +1323,7 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let cardBbottom = 178 + 33 * CGFloat(RESET_SOUNDS.count)
+    let cardBbottom = 252 + 33 * CGFloat(RESET_SOUNDS.count)   // +74 for the language section
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
@@ -1382,6 +1413,16 @@ func releaseNotesSince(_ current: String) -> [ReleaseNote] {
     return out
 }
 
+/// A release body may carry both languages, delimited by `<!--RU-->` / `<!--EN-->`.
+/// Returns the section for `lang`; falls back to the whole body if it isn't marked.
+func localizedBody(_ body: String, _ lang: String) -> String {
+    guard let en = body.range(of: "<!--EN-->") else { return body }   // single-language release
+    let enPart = String(body[en.upperBound...])
+    var ruPart = String(body[..<en.lowerBound])
+    if let ru = ruPart.range(of: "<!--RU-->") { ruPart = String(ruPart[ru.upperBound...]) }
+    return (lang == "en" ? enPart : ruPart).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// Light markdown tidy for display (strip headings/bold/code, normalize bullets, collapse blanks).
 func tidyNotes(_ s: String) -> String {
     var lines: [String] = []
@@ -1404,9 +1445,9 @@ func notesAttributedString(_ notes: [ReleaseNote]) -> NSAttributedString {
     let m = NSMutableAttributedString()
     for (i, n) in notes.enumerated() {
         if i > 0 { m.append(ctAttr("\n\n", ctFont(7, .regular), cg(.white))) }
-        let head = "Версия \(n.version)" + (n.date.isEmpty ? "" : "    \(n.date)") + "\n"
+        let head = tr("Версия", "Version") + " \(n.version)" + (n.date.isEmpty ? "" : "    \(n.date)") + "\n"
         m.append(ctAttr(head, ctFont(13.5, .semibold), cg(accent)))
-        let t = tidyNotes(n.body)
+        let t = tidyNotes(localizedBody(n.body, appLang()))
         m.append(ctAttr(t.isEmpty ? "—" : t, ctFont(12, .regular), cg(bodyColor)))
     }
     return m
@@ -1625,11 +1666,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         v.about.availVersion = ver; v.about.availURL = url; v.about.status = ""
                         self.availableUpdate = (ver, url)
                     } else {
-                        v.about.status = "Установлена последняя версия (\(APP_VERSION))"
+                        v.about.status = tr("Установлена последняя версия (\(APP_VERSION))", "You're on the latest version (\(APP_VERSION))")
                         self.availableUpdate = nil
                     }
                 } else {
-                    v.about.status = "Не удалось проверить обновление"
+                    v.about.status = tr("Не удалось проверить обновление", "Couldn't check for updates")
                 }
                 self.refreshTray()
                 v.resizeToContent()
@@ -1650,7 +1691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     guard let v = self?.panelCtrl.view else { return }
                     v.notes = ns; v.notesLoading = false
-                    if ns.isEmpty { v.notesError = "Пока нет заметок о новых версиях" }
+                    if ns.isEmpty { v.notesError = tr("Пока нет заметок о новых версиях", "No notes for newer versions yet") }
                     v.resizeToContent(); v.needsDisplay = true
                 }
             }
@@ -1691,13 +1732,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let url = URL(string: urlStr) else { return }
         let v = panelCtrl.view
         v.about.phase = .downloading; v.about.progress = 0
-        v.about.status = "Загрузка… 0%"; v.about.availVersion = nil
+        v.about.status = tr("Загрузка…", "Downloading…") + " 0%"; v.about.availVersion = nil
         v.resizeToContent(); v.needsDisplay = true
         let dl = UpdateDownloader()
         dl.onProgress = { [weak self] p in
             guard let self = self else { return }
             let v = self.panelCtrl.view
-            v.about.progress = p; v.about.status = "Загрузка… \(Int(p * 100))%"
+            v.about.progress = p; v.about.status = tr("Загрузка…", "Downloading…") + " \(Int(p * 100))%"
             if self.panelCtrl.isVisible { v.needsDisplay = true }
         }
         dl.onDone = { [weak self] fileURL in
@@ -1708,9 +1749,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                let sz = attrs[.size] as? Int, sz > 100_000 { sizeOK = true }
             if sizeOK, let f = fileURL {
                 v.about.phase = .ready; v.about.dmgPath = f.path; v.about.progress = 1
-                v.about.status = "Готово — нажмите «Установить и перезапустить»"
+                v.about.status = tr("Готово — нажмите «Установить и перезапустить»", "Ready — tap «Install & Relaunch»")
             } else {
-                v.about.phase = .idle; v.about.status = "Ошибка загрузки"
+                v.about.phase = .idle; v.about.status = tr("Ошибка загрузки", "Download failed")
                 if let u = self.availableUpdate { v.about.availVersion = u.version; v.about.availURL = u.url }
             }
             v.resizeToContent(); if self.panelCtrl.isVisible { v.needsDisplay = true }
@@ -1724,7 +1765,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func installAndRelaunch() {
         let v = panelCtrl.view
         guard let dmg = v.about.dmgPath else { return }
-        v.about.status = "Установка…"; v.needsDisplay = true
+        v.about.status = tr("Установка…", "Installing…"); v.needsDisplay = true
         let appPath = Bundle.main.bundlePath
         let sp = NSTemporaryDirectory() + "ccl-update.sh"
         let script = """
@@ -1769,12 +1810,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showContextMenu() {
         let m = NSMenu()
-        let r = m.addItem(withTitle: "Обновить", action: #selector(refreshNow), keyEquivalent: ""); r.target = self
+        let r = m.addItem(withTitle: tr("Обновить", "Refresh"), action: #selector(refreshNow), keyEquivalent: ""); r.target = self
         m.addItem(.separator())
-        let li = m.addItem(withTitle: "Запускать при входе", action: #selector(toggleLogin), keyEquivalent: "")
+        let li = m.addItem(withTitle: tr("Запускать при входе", "Launch at login"), action: #selector(toggleLogin), keyEquivalent: "")
         li.target = self; li.state = loginEnabled() ? .on : .off
         m.addItem(.separator())
-        let q = m.addItem(withTitle: "Выйти", action: #selector(quit), keyEquivalent: "q"); q.target = self
+        let q = m.addItem(withTitle: tr("Выйти", "Quit"), action: #selector(quit), keyEquivalent: "q"); q.target = self
         if let btn = statusItem.button {
             m.popUp(positioning: nil, at: NSPoint(x: 0, y: btn.bounds.height + 4), in: btn)
         }
