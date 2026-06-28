@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.2"
+let APP_VERSION = "2.2.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -1629,21 +1629,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             d.set(newR, forKey: w.rkey)
         }
-        // limit reached (usage crosses to 100%)
+        // A limit is "reached" when usage rounds to 100% (≥ 99.5, matching the shown %).
+        // This is tracked via PERSISTED state (rch_*), so the alert survives app restarts
+        // and fires once per crossing — including when the very first reading after launch
+        // is already at the limit (e.g. it was hit while the app was closed). It never
+        // re-alerts a state already recorded as reached. Crucially it does NOT depend on the
+        // in-memory `soundBaseline`, so a restart can't silently swallow the alert.
         let reachWins: [(key: String, used: Double?)] = [
             ("rch_c5", claude.session), ("rch_x5", codex.session),
             ("rch_c7", claude.weekly), ("rch_x7", codex.weekly),
         ]
         var firedReached = false
         for w in reachWins {
-            let nowR = (w.used ?? 0) >= 100
+            let nowR = (w.used ?? 0) >= 99.5
             let wasR = d.bool(forKey: w.key)
-            if soundBaseline, nowR, !wasR { firedReached = true }
+            if nowR, !wasR { firedReached = true }
             d.set(nowR, forKey: w.key)
         }
-        if !soundBaseline { soundBaseline = true; return }   // first reading → just establish baseline
-        if fired5, d.bool(forKey: "sound5h") { playSound(sound5hId()) }
-        else if fired7, d.bool(forKey: "sound7d") { playSound(sound7dId()) }
+        let firstReading = !soundBaseline
+        soundBaseline = true
+        if !firstReading {                                   // reset chimes need the in-memory baseline
+            if fired5, d.bool(forKey: "sound5h") { playSound(sound5hId()) }
+            else if fired7, d.bool(forKey: "sound7d") { playSound(sound7dId()) }
+        }
         if firedReached, d.bool(forKey: "reachedOn") { playSound(reachedId()) }
     }
 
