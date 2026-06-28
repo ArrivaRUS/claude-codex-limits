@@ -556,8 +556,8 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-enum PanelMode { case main, settings }
-let APP_VERSION = "2.0"
+enum PanelMode { case main, settings, whatsnew }
+let APP_VERSION = "2.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -931,6 +931,17 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         text(attr(label, 11.5, .medium, accent ? gray(0.10, 1) : textHi), x: r.midX, topY: c4top + 16, align: 1)
         hits.append(Hit(id: id, rect: r))
     }
+    // a pill whose right edge sits at `rightX`; returns its width (for chaining two pills)
+    func pillR(_ rightX: CGFloat, _ label: String, _ id: String, _ accent: Bool) -> CGFloat {
+        let f = ctFont(11.5, .medium)
+        let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, f, cg(.white)))))
+        let w = lw + 22, h: CGFloat = 26
+        let r = rectTL(rightX - w, c4top + (44 - h) / 2, w, h)
+        roundFill(r, 8, accent ? orange : gray(1, 0.14))
+        text(attr(label, 11.5, .medium, accent ? gray(0.10, 1) : textHi), x: r.midX, topY: c4top + 16, align: 1)
+        hits.append(Hit(id: id, rect: r))
+        return w
+    }
     switch about.phase {
     case .downloading:
         // progress bar where the action pill normally sits
@@ -945,7 +956,8 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         if about.checking {
             text(attr("Проверка…", 12, .regular, textMid), x: cardX + cardW - 16, topY: c4top + 15, align: 2)
         } else if about.availVersion != nil {
-            pill("Скачать", "update", true)
+            let wDl = pillR(cardX + cardW - 14, "Скачать", "update", true)
+            _ = pillR(cardX + cardW - 14 - wDl - 8, "Что нового", "whatsnew", false)
         } else {
             pill("Проверить обновление", "checkupdate", false)
         }
@@ -960,6 +972,122 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         text(attr("Доступна версия \(av) — нажмите «Скачать»", 11.5, .regular, orange), x: cardX + 4, topY: lineY)
     } else if !about.status.isEmpty {
         text(attr(about.status, 11.5, .regular, textLo), x: cardX + 4, topY: lineY)
+    }
+
+    return hits
+}
+
+// MARK: - "What's new" screen (accumulated release notes + update action)
+
+func drawWhatsNew(_ ctx: CGContext, size: CGSize, notes: [ReleaseNote], loading: Bool,
+                  error: String, scroll: CGFloat, contentH: CGFloat, viewportH: CGFloat,
+                  about: AboutState) -> [Hit] {
+    let W = size.width, H = size.height
+    var hits: [Hit] = []
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let textHi = gray(1, 0.95), textMid = gray(1, 0.5), textLo = gray(1, 0.34)
+    let orange = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
+
+    func rectTL(_ x: CGFloat, _ topY: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: x, y: H - topY - h, width: w, height: h)
+    }
+    func attr(_ s: String, _ sz: CGFloat, _ weight: NSFont.Weight, _ color: NSColor) -> NSAttributedString {
+        ctAttr(s, ctFont(sz, weight), cg(color))
+    }
+    func text(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
+        var dx = x
+        if align == 1 { dx = x - w / 2 } else if align == 2 { dx = x - w }
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - topY - asc)
+        CTLineDraw(line, ctx)
+    }
+    func roundFill(_ r: CGRect, _ rad: CGFloat, _ color: NSColor) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setFillColor(cg(color)); ctx.fillPath()
+    }
+    func hdiv(_ x0: CGFloat, _ x1: CGFloat, _ topY: CGFloat) {
+        ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
+        ctx.beginPath(); ctx.move(to: CGPoint(x: x0, y: H - topY)); ctx.addLine(to: CGPoint(x: x1, y: H - topY)); ctx.strokePath()
+    }
+
+    // background — identical to the panel/settings
+    let bgPath = CGPath(roundedRect: CGRect(x: 0.5, y: 0.5, width: W - 1, height: H - 1), cornerWidth: 18, cornerHeight: 18, transform: nil)
+    ctx.saveGState(); ctx.addPath(bgPath); ctx.clip()
+    if let g = CGGradient(colorsSpace: cs, colors: [cg(gray(0.16, 1)), cg(gray(0.075, 1))] as CFArray, locations: [0, 1]) {
+        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: H), end: CGPoint(x: 0, y: 0), options: [])
+    }
+    if let glow = CGGradient(colorsSpace: cs, colors: [cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0.10)), cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0))] as CFArray, locations: [0, 1]) {
+        ctx.drawRadialGradient(glow, startCenter: CGPoint(x: 54, y: H - 26), startRadius: 0, endCenter: CGPoint(x: 54, y: H - 26), endRadius: 170, options: [])
+    }
+    ctx.restoreGState()
+    ctx.addPath(bgPath); ctx.setStrokeColor(cg(gray(1, 0.08))); ctx.setLineWidth(1); ctx.strokePath()
+
+    let pad: CGFloat = 16
+    // header: back + title (+ count)
+    let backRect = rectTL(pad - 4, pad - 4, 28, 28)
+    drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
+    hits.append(Hit(id: "backsettings", rect: backRect))
+    text(attr("Что нового", 16, .semibold, textHi), x: pad + 24, topY: pad)
+    if !notes.isEmpty {
+        let n = notes.count
+        let sub = n == 1 ? "1 версия" : (n < 5 ? "\(n) версии" : "\(n) версий")
+        text(attr(sub, 11, .regular, textLo), x: W - pad, topY: pad + 3, align: 2)
+    }
+
+    // scrollable notes viewport
+    let vp = CGRect(x: WN_PAD, y: WN_FOOTER, width: W - WN_PAD * 2 - 8, height: max(0, H - WN_HEADER - WN_FOOTER))
+    if loading {
+        text(attr("Загрузка заметок…", 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
+    } else if notes.isEmpty {
+        text(attr(error.isEmpty ? "Нет заметок" : error, 12.5, .regular, textMid), x: W / 2, topY: WN_HEADER + 22, align: 1)
+    } else {
+        let maxScroll = max(0, contentH - vp.height)
+        let sc = max(0, min(scroll, maxScroll))             // defensive clamp
+        let a = notesAttributedString(notes)
+        ctx.saveGState(); ctx.clip(to: vp)
+        let fs = CTFramesetterCreateWithAttributedString(a)
+        let pathRect = CGRect(x: vp.minX, y: (vp.maxY + sc) - contentH, width: WN_CONTENT_W, height: contentH)
+        let frame = CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), CGPath(rect: pathRect, transform: nil), nil)
+        ctx.textMatrix = .identity
+        CTFrameDraw(frame, ctx)
+        ctx.restoreGState()
+        if maxScroll > 0 {                                  // scrollbar thumb
+            let thumbH = max(28, vp.height * vp.height / contentH)
+            let frac = sc / maxScroll
+            let thumbTop = vp.maxY - frac * (vp.height - thumbH)
+            roundFill(CGRect(x: W - WN_PAD + 2, y: thumbTop - thumbH, width: 3, height: thumbH), 1.5, gray(1, 0.20))
+        }
+    }
+
+    // footer: divider + phase-based action
+    hdiv(WN_PAD, W - WN_PAD, H - WN_FOOTER + 8)
+    let pillH: CGFloat = 28
+    let pillTopY = (H - WN_FOOTER + 8) + (WN_FOOTER - 8 - pillH) / 2
+    func footPill(_ rightX: CGFloat, _ label: String, _ id: String, _ accent: Bool) {
+        let f = ctFont(12, .medium)
+        let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, f, cg(.white)))))
+        let w = lw + 26
+        let r = rectTL(rightX - w, pillTopY, w, pillH)
+        roundFill(r, 8, accent ? orange : gray(1, 0.14))
+        text(attr(label, 12, .medium, accent ? gray(0.10, 1) : textHi), x: r.midX, topY: pillTopY + 7, align: 1)
+        hits.append(Hit(id: id, rect: r))
+    }
+    switch about.phase {
+    case .downloading:
+        let bw: CGFloat = 180, bh: CGFloat = 8
+        let track = rectTL(W - WN_PAD - bw, pillTopY + (pillH - bh) / 2, bw, bh)
+        roundFill(track, bh / 2, gray(1, 0.16))
+        let fw = max(bh, bw * CGFloat(min(1, max(0, about.progress))))
+        roundFill(CGRect(x: track.minX, y: track.minY, width: fw, height: bh), bh / 2, orange)
+        text(attr(about.status.isEmpty ? "Загрузка…" : about.status, 11.5, .regular, textMid), x: WN_PAD, topY: pillTopY + 8)
+    case .ready:
+        footPill(W - WN_PAD, "Установить и перезапустить", "install", true)
+        text(attr("Готово", 11.5, .regular, orange), x: WN_PAD, topY: pillTopY + 8)
+    case .idle:
+        footPill(W - WN_PAD, about.availVersion.map { "Обновить до \($0)" } ?? "Скачать", "update", true)
     }
 
     return hits
@@ -981,7 +1109,15 @@ final class LimitsPanelView: NSView {
     var onCheckUpdate: (() -> Void)?
     var onUpdate: ((String) -> Void)?
     var onInstall: (() -> Void)?
+    var onWhatsNew: (() -> Void)?
     var mode: PanelMode = .main
+    // "What's new" screen state
+    var notes: [ReleaseNote] = []
+    var notesLoading = false
+    var notesError = ""
+    var scroll: CGFloat = 0
+    var notesContentH: CGFloat = 0
+    var notesViewportH: CGFloat = 0
     override var isFlipped: Bool { false }
 
     func setMode(_ m: PanelMode) {
@@ -991,7 +1127,17 @@ final class LimitsPanelView: NSView {
 
     /// Resize the panel (anchored at its top edge) to fit the current mode/state.
     func resizeToContent() {
-        let targetH = (mode == .settings) ? settingsTotalHeight(about) : PANEL_H
+        var targetH = PANEL_H
+        if mode == .settings {
+            targetH = settingsTotalHeight(about)
+        } else if mode == .whatsnew {
+            notesContentH = (notesLoading || notes.isEmpty) ? 0 : notesContentHeight(notesAttributedString(notes), width: WN_CONTENT_W)
+            let bodyH = (notesLoading || notes.isEmpty) ? 64 : notesContentH
+            let screenMax = (window?.screen?.visibleFrame.height ?? 800) - 40
+            let maxH = min(screenMax, 540)
+            targetH = min(maxH, WN_HEADER + WN_FOOTER + bodyH)
+            notesViewportH = targetH - WN_HEADER - WN_FOOTER
+        }
         if let win = window {
             let f = win.frame
             var ny = f.maxY - targetH
@@ -1005,9 +1151,20 @@ final class LimitsPanelView: NSView {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         if mode == .settings {
             hits = drawSettings(ctx, size: bounds.size, about: about)
+        } else if mode == .whatsnew {
+            hits = drawWhatsNew(ctx, size: bounds.size, notes: notes, loading: notesLoading,
+                                error: notesError, scroll: scroll, contentH: notesContentH,
+                                viewportH: notesViewportH, about: about)
         } else {
             hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard mode == .whatsnew else { super.scrollWheel(with: event); return }
+        let maxScroll = max(0, notesContentH - notesViewportH)
+        scroll = min(maxScroll, max(0, scroll - event.scrollingDeltaY))
+        needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1018,6 +1175,8 @@ final class LimitsPanelView: NSView {
             case "quit": onQuit?()
             case "settings": setMode(.settings)
             case "back": setMode(.main)
+            case "backsettings": setMode(.settings)
+            case "whatsnew": onWhatsNew?()
             case "checkupdate": onCheckUpdate?()
             case "update": if let u = about.availURL { onUpdate?(u) }
             case "install": onInstall?()
@@ -1191,6 +1350,78 @@ func latestRelease() -> (version: String, dmgURL: String)? {
     return (ver, u)
 }
 
+// MARK: - Release notes ("What's new")
+
+let WN_HEADER: CGFloat = 52                                  // back + title band
+let WN_FOOTER: CGFloat = 60                                  // divider + action row
+let WN_PAD: CGFloat = 18
+let WN_CONTENT_W: CGFloat = PANEL_W - WN_PAD * 2 - 10        // text column (leaves a scrollbar gutter)
+
+struct ReleaseNote { let version: String; let date: String; let body: String }
+
+/// Every published release newer than `current`, newest first, with its notes —
+/// so a user who skipped several versions sees the whole accumulated changelog.
+func releaseNotesSince(_ current: String) -> [ReleaseNote] {
+    let resp = http("https://api.github.com/repos/ArrivaRUS/claude-codex-limits/releases?per_page=30",
+                    method: "GET",
+                    headers: ["User-Agent": "ClaudeCodexLimits", "Accept": "application/vnd.github+json"],
+                    body: nil)
+    guard resp.status == 200, let d = resp.data,
+          let arr = (try? JSONSerialization.jsonObject(with: d)) as? [[String: Any]] else { return [] }
+    var out: [ReleaseNote] = []
+    for r in arr {
+        guard let tag = r["tag_name"] as? String else { continue }
+        if (r["draft"] as? Bool) == true || (r["prerelease"] as? Bool) == true { continue }
+        let ver = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        guard versionGreater(ver, current) else { continue }
+        let body = (r["body"] as? String) ?? ""
+        let date = String((r["published_at"] as? String)?.prefix(10) ?? "")
+        out.append(ReleaseNote(version: ver, date: date, body: body))
+    }
+    out.sort { versionGreater($0.version, $1.version) }
+    return out
+}
+
+/// Light markdown tidy for display (strip headings/bold/code, normalize bullets, collapse blanks).
+func tidyNotes(_ s: String) -> String {
+    var lines: [String] = []
+    for raw in s.replacingOccurrences(of: "\r", with: "").components(separatedBy: "\n") {
+        var l = raw.trimmingCharacters(in: .whitespaces)
+        while l.hasPrefix("#") { l.removeFirst() }
+        l = l.trimmingCharacters(in: .whitespaces)
+        if l.hasPrefix("- ") || l.hasPrefix("* ") { l = "•  " + l.dropFirst(2) }
+        l = l.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        lines.append(l)
+    }
+    var res: [String] = []
+    for l in lines { if l.isEmpty && (res.last?.isEmpty ?? true) { continue }; res.append(l) }
+    return res.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func notesAttributedString(_ notes: [ReleaseNote]) -> NSAttributedString {
+    let accent = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
+    let bodyColor = NSColor(white: 1, alpha: 0.66)
+    let m = NSMutableAttributedString()
+    for (i, n) in notes.enumerated() {
+        if i > 0 { m.append(ctAttr("\n\n", ctFont(7, .regular), cg(.white))) }
+        let head = "Версия \(n.version)" + (n.date.isEmpty ? "" : "    \(n.date)") + "\n"
+        m.append(ctAttr(head, ctFont(13.5, .semibold), cg(accent)))
+        let t = tidyNotes(n.body)
+        m.append(ctAttr(t.isEmpty ? "—" : t, ctFont(12, .regular), cg(bodyColor)))
+    }
+    return m
+}
+
+/// Lay-out height of the notes column at the given width.
+func notesContentHeight(_ attr: NSAttributedString, width: CGFloat) -> CGFloat {
+    guard attr.length > 0 else { return 0 }
+    let fs = CTFramesetterCreateWithAttributedString(attr)
+    let sz = CTFramesetterSuggestFrameSizeWithConstraints(
+        fs, CFRangeMake(0, attr.length), nil,
+        CGSize(width: width, height: .greatestFiniteMagnitude), nil)
+    return ceil(sz.height) + 6
+}
+
 /// Downloads a file with progress callbacks. Keep a strong reference until `onDone` fires.
 final class UpdateDownloader: NSObject, URLSessionDownloadDelegate {
     var onProgress: ((Double) -> Void)?
@@ -1257,6 +1488,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.view.onCheckUpdate = { [weak self] in self?.checkForUpdate() }
         panelCtrl.view.onUpdate = { [weak self] url in self?.startDownload(url) }
         panelCtrl.view.onInstall = { [weak self] in self?.installAndRelaunch() }
+        panelCtrl.view.onWhatsNew = { [weak self] in self?.showWhatsNew() }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),
@@ -1401,6 +1633,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self.refreshTray()
                 v.resizeToContent()
+            }
+        }
+    }
+
+    /// Open the "What's new" screen, lazily loading the accumulated release notes.
+    func showWhatsNew() {
+        let v = panelCtrl.view
+        v.scroll = 0
+        if v.notes.isEmpty { v.notesLoading = true; v.notesError = "" }
+        v.setMode(.whatsnew)
+        v.needsDisplay = true
+        if v.notes.isEmpty {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let ns = releaseNotesSince(APP_VERSION)
+                DispatchQueue.main.async {
+                    guard let v = self?.panelCtrl.view else { return }
+                    v.notes = ns; v.notesLoading = false
+                    if ns.isEmpty { v.notesError = "Пока нет заметок о новых версиях" }
+                    v.resizeToContent(); v.needsDisplay = true
+                }
             }
         }
     }
