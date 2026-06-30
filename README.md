@@ -32,7 +32,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
 - **Light & dark** menu bar, retina‑crisp.
-- **Launch at login**, no Dock icon, no dependencies beyond what macOS already ships.
+- **Launch at login** — a toggle right in Settings; no Dock icon, no dependencies beyond what macOS already ships.
 
 <p align="center">
   <img src="docs/menubar-single.png" width="140" alt="Single product (menu bar)">
@@ -42,7 +42,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
 <p align="center"><img src="docs/settings-en.png" width="250" alt="Settings screen"></p>
-<p align="center"><sub>Settings (⚙): interface language · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
+<p align="center"><sub>Settings (⚙): interface language · launch at login · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
 
 <p align="center"><img src="docs/whatsnew-en.png" width="320" alt="What's new screen"></p>
 <p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
@@ -70,7 +70,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-2.2.2.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.3.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -98,7 +98,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.2.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.3.dmg
 ```
 
 ## Project layout

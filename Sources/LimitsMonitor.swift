@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.2.2"
+let APP_VERSION = "2.3"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -853,28 +853,40 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     hits.append(Hit(id: "back", rect: backRect))
     text(attr(tr("Настройки", "Settings"), 16, .semibold, textHi), x: pad + 24, topY: pad)
 
-    // section 0 — interface language
-    text(attr(tr("ЯЗЫК", "LANGUAGE"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
-    let langTop: CGFloat = 66, langH: CGFloat = 44
-    roundFill(rectTL(cardX, langTop, cardW, langH), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, langTop, cardW, langH), 12, gray(1, 0.06), 1)
+    // section 0 — general: interface language + launch at login
+    text(attr(tr("ОБЩИЕ", "GENERAL"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
+    let genTop: CGFloat = 66, genRowH: CGFloat = 44, genH = genRowH * 2
+    roundFill(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.06), 1)
+    // language row — globe + label + a compact EN | RU segmented control
+    drawSF(ctx, "globe", in: rectTL(cardX + 15, genTop + (genRowH - 16) / 2, 16, 16), textMid)
+    text(attr(tr("Язык", "Language"), 13, .regular, textHi), x: cardX + 42, topY: genTop + (genRowH - 13) / 2 - 1)
     do {
-        let cur = appLang(), segGap: CGFloat = 7
-        let segW = (cardW - 14 * 2 - segGap) / 2
-        func langSeg(_ i: Int, _ code: String, _ label: String) {
-            let x = cardX + 14 + CGFloat(i) * (segW + segGap)
-            let r = rectTL(x, langTop + 7, segW, langH - 14)
-            let active = cur == code
-            if active { roundFill(r, 8, orange) } else { roundStroke(r, 8, gray(1, 0.12), 1) }
-            text(attr(label, 12.5, active ? .semibold : .regular, active ? gray(0.10, 1) : textHi), x: r.midX, topY: langTop + (langH - 12.5) / 2 - 1, align: 1)
-            hits.append(Hit(id: "lang:\(code)", rect: r))
+        let cur = appLang()
+        let ctrlW: CGFloat = 66, segH: CGFloat = 24
+        let trackX = cardX + cardW - 14 - ctrlW, trackTop = genTop + (genRowH - segH) / 2
+        roundFill(rectTL(trackX, trackTop, ctrlW, segH), 7, gray(1, 0.08))
+        let segW = (ctrlW - 9) / 2
+        for (i, o) in [("en", "EN"), ("ru", "RU")].enumerated() {
+            let sRect = rectTL(trackX + 3 + CGFloat(i) * (segW + 3), trackTop + 3, segW, segH - 6)
+            let active = cur == o.0
+            if active { roundFill(sRect, 5, gray(1, 0.18)) }
+            text(attr(o.1, 11, active ? .semibold : .medium, active ? textHi : textMid), x: sRect.midX, topY: genTop + (genRowH - 11) / 2 - 0.5, align: 1)
+            hits.append(Hit(id: "lang:\(o.0)", rect: sRect))
         }
-        langSeg(0, "ru", "Русский")
-        langSeg(1, "en", "English")
+    }
+    hdiv(cardX + 42, cardX + cardW, genTop + genRowH)
+    // launch-at-login row — sparkles + label + toggle
+    drawSF(ctx, "sparkles", in: rectTL(cardX + 15, genTop + genRowH + (genRowH - 16) / 2, 16, 16), textMid)
+    text(attr(tr("Запускать при входе", "Launch at login"), 13, .regular, textHi), x: cardX + 42, topY: genTop + genRowH + (genRowH - 13) / 2 - 1)
+    do {
+        let tw: CGFloat = 38, th: CGFloat = 22
+        drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH + (genRowH - th) / 2, tw, th), loginEnabled())
+        hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH, cardW, genRowH)))
     }
 
     // section 1 — reset-sound master toggles
-    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 124)
-    let c1top: CGFloat = 140, rowH: CGFloat = 44, c1H = rowH * 2
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 168)
+    let c1top: CGFloat = 184, rowH: CGFloat = 44, c1H = rowH * 2
     roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
@@ -1215,6 +1227,7 @@ final class LimitsPanelView: NSView {
             case "checkupdate": onCheckUpdate?()
             case "update": if let u = about.availURL { onUpdate?(u) }
             case "install": onInstall?()
+            case "togglelogin": setLoginEnabled(!loginEnabled()); needsDisplay = true
             default:
                 if h.id.hasPrefix("lang:") {
                     UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "lang")
@@ -1331,7 +1344,7 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let cardBbottom = 252 + 33 * CGFloat(RESET_SOUNDS.count)   // +74 for the language section
+    let cardBbottom = 296 + 33 * CGFloat(RESET_SOUNDS.count)   // +118 for the "General" (language + launch) section
     let c3top = cardBbottom + 14 + 16
     let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
