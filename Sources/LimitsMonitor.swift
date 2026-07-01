@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.3.2"
+let APP_VERSION = "2.3.3"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -828,9 +828,9 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         let rad = r.height / 2
         ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
         ctx.setFillColor(cg(on ? orange : gray(1, 0.18))); ctx.fillPath()
-        let kd = r.height - 6
-        let kx = on ? (r.maxX - 3 - kd) : (r.minX + 3)
-        ctx.setFillColor(cg(.white)); ctx.fillEllipse(in: CGRect(x: kx, y: r.minY + 3, width: kd, height: kd))
+        let kd = r.height - 4
+        let kx = on ? (r.maxX - 2 - kd) : (r.minX + 2)
+        ctx.setFillColor(cg(.white)); ctx.fillEllipse(in: CGRect(x: kx, y: r.minY + 2, width: kd, height: kd))
     }
 
     // background — identical to the main panel
@@ -879,7 +879,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     drawSF(ctx, "sparkles", in: rectTL(cardX + 15, genTop + genRowH + (genRowH - 16) / 2, 16, 16), textMid)
     text(attr(tr("Запускать при входе", "Launch at login"), 13, .regular, textHi), x: cardX + 42, topY: genTop + genRowH + (genRowH - 13) / 2 - 1)
     do {
-        let tw: CGFloat = 34, th: CGFloat = 20
+        let tw: CGFloat = 34, th: CGFloat = 16
         drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH + (genRowH - th) / 2, tw, th), loginEnabled())
         hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH, cardW, genRowH)))
     }
@@ -891,7 +891,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
         text(attr(label, 13, .regular, textHi), x: cardX + 42, topY: rowTop + (rowH - 13) / 2 - 1)
-        let tw: CGFloat = 34, th: CGFloat = 20
+        let tw: CGFloat = 34, th: CGFloat = 16
         let tRect = rectTL(cardX + cardW - 14 - tw, rowTop + (rowH - th) / 2, tw, th)
         drawToggle(tRect, d.bool(forKey: key))
         hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
@@ -935,7 +935,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
     text(attr(tr("Звук при достижении лимита", "Sound when a limit is reached"), 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
     do {
-        let tw: CGFloat = 34, th: CGFloat = 20
+        let tw: CGFloat = 34, th: CGFloat = 16
         drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
         hits.append(Hit(id: "toggle:reachedOn", rect: rectTL(cardX, c3top, cardW, toggleH)))
     }
