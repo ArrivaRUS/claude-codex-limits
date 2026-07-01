@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.3"
+let APP_VERSION = "2.3.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -1315,6 +1315,7 @@ final class PanelController {
     func hide() {
         panel.orderOut(nil)
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        view.mode = .main; view.scroll = 0   // forget any sub-screen: next open starts on the main screen
     }
 }
 
