@@ -3,7 +3,7 @@
 [English](README.md) · **Русский**
 
 <p align="center">
-  <img src="docs/banner.png" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
+  <img src="docs/banner.png?v=233" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
 </p>
 
 Маленькое приложение для строки меню macOS, которое показывает, сколько у вас осталось
@@ -13,9 +13,9 @@
 слева иконка продукта. По клику на иконку в трее открывается подробная панель.
 
 <p align="center">
-  <img src="docs/menubar-dark.png" width="180" alt="Строка меню (тёмная)">
+  <img src="docs/menubar-dark.png?v=233" width="180" alt="Строка меню (тёмная)">
   &nbsp;&nbsp;
-  <img src="docs/panel.png" width="320" alt="Панель">
+  <img src="docs/panel.png?v=233" width="320" alt="Панель">
 </p>
 
 ## Возможности
@@ -35,16 +35,16 @@
 - **Автозапуск при входе** — тумблер прямо в настройках; без иконки в Dock, без сторонних зависимостей.
 
 <p align="center">
-  <img src="docs/menubar-single.png" width="140" alt="Один продукт (строка меню)">
+  <img src="docs/menubar-single.png?v=233" width="140" alt="Один продукт (строка меню)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single.png" width="300" alt="Один продукт (панель)">
+  <img src="docs/panel-single.png?v=233" width="300" alt="Один продукт (панель)">
 </p>
 <p align="center"><sub>Если настроена только одна подписка — трей и панель сворачиваются в одну строку / карточку.</sub></p>
 
-<p align="center"><img src="docs/settings.png" width="250" alt="Экран настроек"></p>
+<p align="center"><img src="docs/settings.png?v=233" width="250" alt="Экран настроек"></p>
 <p align="center"><sub>Настройки (⚙): язык интерфейса · автозапуск · свой звук для каждого события (сбросы и достижение лимита) · встроенные обновления.</sub></p>
 
-<p align="center"><img src="docs/whatsnew.png" width="320" alt="Экран «Что нового»"></p>
+<p align="center"><img src="docs/whatsnew.png?v=233" width="320" alt="Экран «Что нового»"></p>
 <p align="center"><sub>«Что нового»: релиз-ноуты за все пропущенные версии и обновление прямо оттуда.</sub></p>
 
 ## Как это работает
