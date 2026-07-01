@@ -563,7 +563,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.3.1"
+let APP_VERSION = "2.3.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -855,7 +855,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
 
     // section 0 — general: interface language + launch at login
     text(attr(tr("ОБЩИЕ", "GENERAL"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
-    let genTop: CGFloat = 66, genRowH: CGFloat = 44, genH = genRowH * 2
+    let genTop: CGFloat = 66, genRowH: CGFloat = 36, genH = genRowH * 2
     roundFill(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.06), 1)
     // language row — globe + label + a compact EN | RU segmented control
     drawSF(ctx, "globe", in: rectTL(cardX + 15, genTop + (genRowH - 16) / 2, 16, 16), textMid)
@@ -879,19 +879,19 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     drawSF(ctx, "sparkles", in: rectTL(cardX + 15, genTop + genRowH + (genRowH - 16) / 2, 16, 16), textMid)
     text(attr(tr("Запускать при входе", "Launch at login"), 13, .regular, textHi), x: cardX + 42, topY: genTop + genRowH + (genRowH - 13) / 2 - 1)
     do {
-        let tw: CGFloat = 38, th: CGFloat = 22
+        let tw: CGFloat = 34, th: CGFloat = 20
         drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH + (genRowH - th) / 2, tw, th), loginEnabled())
         hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH, cardW, genRowH)))
     }
 
     // section 1 — reset-sound master toggles
-    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 168)
-    let c1top: CGFloat = 184, rowH: CGFloat = 44, c1H = rowH * 2
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 152)
+    let c1top: CGFloat = 168, rowH: CGFloat = 36, c1H = rowH * 2
     roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
         text(attr(label, 13, .regular, textHi), x: cardX + 42, topY: rowTop + (rowH - 13) / 2 - 1)
-        let tw: CGFloat = 38, th: CGFloat = 22
+        let tw: CGFloat = 34, th: CGFloat = 20
         let tRect = rectTL(cardX + cardW - 14 - tw, rowTop + (rowH - th) / 2, tw, th)
         drawToggle(tRect, d.bool(forKey: key))
         hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
@@ -906,7 +906,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
     text(attr(tr("5ч", "5h"), 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
     text(attr(tr("нед", "wk"), 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
-    let c2top = cap2 + 16, sRowH: CGFloat = 33, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
+    let c2top = cap2 + 16, sRowH: CGFloat = 29, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
     roundFill(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.06), 1)
     func dot(_ cx: CGFloat, _ centerTop: CGFloat, _ on: Bool) {
         let r: CGFloat = 7, rect = CGRect(x: cx - r, y: H - centerTop - r, width: 2 * r, height: 2 * r)
@@ -930,12 +930,12 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     // section 3 — limit-reached sound (any 5h/weekly limit hit)
     let capC = c2top + c2H + 14
     text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛИМИТА (5ч ИЛИ НЕД)", "WHEN A LIMIT IS REACHED (5H / WEEKLY)"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
-    let c3top = capC + 16, toggleH: CGFloat = 44, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
+    let c3top = capC + 16, toggleH: CGFloat = 36, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
     roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
     drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
     text(attr(tr("Звук при достижении лимита", "Sound when a limit is reached"), 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
     do {
-        let tw: CGFloat = 38, th: CGFloat = 22
+        let tw: CGFloat = 34, th: CGFloat = 20
         drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
         hits.append(Hit(id: "toggle:reachedOn", rect: rectTL(cardX, c3top, cardW, toggleH)))
     }
@@ -1345,9 +1345,9 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let cardBbottom = 296 + 33 * CGFloat(RESET_SOUNDS.count)   // +118 for the "General" (language + launch) section
+    let cardBbottom = 270 + 29 * CGFloat(RESET_SOUNDS.count)   // compact rows (36 general/toggle, 29 sound)
     let c3top = cardBbottom + 14 + 16
-    let cardCbottom = c3top + 44 + 33 * CGFloat(REACHED_SOUNDS.count)
+    let cardCbottom = c3top + 36 + 29 * CGFloat(REACHED_SOUNDS.count)
     let c4top = cardCbottom + 14 + 16
     let needsLine = about.availVersion != nil || about.msg != .none || about.phase != .idle
     return c4top + 44 + (needsLine ? 22 : 0) + 16
