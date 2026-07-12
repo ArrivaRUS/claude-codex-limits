@@ -169,6 +169,26 @@ func fetchClaude() -> LimitData {
 
 // MARK: - Codex
 
+/// Assign a Codex usage window to Session or Week by its DURATION — the ~5-hour window
+/// feeds Session, the ~7-day window feeds Week — so the labels stay correct no matter
+/// which slot (primary/secondary) the backend put it in, or if it returned only one.
+/// Falls back to the positional guess when the duration field is absent. Handles both
+/// shapes: live (`limit_window_seconds`, `reset_at`) and rollout (`window_minutes`, `resets_at`).
+func codexApplyWindow(_ win: [String: Any], _ d: inout LimitData, positionalWeekly: Bool) {
+    let used = win["used_percent"] as? Double
+    let resetTs = (win["reset_at"] as? Double) ?? (win["resets_at"] as? Double)
+    let reset = resetTs.map { Date(timeIntervalSince1970: $0) }
+    let durSec = (win["limit_window_seconds"] as? Double) ?? (win["window_minutes"] as? Double).map { $0 * 60 }
+    let isWeekly = durSec.map { $0 >= 2 * 86400 } ?? positionalWeekly   // ≥ 2 days ⇒ the weekly window
+    if isWeekly {
+        if let u = used { d.weekly = u }
+        if let r = reset { d.weeklyReset = r }
+    } else {
+        if let u = used { d.session = u }
+        if let r = reset { d.sessionReset = r }
+    }
+}
+
 func codexFromRollout() -> LimitData {
     var d = LimitData()
     let base = HOME + "/.codex/sessions"
@@ -203,14 +223,8 @@ func codexFromRollout() -> LimitData {
         }
     }
     guard let rl = bestRL else { d.error = "нет данных лимитов в rollout"; return d }
-    if let p = rl["primary"] as? [String: Any] {
-        d.session = p["used_percent"] as? Double
-        if let r = p["resets_at"] as? Double { d.sessionReset = Date(timeIntervalSince1970: r) }
-    }
-    if let s = rl["secondary"] as? [String: Any] {
-        d.weekly = s["used_percent"] as? Double
-        if let r = s["resets_at"] as? Double { d.weeklyReset = Date(timeIntervalSince1970: r) }
-    }
+    if let p = rl["primary"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
+    if let s = rl["secondary"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
     d.plan = (rl["plan_type"] as? String) ?? lastPlan
     d.asOf = parseISOmillisZ(bestTs)
     if let a = d.asOf, Date().timeIntervalSince(a) > 2 * 3600 { d.stale = true }
@@ -276,14 +290,8 @@ func codexUsageLive() -> LimitData? {
           let obj = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
           let rl = obj["rate_limit"] as? [String: Any] else { return nil }
     var d = LimitData(); d.present = true
-    if let p = rl["primary_window"] as? [String: Any] {
-        d.session = p["used_percent"] as? Double
-        if let r = p["reset_at"] as? Double { d.sessionReset = Date(timeIntervalSince1970: r) }
-    }
-    if let s = rl["secondary_window"] as? [String: Any] {
-        d.weekly = s["used_percent"] as? Double
-        if let r = s["reset_at"] as? Double { d.weeklyReset = Date(timeIntervalSince1970: r) }
-    }
+    if let p = rl["primary_window"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
+    if let s = rl["secondary_window"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
     d.plan = obj["plan_type"] as? String
     d.asOf = Date()
     return d
@@ -563,7 +571,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.3.3"
+let APP_VERSION = "2.3.4"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
