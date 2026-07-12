@@ -575,7 +575,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.4.1"
+let APP_VERSION = "2.4.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -733,19 +733,6 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
         drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
-        // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill left of the link arrow
-        if let rc = d.resetCredits, rc >= 1 {
-            let orange = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
-            let num = "\(rc)"
-            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
-            let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
-            let pillTop = cardsTop + 14.5   // vertically centered on the product name
-            let pillW = padL + icoW + midGap + nw + padR
-            let pillR = rectTL(x + w - 27 - pillW, pillTop, pillW, pillH)
-            roundFill(pillR, pillH / 2, gray(1, 0.09))
-            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
-            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
-        }
 
         let cx = x + w / 2, cyTop = cardsTop + 84
         let sCol = metricColor(blue, d.session), wCol = metricColor(purple, d.weekly)
@@ -755,6 +742,19 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         let wTxt = d.weekly == nil ? "—" : numText(d.weekly) + "%"
         text(attr(sTxt, 15, .semibold, sCol), x: cx, topY: cyTop - 18, align: 1)
         text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
+        // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill under the weekly %
+        if let rc = d.resetCredits, rc >= 1 {
+            let orange = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
+            let num = "\(rc)"
+            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
+            let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
+            let pillW = padL + icoW + midGap + nw + padR
+            let pillTop = cyTop + 20
+            let pillR = rectTL(cx - pillW / 2, pillTop, pillW, pillH)
+            roundFill(pillR, pillH / 2, gray(1, 0.09))
+            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
+            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
+        }
         let lx = x + 16, l1 = cardsTop + 124, l2 = cardsTop + 139
         dot(lx, centerTopY: l1 + 5, sCol)
         text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
