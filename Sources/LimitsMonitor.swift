@@ -575,7 +575,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.4"
+let APP_VERSION = "2.4.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -739,11 +739,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             let num = "\(rc)"
             let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
             let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
+            let pillTop = cardsTop + 14.5   // vertically centered on the product name
             let pillW = padL + icoW + midGap + nw + padR
-            let pillR = rectTL(x + w - 27 - pillW, cardsTop + 11, pillW, pillH)
+            let pillR = rectTL(x + w - 27 - pillW, pillTop, pillW, pillH)
             roundFill(pillR, pillH / 2, gray(1, 0.09))
             drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
-            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: cardsTop + 11 + (pillH - 10) / 2 - 0.5)
+            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
 
         let cx = x + w / 2, cyTop = cardsTop + 84
