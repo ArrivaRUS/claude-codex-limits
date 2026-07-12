@@ -75,6 +75,7 @@ struct LimitData {
     var sessionReset: Date?
     var weeklyReset: Date?
     var plan: String?
+    var resetCredits: Int?     // Codex "reset banking" — banked rate-limit resets available
     var asOf: Date?
     var error: String?
     var stale = false
@@ -293,6 +294,7 @@ func codexUsageLive() -> LimitData? {
     if let p = rl["primary_window"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
     if let s = rl["secondary_window"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
     d.plan = obj["plan_type"] as? String
+    if let rc = (obj["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int { d.resetCredits = rc }
     d.asOf = Date()
     return d
 }
@@ -329,6 +331,7 @@ func ld2dict(_ d: LimitData) -> [String: Any] {
     if let v = d.sessionReset { m["sReset"] = v.timeIntervalSince1970 }
     if let v = d.weeklyReset { m["wReset"] = v.timeIntervalSince1970 }
     if let v = d.plan { m["plan"] = v }
+    if let v = d.resetCredits { m["resetCredits"] = v }
     if let v = d.asOf { m["asOf"] = v.timeIntervalSince1970 }
     return m
 }
@@ -340,6 +343,7 @@ func dict2ld(_ m: [String: Any]) -> LimitData {
     if let v = m["sReset"] as? Double { d.sessionReset = Date(timeIntervalSince1970: v) }
     if let v = m["wReset"] as? Double { d.weeklyReset = Date(timeIntervalSince1970: v) }
     d.plan = m["plan"] as? String
+    d.resetCredits = m["resetCredits"] as? Int
     if let v = m["asOf"] as? Double { d.asOf = Date(timeIntervalSince1970: v) }
     d.fromCache = true
     return d
@@ -571,7 +575,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.3.4"
+let APP_VERSION = "2.4"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -729,6 +733,18 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
         drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
+        // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill left of the link arrow
+        if let rc = d.resetCredits, rc >= 1 {
+            let orange = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
+            let num = "\(rc)"
+            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
+            let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
+            let pillW = padL + icoW + midGap + nw + padR
+            let pillR = rectTL(x + w - 27 - pillW, cardsTop + 11, pillW, pillH)
+            roundFill(pillR, pillH / 2, gray(1, 0.09))
+            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
+            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: cardsTop + 11 + (pillH - 10) / 2 - 0.5)
+        }
 
         let cx = x + w / 2, cyTop = cardsTop + 84
         let sCol = metricColor(blue, d.session), wCol = metricColor(purple, d.weekly)
@@ -1935,7 +1951,8 @@ if CommandLine.arguments.contains("--screenshots") {
         return d
     }
     let claude = demo(24, 58, 2 * 3600, 4 * 86400)        // blue / amber
-    let codex  = demo(76, 43, 3 * 3600 + 1800, 2 * 86400) // amber / blue
+    var codex  = demo(76, 43, 3 * 3600 + 1800, 2 * 86400) // amber / blue
+    codex.resetCredits = 2                                 // show the banked-resets badge
     let claudeOnly = claude; var noCodex = codex; noCodex.present = false
 
     // menu-bar strips (language-neutral)
