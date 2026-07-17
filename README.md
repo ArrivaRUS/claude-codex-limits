@@ -22,6 +22,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both are pulled from the same backends their CLIs use, so Codex matches its web page (not a stale local cache).
+- **Honest when a login lapses** — if Claude Code's saved credentials expire, the card greys out with an “as of …” note instead of passing off old numbers (and a reset time in the past) as current. It heals on its own the moment you use Claude Code again.
 - **Codex reset credits** — if you've banked rate‑limit resets, a small ⟳ badge on the Codex card shows how many you have.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
 - **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
@@ -71,7 +72,7 @@ under `~/.claude-limits-monitor/`.
 
 ### From the .dmg
 
-1. Download `ClaudeCodexLimits-2.4.2.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.5.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. Because the build isn't notarized, the first time you may need to
    right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
@@ -99,7 +100,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.4.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.5.dmg
 ```
 
 ## Project layout

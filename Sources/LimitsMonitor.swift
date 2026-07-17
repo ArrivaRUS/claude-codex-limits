@@ -412,11 +412,14 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
 }
 
 func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString {
-    let neutral = cg(dark ? .white : .black)
-    let dim = cg((dark ? NSColor.white : NSColor.black).withAlphaComponent(0.95))
-    let isErr = d.error != nil
-    let sCol = isErr ? neutral : cg(sevColor(severity(d.session), dark: dark))
-    let wCol = isErr ? neutral : cg(sevColor(severity(d.weekly), dark: dark))
+    let base = dark ? NSColor.white : NSColor.black
+    // Stale (auth/fetch error or a frozen snapshot) → fade the whole group so the tray
+    // reads as "last known, not live" rather than presenting old numbers as current.
+    let stale = isStale(d)
+    let dim = cg(base.withAlphaComponent(stale ? 0.4 : 0.95))
+    let faint = cg(base.withAlphaComponent(0.4))
+    let sCol = stale ? faint : cg(sevColor(severity(d.session), dark: dark))
+    let wCol = stale ? faint : cg(sevColor(severity(d.weekly), dark: dark))
     let m = NSMutableAttributedString()
     m.append(ctAttr(numText(d.session), font, sCol))
     m.append(ctAttr("/", font, dim))
@@ -530,6 +533,23 @@ func fmtReset(_ d: Date?) -> String {
     return df.string(from: d)
 }
 
+/// True when a card is showing a frozen / aged snapshot instead of live data — so the UI
+/// can say so plainly instead of passing off old numbers (and a past reset time) as current.
+/// Signals, any one of which is conclusive:
+///   • an auth/fetch error (we fell back to the last cached values),
+///   • the fetch layer already flagged it stale (an old local-log fallback),
+///   • a reset moment that's already passed — a rolling 5-hour window can't reset in the
+///     past for live data, so a past session reset is a dead giveaway of a stuck snapshot,
+///   • no successful read in over an hour (well past the 1/5/15-min refresh cadence).
+func isStale(_ d: LimitData, _ now: Date = Date()) -> Bool {
+    guard d.present else { return false }
+    if d.error != nil || d.stale { return true }
+    if let sr = d.sessionReset, sr < now.addingTimeInterval(-60) { return true }
+    if let wr = d.weeklyReset, wr < now { return true }
+    if let a = d.asOf, now.timeIntervalSince(a) > 3600 { return true }
+    return false
+}
+
 func pctText(_ v: Double?) -> String {
     guard let v = v else { return "—" }
     return "\(Int(v.rounded()))%"
@@ -575,7 +595,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.4.2"
+let APP_VERSION = "2.5"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -735,7 +755,11 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
 
         let cx = x + w / 2, cyTop = cardsTop + 84
-        let sCol = metricColor(blue, d.session), wCol = metricColor(purple, d.weekly)
+        // A frozen snapshot shouldn't masquerade as live: grey the ring + numbers and, below,
+        // swap the reset times (which would otherwise show an impossible past moment) for a note.
+        let stale = isStale(d)
+        let sCol = stale ? gray(1, 0.3) : metricColor(blue, d.session)
+        let wCol = stale ? gray(1, 0.3) : metricColor(purple, d.weekly)
         gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
         gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
         let sTxt = d.session == nil ? "—" : numText(d.session) + "%"
@@ -743,7 +767,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         text(attr(sTxt, 15, .semibold, sCol), x: cx, topY: cyTop - 18, align: 1)
         text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
         // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill under the weekly %
-        if let rc = d.resetCredits, rc >= 1 {
+        if !stale, let rc = d.resetCredits, rc >= 1 {
             let orange = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
             let num = "\(rc)"
             let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
@@ -755,13 +779,26 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
             text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
-        let lx = x + 16, l1 = cardsTop + 124, l2 = cardsTop + 139
-        dot(lx, centerTopY: l1 + 5, sCol)
-        text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
-        text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
-        dot(lx, centerTopY: l2 + 5, wCol)
-        text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
-        text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+        let l1 = cardsTop + 124, l2 = cardsTop + 139
+        if stale {
+            // "As of <last good read>" + a gentle nudge to restore access — no misleading times.
+            let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
+            let msg1 = tr("данные от ", "as of ") + fmtReset(d.asOf)
+            let icoW: CGFloat = 9, g: CGFloat = 4
+            let tw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(msg1, ctFont(9.5, .regular), cg(amber)))))
+            let bx = cx - (icoW + g + tw) / 2
+            drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(bx, l1 + 1, icoW, icoW), amber)
+            text(attr(msg1, 9.5, .regular, amber), x: bx + icoW + g, topY: l1)
+            text(attr(tr("обновите вход в \(name)", "re-open \(name) to refresh"), 9.5, .regular, textLo), x: cx, topY: l2, align: 1)
+        } else {
+            let lx = x + 16
+            dot(lx, centerTopY: l1 + 5, sCol)
+            text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
+            text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
+            dot(lx, centerTopY: l2 + 5, wCol)
+            text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
+            text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+        }
     }
 
     if prods.count >= 2 {
