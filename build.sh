@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="2.6"
+VERSION="2.7"
 APP="$DIR/dist/$APP_NAME.app"
 
 echo "==> building $APP_NAME.app"
@@ -47,10 +47,27 @@ echo "==> code-signing (ad-hoc)"
 # Clear extended attributes first. Files copied from Resources carry FinderInfo /
 # resource forks; without this codesign aborts with "resource fork, Finder
 # information, or similar detritus not allowed".
-xattr -cr "$APP"
-codesign --force --deep -s - "$APP"
-# Verify — under `set -e` a non-zero exit here fails the whole build.
-codesign -v "$APP" || { echo "!! codesign verification FAILED for $APP" >&2; exit 1; }
+#
+# When dist/ lives on a cloud file-provider volume (iCloud Drive / Dropbox / etc.,
+# marked by a com.apple.fileprovider.fpfs xattr) the provider ASYNCHRONOUSLY
+# re-injects com.apple.FinderInfo onto the freshly-created .app bundle root a
+# moment after we clear it — so a single clear+sign can lose the race and fail
+# intermittently with the "detritus not allowed" error. Retry the clear+sign+verify
+# until codesign wins on a settled tree (it converges within a couple of attempts).
+signed=0
+for attempt in 1 2 3 4 5 6 7 8; do
+    xattr -cr "$APP"
+    if codesign --force --deep -s - "$APP" 2>/tmp/ccl_codesign.err \
+       && codesign -v "$APP" 2>>/tmp/ccl_codesign.err; then
+        signed=1; break
+    fi
+    echo "   sign/verify attempt $attempt lost the FinderInfo race, retrying…" >&2
+done
+if [ "$signed" != 1 ]; then
+    echo "!! codesign FAILED for $APP after 8 attempts" >&2
+    cat /tmp/ccl_codesign.err >&2 || true
+    exit 1
+fi
 echo "==> signed & verified"
 
 echo "==> built: $APP"

@@ -69,6 +69,15 @@ func http(_ url: String, method: String, headers: [String: String], body: Data?,
 
 // MARK: - Model
 
+/// Authentication state of a product (only Claude Code uses anything but `.ok`).
+///   • ok            — signed in, data is (or can be) live
+///   • loggedOut     — no Claude Code CLI login: keychain item absent, or present
+///                     but without a `claudeAiOauth` block (e.g. only the desktop app
+///                     is signed in). Recoverable by signing into the CLI.
+///   • expired       — a saved CLI login whose token expired and could not be refreshed.
+///   • keychainError — a genuine keychain read failure (errSec other than 0 / 44).
+enum AuthState { case ok, loggedOut, expired, keychainError }
+
 struct LimitData {
     var session: Double?
     var weekly: Double?
@@ -81,6 +90,7 @@ struct LimitData {
     var stale = false
     var fromCache = false
     var present = true         // false → product not set up on this Mac (hide its row/card)
+    var auth: AuthState = .ok  // Claude Code sign-in state (drives the "how to fix" card)
 }
 
 // MARK: - Date helpers
@@ -104,12 +114,19 @@ func parseISOmillisZ(_ s: String) -> Date? {
 func fetchClaude() -> LimitData {
     var d = LimitData()
     let kc = shell("/usr/bin/security", ["find-generic-password", "-s", KC_SERVICE, "-w"])
-    if kc.code == 44 { d.present = false; return d }   // keychain item not found → Claude Code not set up
+    // State (1) "not signed in", half A: the keychain item is absent (errSec 44 =
+    // errSecItemNotFound). Keep the card visible with a "sign in" prompt rather than
+    // hiding the product — the user still wants Claude Code limits, they just need to log in.
+    if kc.code == 44 { d.auth = .loggedOut; return d }
+    // State (3) a genuine keychain read failure (any errSec other than 0 / 44).
     guard kc.code == 0,
           let data = kc.out.data(using: .utf8),
-          var creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-          var oauth = creds["claudeAiOauth"] as? [String: Any]
-    else { d.error = "нет доступа к keychain Claude"; return d }
+          var creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    else { d.auth = .keychainError; d.error = "keychain read failed (errSec \(kc.code))"; return d }
+    // State (1) "not signed in", half B: the item exists but has NO Claude Code login
+    // block (only e.g. mcpOAuth, or credentials written by the desktop app, which the
+    // monitor can't use). Same user-facing state as a missing item: "sign in via the CLI".
+    guard var oauth = creds["claudeAiOauth"] as? [String: Any] else { d.auth = .loggedOut; return d }
 
     d.plan = oauth["subscriptionType"] as? String
     var at = oauth["accessToken"] as? String ?? ""
@@ -140,10 +157,10 @@ func fetchClaude() -> LimitData {
                                "-s", KC_SERVICE, "-w", outStr])
                 }
             } else if at.isEmpty {
-                d.error = "refresh не удался (HTTP \(resp.status))"; return d
+                d.auth = .expired; d.error = "refresh failed (HTTP \(resp.status))"; return d
             }
         } else if at.isEmpty {
-            d.error = "нет refresh-токена"; return d
+            d.auth = .expired; d.error = "no refresh token"; return d
         }
     }
 
@@ -354,12 +371,16 @@ func applyCache(_ claude: inout LimitData, _ codex: inout LimitData) {
     if let cd = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
        let cj = (try? JSONSerialization.jsonObject(with: cd)) as? [String: Any] { cache = cj }
     if claude.present, claude.error != nil, let cm = cache["claude"] as? [String: Any] {
-        let e = claude.error; claude = dict2ld(cm); claude.error = e
+        // Restore last-known numbers behind the error flag — but keep the auth state
+        // (dict2ld resets it to .ok) so an "expired" card still reads as expired.
+        let e = claude.error; let a = claude.auth; claude = dict2ld(cm); claude.error = e; claude.auth = a
     }
     if codex.present, codex.error != nil, let cm = cache["codex"] as? [String: Any] {
         let e = codex.error; codex = dict2ld(cm); codex.error = e
     }
-    if claude.present, claude.error == nil { cache["claude"] = ld2dict(claude) }
+    // Only persist genuinely-good live readings. A "not signed in" / expired Claude has no
+    // fresh data, so it must never overwrite the cache with blanks.
+    if claude.present, claude.error == nil, claude.auth == .ok { cache["claude"] = ld2dict(claude) }
     if codex.present, codex.error == nil { cache["codex"] = ld2dict(codex) }
     if let outD = try? JSONSerialization.data(withJSONObject: cache) {
         try? outD.write(to: URL(fileURLWithPath: CACHE_PATH))
@@ -404,6 +425,19 @@ func ctFont(_ size: CGFloat, _ weight: NSFont.Weight) -> CTFont {
     return CTFontCreateWithFontDescriptor(ns.fontDescriptor as CTFontDescriptor, size, nil)
 }
 
+func ctMono(_ size: CGFloat, _ weight: NSFont.Weight) -> CTFont {
+    let ns = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+    return CTFontCreateWithFontDescriptor(ns.fontDescriptor as CTFontDescriptor, size, nil)
+}
+
+/// Height a paragraph occupies when wrapped to `width` (CoreText measurement).
+func wrappedHeight(_ a: NSAttributedString, width: CGFloat) -> CGFloat {
+    let fs = CTFramesetterCreateWithAttributedString(a)
+    let sz = CTFramesetterSuggestFrameSizeWithConstraints(
+        fs, CFRangeMake(0, 0), nil, CGSize(width: width, height: .greatestFiniteMagnitude), nil)
+    return ceil(sz.height)
+}
+
 func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString {
     NSAttributedString(string: s, attributes: [
         NSAttributedString.Key(kCTFontAttributeName as String): font,
@@ -411,7 +445,13 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
     ])
 }
 
-func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString {
+/// The tray number for a product, or nil when there is nothing meaningful to show
+/// (a "not signed in" product, or one with no session AND no weekly value) — the caller
+/// then draws just a faint icon. When only one of the two values exists, that single
+/// percentage is shown on its own (e.g. weekly-only → "4%") instead of a "–/4%" placeholder.
+func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString? {
+    if d.auth == .loggedOut { return nil }                       // "sign in" → faint icon, no number
+    if d.session == nil && d.weekly == nil { return nil }        // no data at all → faint icon, no number
     let base = dark ? NSColor.white : NSColor.black
     // Stale (auth/fetch error or a frozen snapshot) → fade the whole group so the tray
     // reads as "last known, not live" rather than presenting old numbers as current.
@@ -421,10 +461,18 @@ func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString
     let sCol = stale ? faint : cg(sevColor(severity(d.session), dark: dark))
     let wCol = stale ? faint : cg(sevColor(severity(d.weekly), dark: dark))
     let m = NSMutableAttributedString()
-    m.append(ctAttr(numText(d.session), font, sCol))
-    m.append(ctAttr("/", font, dim))
-    m.append(ctAttr(numText(d.weekly), font, wCol))
-    m.append(ctAttr("%", font, dim))
+    if d.session != nil && d.weekly != nil {
+        m.append(ctAttr(numText(d.session), font, sCol))
+        m.append(ctAttr("/", font, dim))
+        m.append(ctAttr(numText(d.weekly), font, wCol))
+        m.append(ctAttr("%", font, dim))
+    } else if d.weekly != nil {                                  // session missing → weekly on its own
+        m.append(ctAttr(numText(d.weekly), font, wCol))
+        m.append(ctAttr("%", font, dim))
+    } else {                                                     // weekly missing → session on its own
+        m.append(ctAttr(numText(d.session), font, sCol))
+        m.append(ctAttr("%", font, dim))
+    }
     return m
 }
 
@@ -467,8 +515,11 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, 
     let gapIcon: CGFloat = (two ? 2.5 : 4) * s
     let font = ctFont((two ? 9 : 14.5) * s, two ? .regular : .medium)
 
-    let lines = products.map { CTLineCreateWithAttributedString(groupString($0.0, dark: dark, font: font)) }
-    let textW = lines.map { ceil(lineWidth($0)) }.max() ?? 0
+    // A nil line = "no number for this product" (not signed in / no data) → icon only.
+    let lines: [CTLine?] = products.map { p in
+        groupString(p.0, dark: dark, font: font).map { CTLineCreateWithAttributedString($0) }
+    }
+    let textW = lines.compactMap { $0.map { ceil(lineWidth($0)) } }.max() ?? 0
     let textX = padX + iconSz + gapIcon
     let dotR: CGFloat = 2.4 * s
     let dotZone: CGFloat = badge ? (dotR * 2 + 5 * s) : 0   // "update available" dot to the right
@@ -477,19 +528,26 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, 
     guard let ctx = bitmapContext(Int(W), Int(H)) else { return nil }
     ctx.interpolationQuality = .high
     ctx.textMatrix = .identity
+    // Vertical metrics come from the font (a reference glyph), not lines[0] — which may be nil.
     var asc: CGFloat = 0, desc: CGFloat = 0
-    _ = CTLineGetTypographicBounds(lines[0], &asc, &desc, nil)
+    _ = CTLineGetTypographicBounds(CTLineCreateWithAttributedString(ctAttr("0%", font, fg)), &asc, &desc, nil)
 
     // CG origin is bottom-left → first product on top.
     for (i, prod) in products.enumerated() {
         let y0 = two ? (i == 0 ? rowH : 0) : 0
         let iconY = (y0 + (rowH - iconSz) / 2).rounded()
         if let img = loadCGImage(assetPath(prod.1)) {
+            // A "not signed in" product shows a faint icon so the row reads as inactive.
+            let dimIcon = prod.0.auth == .loggedOut
+            if dimIcon { ctx.saveGState(); ctx.setAlpha(0.4) }
             ctx.draw(img, in: CGRect(x: padX, y: iconY, width: iconSz, height: iconSz))
+            if dimIcon { ctx.restoreGState() }
         }
-        let baseY = (y0 + (rowH - asc - desc) / 2 + desc).rounded()
-        ctx.textPosition = CGPoint(x: textX, y: baseY)
-        CTLineDraw(lines[i], ctx)
+        if let line = lines[i] {
+            let baseY = (y0 + (rowH - asc - desc) / 2 + desc).rounded()
+            ctx.textPosition = CGPoint(x: textX, y: baseY)
+            CTLineDraw(line, ctx)
+        }
     }
     if badge {
         let cxd = W - padX - dotR
@@ -594,10 +652,47 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
-enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.6"
+enum PanelMode { case main, settings, whatsnew, claudeFix }
+let APP_VERSION = "2.7"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
+let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
+// The installer drops the binary in ~/.local/bin but doesn't always add it to PATH
+// (a real lesson from a user's Mac). This one line fixes it; the user then opens a new
+// Terminal window so the updated PATH takes effect.
+let CLAUDE_PATH_CMD = "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc"
+
+/// Localized copy for the "Connect Claude Code" walkthrough — a single source shared by
+/// both the drawing pass (`drawClaudeFix`) and the height pass (`claudeFixHeight`).
+struct ClaudeFixCopy {
+    let title: String        // panel title
+    let intro: String        // why the CLI login (not the desktop app)
+    let s1: String           // step 1 — install the CLI
+    let s2: String           // step 2 — PATH fix (the ~/.local/bin lesson)
+    let s3: String           // step 3 — run `claude` and sign in
+    let s4: String           // step 4 — come back and refresh
+    let note: String         // the "desktop app won't do" reminder
+    let copy: String         // copy-button label
+    let copied: String       // copied-confirmation label
+}
+func claudeFixStrings() -> ClaudeFixCopy {
+    ClaudeFixCopy(
+        title: tr("Подключить Claude Code", "Connect Claude Code"),
+        intro: tr("Монитор читает лимиты из входа Claude Code CLI — не из настольного приложения Claude.",
+                  "The monitor reads limits from the Claude Code CLI login — not the Claude desktop app."),
+        s1: tr("1. Установите Claude Code CLI (если ещё не установлен):",
+               "1. Install the Claude Code CLI (if you don’t have it yet):"),
+        s2: tr("2. Если после установки команда claude не находится — добавьте её в PATH и откройте новое окно Терминала:",
+               "2. If claude isn’t found afterward, add it to your PATH and open a new Terminal window:"),
+        s3: tr("3. Запустите claude и войдите через браузер (или командой /login).",
+               "3. Run claude and sign in through the browser (or the /login command)."),
+        s4: tr("4. Вернитесь сюда и нажмите «Обновить».",
+               "4. Come back here and tap “Refresh”."),
+        note: tr("Вход в настольное приложение Claude не подходит: нужен именно вход Claude Code CLI — он создаёт токен, который читает монитор.",
+                 "Signing into the Claude desktop app won’t work — you need the Claude Code CLI login, which creates the token the monitor reads."),
+        copy: tr("Скопировать", "Copy"),
+        copied: tr("Скопировано", "Copied"))
+}
 
 func gray(_ w: CGFloat, _ a: CGFloat) -> NSColor { NSColor(white: w, alpha: a) }
 
@@ -749,11 +844,52 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String) {
         let r = rectTL(x, cardsTop, w, cardH)
         roundFill(r, 14, gray(1, 0.04)); roundStroke(r, 14, gray(1, 0.06), 1)
-        hits.append(Hit(id: "open:\(url)", rect: r))
+        // Claude sign-in problems (states 1 & 2) make the whole card tap-to-fix; everything
+        // else opens the product's usage page in the browser.
+        let canFix = (d.auth == .loggedOut || d.auth == .expired)
+        hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
-        drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
 
+        let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
+
+        // A sign-in problem replaces the gauges with an honest status + (when recoverable)
+        // a "How to fix?" affordance. The whole card is already the tap target.
+        func problemBody(_ title: String, _ subtitle: String?, showFix: Bool) {
+            let cxp = x + w / 2
+            drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(cxp - 11, cardsTop + 46, 22, 22), amber)
+            text(attr(title, 12.5, .semibold, gray(1, 0.92)), x: cxp, topY: cardsTop + 78, align: 1)
+            if let s = subtitle { text(attr(s, 9.5, .regular, textLo), x: cxp, topY: cardsTop + 97, align: 1) }
+            if showFix {
+                let label = tr("Как починить?", "How to fix?")
+                let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(11, .semibold), cg(amber)))))
+                let pw = lw + 26, ph: CGFloat = 24, pTop = cardsTop + 116
+                let pr = rectTL(cxp - pw / 2, pTop, pw, ph)
+                roundFill(pr, ph / 2, amber.withAlphaComponent(0.16))
+                roundStroke(pr, ph / 2, amber.withAlphaComponent(0.5), 1)
+                text(attr(label, 11, .semibold, amber), x: cxp, topY: pTop + 6, align: 1)
+            }
+        }
+        switch d.auth {
+        case .loggedOut:
+            problemBody(tr("Вход не выполнен", "Not signed in"),
+                        tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI"), showFix: true)
+            return
+        case .keychainError:
+            drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
+            problemBody(tr("Нет доступа к keychain", "Keychain access failed"),
+                        tr("проверьте доступ к «Связке ключей»", "check Keychain access"), showFix: false)
+            return
+        case .expired where d.session == nil && d.weekly == nil:
+            problemBody(tr("Вход устарел", "Sign-in expired"),
+                        d.asOf.map { tr("данные от ", "as of ") + fmtReset($0) }, showFix: true)
+            return
+        default: break
+        }
+        // Normal / stale-with-data card — the ring gauges.
+        if d.auth == .ok {
+            drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
+        }
         let cx = x + w / 2, cyTop = cardsTop + 84
         // A frozen snapshot shouldn't masquerade as live: grey the ring + numbers and, below,
         // swap the reset times (which would otherwise show an impossible past moment) for a note.
@@ -768,28 +904,30 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
         // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill under the weekly %
         if !stale, let rc = d.resetCredits, rc >= 1 {
-            let orange = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
             let num = "\(rc)"
-            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(orange)))))
+            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(amber)))))
             let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
             let pillW = padL + icoW + midGap + nw + padR
             let pillTop = cyTop + 20
             let pillR = rectTL(cx - pillW / 2, pillTop, pillW, pillH)
             roundFill(pillR, pillH / 2, gray(1, 0.09))
-            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), orange, weight: .semibold)
-            text(attr(num, 10, .semibold, orange), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
+            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), amber, weight: .semibold)
+            text(attr(num, 10, .semibold, amber), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
         if stale {
             // "As of <last good read>" + a gentle nudge to restore access — no misleading times.
-            let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
             let msg1 = tr("данные от ", "as of ") + fmtReset(d.asOf)
             let icoW: CGFloat = 9, g: CGFloat = 4
             let tw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(msg1, ctFont(9.5, .regular), cg(amber)))))
             let bx = cx - (icoW + g + tw) / 2
             drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(bx, l1 + 1, icoW, icoW), amber)
             text(attr(msg1, 9.5, .regular, amber), x: bx + icoW + g, topY: l1)
-            text(attr(tr("обновите вход в \(name)", "re-open \(name) to refresh"), 9.5, .regular, textLo), x: cx, topY: l2, align: 1)
+            if d.auth == .expired {
+                text(attr(tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?"), 9.5, .semibold, blue), x: cx, topY: l2, align: 1)
+            } else {
+                text(attr(tr("обновите вход в \(name)", "re-open \(name) to refresh"), 9.5, .regular, textLo), x: cx, topY: l2, align: 1)
+            }
         } else {
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
@@ -1202,6 +1340,168 @@ func drawWhatsNew(_ ctx: CGContext, size: CGSize, notes: [ReleaseNote], loading:
     return hits
 }
 
+// MARK: - "Connect Claude Code" walkthrough
+
+let CFIX_PAD: CGFloat = 18
+let CFIX_HEADER: CGFloat = 50          // back + title band
+let CFIX_FOOTER: CGFloat = 54          // divider + refresh row
+let CFIX_BOX_PADX: CGFloat = 11
+let CFIX_BOX_PADTOP: CGFloat = 9
+let CFIX_BOX_PADBOT: CGFloat = 9
+let CFIX_BOX_GAP: CGFloat = 7           // mono command → copy label
+let CFIX_LABEL_H: CGFloat = 15          // copy-label row
+
+/// Every wrapped block height + the panel total, computed once and shared by the height
+/// pass (`claudeFixHeight`) and the draw pass (`drawClaudeFix`) so they can never drift.
+struct CFixMetrics { let introH, s1H, box1H, s2H, box2H, s3H, noteH, s4H, total: CGFloat }
+func claudeFixMetrics() -> CFixMetrics {
+    let c = claudeFixStrings()
+    let contentW = PANEL_W - CFIX_PAD * 2
+    let monoW = contentW - CFIX_BOX_PADX * 2
+    let white = cg(gray(1, 0.9))
+    func wtitle(_ s: String) -> CGFloat { wrappedHeight(ctAttr(s, ctFont(12, .medium), white), width: contentW) }
+    func wbody(_ s: String, _ sz: CGFloat) -> CGFloat { wrappedHeight(ctAttr(s, ctFont(sz, .regular), white), width: contentW) }
+    func box(_ cmd: String) -> CGFloat {
+        CFIX_BOX_PADTOP + wrappedHeight(ctAttr(cmd, ctMono(11, .regular), white), width: monoW)
+            + CFIX_BOX_GAP + CFIX_LABEL_H + CFIX_BOX_PADBOT
+    }
+    let introH = wbody(c.intro, 11.5)
+    let s1H = wtitle(c.s1), box1H = box(CLAUDE_INSTALL_CMD)
+    let s2H = wtitle(c.s2), box2H = box(CLAUDE_PATH_CMD)
+    let s3H = wtitle(c.s3)
+    let noteH = wbody(c.note, 11)
+    let s4H = wtitle(c.s4)
+    var y = CFIX_HEADER + 6
+    y += introH + 14
+    y += s1H + 8 + box1H + 16
+    y += s2H + 8 + box2H + 16
+    y += s3H + 14
+    y += noteH + 12
+    y += s4H + 10
+    return CFixMetrics(introH: introH, s1H: s1H, box1H: box1H, s2H: s2H, box2H: box2H,
+                       s3H: s3H, noteH: noteH, s4H: s4H, total: y + CFIX_FOOTER)
+}
+func claudeFixHeight() -> CGFloat { claudeFixMetrics().total }
+
+@discardableResult
+func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?) -> [Hit] {
+    let W = size.width, H = size.height
+    var hits: [Hit] = []
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let textHi = gray(1, 0.95), textMid = gray(1, 0.5), textLo = gray(1, 0.4)
+    let blue = NSColor(srgbRed: 0.34, green: 0.62, blue: 1.0, alpha: 1)
+    let green = NSColor(srgbRed: 0.3, green: 0.8, blue: 0.45, alpha: 1)
+    let orange = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
+    let mono = gray(1, 0.9)
+    let m = claudeFixMetrics()
+    let c = claudeFixStrings()
+    let contentW = PANEL_W - CFIX_PAD * 2
+    let monoW = contentW - CFIX_BOX_PADX * 2
+
+    func rectTL(_ x: CGFloat, _ topY: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: x, y: H - topY - h, width: w, height: h)
+    }
+    func attr(_ s: String, _ sz: CGFloat, _ weight: NSFont.Weight, _ color: NSColor) -> NSAttributedString {
+        ctAttr(s, ctFont(sz, weight), cg(color))
+    }
+    func text(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
+        var dx = x
+        if align == 1 { dx = x - w / 2 } else if align == 2 { dx = x - w }
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - topY - asc)
+        CTLineDraw(line, ctx)
+    }
+    func wrapped(_ a: NSAttributedString, x: CGFloat, topY: CGFloat, width: CGFloat, height: CGFloat) {
+        let fs = CTFramesetterCreateWithAttributedString(a)
+        let path = CGPath(rect: CGRect(x: x, y: H - topY - height, width: width, height: height), transform: nil)
+        let frame = CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), path, nil)
+        ctx.textMatrix = .identity
+        CTFrameDraw(frame, ctx)
+    }
+    func roundFill(_ r: CGRect, _ rad: CGFloat, _ color: NSColor) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setFillColor(cg(color)); ctx.fillPath()
+    }
+    func roundStroke(_ r: CGRect, _ rad: CGFloat, _ color: NSColor, _ lw: CGFloat) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: rad, cornerHeight: rad, transform: nil))
+        ctx.setStrokeColor(cg(color)); ctx.setLineWidth(lw); ctx.strokePath()
+    }
+    func hdiv(_ x0: CGFloat, _ x1: CGFloat, _ topY: CGFloat) {
+        ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
+        ctx.beginPath(); ctx.move(to: CGPoint(x: x0, y: H - topY)); ctx.addLine(to: CGPoint(x: x1, y: H - topY)); ctx.strokePath()
+    }
+
+    // background — identical to the other panels
+    let bgPath = CGPath(roundedRect: CGRect(x: 0.5, y: 0.5, width: W - 1, height: H - 1), cornerWidth: 18, cornerHeight: 18, transform: nil)
+    ctx.saveGState(); ctx.addPath(bgPath); ctx.clip()
+    if let g = CGGradient(colorsSpace: cs, colors: [cg(gray(0.16, 1)), cg(gray(0.075, 1))] as CFArray, locations: [0, 1]) {
+        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: H), end: CGPoint(x: 0, y: 0), options: [])
+    }
+    if let glow = CGGradient(colorsSpace: cs, colors: [cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0.10)), cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0))] as CFArray, locations: [0, 1]) {
+        ctx.drawRadialGradient(glow, startCenter: CGPoint(x: 54, y: H - 26), startRadius: 0, endCenter: CGPoint(x: 54, y: H - 26), endRadius: 170, options: [])
+    }
+    ctx.restoreGState()
+    ctx.addPath(bgPath); ctx.setStrokeColor(cg(gray(1, 0.08))); ctx.setLineWidth(1); ctx.strokePath()
+
+    // header: back + title
+    let backRect = rectTL(CFIX_PAD - 4, CFIX_PAD - 6, 28, 28)
+    drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
+    hits.append(Hit(id: "back", rect: backRect))
+    text(attr(c.title, 16, .semibold, textHi), x: CFIX_PAD + 24, topY: CFIX_PAD - 2)
+
+    // a command box: mono command (wrapping) + a "copy" label; the whole box copies on tap
+    func cmdBox(_ topY: CGFloat, _ boxH: CGFloat, _ cmd: String) {
+        let r = rectTL(CFIX_PAD, topY, contentW, boxH)
+        roundFill(r, 8, gray(1, 0.05)); roundStroke(r, 8, gray(1, 0.09), 1)
+        let monoA = ctAttr(cmd, ctMono(11, .regular), cg(mono))
+        let monoH = boxH - CFIX_BOX_PADTOP - CFIX_BOX_GAP - CFIX_LABEL_H - CFIX_BOX_PADBOT
+        wrapped(monoA, x: CFIX_PAD + CFIX_BOX_PADX, topY: topY + CFIX_BOX_PADTOP, width: monoW, height: monoH)
+        // copy label, bottom-right
+        let copied = (copiedCmd == cmd)
+        let label = copied ? c.copied : c.copy
+        let accent = copied ? green : blue
+        let lblFont = ctFont(11, .medium)
+        let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, lblFont, cg(accent)))))
+        let icoW: CGFloat = 11, g: CGFloat = 5
+        let labelTop = topY + boxH - CFIX_BOX_PADBOT - CFIX_LABEL_H
+        let rightX = CFIX_PAD + contentW - CFIX_BOX_PADX
+        let icoX = rightX - lw - g - icoW
+        drawSF(ctx, copied ? "checkmark" : "doc.on.doc",
+               in: rectTL(icoX, labelTop + 1.5, icoW, icoW), accent, weight: .semibold)
+        text(attr(label, 11, .medium, accent), x: rightX, topY: labelTop, align: 2)
+        hits.append(Hit(id: "copy:\(cmd)", rect: r))
+    }
+
+    // body — top-down cursor
+    var y = CFIX_HEADER + 6
+    wrapped(attr(c.intro, 11.5, .regular, textMid), x: CFIX_PAD, topY: y, width: contentW, height: m.introH); y += m.introH + 14
+    wrapped(attr(c.s1, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s1H); y += m.s1H + 8
+    cmdBox(y, m.box1H, CLAUDE_INSTALL_CMD); y += m.box1H + 16
+    wrapped(attr(c.s2, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s2H); y += m.s2H + 8
+    cmdBox(y, m.box2H, CLAUDE_PATH_CMD); y += m.box2H + 16
+    wrapped(attr(c.s3, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s3H); y += m.s3H + 14
+    wrapped(attr(c.note, 11, .regular, textLo), x: CFIX_PAD, topY: y, width: contentW, height: m.noteH); y += m.noteH + 12
+    wrapped(attr(c.s4, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s4H)
+
+    // footer: divider + Refresh
+    hdiv(CFIX_PAD, W - CFIX_PAD, H - CFIX_FOOTER + 8)
+    let pillH: CGFloat = 30
+    let pillTopY = (H - CFIX_FOOTER + 8) + (CFIX_FOOTER - 8 - pillH) / 2
+    let label = tr("Обновить", "Refresh")
+    let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(12.5, .semibold), cg(.white)))))
+    let icoW: CGFloat = 12, g: CGFloat = 6, pw = lw + icoW + g + 30
+    let pr = rectTL(W - CFIX_PAD - pw, pillTopY, pw, pillH)
+    roundFill(pr, 9, orange)
+    drawSF(ctx, "arrow.clockwise", in: rectTL(W - CFIX_PAD - pw + 15, pillTopY + (pillH - icoW) / 2, icoW, icoW), gray(0.1, 1), weight: .bold)
+    text(attr(label, 12.5, .semibold, gray(0.1, 1)), x: W - CFIX_PAD - pw + 15 + icoW + g, topY: pillTopY + (pillH - 15) / 2)
+    hits.append(Hit(id: "fixrefresh", rect: pr))
+
+    return hits
+}
+
 // MARK: - Panel view + window
 
 final class LimitsPanelView: NSView {
@@ -1220,6 +1520,9 @@ final class LimitsPanelView: NSView {
     var onInstall: (() -> Void)?
     var onWhatsNew: (() -> Void)?
     var mode: PanelMode = .main
+    // "Connect Claude Code" walkthrough: which command was just copied (transient tick)
+    var copiedCmd: String?
+    var copiedTimer: Timer?
     // "What's new" screen state
     var notes: [ReleaseNote] = []
     var notesLoading = false
@@ -1246,6 +1549,9 @@ final class LimitsPanelView: NSView {
             let maxH = min(screenMax, 540)
             targetH = min(maxH, WN_HEADER + WN_FOOTER + bodyH)
             notesViewportH = targetH - WN_HEADER - WN_FOOTER
+        } else if mode == .claudeFix {
+            let screenMax = (window?.screen?.visibleFrame.height ?? 800) - 40
+            targetH = min(screenMax, claudeFixHeight())
         }
         if let win = window {
             let f = win.frame
@@ -1264,6 +1570,8 @@ final class LimitsPanelView: NSView {
             hits = drawWhatsNew(ctx, size: bounds.size, notes: notes, loading: notesLoading,
                                 error: notesError, scroll: scroll, contentH: notesContentH,
                                 viewportH: notesViewportH, about: about)
+        } else if mode == .claudeFix {
+            hits = drawClaudeFix(ctx, size: bounds.size, copiedCmd: copiedCmd)
         } else {
             hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
@@ -1290,8 +1598,12 @@ final class LimitsPanelView: NSView {
             case "update": if let u = about.availURL { onUpdate?(u) }
             case "install": onInstall?()
             case "togglelogin": setLoginEnabled(!loginEnabled()); needsDisplay = true
+            case "claudefix": setMode(.claudeFix)
+            case "fixrefresh": onRefresh?(); setMode(.main)
             default:
-                if h.id.hasPrefix("lang:") {
+                if h.id.hasPrefix("copy:") {
+                    copyToClipboard(String(h.id.dropFirst(5)))
+                } else if h.id.hasPrefix("lang:") {
                     UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "lang")
                     resizeToContent()        // relayout + redraw in the chosen language
                 } else if h.id.hasPrefix("toggle:") {
@@ -1319,6 +1631,20 @@ final class LimitsPanelView: NSView {
                 }
             }
             return
+        }
+    }
+
+    /// Put a shell command on the clipboard and flash a "Copied" tick on its box.
+    func copyToClipboard(_ s: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+        copiedCmd = s
+        needsDisplay = true
+        copiedTimer?.invalidate()
+        copiedTimer = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: false) { [weak self] _ in
+            self?.copiedCmd = nil
+            self?.needsDisplay = true
         }
     }
 }
@@ -1934,6 +2260,13 @@ if CommandLine.arguments.contains("--preview") {
     writePreview([cP, xP], dark: false, to: "/tmp/limits_preview_light.png")
     writePreview([cP], dark: true, to: "/tmp/limits_preview_claude.png")   // single-product look
     writePreview([xP], dark: true, to: "/tmp/limits_preview_codex.png")
+    // Synthetic tray demo for the v2.7 review: Codex has only a weekly reading (4%) → "4%"
+    // on its own; Claude is not signed in → faint icon, no number.
+    var cOut = LimitData(); cOut.present = true; cOut.auth = .loggedOut
+    var xWeekly = LimitData(); xWeekly.present = true; xWeekly.weekly = 4   // weekly only, no session
+    let demo = [(cOut, "claude_128.png"), (xWeekly, "codex_128.png")]
+    writePreview(demo, dark: true,  to: "/tmp/limits_preview_demo_dark.png")
+    writePreview(demo, dark: false, to: "/tmp/limits_preview_demo_light.png")
     print("preview written"); exit(0)
 }
 
@@ -1952,11 +2285,34 @@ if CommandLine.arguments.contains("--panel-preview") {
             if CGImageDestinationFinalize(dest) { try? (data as Data).write(to: URL(fileURLWithPath: path)) }
         }
     }
+    func savePNG(_ img: CGImage, _ path: String) {
+        let data = NSMutableData()
+        if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, img, nil)
+            if CGImageDestinationFinalize(dest) { try? (data as Data).write(to: URL(fileURLWithPath: path)) }
+        }
+    }
     var xAbsent = x; xAbsent.present = false
     var cAbsent = c; cAbsent.present = false
     renderPanel(c, x, "/tmp/panel_preview.png")
     renderPanel(c, xAbsent, "/tmp/panel_claude_only.png")
     renderPanel(cAbsent, x, "/tmp/panel_codex_only.png")
+    // v2.7: the main panel with Claude "not signed in" (the tap-to-fix card)…
+    var cOut = LimitData(); cOut.present = true; cOut.auth = .loggedOut
+    renderPanel(cOut, x, "/tmp/panel_claude_loggedout.png")
+    // …and the expanded "Connect Claude Code" walkthrough itself.
+    let fixH = claudeFixHeight()
+    if let ctx = bitmapContext(Int(PANEL_W * s), Int(fixH * s)) {
+        ctx.scaleBy(x: s, y: s)
+        _ = drawClaudeFix(ctx, size: CGSize(width: PANEL_W, height: fixH), copiedCmd: nil)
+        if let img = ctx.makeImage() { savePNG(img, "/tmp/panel_claude_fix.png") }
+    }
+    // and the same walkthrough with the install command showing its "copied" tick
+    if let ctx = bitmapContext(Int(PANEL_W * s), Int(fixH * s)) {
+        ctx.scaleBy(x: s, y: s)
+        _ = drawClaudeFix(ctx, size: CGSize(width: PANEL_W, height: fixH), copiedCmd: CLAUDE_INSTALL_CMD)
+        if let img = ctx.makeImage() { savePNG(img, "/tmp/panel_claude_fix_copied.png") }
+    }
     print("panel preview written"); exit(0)
 }
 
