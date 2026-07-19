@@ -593,19 +593,18 @@ func fmtReset(_ d: Date?) -> String {
 
 /// True when a card is showing a frozen / aged snapshot instead of live data — so the UI
 /// can say so plainly instead of passing off old numbers (and a past reset time) as current.
-/// Signals, any one of which is conclusive:
-///   • an auth/fetch error (we fell back to the last cached values),
-///   • the fetch layer already flagged it stale (an old local-log fallback),
-///   • a reset moment that's already passed — a rolling 5-hour window can't reset in the
-///     past for live data, so a past session reset is a dead giveaway of a stuck snapshot,
-///   • no successful read in over an hour (well past the 1/5/15-min refresh cadence).
+/// Conclusive on its own: a reset moment that's already passed — a rolling window can't
+/// reset in the past for live data, so that's a dead giveaway of a stuck snapshot.
+/// Everything else is judged by the AGE of the last good read: a single failed poll with a
+/// minute-old cache is a transient hiccup (throttling, a blip) and must NOT grey the card —
+/// only a failure streak long enough to leave the snapshot genuinely old (15+ min) does.
 func isStale(_ d: LimitData, _ now: Date = Date()) -> Bool {
     guard d.present else { return false }
-    if d.error != nil || d.stale { return true }
-    if let sr = d.sessionReset, sr < now.addingTimeInterval(-60) { return true }
-    if let wr = d.weeklyReset, wr < now { return true }
-    if let a = d.asOf, now.timeIntervalSince(a) > 3600 { return true }
-    return false
+    if let sr = d.sessionReset, sr < now.addingTimeInterval(-120) { return true }
+    if let wr = d.weeklyReset, wr < now.addingTimeInterval(-120) { return true }
+    let age = d.asOf.map { now.timeIntervalSince($0) } ?? .infinity
+    if d.error != nil || d.stale { return age > 15 * 60 }
+    return age > 3600
 }
 
 func pctText(_ v: Double?) -> String {
@@ -653,7 +652,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.7.1"
+let APP_VERSION = "2.7.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
