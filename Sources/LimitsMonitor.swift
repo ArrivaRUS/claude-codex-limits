@@ -653,7 +653,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.7"
+let APP_VERSION = "2.7.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -1920,6 +1920,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
     var updateTimer: Timer?
     var downloader: UpdateDownloader?
+    /// KVO on the status-item button's effectiveAppearance: the menu bar can flip
+    /// dark↔light with no system-theme change (dark wallpaper / Space switch), and
+    /// that's exactly when the tray numbers would otherwise render in the wrong color.
+    var trayAppearanceObs: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1946,9 +1950,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self, selector: #selector(themeChanged),
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
 
+        // The menu bar's look can change WITHOUT a system-theme notification (e.g. the
+        // wallpaper behind the bar goes dark, or you switch to a Space with a dark one),
+        // so also watch the button's own appearance and repaint the tray when it flips.
+        trayAppearanceObs = statusItem.button?.observe(\.effectiveAppearance) { [weak self] _, _ in
+            if let (c, x) = self?.last { self?.applyTrayImage(c, x) }
+        }
+
         startTimer()
         doRefresh(live: true)   // live Codex from launch, then on every timer tick
         startUpdateChecks()     // background update check shortly after launch + every 6h
+    }
+
+    func applicationWillTerminate(_ note: Notification) {
+        trayAppearanceObs?.invalidate()
+        trayAppearanceObs = nil
     }
 
     func startTimer() {
@@ -1980,6 +1996,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
+    /// Theme for the MENU-BAR strip specifically. The status-item button inherits the
+    /// menu bar's *actual* appearance, which can be dark even under a Light system theme
+    /// (a dark wallpaper turns the bar dark via vibrancy). Reading the button's own
+    /// effectiveAppearance — not NSApp's — is what keeps the tray numbers legible.
+    func isTrayDark() -> Bool {
+        guard let a = statusItem?.button?.effectiveAppearance else { return isDark() }
+        return a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
     func render(_ claude: LimitData, _ codex: LimitData) {
         last = (claude, codex)
         applyTrayImage(claude, codex)
@@ -1992,7 +2017,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var products: [(LimitData, String)] = []
         if claude.present { products.append((claude, "claude_128.png")) }
         if codex.present { products.append((codex, "codex_128.png")) }
-        if let cgImg = renderStrip(products, dark: isDark(), s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
+        if let cgImg = renderStrip(products, dark: isTrayDark(), s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
             let img = NSImage(cgImage: cgImg, size: NSSize(width: CGFloat(cgImg.width) / 2,
                                                            height: CGFloat(cgImg.height) / 2))
             img.isTemplate = false
