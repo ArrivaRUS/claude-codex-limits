@@ -595,7 +595,7 @@ struct Hit { let id: String; let rect: CGRect }
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 enum PanelMode { case main, settings, whatsnew }
-let APP_VERSION = "2.5"
+let APP_VERSION = "2.6"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 
@@ -1918,6 +1918,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 // MARK: - Single instance (flock) + launch
+
+// Ensure the data directory exists before ANY code path touches it. The lock
+// file (LOCK_PATH), the cache (CACHE_PATH) and downloaded assets all live under
+// DATA_DIR. Without this, on a clean Mac open(LOCK_PATH, O_CREAT, …) returns -1
+// because the parent dir is missing → the app mistakes it for "another instance
+// already running" and silently exit(0)'s. A single mkdir up front fixes both
+// the silent-exit bug and the (previously failing) cache persistence.
+try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
 
 if CommandLine.arguments.contains("--preview") {
     var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)

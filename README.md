@@ -70,15 +70,34 @@ under `~/.claude-limits-monitor/`.
 
 ## Install
 
-### From the .dmg
+### 1. One‑line install (recommended)
 
-1. Download `ClaudeCodexLimits-2.5.dmg` from the [Releases](../../releases) page.
+```bash
+curl -fsSL https://raw.githubusercontent.com/ArrivaRUS/claude-codex-limits/main/get.sh | bash
+```
+
+Downloads the latest release and installs it straight into **Applications** with **no
+Gatekeeper prompts** — an app fetched with `curl` isn't quarantined, so macOS doesn't
+flag it as “damaged” or “unidentified developer”. Launch‑at‑login stays **off** until
+you turn it on in Settings.
+
+### 2. From the .dmg
+
+1. Download `ClaudeCodexLimits-2.6.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
-3. Launch it. Because the build isn't notarized, the first time you may need to
-   right‑click → **Open**, or allow it under **System Settings → Privacy & Security**.
+3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
+   launch is blocked. Do this once:
+   - In the block dialog click **Cancel** (⚠️ **not** “Move to Trash”).
+   - Open **System Settings → Privacy & Security**, scroll to the bottom, click
+     **Open Anyway**, and confirm.
+   - **If no “Open Anyway” button appears**, clear the quarantine flag in Terminal,
+     then open the app normally:
+     ```bash
+     xattr -dr com.apple.quarantine "/Applications/Claude Codex Limits.app"
+     ```
 4. The icon appears at the top‑right of your menu bar.
 
-### From source
+### 3. From source
 
 ```bash
 git clone https://github.com/ArrivaRUS/claude-codex-limits.git
@@ -100,7 +119,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.5.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.6.dmg
 ```
 
 ## Project layout

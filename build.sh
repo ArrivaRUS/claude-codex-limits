@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="2.5"
+VERSION="2.6"
 APP="$DIR/dist/$APP_NAME.app"
 
 echo "==> building $APP_NAME.app"
@@ -37,5 +37,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# --- Code signing (ad-hoc) ---------------------------------------------------
+# No Apple Developer account, so we sign ad-hoc (identity "-"). This is still
+# required: an unsigned / linker-signed-only bundle fails `codesign -v` with
+# "code has no resources but signature indicates they must be present" and
+# Gatekeeper treats it as damaged.
+echo "==> code-signing (ad-hoc)"
+# Clear extended attributes first. Files copied from Resources carry FinderInfo /
+# resource forks; without this codesign aborts with "resource fork, Finder
+# information, or similar detritus not allowed".
+xattr -cr "$APP"
+codesign --force --deep -s - "$APP"
+# Verify — under `set -e` a non-zero exit here fails the whole build.
+codesign -v "$APP" || { echo "!! codesign verification FAILED for $APP" >&2; exit 1; }
+echo "==> signed & verified"
 
 echo "==> built: $APP"
