@@ -15,3 +15,6 @@ cache.json
 app.lock
 build.log
 backups/
+
+# local time ledger (Юрка time-tracking — не коммитить)
+*.local.md
