@@ -711,8 +711,19 @@ let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 
 /// Identity colour of a per-model weekly limit — a third hue alongside session-blue and
-/// weekly-purple. Severity still overrides it at 50% / 80%, like every other metric.
+/// weekly-purple.
 let SCOPED_COLOR = NSColor(srgbRed: 0.20, green: 0.85, blue: 0.70, alpha: 1)
+
+/// Severity ramp for a per-model limit — deliberately NOT the shared amber/red ramp.
+/// The weekly limit goes amber then red as well, and two identically coloured readings on
+/// one card can't be told apart: a red pill next to a red ring leaves you guessing whether
+/// it's the model that ran out or the week. Coral and magenta stay unmistakably "hot" while
+/// remaining distinct from the weekly's amber and red at every level.
+func scopedColor(_ pct: Double) -> NSColor {
+    if pct >= 80 { return NSColor(srgbRed: 0.98, green: 0.22, blue: 0.56, alpha: 1) }
+    if pct >= 50 { return NSColor(srgbRed: 0.99, green: 0.47, blue: 0.38, alpha: 1) }
+    return SCOPED_COLOR
+}
 /// Height of the extra card row a per-model limit adds.
 let SCOPED_ROW_H: CGFloat = 15
 
@@ -730,7 +741,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.8.1"
+let APP_VERSION = "2.8.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -999,7 +1010,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             }
             text(attr(label, 10, .semibold, color), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
-        let scopedCol = d.scoped.map { metricColor(SCOPED_COLOR, $0.percent) } ?? SCOPED_COLOR
+        let scopedCol = d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR
         if !stale, let rc = d.resetCredits, rc >= 1 {
             pill("arrow.clockwise", "\(rc)", amber)
         } else if !stale, let s = d.scoped {

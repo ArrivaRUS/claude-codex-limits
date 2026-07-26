@@ -3,7 +3,7 @@
 **English** · [Русский](README.ru.md)
 
 <p align="center">
-  <img src="docs/banner.png?v=281" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
+  <img src="docs/banner.png?v=282" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
 </p>
 
 A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
@@ -13,9 +13,9 @@ Each row shows `session% / weekly%` (the rolling 5‑hour window and the 7‑day
 with the product's icon to its left. Click the tray icon for a detailed popover.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=281" width="180" alt="Menu bar (dark)">
+  <img src="docs/menubar-dark.png?v=282" width="180" alt="Menu bar (dark)">
   &nbsp;&nbsp;
-  <img src="docs/panel-en.png?v=281" width="320" alt="Popover">
+  <img src="docs/panel-en.png?v=282" width="320" alt="Popover">
 </p>
 
 ## Features
@@ -38,16 +38,16 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Launch at login** — a toggle right in Settings; no Dock icon, no dependencies beyond what macOS already ships.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=281" width="140" alt="Single product (menu bar)">
+  <img src="docs/menubar-single.png?v=282" width="140" alt="Single product (menu bar)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single-en.png?v=281" width="300" alt="Single product (popover)">
+  <img src="docs/panel-single-en.png?v=282" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
-<p align="center"><img src="docs/settings-en.png?v=281" width="250" alt="Settings screen"></p>
+<p align="center"><img src="docs/settings-en.png?v=282" width="250" alt="Settings screen"></p>
 <p align="center"><sub>Settings (⚙): interface language · launch at login · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
 
-<p align="center"><img src="docs/whatsnew-en.png?v=281" width="320" alt="What's new screen"></p>
+<p align="center"><img src="docs/whatsnew-en.png?v=282" width="320" alt="What's new screen"></p>
 <p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
 
 ## How it works
@@ -87,7 +87,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-2.8.1.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.8.2.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -123,7 +123,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.8.1.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.8.2.dmg
 ```
 
 ## Project layout
