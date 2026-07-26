@@ -225,6 +225,8 @@ func fetchClaude() -> LimitData {
            let p = pct(e) {
             d.scoped = ScopedLimit(name: name, percent: p, reset: reset(e),
                                    severity: e["severity"] as? String)
+            // Remembered so Settings can name the option ("Fable") on the next launch too.
+            UserDefaults.standard.set(name, forKey: "scopedName")
         }
     }
     d.asOf = Date()
@@ -460,6 +462,76 @@ func sevColor(_ s: Int, dark: Bool) -> NSColor {
     }
 }
 
+/// The per-model metric keeps its own ramp in the menu bar too (teal → coral → magenta), the
+/// same way it does on the card, so a model at its limit can never be read as the weekly one.
+/// Teal goes dark on a light menu bar, where the bright variant would be unreadable.
+func trayScopedColor(_ pct: Double, dark: Bool) -> NSColor {
+    if pct >= 80 { return NSColor(srgbRed: 0.90, green: 0.18, blue: 0.50, alpha: 1) }
+    if pct >= 50 { return NSColor(srgbRed: 0.93, green: 0.42, blue: 0.28, alpha: 1) }
+    return dark ? NSColor(srgbRed: 0.30, green: 0.88, blue: 0.76, alpha: 1)
+                : NSColor(srgbRed: 0.00, green: 0.45, blue: 0.38, alpha: 1)
+}
+
+// MARK: - What the menu bar shows
+
+/// Which percentages make it into the menu-bar strip. The popover always shows everything —
+/// the tray is narrow, so the user picks what earns the space (Settings → «В строке меню»).
+enum TrayMetric: String, CaseIterable { case session, weekly, model }
+
+let TRAY_METRICS_DEFAULT: [TrayMetric] = [.session, .weekly]
+
+/// The picked metrics **in the user's own order** — the stored order is the left-to-right
+/// order in the tray, so "Fable / week" and "week / Fable" are different settings.
+func trayMetrics() -> [TrayMetric] {
+    guard let raw = UserDefaults.standard.string(forKey: "trayMetrics") else { return TRAY_METRICS_DEFAULT }
+    var out: [TrayMetric] = []
+    for p in raw.split(separator: ",") {
+        if let m = TrayMetric(rawValue: String(p)), !out.contains(m) { out.append(m) }
+    }
+    return out.isEmpty ? TRAY_METRICS_DEFAULT : out              // never leave the tray blank
+}
+
+func setTrayMetrics(_ m: [TrayMetric]) {
+    var out: [TrayMetric] = []
+    for x in m where !out.contains(x) { out.append(x) }
+    guard !out.isEmpty else { return }
+    UserDefaults.standard.set(out.map { $0.rawValue }.joined(separator: ","), forKey: "trayMetrics")
+}
+
+/// Assign one side of the strip. The left side always carries a value; the right may be
+/// cleared ("—") to show a single number. Picking the metric that already sits on the other
+/// side swaps the two rather than showing it twice.
+func trayApplySlot(_ slot: Int, _ pick: TrayMetric?) {
+    let cur = Array(trayMetrics().prefix(2))
+    let left = cur.first, right = cur.count > 1 ? cur[1] : nil
+    var out: [TrayMetric?]
+    if slot == 0 {
+        guard let v = pick else { return }
+        out = (right == v) ? [v, left] : [v, right]
+    } else {
+        guard let v = pick else { setTrayMetrics([left].compactMap { $0 }); return }
+        if left == v {
+            guard let r = right else { return }                 // nothing to swap with → ignore
+            out = [r, v]
+        } else {
+            out = [left, v]
+        }
+    }
+    setTrayMetrics(out.compactMap { $0 })
+}
+
+/// Short tray-strip name of a metric, for the settings segments.
+func trayMetricShort(_ m: TrayMetric?) -> String {
+    switch m {
+    case .session: return tr("5ч", "5h")
+    case .weekly:  return tr("нед", "wk")
+    case .model:
+        let n = trayModelLabel()                                // a long display_name would
+        return n.count > 7 ? String(n.prefix(6)) + "…" : n      // overflow its segment
+    case nil:      return "—"
+    }
+}
+
 // MARK: - Rendering (CoreGraphics + CoreText)
 
 func numText(_ v: Double?) -> String {
@@ -472,6 +544,12 @@ func numText(_ v: Double?) -> String {
 func appLang() -> String { UserDefaults.standard.string(forKey: "lang") == "en" ? "en" : "ru" }
 /// Pick the string for the current UI language. Default is Russian.
 func tr(_ ru: String, _ en: String) -> String { appLang() == "en" ? en : ru }
+
+/// Name of the per-model limit ("Fable"), remembered from the last successful fetch so the
+/// settings screen can label the option even before the first refresh of this launch.
+func trayModelLabel() -> String {
+    UserDefaults.standard.string(forKey: "scopedName") ?? tr("Модель", "Model")
+}
 
 func cg(_ c: NSColor) -> CGColor {
     let r = c.usingColorSpace(.sRGB) ?? c
@@ -504,33 +582,42 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
 }
 
 /// The tray number for a product, or nil when there is nothing meaningful to show
-/// (a "not signed in" product, or one with no session AND no weekly value) — the caller
-/// then draws just a faint icon. When only one of the two values exists, that single
-/// percentage is shown on its own (e.g. weekly-only → "4%") instead of a "–/4%" placeholder.
+/// (a "not signed in" product, or one carrying none of the picked metrics) — the caller
+/// then draws just a faint icon. Only the metrics the user picked are drawn, and only
+/// those this product actually has, so a Codex row never shows a "–" for a per-model
+/// limit that exists on the Claude side alone.
 func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString? {
     if d.auth == .loggedOut { return nil }                       // "sign in" → faint icon, no number
-    if d.session == nil && d.weekly == nil { return nil }        // no data at all → faint icon, no number
     let base = dark ? NSColor.white : NSColor.black
     // Stale (auth/fetch error or a frozen snapshot) → fade the whole group so the tray
     // reads as "last known, not live" rather than presenting old numbers as current.
     let stale = isStale(d)
     let dim = cg(base.withAlphaComponent(stale ? 0.4 : 0.95))
     let faint = cg(base.withAlphaComponent(0.4))
-    let sCol = stale ? faint : cg(sevColor(severity(d.session), dark: dark))
-    let wCol = stale ? faint : cg(sevColor(severity(d.weekly), dark: dark))
-    let m = NSMutableAttributedString()
-    if d.session != nil && d.weekly != nil {
-        m.append(ctAttr(numText(d.session), font, sCol))
-        m.append(ctAttr("/", font, dim))
-        m.append(ctAttr(numText(d.weekly), font, wCol))
-        m.append(ctAttr("%", font, dim))
-    } else if d.weekly != nil {                                  // session missing → weekly on its own
-        m.append(ctAttr(numText(d.weekly), font, wCol))
-        m.append(ctAttr("%", font, dim))
-    } else {                                                     // weekly missing → session on its own
-        m.append(ctAttr(numText(d.session), font, sCol))
-        m.append(ctAttr("%", font, dim))
+    var parts: [(value: Double, color: CGColor)] = []
+    for metric in trayMetrics() {
+        switch metric {
+        case .session:
+            if let v = d.session { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+        case .weekly:
+            if let v = d.weekly { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+        case .model:
+            if let s = d.scoped { parts.append((s.percent, stale ? faint : cg(trayScopedColor(s.percent, dark: dark)))) }
+        }
     }
+    // Codex has no per-model limit, so a "weekly + model" pick would leave its row numberless.
+    // Fall back to whatever that product does have rather than showing a bare icon.
+    if parts.isEmpty {
+        if let v = d.session { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+        if let v = d.weekly { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+    }
+    if parts.isEmpty { return nil }                              // genuinely no data → icon only
+    let m = NSMutableAttributedString()
+    for (i, p) in parts.enumerated() {
+        if i > 0 { m.append(ctAttr("/", font, dim)) }
+        m.append(ctAttr(numText(p.value), font, p.color))
+    }
+    m.append(ctAttr("%", font, dim))
     return m
 }
 
@@ -727,6 +814,21 @@ func scopedColor(_ pct: Double) -> NSColor {
 /// Height of the extra card row a per-model limit adds.
 let SCOPED_ROW_H: CGFloat = 15
 
+// Settings layout. Both drawSettings() and settingsTotalHeight() derive their positions from
+// these, so adding a row can't leave the two out of step (the way the footer divider once
+// kept a hardcoded offset after the card grew).
+let SET_ROW_H: CGFloat = 36              // language / toggle rows
+let SET_SOUND_ROW_H: CGFloat = 29        // sound-picker rows
+let SET_GAP: CGFloat = 14                // card bottom → next section caption
+let SET_CAP_H: CGFloat = 16              // caption → its card
+let SET_GEN_TOP: CGFloat = 66
+let SET_GEN_H = SET_ROW_H * 2            // language · launch at login
+let SET_TRAY_CAP = SET_GEN_TOP + SET_GEN_H + SET_GAP
+let SET_TRAY_TOP = SET_TRAY_CAP + SET_CAP_H
+let SET_TRAY_H: CGFloat = 44             // the menu-bar picker card
+let SET_CAP1 = SET_TRAY_TOP + SET_TRAY_H + SET_GAP
+let SET_C1_TOP = SET_CAP1 + SET_CAP_H
+
 /// Does this card render the per-model row? Only a healthy, live card does — the
 /// sign-in-problem and stale layouts replace the reset rows with a status message.
 func showsScopedRow(_ d: LimitData) -> Bool {
@@ -741,7 +843,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.8.2"
+let APP_VERSION = "2.9"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -1168,7 +1270,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
 
     // section 0 — general: interface language + launch at login
     text(attr(tr("ОБЩИЕ", "GENERAL"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
-    let genTop: CGFloat = 66, genRowH: CGFloat = 36, genH = genRowH * 2
+    let genTop: CGFloat = SET_GEN_TOP, genRowH: CGFloat = SET_ROW_H, genH = SET_GEN_H
     roundFill(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, genTop, cardW, genH), 12, gray(1, 0.06), 1)
     // language row — globe + label + a compact EN | RU segmented control
     drawSF(ctx, "globe", in: rectTL(cardX + 15, genTop + (genRowH - 16) / 2, 16, 16), textMid)
@@ -1197,9 +1299,37 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH, cardW, genRowH)))
     }
 
-    // section 1 — reset-sound master toggles
-    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: 152)
-    let c1top: CGFloat = 168, rowH: CGFloat = 36, c1H = rowH * 2
+    // section 1 — which percentages go into the menu-bar strip
+    text(attr(tr("В СТРОКЕ МЕНЮ", "IN THE MENU BAR"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_TRAY_CAP)
+    roundFill(rectTL(cardX, SET_TRAY_TOP, cardW, SET_TRAY_H), 12, gray(1, 0.04))
+    roundStroke(rectTL(cardX, SET_TRAY_TOP, cardW, SET_TRAY_H), 12, gray(1, 0.06), 1)
+    do {
+        let cur = Array(trayMetrics().prefix(2))
+        // Both sides on one row, split by the same slash the strip itself draws, so the
+        // control reads like its own result: «Fable / нед» → "100/86%" in the menu bar.
+        func segGroup(_ x: CGFloat, _ w: CGFloat, _ slot: Int, _ options: [TrayMetric?]) {
+            let segH: CGFloat = 24, trackTop = SET_TRAY_TOP + (SET_TRAY_H - segH) / 2
+            roundFill(rectTL(x, trackTop, w, segH), 7, gray(1, 0.08))
+            let n = CGFloat(options.count), segW = (w - 6 - (n - 1) * 2) / n
+            let picked: TrayMetric? = slot < cur.count ? cur[slot] : nil
+            for (i, o) in options.enumerated() {
+                let r = rectTL(x + 3 + CGFloat(i) * (segW + 2), trackTop + 3, segW, segH - 6)
+                let active = picked == o
+                if active { roundFill(r, 5, gray(1, 0.18)) }
+                text(attr(trayMetricShort(o), 11, active ? .semibold : .medium, active ? textHi : textMid),
+                     x: r.midX, topY: trackTop + 6.5, align: 1)
+                hits.append(Hit(id: "trayslot:\(slot):\(o?.rawValue ?? "none")", rect: r))
+            }
+        }
+        let lw: CGFloat = 124, rw: CGFloat = 152      // left side has 3 options, right also "—"
+        segGroup(cardX + 14, lw, 0, [.session, .weekly, .model])
+        text(attr("/", 13, .regular, textMid), x: cardX + 14 + lw + 10, topY: SET_TRAY_TOP + (SET_TRAY_H - 13) / 2 - 1)
+        segGroup(cardX + 14 + lw + 20, rw, 1, [nil, .session, .weekly, .model])
+    }
+
+    // section 2 — reset-sound master toggles
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_CAP1)
+    let c1top: CGFloat = SET_C1_TOP, rowH: CGFloat = SET_ROW_H, c1H = rowH * 2
     roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
@@ -1213,7 +1343,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     hdiv(cardX + 42, cardX + cardW, c1top + rowH)
     toggleRow(c1top + rowH, "calendar", tr("Недельный лимит", "Weekly limit"), "sound7d")
 
-    // section 2 — per-event sound choice (two radio columns: 5h | weekly)
+    // section 3 — per-event sound choice (two radio columns: 5h | weekly)
     let cap2 = c1top + c1H + 14
     text(attr(tr("ЗВУК", "SOUND"), 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
     let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
@@ -1240,7 +1370,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         if i < RESET_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
     }
 
-    // section 3 — limit-reached sound (any 5h/weekly limit hit)
+    // section 4 — limit-reached sound (any 5h/weekly/per-model limit hit)
     let capC = c2top + c2H + 14
     text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛЮБОГО ЛИМИТА", "WHEN ANY LIMIT IS REACHED"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
     let c3top = capC + 16, toggleH: CGFloat = 36, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
@@ -1265,7 +1395,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         if i < REACHED_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
     }
 
-    // section 4 — about / check for updates
+    // section 5 — about / check for updates
     let capD = c3top + c3H + 14
     text(attr(tr("О ПРИЛОЖЕНИИ", "ABOUT"), 9.5, .semibold, textLo), x: pad + 2, topY: capD)
     let c4top = capD + 16, c4H: CGFloat = 44
@@ -1632,6 +1762,7 @@ final class LimitsPanelView: NSView {
     var onUpdate: ((String) -> Void)?
     var onInstall: (() -> Void)?
     var onWhatsNew: (() -> Void)?
+    var onTrayChanged: (() -> Void)?     // the menu-bar picker changed → redraw the strip now
     var mode: PanelMode = .main
     // "Connect Claude Code" walkthrough: which command was just copied (transient tick)
     var copiedCmd: String?
@@ -1723,6 +1854,13 @@ final class LimitsPanelView: NSView {
                     let key = String(h.id.dropFirst(7))
                     let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
                     needsDisplay = true
+                } else if h.id.hasPrefix("trayslot:") {
+                    let parts = h.id.dropFirst(9).split(separator: ":")
+                    if parts.count == 2, let slot = Int(parts[0]) {
+                        trayApplySlot(slot, TrayMetric(rawValue: String(parts[1])))
+                        onTrayChanged?()         // the menu bar reflects the tap immediately
+                        needsDisplay = true
+                    }
                 } else if h.id.hasPrefix("preview:") {
                     onPreview?(String(h.id.dropFirst(8)))
                 } else if h.id.hasPrefix("set5:") {
@@ -1847,10 +1985,11 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let cardBbottom = 270 + 29 * CGFloat(RESET_SOUNDS.count)   // compact rows (36 general/toggle, 29 sound)
-    let c3top = cardBbottom + 14 + 16
-    let cardCbottom = c3top + 36 + 29 * CGFloat(REACHED_SOUNDS.count)
-    let c4top = cardCbottom + 14 + 16
+    let c2top = SET_C1_TOP + SET_ROW_H * 2 + SET_GAP + SET_CAP_H
+    let cardBbottom = c2top + SET_SOUND_ROW_H * CGFloat(RESET_SOUNDS.count)
+    let c3top = cardBbottom + SET_GAP + SET_CAP_H
+    let cardCbottom = c3top + SET_ROW_H + SET_SOUND_ROW_H * CGFloat(REACHED_SOUNDS.count)
+    let c4top = cardCbottom + SET_GAP + SET_CAP_H
     let needsLine = about.availVersion != nil || about.msg != .none || about.phase != .idle
     return c4top + 44 + (needsLine ? 22 : 0) + 16
 }
@@ -2059,6 +2198,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.view.onUpdate = { [weak self] url in self?.startDownload(url) }
         panelCtrl.view.onInstall = { [weak self] in self?.installAndRelaunch() }
         panelCtrl.view.onWhatsNew = { [weak self] in self?.showWhatsNew() }
+        panelCtrl.view.onTrayChanged = { [weak self] in
+            guard let self = self, let l = self.last else { return }
+            self.applyTrayImage(l.0, l.1)
+        }
 
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),

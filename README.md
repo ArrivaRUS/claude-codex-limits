@@ -3,19 +3,20 @@
 **English** · [Русский](README.ru.md)
 
 <p align="center">
-  <img src="docs/banner.png?v=282" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
+  <img src="docs/banner.png?v=290" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
 </p>
 
 A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
 usage limits you have left — at a glance, right in the top tray.
 
-Each row shows `session% / weekly%` (the rolling 5‑hour window and the 7‑day window),
-with the product's icon to its left. Click the tray icon for a detailed popover.
+Each row shows `session% / weekly%` by default (the rolling 5‑hour window and the 7‑day
+window), with the product's icon to its left — and you decide which two numbers those are.
+Click the tray icon for a detailed popover.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=282" width="180" alt="Menu bar (dark)">
+  <img src="docs/menubar-dark.png?v=290" width="180" alt="Menu bar (dark)">
   &nbsp;&nbsp;
-  <img src="docs/panel-en.png?v=282" width="320" alt="Popover">
+  <img src="docs/panel-en.png?v=290" width="320" alt="Popover">
 </p>
 
 ## Features
@@ -24,6 +25,7 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Live data** — both are pulled from the same backends their CLIs use, so Codex matches its web page (not a stale local cache).
 - **Honest when a login lapses** — if Claude Code's saved credentials expire, the card greys out with an “as of …” note instead of passing off old numbers (and a reset time in the past) as current. It heals on its own the moment you use Claude Code again.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
+- **You choose what the menu bar shows** — pick which number sits on each side of the slash (5‑hour, weekly, or the per‑model limit) and in which order, or clear the right‑hand one for a single figure. Settings → *In the menu bar*. The strip updates the moment you tap.
 - **Codex reset credits** — if you've banked rate‑limit resets, a small ⟳ badge on the Codex card shows how many you have.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
 - **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
@@ -38,16 +40,16 @@ with the product's icon to its left. Click the tray icon for a detailed popover.
 - **Launch at login** — a toggle right in Settings; no Dock icon, no dependencies beyond what macOS already ships.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=282" width="140" alt="Single product (menu bar)">
+  <img src="docs/menubar-single.png?v=290" width="140" alt="Single product (menu bar)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single-en.png?v=282" width="300" alt="Single product (popover)">
+  <img src="docs/panel-single-en.png?v=290" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
-<p align="center"><img src="docs/settings-en.png?v=282" width="250" alt="Settings screen"></p>
-<p align="center"><sub>Settings (⚙): interface language · launch at login · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
+<p align="center"><img src="docs/settings-en.png?v=290" width="250" alt="Settings screen"></p>
+<p align="center"><sub>Settings (⚙): interface language · launch at login · which two numbers the menu bar shows · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
 
-<p align="center"><img src="docs/whatsnew-en.png?v=282" width="320" alt="What's new screen"></p>
+<p align="center"><img src="docs/whatsnew-en.png?v=290" width="320" alt="What's new screen"></p>
 <p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
 
 ## How it works
@@ -87,7 +89,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-2.8.2.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-2.9.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -123,7 +125,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.8.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.9.dmg
 ```
 
 ## Project layout
