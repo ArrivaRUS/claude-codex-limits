@@ -730,7 +730,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.8"
+let APP_VERSION = "2.8.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -1066,8 +1066,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         text(attr(tr("обновлено ", "updated ") + clockText(u), 10, .regular, textLo), x: W - pad - 32, topY: footTop + 7, align: 2)
     }
 
-    // credit line (authorship + version + clickable GitHub), like the reference app
-    let divY = H - 256
+    // credit line (authorship + version + clickable GitHub), like the reference app.
+    // Anchored BELOW the interval row rather than at a fixed offset from the top: the cards
+    // can grow (a per-model limit adds a row), and a hardcoded position would slide up into
+    // the pills and strike through them.
+    let divTopY = footTop + segH + 8
+    let divY = H - divTopY
     ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
     ctx.beginPath(); ctx.move(to: CGPoint(x: pad, y: divY)); ctx.addLine(to: CGPoint(x: W - pad, y: divY)); ctx.strokePath()
     let creditPre = attr("Claude Codex Limits \(APP_VERSION) · by \(APP_AUTHOR) · ", 9.5, .regular, gray(1, 0.32))
@@ -1075,7 +1079,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let preW = lineWidth(CTLineCreateWithAttributedString(creditPre))
     let linkW = lineWidth(CTLineCreateWithAttributedString(creditLink))
     let creditX = (W - preW - linkW) / 2
-    let creditTop: CGFloat = 265
+    let creditTop = divTopY + 9
     text(creditPre, x: creditX, topY: creditTop)
     text(creditLink, x: creditX + preW, topY: creditTop)
     hits.append(Hit(id: "open:\(REPO_URL)",

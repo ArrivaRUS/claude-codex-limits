@@ -3,7 +3,7 @@
 [English](README.md) · **Русский**
 
 <p align="center">
-  <img src="docs/banner.png?v=280" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
+  <img src="docs/banner.png?v=281" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
 </p>
 
 Маленькое приложение для строки меню macOS, которое показывает, сколько у вас осталось
@@ -13,9 +13,9 @@
 слева иконка продукта. По клику на иконку в трее открывается подробная панель.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=280" width="180" alt="Строка меню (тёмная)">
+  <img src="docs/menubar-dark.png?v=281" width="180" alt="Строка меню (тёмная)">
   &nbsp;&nbsp;
-  <img src="docs/panel.png?v=280" width="320" alt="Панель">
+  <img src="docs/panel.png?v=281" width="320" alt="Панель">
 </p>
 
 ## Возможности
@@ -38,16 +38,16 @@
 - **Автозапуск при входе** — тумблер прямо в настройках; без иконки в Dock, без сторонних зависимостей.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=280" width="140" alt="Один продукт (строка меню)">
+  <img src="docs/menubar-single.png?v=281" width="140" alt="Один продукт (строка меню)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single.png?v=280" width="300" alt="Один продукт (панель)">
+  <img src="docs/panel-single.png?v=281" width="300" alt="Один продукт (панель)">
 </p>
 <p align="center"><sub>Если настроена только одна подписка — трей и панель сворачиваются в одну строку / карточку.</sub></p>
 
-<p align="center"><img src="docs/settings.png?v=280" width="250" alt="Экран настроек"></p>
+<p align="center"><img src="docs/settings.png?v=281" width="250" alt="Экран настроек"></p>
 <p align="center"><sub>Настройки (⚙): язык интерфейса · автозапуск · свой звук для каждого события (сбросы и достижение лимита) · встроенные обновления.</sub></p>
 
-<p align="center"><img src="docs/whatsnew.png?v=280" width="320" alt="Экран «Что нового»"></p>
+<p align="center"><img src="docs/whatsnew.png?v=281" width="320" alt="Экран «Что нового»"></p>
 <p align="center"><sub>«Что нового»: релиз-ноуты за все пропущенные версии и обновление прямо оттуда.</sub></p>
 
 ## Как это работает
@@ -87,7 +87,7 @@ Gatekeeper** — приложение, скачанное через `curl`, н�
 
 ### 2. Из .dmg
 
-1. Скачайте `ClaudeCodexLimits-2.8.dmg` со страницы [Releases](../../releases).
+1. Скачайте `ClaudeCodexLimits-2.8.1.dmg` со страницы [Releases](../../releases).
 2. Откройте и перетащите **Claude Codex Limits** в **Applications**.
 3. Запустите. Сборка не нотаризована, поэтому на **macOS Sequoia / Tahoe** первый
    запуск блокируется. Сделайте один раз:
@@ -123,7 +123,7 @@ cd claude-codex-limits
 ## Сборка релиза
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.8.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.8.1.dmg
 ```
 
 ## Структура проекта
