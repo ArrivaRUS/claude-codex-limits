@@ -78,11 +78,23 @@ func http(_ url: String, method: String, headers: [String: String], body: Data?,
 ///   • keychainError — a genuine keychain read failure (errSec other than 0 / 44).
 enum AuthState { case ok, loggedOut, expired, keychainError }
 
+/// A weekly limit scoped to one model (Anthropic's `limits[].kind == "weekly_scoped"`),
+/// e.g. Fable's own 7-day allowance, which can run out while the overall weekly still has
+/// room. `name` is the backend's own `scope.model.display_name`, so a future model shows up
+/// correctly without a code change.
+struct ScopedLimit {
+    var name: String
+    var percent: Double
+    var reset: Date?
+    var severity: String?      // backend's own "normal" | "warning" | "critical"
+}
+
 struct LimitData {
     var session: Double?
     var weekly: Double?
     var sessionReset: Date?
     var weeklyReset: Date?
+    var scoped: ScopedLimit?   // Claude: the binding per-model weekly limit, when the API reports one
     var plan: String?
     var resetCredits: Int?     // Codex "reset banking" — banked rate-limit resets available
     var asOf: Date?
@@ -180,6 +192,40 @@ func fetchClaude() -> LimitData {
     if let sd = j["seven_day"] as? [String: Any] {
         d.weekly = sd["utilization"] as? Double
         if let rs = sd["resets_at"] as? String { d.weeklyReset = parseISOmicroOffset(rs) }
+    }
+
+    // `limits[]` is the newer, structured view of the same quotas. It carries something the
+    // flat fields can't express: per-model weekly limits (`weekly_scoped`), which is how a
+    // model like Fable can sit at 100% while the overall weekly is still at 84%. The old
+    // per-model fields (`seven_day_opus`/`seven_day_sonnet`) now come back null, so this
+    // array is the only source for that. Also used to backfill session/weekly if Anthropic
+    // ever drops the flat fields the way they dropped the per-model ones.
+    if let limits = j["limits"] as? [[String: Any]] {
+        func pct(_ e: [String: Any]) -> Double? {
+            (e["percent"] as? Double) ?? (e["percent"] as? Int).map(Double.init)
+        }
+        func reset(_ e: [String: Any]) -> Date? {
+            (e["resets_at"] as? String).flatMap(parseISOmicroOffset)
+        }
+        for e in limits where e["kind"] as? String == "session" {
+            if d.session == nil { d.session = pct(e) }
+            if d.sessionReset == nil { d.sessionReset = reset(e) }
+        }
+        for e in limits where e["kind"] as? String == "weekly_all" {
+            if d.weekly == nil { d.weekly = pct(e) }
+            if d.weeklyReset == nil { d.weeklyReset = reset(e) }
+        }
+        // Pick the one that actually constrains you: the backend's own `is_active` flag wins,
+        // otherwise the highest percentage. (There may be several scoped limits in play.)
+        let scopedEntries = limits.filter { $0["kind"] as? String == "weekly_scoped" }
+        let chosen = scopedEntries.first { $0["is_active"] as? Bool == true }
+            ?? scopedEntries.max { (pct($0) ?? 0) < (pct($1) ?? 0) }
+        if let e = chosen,
+           let name = ((e["scope"] as? [String: Any])?["model"] as? [String: Any])?["display_name"] as? String,
+           let p = pct(e) {
+            d.scoped = ScopedLimit(name: name, percent: p, reset: reset(e),
+                                   severity: e["severity"] as? String)
+        }
     }
     d.asOf = Date()
     return d
@@ -349,6 +395,12 @@ func ld2dict(_ d: LimitData) -> [String: Any] {
     if let v = d.weeklyReset { m["wReset"] = v.timeIntervalSince1970 }
     if let v = d.plan { m["plan"] = v }
     if let v = d.resetCredits { m["resetCredits"] = v }
+    if let s = d.scoped {
+        var sm: [String: Any] = ["name": s.name, "percent": s.percent]
+        if let r = s.reset { sm["reset"] = r.timeIntervalSince1970 }
+        if let sev = s.severity { sm["severity"] = sev }
+        m["scoped"] = sm
+    }
     if let v = d.asOf { m["asOf"] = v.timeIntervalSince1970 }
     return m
 }
@@ -361,6 +413,12 @@ func dict2ld(_ m: [String: Any]) -> LimitData {
     if let v = m["wReset"] as? Double { d.weeklyReset = Date(timeIntervalSince1970: v) }
     d.plan = m["plan"] as? String
     d.resetCredits = m["resetCredits"] as? Int
+    if let sm = m["scoped"] as? [String: Any],
+       let name = sm["name"] as? String, let p = sm["percent"] as? Double {
+        d.scoped = ScopedLimit(name: name, percent: p,
+                               reset: (sm["reset"] as? Double).map { Date(timeIntervalSince1970: $0) },
+                               severity: sm["severity"] as? String)
+    }
     if let v = m["asOf"] as? Double { d.asOf = Date(timeIntervalSince1970: v) }
     d.fromCache = true
     return d
@@ -651,8 +709,28 @@ struct Hit { let id: String; let rect: CGRect }
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
+
+/// Identity colour of a per-model weekly limit — a third hue alongside session-blue and
+/// weekly-purple. Severity still overrides it at 50% / 80%, like every other metric.
+let SCOPED_COLOR = NSColor(srgbRed: 0.20, green: 0.85, blue: 0.70, alpha: 1)
+/// Height of the extra card row a per-model limit adds.
+let SCOPED_ROW_H: CGFloat = 15
+
+/// Does this card render the per-model row? Only a healthy, live card does — the
+/// sign-in-problem and stale layouts replace the reset rows with a status message.
+func showsScopedRow(_ d: LimitData) -> Bool {
+    d.present && d.scoped != nil && d.auth == .ok && !isStale(d)
+}
+/// Extra height the cards (and so the panel) need for the per-model row.
+func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
+    (showsScopedRow(claude) || showsScopedRow(codex)) ? SCOPED_ROW_H : 0
+}
+/// Height of the main panel for the given data — grows when a per-model limit is shown.
+func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
+    PANEL_H + scopedRowExtra(claude, codex)
+}
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.7.2"
+let APP_VERSION = "2.8"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -837,7 +915,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     }
 
     // cards
-    let cardsTop: CGFloat = 58, cardH: CGFloat = 152, gap: CGFloat = 12
+    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + scopedRowExtra(claude, codex), gap: CGFloat = 12
     let cardW = (W - pad * 2 - gap) / 2
 
     func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String) {
@@ -901,17 +979,31 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         let wTxt = d.weekly == nil ? "—" : numText(d.weekly) + "%"
         text(attr(sTxt, 15, .semibold, sCol), x: cx, topY: cyTop - 18, align: 1)
         text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
-        // banked rate-limit resets (Codex "reset banking") → a small ⟳N pill under the weekly %
-        if !stale, let rc = d.resetCredits, rc >= 1 {
-            let num = "\(rc)"
-            let nw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(num, ctFont(10, .semibold), cg(amber)))))
-            let icoW: CGFloat = 9, padL: CGFloat = 6, midGap: CGFloat = 2.5, padR: CGFloat = 7, pillH: CGFloat = 16
-            let pillW = padL + icoW + midGap + nw + padR
-            let pillTop = cyTop + 20
+        // The ring's lower opening carries one supplementary metric: Codex's banked resets
+        // (⟳N), or — for Claude — the per-model weekly limit's own percentage (✦NN%), the
+        // number that actually runs out first when you lean on a single model.
+        // `symbol` is optional: the model pill is text-only so it stays narrow enough to sit
+        // inside the ring's lower opening without touching the arc, and it carries a tinted
+        // fill so a red 100% reads as its own object rather than a second bare red number.
+        func pill(_ symbol: String?, _ label: String, _ color: NSColor, tinted: Bool = false) {
+            let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(10, .semibold), cg(color)))))
+            let icoW: CGFloat = symbol == nil ? 0 : 9, midGap: CGFloat = symbol == nil ? 0 : 2.5
+            let padL: CGFloat = symbol == nil ? 8 : 6, padR: CGFloat = symbol == nil ? 8 : 7, pillH: CGFloat = 16
+            let pillW = padL + icoW + midGap + lw + padR
+            let pillTop = cyTop + 22
             let pillR = rectTL(cx - pillW / 2, pillTop, pillW, pillH)
-            roundFill(pillR, pillH / 2, gray(1, 0.09))
-            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), amber, weight: .semibold)
-            text(attr(num, 10, .semibold, amber), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
+            roundFill(pillR, pillH / 2, tinted ? color.withAlphaComponent(0.16) : gray(1, 0.09))
+            if tinted { roundStroke(pillR, pillH / 2, color.withAlphaComponent(0.42), 1) }
+            if let sym = symbol {
+                drawSF(ctx, sym, in: CGRect(x: pillR.minX + padL, y: pillR.midY - icoW / 2, width: icoW, height: icoW), color, weight: .semibold)
+            }
+            text(attr(label, 10, .semibold, color), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
+        }
+        let scopedCol = d.scoped.map { metricColor(SCOPED_COLOR, $0.percent) } ?? SCOPED_COLOR
+        if !stale, let rc = d.resetCredits, rc >= 1 {
+            pill("arrow.clockwise", "\(rc)", amber)
+        } else if !stale, let s = d.scoped {
+            pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
         if stale {
@@ -935,6 +1027,13 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             dot(lx, centerTopY: l2 + 5, wCol)
             text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
             text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+            // Per-model weekly limit — named by the backend, so a future model needs no code change.
+            if showsScopedRow(d), let s = d.scoped {
+                let l3 = l2 + SCOPED_ROW_H
+                dot(lx, centerTopY: l3 + 5, scopedCol)
+                text(attr(s.name, 10.5, .regular, textMid), x: lx + 11, topY: l3)
+                text(attr(fmtReset(s.reset), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
+            }
         }
     }
 
@@ -1128,7 +1227,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
 
     // section 3 — limit-reached sound (any 5h/weekly limit hit)
     let capC = c2top + c2H + 14
-    text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛИМИТА (5ч ИЛИ НЕД)", "WHEN A LIMIT IS REACHED (5H / WEEKLY)"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
+    text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛЮБОГО ЛИМИТА", "WHEN ANY LIMIT IS REACHED"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
     let c3top = capC + 16, toggleH: CGFloat = 36, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
     roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
     drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
@@ -1538,7 +1637,7 @@ final class LimitsPanelView: NSView {
 
     /// Resize the panel (anchored at its top edge) to fit the current mode/state.
     func resizeToContent() {
-        var targetH = PANEL_H
+        var targetH = panelMainHeight(claude, codex)
         if mode == .settings {
             targetH = settingsTotalHeight(about)
         } else if mode == .whatsnew {
@@ -1680,18 +1779,19 @@ final class PanelController {
 
     func show(below button: NSStatusBarButton) {
         view.mode = .main   // always open on the main screen
+        let mainH = panelMainHeight(view.claude, view.codex)
         var origin = NSPoint(x: 200, y: 200)
         if let win = button.window {
             let bf = button.frame
             let pt = win.convertPoint(toScreen: NSPoint(x: bf.midX, y: bf.minY))
-            origin = NSPoint(x: pt.x - PANEL_W / 2, y: pt.y - PANEL_H - 6)
+            origin = NSPoint(x: pt.x - PANEL_W / 2, y: pt.y - mainH - 6)
             if let scr = win.screen ?? NSScreen.main {
                 let v = scr.visibleFrame
                 origin.x = max(v.minX + 8, min(origin.x, v.maxX - PANEL_W - 8))
                 origin.y = max(v.minY + 8, origin.y)
             }
         }
-        panel.setFrame(NSRect(origin: origin, size: NSSize(width: PANEL_W, height: PANEL_H)), display: false)
+        panel.setFrame(NSRect(origin: origin, size: NSSize(width: PANEL_W, height: mainH)), display: false)
         view.needsDisplay = true
         panel.orderFrontRegardless()
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
@@ -2043,12 +2143,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //   • usage did not climb (newUsed <= oldUsed) — it drops to ~0 at a real reset.
         // So sitting at a constant level (including 0% while idle) never chimes, a slowly
         // creeping resets_at can't false-fire, and a genuine rollover chimes exactly once.
-        let resetWins: [(rkey: String, ukey: String, date: Date?, used: Double?, is5h: Bool)] = [
+        var resetWins: [(rkey: String, ukey: String, date: Date?, used: Double?, is5h: Bool)] = [
             ("rst_c5", "use_c5", claude.sessionReset, claude.session, true),
             ("rst_x5", "use_x5", codex.sessionReset,  codex.session,  true),
             ("rst_c7", "use_c7", claude.weeklyReset,  claude.weekly,  false),
             ("rst_x7", "use_x7", codex.weeklyReset,   codex.weekly,   false),
         ]
+        // A per-model weekly limit (e.g. Fable) is a weekly window too, so its rollover —
+        // the moment that model becomes usable again — chimes with the weekly sound.
+        // Keyed by model name so each model tracks its own window independently.
+        if let s = claude.scoped {
+            let k = s.name.lowercased()
+            resetWins.append(("rst_cs_" + k, "use_cs_" + k, s.reset, s.percent, false))
+        }
         var fired5 = false, fired7 = false
         for w in resetWins {
             guard let date = w.date else { continue }
@@ -2070,13 +2177,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is already at the limit (e.g. it was hit while the app was closed). It never
         // re-alerts a state already recorded as reached. Crucially it does NOT depend on the
         // in-memory `soundBaseline`, so a restart can't silently swallow the alert.
-        let reachWins: [(key: String, used: Double?)] = [
+        var reachWins: [(key: String, used: Double?)] = [
             ("rch_c5", claude.session), ("rch_x5", codex.session),
             ("rch_c7", claude.weekly), ("rch_x7", codex.weekly),
         ]
+        // ...including a per-model weekly limit, which is the one you actually hit first
+        // when you lean on a single model — so running out of Fable chimes like any other.
+        if let s = claude.scoped { reachWins.append(("rch_cs_" + s.name.lowercased(), s.percent)) }
         var firedReached = false
         for w in reachWins {
-            let nowR = (w.used ?? 0) >= 99.5
+            // No reading (failed fetch) must not erase the recorded state — otherwise the
+            // next successful reading would re-announce a limit that was already reached.
+            guard let used = w.used else { continue }
+            let nowR = used >= 99.5
             let wasR = d.bool(forKey: w.key)
             if nowR, !wasR { firedReached = true }
             d.set(nowR, forKey: w.key)
@@ -2298,9 +2411,10 @@ if CommandLine.arguments.contains("--panel-preview") {
     var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)
     let s: CGFloat = 2
     func renderPanel(_ cl: LimitData, _ cx: LimitData, _ path: String) {
-        guard let ctx = bitmapContext(Int(PANEL_W * s), Int(PANEL_H * s)) else { return }
+        let ph = panelMainHeight(cl, cx)
+        guard let ctx = bitmapContext(Int(PANEL_W * s), Int(ph * s)) else { return }
         ctx.scaleBy(x: s, y: s)
-        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: PANEL_H),
+        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph),
                       claude: cl, codex: cx, interval: 60, updated: Date(), about: AboutState())
         guard let img = ctx.makeImage() else { return }
         let data = NSMutableData()
@@ -2376,7 +2490,9 @@ if CommandLine.arguments.contains("--screenshots") {
         d.sessionReset = Date().addingTimeInterval(srOff); d.weeklyReset = Date().addingTimeInterval(wrOff); d.asOf = Date()
         return d
     }
-    let claude = demo(24, 58, 2 * 3600, 4 * 86400)        // blue / amber
+    var claude = demo(24, 58, 2 * 3600, 4 * 86400)        // blue / amber
+    claude.scoped = ScopedLimit(name: "Fable", percent: 46,
+                                reset: Date().addingTimeInterval(4 * 86400), severity: "normal")
     var codex  = demo(76, 43, 3 * 3600 + 1800, 2 * 86400) // amber / blue
     codex.resetCredits = 2                                 // show the banked-resets badge
     let claudeOnly = claude; var noCodex = codex; noCodex.present = false
@@ -2392,9 +2508,10 @@ if CommandLine.arguments.contains("--screenshots") {
         ReleaseNote(version: "2.0", date: "2026-06-28", body: "<!--RU-->\n**Автообновления.**\nФоновая проверка, скачивание с прогрессом, установка с перезапуском.\n<!--EN-->\n**Automatic updates.**\nBackground checks, download with progress, install & relaunch."),
     ]
     func renderPanel(_ c: LimitData, _ x: LimitData, _ about: AboutState, _ path: String) {
-        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(PANEL_H * s2)) else { return }
+        let ph = panelMainHeight(c, x)
+        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(ph * s2)) else { return }
         ctx.scaleBy(x: s2, y: s2)
-        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: PANEL_H), claude: c, codex: x, interval: 60, updated: Date(), about: about)
+        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph), claude: c, codex: x, interval: 60, updated: Date(), about: about)
         savePNG(ctx, path)
     }
     func renderSettings(_ about: AboutState, _ path: String) {
