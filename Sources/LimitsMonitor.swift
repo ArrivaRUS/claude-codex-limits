@@ -123,6 +123,19 @@ func parseISOmillisZ(_ s: String) -> Date? {
 
 // MARK: - Claude Code
 
+/// Key under which the fingerprint of an already-rejected refresh token is remembered.
+let DEAD_REFRESH_KEY = "deadRefresh"
+
+/// A stable, one-way fingerprint of a token. `String.hashValue` is seeded per process and
+/// would differ every launch; this (FNV-1a) is the same every time. It only ever answers
+/// "is this the same token the server already refused?" — it is never stored anywhere it
+/// could be read back as a credential, and never leaves the machine.
+func tokenFingerprint(_ s: String) -> String {
+    var h: UInt64 = 0xcbf2_9ce4_8422_2325
+    for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
+    return String(h, radix: 16)
+}
+
 func fetchClaude() -> LimitData {
     var d = LimitData()
     let kc = shell("/usr/bin/security", ["find-generic-password", "-s", KC_SERVICE, "-w"])
@@ -145,34 +158,61 @@ func fetchClaude() -> LimitData {
     let exp = (oauth["expiresAt"] as? Double) ?? 0
     let nowMs = Date().timeIntervalSince1970 * 1000
 
+    // A token that expires in under two minutes is treated as spent — a reading started now
+    // could outlive it. `usable` is the honest question: is there still something to ask with
+    // if the refresh doesn't work out?
     if at.isEmpty || exp - nowMs < 120_000 {
-        if let rt = oauth["refreshToken"] as? String, !rt.isEmpty {
-            let bodyObj: [String: Any] = ["grant_type": "refresh_token",
-                                          "refresh_token": rt, "client_id": CLIENT_ID]
-            let body = try? JSONSerialization.data(withJSONObject: bodyObj)
-            let resp = http("https://api.anthropic.com/v1/oauth/token", method: "POST",
-                            headers: ["Content-Type": "application/json",
-                                      "User-Agent": UA, "Accept": "application/json"], body: body)
-            if resp.status == 200, let rd = resp.data,
-               let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-               let newAt = tok["access_token"] as? String {
-                at = newAt
-                oauth["accessToken"] = newAt
-                if let newRt = tok["refresh_token"] as? String { oauth["refreshToken"] = newRt }
-                let ein = (tok["expires_in"] as? Double) ?? 28800
-                oauth["expiresAt"] = (Date().timeIntervalSince1970 + ein) * 1000
-                creds["claudeAiOauth"] = oauth
-                if let outData = try? JSONSerialization.data(withJSONObject: creds),
-                   let outStr = String(data: outData, encoding: .utf8) {
-                    _ = shell("/usr/bin/security",
-                              ["add-generic-password", "-U", "-a", NSUserName(),
-                               "-s", KC_SERVICE, "-w", outStr])
+        let usable = !at.isEmpty && exp > nowMs
+        let rt = (oauth["refreshToken"] as? String) ?? ""
+        if rt.isEmpty {
+            if !usable { d.auth = .expired; d.error = "no refresh token"; return d }
+        } else {
+            let fp = tokenFingerprint(rt)
+            // A refresh token the server has already refused never recovers. Asking again every
+            // five minutes is how a dead login earned a 429 after one night, so once refused we
+            // stop asking. A fresh CLI login rewrites the keychain, which changes the
+            // fingerprint and re-arms the check on its own — no manual reset needed.
+            var refused = UserDefaults.standard.string(forKey: DEAD_REFRESH_KEY) == fp
+            if !refused {
+                let bodyObj: [String: Any] = ["grant_type": "refresh_token",
+                                              "refresh_token": rt, "client_id": CLIENT_ID]
+                let body = try? JSONSerialization.data(withJSONObject: bodyObj)
+                let resp = http("https://api.anthropic.com/v1/oauth/token", method: "POST",
+                                headers: ["Content-Type": "application/json",
+                                          "User-Agent": UA, "Accept": "application/json"], body: body)
+                if resp.status == 200, let rd = resp.data,
+                   let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
+                   let newAt = tok["access_token"] as? String {
+                    at = newAt
+                    oauth["accessToken"] = newAt
+                    if let newRt = tok["refresh_token"] as? String { oauth["refreshToken"] = newRt }
+                    let ein = (tok["expires_in"] as? Double) ?? 28800
+                    oauth["expiresAt"] = (Date().timeIntervalSince1970 + ein) * 1000
+                    creds["claudeAiOauth"] = oauth
+                    if let outData = try? JSONSerialization.data(withJSONObject: creds),
+                       let outStr = String(data: outData, encoding: .utf8) {
+                        _ = shell("/usr/bin/security",
+                                  ["add-generic-password", "-U", "-a", NSUserName(),
+                                   "-s", KC_SERVICE, "-w", outStr])
+                    }
+                    UserDefaults.standard.removeObject(forKey: DEAD_REFRESH_KEY)
+                } else {
+                    // `invalid_grant` is the server saying this login is finished — unlike a
+                    // timeout or a 5xx, which is worth retrying on the next tick.
+                    let err = resp.data
+                        .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["error"] as? String
+                    if err == "invalid_grant" || resp.status == 400 || resp.status == 401 {
+                        UserDefaults.standard.set(fp, forKey: DEAD_REFRESH_KEY)
+                        refused = true
+                    } else if !usable {
+                        d.auth = .expired; d.error = "refresh failed (HTTP \(resp.status))"; return d
+                    }
                 }
-            } else if at.isEmpty {
-                d.auth = .expired; d.error = "refresh failed (HTTP \(resp.status))"; return d
             }
-        } else if at.isEmpty {
-            d.auth = .expired; d.error = "no refresh token"; return d
+            // Nothing left to ask with. Say the login expired instead of quietly serving
+            // yesterday's numbers behind a grey card — and don't spend the call on a token
+            // that is already known to be dead.
+            if refused, !usable { d.auth = .expired; d.error = "sign-in expired"; return d }
         }
     }
 
@@ -183,7 +223,13 @@ func fetchClaude() -> LimitData {
                               "anthropic-version": "2023-06-01"], body: nil)
     guard resp.status == 200, let ud = resp.data,
           let j = (try? JSONSerialization.jsonObject(with: ud)) as? [String: Any]
-    else { d.error = "usage HTTP \(resp.status)"; return d }
+    else {
+        // 401 here means the token we just refreshed (or were still holding) isn't accepted —
+        // that's a dead sign-in, not a hiccup, and the card should say so.
+        if resp.status == 401 { d.auth = .expired }
+        d.error = "usage HTTP \(resp.status)"
+        return d
+    }
 
     if let fh = j["five_hour"] as? [String: Any] {
         d.session = fh["utilization"] as? Double
@@ -843,7 +889,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.9"
+let APP_VERSION = "2.9.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -857,23 +903,50 @@ let CLAUDE_PATH_CMD = "echo 'export PATH=\"$HOME/.local/bin:$PATH\"' >> ~/.zshrc
 struct ClaudeFixCopy {
     let title: String        // panel title
     let intro: String        // why the CLI login (not the desktop app)
-    let s1: String           // step 1 — install the CLI
-    let s2: String           // step 2 — PATH fix (the ~/.local/bin lesson)
-    let s3: String           // step 3 — run `claude` and sign in
+    let s1: String           // step 1 + its command box
+    let cmd1: String
+    let s2: String           // step 2 + its command box
+    let cmd2: String
+    let s3: String           // step 3 — sign in
     let s4: String           // step 4 — come back and refresh
     let note: String         // the "desktop app won't do" reminder
     let copy: String         // copy-button label
     let copied: String       // copied-confirmation label
 }
-func claudeFixStrings() -> ClaudeFixCopy {
-    ClaudeFixCopy(
+
+/// Two different problems reach this screen and they need different instructions. A login
+/// that has *expired* means the CLI is already installed and working — walking that user
+/// through `curl … install.sh` and a PATH fix is noise; they need `claude` → `/login` and
+/// an explanation of why a working Claude Code session didn't keep the monitor alive.
+func claudeFixStrings(expired: Bool = false) -> ClaudeFixCopy {
+    if expired {
+        return ClaudeFixCopy(
+            title: tr("Вход устарел", "Sign-in expired"),
+            intro: tr("Токен входа Claude Code CLI истёк, и обновить его больше нечем — такой токен живёт ограниченное время. Нужно войти заново, это займёт полминуты.",
+                      "The Claude Code CLI sign-in has expired and can no longer be refreshed — that token has a limited lifetime. Signing in again takes half a minute."),
+            s1: tr("1. Запустите Claude Code в Терминале:", "1. Start Claude Code in Terminal:"),
+            cmd1: "claude",
+            s2: tr("2. Внутри выполните команду входа:", "2. Inside, run the sign-in command:"),
+            cmd2: "/login",
+            s3: tr("3. Войдите через браузер — Claude Code перезапишет токен.",
+                   "3. Sign in through the browser — Claude Code rewrites the token."),
+            s4: tr("4. Вернитесь сюда и нажмите «Обновить».",
+                   "4. Come back here and tap “Refresh”."),
+            note: tr("Работающая сессия в настольном приложении Claude монитору не поможет: у него свой вход, а читается именно токен Claude Code CLI. Пока вы не войдёте заново, монитор не запрашивает лимиты — старые цифры остаются на карточке как есть.",
+                     "An active session in the Claude desktop app won't help: it has its own sign-in, while the monitor reads the Claude Code CLI token. Until you sign in again the monitor stops asking for limits — the old numbers just stay on the card."),
+            copy: tr("Скопировать", "Copy"),
+            copied: tr("Скопировано", "Copied"))
+    }
+    return ClaudeFixCopy(
         title: tr("Подключить Claude Code", "Connect Claude Code"),
         intro: tr("Монитор читает лимиты из входа Claude Code CLI — не из настольного приложения Claude.",
                   "The monitor reads limits from the Claude Code CLI login — not the Claude desktop app."),
         s1: tr("1. Установите Claude Code CLI (если ещё не установлен):",
                "1. Install the Claude Code CLI (if you don’t have it yet):"),
+        cmd1: CLAUDE_INSTALL_CMD,
         s2: tr("2. Если после установки команда claude не находится — добавьте её в PATH и откройте новое окно Терминала:",
                "2. If claude isn’t found afterward, add it to your PATH and open a new Terminal window:"),
+        cmd2: CLAUDE_PATH_CMD,
         s3: tr("3. Запустите claude и войдите через браузер (или командой /login).",
                "3. Run claude and sign in through the browser (or the /login command)."),
         s4: tr("4. Вернитесь сюда и нажмите «Обновить».",
@@ -1597,8 +1670,8 @@ let CFIX_LABEL_H: CGFloat = 15          // copy-label row
 /// Every wrapped block height + the panel total, computed once and shared by the height
 /// pass (`claudeFixHeight`) and the draw pass (`drawClaudeFix`) so they can never drift.
 struct CFixMetrics { let introH, s1H, box1H, s2H, box2H, s3H, noteH, s4H, total: CGFloat }
-func claudeFixMetrics() -> CFixMetrics {
-    let c = claudeFixStrings()
+func claudeFixMetrics(expired: Bool = false) -> CFixMetrics {
+    let c = claudeFixStrings(expired: expired)
     let contentW = PANEL_W - CFIX_PAD * 2
     let monoW = contentW - CFIX_BOX_PADX * 2
     let white = cg(gray(1, 0.9))
@@ -1609,8 +1682,8 @@ func claudeFixMetrics() -> CFixMetrics {
             + CFIX_BOX_GAP + CFIX_LABEL_H + CFIX_BOX_PADBOT
     }
     let introH = wbody(c.intro, 11.5)
-    let s1H = wtitle(c.s1), box1H = box(CLAUDE_INSTALL_CMD)
-    let s2H = wtitle(c.s2), box2H = box(CLAUDE_PATH_CMD)
+    let s1H = wtitle(c.s1), box1H = box(c.cmd1)
+    let s2H = wtitle(c.s2), box2H = box(c.cmd2)
     let s3H = wtitle(c.s3)
     let noteH = wbody(c.note, 11)
     let s4H = wtitle(c.s4)
@@ -1624,10 +1697,10 @@ func claudeFixMetrics() -> CFixMetrics {
     return CFixMetrics(introH: introH, s1H: s1H, box1H: box1H, s2H: s2H, box2H: box2H,
                        s3H: s3H, noteH: noteH, s4H: s4H, total: y + CFIX_FOOTER)
 }
-func claudeFixHeight() -> CGFloat { claudeFixMetrics().total }
+func claudeFixHeight(expired: Bool = false) -> CGFloat { claudeFixMetrics(expired: expired).total }
 
 @discardableResult
-func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?) -> [Hit] {
+func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?, expired: Bool = false) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -1636,8 +1709,8 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?) -> [Hit] 
     let green = NSColor(srgbRed: 0.3, green: 0.8, blue: 0.45, alpha: 1)
     let orange = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
     let mono = gray(1, 0.9)
-    let m = claudeFixMetrics()
-    let c = claudeFixStrings()
+    let m = claudeFixMetrics(expired: expired)
+    let c = claudeFixStrings(expired: expired)
     let contentW = PANEL_W - CFIX_PAD * 2
     let monoW = contentW - CFIX_BOX_PADX * 2
 
@@ -1722,9 +1795,9 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?) -> [Hit] 
     var y = CFIX_HEADER + 6
     wrapped(attr(c.intro, 11.5, .regular, textMid), x: CFIX_PAD, topY: y, width: contentW, height: m.introH); y += m.introH + 14
     wrapped(attr(c.s1, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s1H); y += m.s1H + 8
-    cmdBox(y, m.box1H, CLAUDE_INSTALL_CMD); y += m.box1H + 16
+    cmdBox(y, m.box1H, c.cmd1); y += m.box1H + 16
     wrapped(attr(c.s2, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s2H); y += m.s2H + 8
-    cmdBox(y, m.box2H, CLAUDE_PATH_CMD); y += m.box2H + 16
+    cmdBox(y, m.box2H, c.cmd2); y += m.box2H + 16
     wrapped(attr(c.s3, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s3H); y += m.s3H + 14
     wrapped(attr(c.note, 11, .regular, textLo), x: CFIX_PAD, topY: y, width: contentW, height: m.noteH); y += m.noteH + 12
     wrapped(attr(c.s4, 12, .medium, textHi), x: CFIX_PAD, topY: y, width: contentW, height: m.s4H)
@@ -1795,7 +1868,7 @@ final class LimitsPanelView: NSView {
             notesViewportH = targetH - WN_HEADER - WN_FOOTER
         } else if mode == .claudeFix {
             let screenMax = (window?.screen?.visibleFrame.height ?? 800) - 40
-            targetH = min(screenMax, claudeFixHeight())
+            targetH = min(screenMax, claudeFixHeight(expired: claude.auth == .expired))
         }
         if let win = window {
             let f = win.frame
@@ -1815,7 +1888,8 @@ final class LimitsPanelView: NSView {
                                 error: notesError, scroll: scroll, contentH: notesContentH,
                                 viewportH: notesViewportH, about: about)
         } else if mode == .claudeFix {
-            hits = drawClaudeFix(ctx, size: bounds.size, copiedCmd: copiedCmd)
+            hits = drawClaudeFix(ctx, size: bounds.size, copiedCmd: copiedCmd,
+                                 expired: claude.auth == .expired)
         } else {
             hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
