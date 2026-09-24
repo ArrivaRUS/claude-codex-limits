@@ -889,7 +889,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.9.1"
+let APP_VERSION = "2.9.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2001,7 +2001,16 @@ final class PanelController {
 
     func update(claude: LimitData, codex: LimitData, interval: TimeInterval, updated: Date?) {
         view.claude = claude; view.codex = codex; view.interval = interval; view.updated = updated
-        if panel.isVisible { view.needsDisplay = true }
+        guard panel.isVisible else { return }
+        // Opening the panel triggers a refresh, and that refresh can add or drop the per-model
+        // row — i.e. change the height the content needs. The frame was sized for the data at
+        // click time, so without this the taller layout draws past the bottom edge and the
+        // footer line gets clipped. Resize whenever the needed height no longer matches.
+        if view.mode == .main, abs(panel.frame.height - panelMainHeight(claude, codex)) > 0.5 {
+            view.resizeToContent()
+        } else {
+            view.needsDisplay = true
+        }
     }
 
     func show(below button: NSStatusBarButton) {
