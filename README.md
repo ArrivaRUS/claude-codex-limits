@@ -3,7 +3,7 @@
 **English** · [Русский](README.ru.md)
 
 <p align="center">
-  <img src="docs/banner.png?v=292" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
+  <img src="docs/banner.png?v=300" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
 </p>
 
 A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
@@ -14,9 +14,9 @@ window), with the product's icon to its left — and you decide which two number
 Click the tray icon for a detailed popover.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=292" width="180" alt="Menu bar (dark)">
+  <img src="docs/menubar-dark.png?v=300" width="180" alt="Menu bar (dark)">
   &nbsp;&nbsp;
-  <img src="docs/panel-en.png?v=292" width="320" alt="Popover">
+  <img src="docs/panel-en.png?v=300" width="320" alt="Popover">
 </p>
 
 ## Features
@@ -25,6 +25,7 @@ Click the tray icon for a detailed popover.
 - **Live data** — both are pulled from the same backends their CLIs use, so Codex matches its web page (not a stale local cache).
 - **Honest when a login lapses** — if Claude Code's saved credentials expire for good, the card says so (“Sign-in expired · How to fix?”) and tapping it walks you through `claude` → `/login`; meanwhile the app stops hammering the API with a token it already knows is dead. One fresh sign-in and it heals on its own.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
+- **Advanced view** — a second panel layout for people who want to *manage* their limits, not just glance at them. Every window gets a pace line: where a linear plan says you should be by now, how many points you're ahead of it, your average burn rate, and a plain verdict — “Lasts until reset (forecast 53%)” or “Runs out at 09:37, 2 h 13 min before reset”. Below: 7 days of consumption as bars stacked by model, a 35‑day calendar heatmap, and money — what a day costs you out of the subscription versus what the same tokens would cost at API prices. Separately for Claude Code and Codex. Settings → *Panel view*.
 - **You choose what the menu bar shows** — pick which number sits on each side of the slash (5‑hour, weekly, or the per‑model limit) and in which order, or clear the right‑hand one for a single figure. Settings → *In the menu bar*. The strip updates the moment you tap.
 - **Codex reset credits** — if you've banked rate‑limit resets, a small ⟳ badge on the Codex card shows how many you have.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
@@ -40,16 +41,19 @@ Click the tray icon for a detailed popover.
 - **Launch at login** — a toggle right in Settings; no Dock icon, no dependencies beyond what macOS already ships.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=292" width="140" alt="Single product (menu bar)">
+  <img src="docs/menubar-single.png?v=300" width="140" alt="Single product (menu bar)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single-en.png?v=292" width="300" alt="Single product (popover)">
+  <img src="docs/panel-single-en.png?v=300" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
-<p align="center"><img src="docs/settings-en.png?v=292" width="250" alt="Settings screen"></p>
-<p align="center"><sub>Settings (⚙): interface language · launch at login · which two numbers the menu bar shows · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
+<p align="center"><img src="docs/advanced-en.png?v=300" width="320" alt="Advanced view"></p>
+<p align="center"><sub>Advanced view: a pace line and a plain verdict per window, 7 days stacked by model, a 35‑day calendar, and what a day costs on the subscription vs at API prices.</sub></p>
 
-<p align="center"><img src="docs/whatsnew-en.png?v=292" width="320" alt="What's new screen"></p>
+<p align="center"><img src="docs/settings-en.png?v=300" width="250" alt="Settings screen"></p>
+<p align="center"><sub>Settings (⚙): interface language · panel view · launch at login · which two numbers the menu bar shows · a sound per event (resets &amp; limit‑reached) · built‑in updates.</sub></p>
+
+<p align="center"><img src="docs/whatsnew-en.png?v=300" width="320" alt="What's new screen"></p>
 <p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
 
 ## How it works
@@ -70,6 +74,17 @@ via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `seconda
 = 7‑day. If a live call fails it falls back to the most recent local session log
 (`~/.codex/sessions/**/rollout-*.jsonl`).
 
+**Advanced view.** The pace math needs only the current reading and the window's reset time.
+The bars, calendar and money come from the CLIs' own local transcripts — `~/.claude/projects/*/*.jsonl`
+and `~/.codex/sessions/**/rollout-*.jsonl` — which record every turn's token counts and model. So the
+percentages and the pace are account‑wide (whatever machine you used), while the bars, calendar and money
+only cover what ran on this Mac. The app indexes the transcripts incrementally (only bytes appended since the last pass) and prices tokens with a built‑in
+per‑model table of public API rates; unknown models are left unpriced rather than guessed. The
+subscription price is inferred from your plan where possible (Claude's rate‑limit tier) and is editable
+in Settings — Codex plan names don't map to public prices, so that one is marked as an estimate until
+you set it. The app also keeps its own utilization samples (35 days, in `~/.claude-limits-monitor/`)
+so that pace can later use your recent rate, not just the window average.
+
 Nothing is sent anywhere except the authenticated usage requests to Anthropic and OpenAI
 (as you). No telemetry, no third‑party services. Runtime cache and a Keychain backup live
 under `~/.claude-limits-monitor/`.
@@ -89,7 +104,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-2.9.2.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.0.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -125,7 +140,7 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-2.9.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.0.dmg
 ```
 
 ## Project layout

@@ -130,11 +130,12 @@ let DEAD_REFRESH_KEY = "deadRefresh"
 /// would differ every launch; this (FNV-1a) is the same every time. It only ever answers
 /// "is this the same token the server already refused?" — it is never stored anywhere it
 /// could be read back as a credential, and never leaves the machine.
-func tokenFingerprint(_ s: String) -> String {
+func fnv64(_ s: String) -> UInt64 {
     var h: UInt64 = 0xcbf2_9ce4_8422_2325
     for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100_0000_01b3 }
-    return String(h, radix: 16)
+    return h
 }
+func tokenFingerprint(_ s: String) -> String { String(fnv64(s), radix: 16) }
 
 func fetchClaude() -> LimitData {
     var d = LimitData()
@@ -154,6 +155,7 @@ func fetchClaude() -> LimitData {
     guard var oauth = creds["claudeAiOauth"] as? [String: Any] else { d.auth = .loggedOut; return d }
 
     d.plan = oauth["subscriptionType"] as? String
+    if let tier = oauth["rateLimitTier"] as? String { UserDefaults.standard.set(tier, forKey: "claudeTier") }
     var at = oauth["accessToken"] as? String ?? ""
     let exp = (oauth["expiresAt"] as? Double) ?? 0
     let nowMs = Date().timeIntervalSince1970 * 1000
@@ -405,6 +407,7 @@ func codexUsageLive() -> LimitData? {
     if let p = rl["primary_window"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
     if let s = rl["secondary_window"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
     d.plan = obj["plan_type"] as? String
+    if let pl = d.plan { UserDefaults.standard.set(pl, forKey: "codexPlan") }
     if let rc = (obj["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int { d.resetCredits = rc }
     d.asOf = Date()
     return d
@@ -491,6 +494,611 @@ func applyCache(_ claude: inout LimitData, _ codex: inout LimitData) {
     if let outD = try? JSONSerialization.data(withJSONObject: cache) {
         try? outD.write(to: URL(fileURLWithPath: CACHE_PATH))
     }
+}
+
+// MARK: - Advanced mode: data layer (history samples, local usage logs, pace, money)
+//
+// The API only ever answers "how much of each window is used RIGHT NOW". Everything the
+// Advanced view adds — pace against a linear plan, when a window runs out, per-day and
+// per-model consumption, what the same tokens would cost on the API — comes from two local
+// sources this layer maintains:
+//   1. `UsageHistory`  — one utilization sample per product per poll, appended to a JSONL
+//      file and kept for 35 days. Feeds the "recent pace" figure and, later, real curves.
+//   2. `UsageLogs`     — an incremental index over the CLIs' own transcripts: Claude Code's
+//      `~/.claude/projects/*/*.jsonl` and Codex's `~/.codex/sessions/**/rollout-*.jsonl`,
+//      which carry every turn's token counts and model. Files are append-only, so each
+//      rescan reads only the bytes added since the last mark.
+
+let HISTORY_PATH = DATA_DIR + "/history.jsonl"
+let USAGE_INDEX_PATH = DATA_DIR + "/usage-index.json"
+let HISTORY_KEEP_DAYS: Double = 35
+
+func advancedEnabled() -> Bool { UserDefaults.standard.bool(forKey: "advanced") }
+
+/// Local-calendar day key ("2026-09-24") — the day boundaries the user actually lives in.
+let dayKeyFormatter: DateFormatter = {
+    let f = DateFormatter(); f.calendar = Calendar.current; f.timeZone = TimeZone.current
+    f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"; return f
+}()
+func dayKey(_ d: Date) -> String { dayKeyFormatter.string(from: d) }
+
+struct UsageSample {
+    let t: Double                 // epoch seconds
+    let product: String           // "claude" | "codex"
+    let session: Double?, weekly: Double?, scoped: Double?
+    let scopedName: String?
+    let sessionReset: Double?, weeklyReset: Double?
+}
+
+final class UsageHistory {
+    static let shared = UsageHistory()
+    private let q = DispatchQueue(label: "ccl.history")
+    private var all: [UsageSample] = []
+
+    /// Read the file once at launch; drop anything older than the retention window and
+    /// rewrite the file compacted so it can't grow without bound.
+    func load() {
+        q.sync {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: HISTORY_PATH)) else { return }
+            let cutoff = Date().timeIntervalSince1970 - HISTORY_KEEP_DAYS * 86400
+            var out: [UsageSample] = []
+            for line in data.split(separator: 0x0A) {
+                guard let o = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+                      let t = o["t"] as? Double, t >= cutoff, let p = o["p"] as? String else { continue }
+                out.append(UsageSample(t: t, product: p, session: o["s"] as? Double, weekly: o["w"] as? Double,
+                                       scoped: o["m"] as? Double, scopedName: o["mn"] as? String,
+                                       sessionReset: o["sr"] as? Double, weeklyReset: o["wr"] as? Double))
+            }
+            all = out
+            let compact = out.map { UsageHistory.line($0) }.joined()
+            try? compact.data(using: .utf8)?.write(to: URL(fileURLWithPath: HISTORY_PATH))
+        }
+    }
+
+    private static func line(_ s: UsageSample) -> String {
+        var o: [String: Any] = ["t": s.t, "p": s.product]
+        if let v = s.session { o["s"] = v }; if let v = s.weekly { o["w"] = v }
+        if let v = s.scoped { o["m"] = v }; if let v = s.scopedName { o["mn"] = v }
+        if let v = s.sessionReset { o["sr"] = v }; if let v = s.weeklyReset { o["wr"] = v }
+        guard let d = try? JSONSerialization.data(withJSONObject: o), let str = String(data: d, encoding: .utf8) else { return "" }
+        return str + "\n"
+    }
+
+    /// Record one live reading. Cached/errored/expired readings are skipped — a sample must
+    /// be a real observation of the backend, or the pace math would see a flat line.
+    func record(_ d: LimitData, product: String) {
+        guard d.present, d.error == nil, d.auth == .ok, !d.fromCache, d.session != nil || d.weekly != nil else { return }
+        let s = UsageSample(t: Date().timeIntervalSince1970, product: product, session: d.session, weekly: d.weekly,
+                            scoped: d.scoped?.percent, scopedName: d.scoped?.name,
+                            sessionReset: d.sessionReset?.timeIntervalSince1970, weeklyReset: d.weeklyReset?.timeIntervalSince1970)
+        q.async {
+            self.all.append(s)
+            let str = UsageHistory.line(s)
+            if let fh = FileHandle(forWritingAtPath: HISTORY_PATH) {
+                fh.seekToEndOfFile(); fh.write(str.data(using: .utf8)!); fh.closeFile()
+            } else {
+                try? str.data(using: .utf8)?.write(to: URL(fileURLWithPath: HISTORY_PATH))
+            }
+        }
+    }
+
+    /// Docs screenshots only: in-memory samples, nothing written.
+    func useForPreview(_ s: [UsageSample]) { q.sync { all = s } }
+
+    func samples(_ product: String, since: Date) -> [UsageSample] {
+        let c = since.timeIntervalSince1970
+        return q.sync { all.filter { $0.product == product && $0.t >= c } }
+    }
+
+    /// Pace over the last `minutes` for one metric, in % per hour — the "current" pace as
+    /// opposed to the average since the window opened. Nil until there are two samples that
+    /// far apart inside the same window (a reset in between would read as a huge negative).
+    func recentRate(_ product: String, metric: (UsageSample) -> Double?, minutes: Double) -> Double? {
+        let pts = samples(product, since: Date().addingTimeInterval(-minutes * 60)).compactMap { s in metric(s).map { (s.t, $0) } }
+        guard let first = pts.first, let last = pts.last, last.0 - first.0 >= 600 else { return nil }
+        let dv = last.1 - first.1
+        if dv < 0 { return nil }                                 // a reset happened inside the span
+        return dv / ((last.0 - first.0) / 3600)
+    }
+}
+
+// ---- Local usage logs → per-day, per-model token counts ----------------------------------
+
+struct DayModelUsage: Codable {
+    var input = 0, output = 0, cacheRead = 0, cacheWrite5m = 0, cacheWrite1h = 0, turns = 0
+    mutating func add(_ o: DayModelUsage) {
+        input += o.input; output += o.output; cacheRead += o.cacheRead
+        cacheWrite5m += o.cacheWrite5m; cacheWrite1h += o.cacheWrite1h; turns += o.turns
+    }
+    var totalTokens: Int { input + output + cacheRead + cacheWrite5m + cacheWrite1h }
+}
+
+struct FileMark: Codable { var size: Int; var lastId: String?; var model: String? }
+
+struct UsageIndex: Codable {
+    var files: [String: FileMark] = [:]
+    /// product → day → model → usage
+    var days: [String: [String: [String: DayModelUsage]]] = [:]
+    /// day → hashes of Claude message ids already counted. A transcript repeats a message
+    /// (same id, same usage) far from its first copy after a resume or compaction, so the
+    /// check has to reach across the whole day, not just the previous line.
+    var seen: [String: [UInt64]] = [:]
+    mutating func add(_ product: String, _ day: String, _ model: String, _ u: DayModelUsage) {
+        var cur = days[product, default: [:]][day, default: [:]][model, default: DayModelUsage()]
+        cur.add(u)
+        days[product, default: [:]][day, default: [:]][model] = cur
+    }
+}
+
+final class UsageLogs {
+    static let shared = UsageLogs()
+    private let lock = NSLock()
+    private var index = UsageIndex()
+    private var scanning = false
+    private(set) var lastScan: Date?
+
+    func snapshot() -> UsageIndex { lock.lock(); defer { lock.unlock() }; return index }
+    /// Docs screenshots only: an in-memory index that never touches the file on disk.
+    func useForPreview(_ ix: UsageIndex) { lock.lock(); index = ix; lock.unlock() }
+
+    func load() {
+        if let d = try? Data(contentsOf: URL(fileURLWithPath: USAGE_INDEX_PATH)),
+           let ix = try? JSONDecoder().decode(UsageIndex.self, from: d) {
+            lock.lock(); index = ix; lock.unlock()
+        }
+    }
+
+    /// Same as `scanAsync`, on the calling thread — for command-line hooks with no run loop.
+    @discardableResult
+    func scanSync() -> Bool {
+        lock.lock(); var ix = index; lock.unlock()
+        let changed = UsageLogs.scan(&ix)
+        lock.lock(); index = ix; lastScan = Date(); lock.unlock()
+        if changed, let d = try? JSONEncoder().encode(ix) { try? d.write(to: URL(fileURLWithPath: USAGE_INDEX_PATH)) }
+        return changed
+    }
+
+    /// Incremental rescan on a background queue; `done` runs on main when the index changed.
+    func scanAsync(done: (() -> Void)? = nil) {
+        lock.lock()
+        if scanning { lock.unlock(); return }
+        scanning = true
+        var ix = index
+        lock.unlock()
+        DispatchQueue.global(qos: .utility).async {
+            let changed = UsageLogs.scan(&ix)
+            // Forget days beyond the retention window so the index can't grow forever.
+            let cutoff = dayKey(Date().addingTimeInterval(-45 * 86400))
+            for p in ix.days.keys { ix.days[p] = ix.days[p]?.filter { $0.key >= cutoff } }
+            ix.seen = ix.seen.filter { $0.key >= cutoff }
+            self.lock.lock(); self.index = ix; self.scanning = false; self.lastScan = Date(); self.lock.unlock()
+            if changed, let d = try? JSONEncoder().encode(ix) { try? d.write(to: URL(fileURLWithPath: USAGE_INDEX_PATH)) }
+            if changed { DispatchQueue.main.async { done?() } }
+        }
+    }
+
+    private static func scan(_ ix: inout UsageIndex) -> Bool {
+        var changed = false
+        var seen: [String: Set<UInt64>] = ix.seen.mapValues { Set($0) }
+        defer { ix.seen = seen.mapValues { Array($0) } }
+        let fm = FileManager.default
+        let cutoff = Date().addingTimeInterval(-45 * 86400)
+        func recent(_ path: String) -> Bool {
+            ((try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date).map { $0 >= cutoff } ?? false
+        }
+        // Claude Code: ~/.claude/projects/<project>/<session>.jsonl — PLUS the subagent
+        // transcripts under <project>/<session>/subagents/agent-*.jsonl. Subagents are where
+        // a different model often runs (an Opus reviewer under a Fable session), and they
+        // burn the same quota; skipping them hid a whole model from the per-model bars.
+        let cRoot = HOME + "/.claude/projects"
+        if let e = fm.enumerator(atPath: cRoot) {
+            while let rel = e.nextObject() as? String {
+                guard rel.hasSuffix(".jsonl") else { continue }
+                let path = cRoot + "/" + rel
+                if recent(path), scanFile(path, product: "claude", &ix, &seen) { changed = true }
+            }
+        }
+        // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
+        let xRoot = HOME + "/.codex/sessions"
+        if let e = fm.enumerator(atPath: xRoot) {
+            while let rel = e.nextObject() as? String {
+                guard rel.hasSuffix(".jsonl"), rel.contains("rollout-") else { continue }
+                let path = xRoot + "/" + rel
+                if recent(path), scanFile(path, product: "codex", &ix, &seen) { changed = true }
+            }
+        }
+        return changed
+    }
+
+    /// Read whatever was appended since the last mark; parse only the lines that matter.
+    /// Files are tens of MB, so the hot path is a C `memmem` for the needle, then a parse
+    /// of just the enclosing line — not a per-line split and search.
+    private static func scanFile(_ path: String, product: String, _ ix: inout UsageIndex, _ seen: inout [String: Set<UInt64>]) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? Int else { return false }
+        var mark = ix.files[path] ?? FileMark(size: 0)
+        if size < mark.size { mark = FileMark(size: 0) }               // truncated/rewritten → start over
+        guard size > mark.size, let fh = FileHandle(forReadingAtPath: path) else { return false }
+        fh.seek(toFileOffset: UInt64(mark.size))
+        let data = fh.readDataToEndOfFile(); fh.closeFile()
+        // Only consume complete lines — the CLI may be mid-write on the last one.
+        var end = data.count
+        if data.last != 0x0A { end = data.lastIndex(of: 0x0A).map { $0 + 1 } ?? 0 }
+        guard end > 0 else { return false }
+        let bytes = [UInt8](data.prefix(end))
+        var lastId = mark.lastId, model = mark.model
+        let needles: [(String, Bool)] = product == "claude" ? [("\"usage\"", false)] : [("\"token_count\"", false), ("\"turn_context\"", true)]
+        // Collect every needle hit as (offset, isContext), then walk them in file order so a
+        // Codex turn_context (which names the model) is applied before the token_count it precedes.
+        var hits: [(Int, Bool)] = []
+        bytes.withUnsafeBufferPointer { buf in
+            for (needle, isCtx) in needles {
+                let n = Array(needle.utf8)
+                var pos = 0
+                while pos < buf.count, let found = memmem(buf.baseAddress! + pos, buf.count - pos, n, n.count) {
+                    let off = UnsafeRawPointer(found) - UnsafeRawPointer(buf.baseAddress!)
+                    hits.append((off, isCtx)); pos = off + n.count
+                }
+            }
+        }
+        hits.sort { $0.0 < $1.0 }
+        var lineEndSeen = -1                                             // skip a second hit inside the same line
+        for (off, isCtx) in hits {
+            if off < lineEndSeen { continue }
+            var ls = off; while ls > 0 && bytes[ls - 1] != 0x0A { ls -= 1 }
+            var le = off; while le < bytes.count && bytes[le] != 0x0A { le += 1 }
+            lineEndSeen = le
+            let line = Data(bytes[ls..<le])
+            guard let o = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
+            if isCtx {
+                if let m = (o["payload"] as? [String: Any])?["model"] as? String { model = m }
+                continue
+            }
+            guard let ts = o["timestamp"] as? String, let when = parseISOmillisZ(ts) ?? parseISOmicroOffset(ts) else { continue }
+            var u = DayModelUsage(); var m = model ?? "?"
+            if product == "claude" {
+                guard o["type"] as? String == "assistant", let msg = o["message"] as? [String: Any],
+                      let usage = msg["usage"] as? [String: Any] else { continue }
+                // A message with several content blocks is written as several lines that
+                // repeat the same id and the same usage — count each message once.
+                let id = msg["id"] as? String
+                if id != nil, id == lastId { continue }
+                lastId = id
+                if let id = id {
+                    let day = dayKey(when), h = fnv64(id)
+                    if seen[day, default: []].contains(h) { continue }
+                    seen[day, default: []].insert(h)
+                }
+                m = msg["model"] as? String ?? "?"
+                if m == "<synthetic>" { continue }
+                u.input = usage["input_tokens"] as? Int ?? 0; u.output = usage["output_tokens"] as? Int ?? 0
+                u.cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
+                if let cc = usage["cache_creation"] as? [String: Any] {
+                    u.cacheWrite5m = cc["ephemeral_5m_input_tokens"] as? Int ?? 0
+                    u.cacheWrite1h = cc["ephemeral_1h_input_tokens"] as? Int ?? 0
+                } else { u.cacheWrite5m = usage["cache_creation_input_tokens"] as? Int ?? 0 }
+            } else {
+                guard let p = o["payload"] as? [String: Any], p["type"] as? String == "token_count",
+                      let lu = (p["info"] as? [String: Any])?["last_token_usage"] as? [String: Any] else { continue }
+                // OpenAI's input_tokens INCLUDES the cached part — split it out for pricing.
+                let inp = lu["input_tokens"] as? Int ?? 0, cached = lu["cached_input_tokens"] as? Int ?? 0
+                u.input = max(0, inp - cached); u.cacheRead = cached
+                u.cacheWrite5m = lu["cache_write_input_tokens"] as? Int ?? 0
+                u.output = lu["output_tokens"] as? Int ?? 0        // reasoning tokens are included in output_tokens
+            }
+            u.turns = 1
+            ix.add(product, dayKey(when), m, u)
+        }
+        ix.files[path] = FileMark(size: mark.size + end, lastId: lastId, model: model)
+        return true
+    }
+}
+
+// ---- Prices & money -----------------------------------------------------------------------
+
+/// USD per 1M tokens. Cache-write prices are per the provider's 5-minute tier; Anthropic's
+/// 1-hour writes are billed at 2× input and handled in `apiCost`.
+struct ModelPrice { let input, output, cacheRead, cacheWrite: Double }
+
+/// Matched by prefix, most specific first. Unknown models cost nothing and are reported as
+/// "unpriced" so the money figures never silently include a guess.
+let MODEL_PRICES: [(prefix: String, price: ModelPrice)] = [
+    ("claude-fable-5-1", ModelPrice(input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5)),
+    ("claude-fable",     ModelPrice(input: 10, output: 50, cacheRead: 1.0,  cacheWrite: 12.5)),
+    ("claude-opus",      ModelPrice(input: 5,  output: 25, cacheRead: 0.5,  cacheWrite: 6.25)),
+    ("claude-sonnet",    ModelPrice(input: 2,  output: 10, cacheRead: 0.2,  cacheWrite: 2.5)),
+    ("claude-haiku",     ModelPrice(input: 1,  output: 5,  cacheRead: 0.1,  cacheWrite: 1.25)),
+    ("gpt-6-astra",      ModelPrice(input: 10, output: 50, cacheRead: 1.0,  cacheWrite: 12.5)),
+    ("gpt-6-luna",       ModelPrice(input: 1,  output: 5,  cacheRead: 0.1,  cacheWrite: 1.25)),
+    ("gpt-5.6",          ModelPrice(input: 4,  output: 20, cacheRead: 0.4,  cacheWrite: 5.0)),
+    ("gpt-6-sol",        ModelPrice(input: 4,  output: 20, cacheRead: 0.4,  cacheWrite: 5.0)),
+    ("gpt-reserve",      ModelPrice(input: 4,  output: 20, cacheRead: 0.4,  cacheWrite: 5.0)),
+    ("codex-auto-review", ModelPrice(input: 4, output: 20, cacheRead: 0.4,  cacheWrite: 5.0)),
+]
+func modelPrice(_ model: String) -> ModelPrice? {
+    MODEL_PRICES.first { model.hasPrefix($0.prefix) }?.price
+}
+func apiCost(_ model: String, _ u: DayModelUsage) -> Double? {
+    guard let p = modelPrice(model) else { return nil }
+    return (Double(u.input) * p.input + Double(u.output) * p.output + Double(u.cacheRead) * p.cacheRead
+            + Double(u.cacheWrite5m) * p.cacheWrite + Double(u.cacheWrite1h) * p.input * 2) / 1e6
+}
+
+/// Short human name for a model id ("claude-fable-5-1" → "Fable 5.1", "gpt-6-astra" → "Astra 6").
+func modelDisplayName(_ id: String) -> String {
+    var s = id
+    for pre in ["claude-", "gpt-"] where s.hasPrefix(pre) { s = String(s.dropFirst(pre.count)) }
+    var parts = s.split(separator: "-").map(String.init)
+    if parts.first == "codex" { return parts.dropFirst().joined(separator: "-") }
+    // move a leading version ("6", "5.6") behind the family name: "6-astra" → "Astra 6"
+    if let first = parts.first, first.first?.isNumber == true, parts.count >= 2 {
+        let ver = parts.removeFirst()
+        let name = parts.removeFirst()
+        return name.capitalized + " " + ([ver] + parts).joined(separator: ".")
+    }
+    let name = parts.removeFirst()
+    return parts.isEmpty ? name.capitalized : name.capitalized + " " + parts.joined(separator: ".")
+}
+
+/// Monthly subscription price in USD — the user's own setting first, else an inference
+/// from what the backends tell us about the plan. Codex plan names aren't public pricing,
+/// so that side is an estimate until the user sets it (`flag` says which).
+func subscriptionUSD(_ product: String, plan: String?) -> (usd: Double, estimated: Bool) {
+    let d = UserDefaults.standard
+    let key = product == "claude" ? "subClaude" : "subCodex"
+    if d.object(forKey: key) != nil { return (d.double(forKey: key), false) }
+    if product == "claude" {
+        let tier = d.string(forKey: "claudeTier") ?? ""
+        if tier.contains("max_20x") { return (200, false) }
+        if tier.contains("max_5x") { return (100, false) }
+        if tier.contains("pro") || plan == "pro" { return (20, false) }
+        return (200, true)
+    }
+    switch plan ?? "" {
+    case "free": return (0, false)
+    case "go": return (8, false)
+    case "plus": return (20, false)
+    case "pro": return (200, true)
+    default: return (100, true)      // "prolite" and anything else: Pro 5x-shaped guess
+    }
+}
+
+struct DayUsage { let day: String; let byModel: [(model: String, tokens: Int, usd: Double)]; let usd: Double; let tokens: Int; let turns: Int }
+
+/// Per-day rollup for the last `days` calendar days (oldest first), with per-model splits
+/// sorted by cost so the biggest consumer sits at the bottom of a stacked bar.
+func dailyUsage(_ product: String, days: Int, index: UsageIndex) -> [DayUsage] {
+    let today = Calendar.current.startOfDay(for: Date())
+    return (0..<days).reversed().map { back -> DayUsage in
+        let d = Calendar.current.date(byAdding: .day, value: -back, to: today)!
+        let key = dayKey(d)
+        let models = index.days[product]?[key] ?? [:]
+        var rows: [(String, Int, Double)] = []
+        var usd = 0.0, tokens = 0, turns = 0
+        for (m, u) in models where m != "?" {
+            let c = apiCost(m, u) ?? 0
+            rows.append((m, u.totalTokens, c)); usd += c; tokens += u.totalTokens; turns += u.turns
+        }
+        rows.sort { $0.2 > $1.2 }
+        return DayUsage(day: key, byModel: rows.map { (model: $0.0, tokens: $0.1, usd: $0.2) }, usd: usd, tokens: tokens, turns: turns)
+    }
+}
+
+struct MoneySummary {
+    let days: Int, activeDays: Int
+    let usdApi: Double, perCalendarDay: Double, perActiveDay: Double
+    let subMonthly: Double, subEstimated: Bool
+    var subPerDay: Double { subMonthly / 30 }
+    var subPerWeek: Double { subMonthly * 12 / 52 }
+    var ratio: Double { subMonthly > 0 ? usdApi / (subMonthly * Double(days) / 30) : 0 }
+}
+func moneySummary(_ product: String, plan: String?, index: UsageIndex, days: Int = 35) -> MoneySummary {
+    let rows = dailyUsage(product, days: days, index: index)
+    let active = rows.filter { $0.turns > 0 }
+    let total = rows.reduce(0) { $0 + $1.usd }
+    let sub = subscriptionUSD(product, plan: plan)
+    return MoneySummary(days: days, activeDays: active.count, usdApi: total,
+                        perCalendarDay: total / Double(days), perActiveDay: active.isEmpty ? 0 : total / Double(active.count),
+                        subMonthly: sub.usd, subEstimated: sub.estimated)
+}
+
+// ---- Text formatting for the Advanced screen ----------------------------------------------
+
+/// "13,4" in Russian, "13.4" in English — one decimal, no trailing zero for whole numbers.
+func fmtNum(_ v: Double, decimals: Int = 1) -> String {
+    let rounded = (v * pow(10, Double(decimals))).rounded() / pow(10, Double(decimals))
+    var str = rounded == rounded.rounded() && decimals <= 1 ? String(Int(rounded)) : String(format: "%.\(decimals)f", rounded)
+    if appLang() == "ru" { str = str.replacingOccurrences(of: ".", with: ",") }
+    return str
+}
+func fmtPct(_ v: Double, decimals: Int = 1) -> String { fmtNum(v, decimals: decimals) + "%" }
+func fmtSignedPts(_ v: Double) -> String { (v >= 0 ? "+" : "−") + fmtNum(abs(v)) + tr(" п.", " pts") }
+func fmtUSD(_ v: Double) -> String {
+    if v >= 100 { return "$" + String(Int(v.rounded())) }
+    return "$" + fmtNum(v, decimals: 2)
+}
+
+/// "2 ч 13 мин" / "3,7 дня" / "45 мин" — the way you'd say a remaining span out loud.
+func fmtSpan(_ hours: Double) -> String {
+    if hours >= 24 {
+        let days = (hours / 24 * 10).rounded() / 10
+        if days == days.rounded() {
+            let n = Int(days)
+            if appLang() == "ru" { return "\(n) " + (n == 1 ? "день" : (2...4).contains(n) ? "дня" : "дней") }
+            return "\(n) " + (n == 1 ? "day" : "days")
+        }
+        return fmtNum(days) + tr(" дня", " days")
+    }
+    if hours >= 1 {
+        let h = Int(hours), m = Int(((hours - Double(h)) * 60).rounded())
+        return m == 0 ? "\(h)" + tr(" ч", " h") : "\(h)" + tr(" ч ", " h ") + "\(m)" + tr(" мин", " min")
+    }
+    return "\(max(1, Int((hours * 60).rounded())))" + tr(" мин", " min")
+}
+/// "3 д 19 ч" — the compact form for a "time left" column.
+func fmtSpanShort(_ hours: Double) -> String {
+    if hours >= 24 { return "\(Int(hours / 24))" + tr(" д ", " d ") + "\(Int(hours.truncatingRemainder(dividingBy: 24)))" + tr(" ч", " h") }
+    if hours >= 1 { return "\(Int(hours))" + tr(" ч ", " h ") + "\(Int(((hours - Double(Int(hours))) * 60).rounded()))" + tr(" мин", " min") }
+    return "\(max(1, Int((hours * 60).rounded())))" + tr(" мин", " min")
+}
+
+/// A moment as people say it: "09:37" today, "сб 15:33" within the week, else "26 сен, 15:33".
+func fmtMoment(_ d: Date) -> String {
+    let cal = Calendar.current
+    let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
+    if cal.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+    if let week = cal.date(byAdding: .day, value: 6, to: Date()), d < week {
+        f.dateFormat = "EEE HH:mm"; return f.string(from: d).replacingOccurrences(of: ".", with: "")
+    }
+    f.dateFormat = "d MMM, HH:mm"; return f.string(from: d).replacingOccurrences(of: ".", with: "")
+}
+
+/// Burn rate in the unit that reads naturally for the window: %/hour for a 5-hour
+/// window, %/day for a weekly one.
+func fmtRate(_ pace: WindowPace) -> String {
+    pace.windowH <= 24 ? fmtNum(pace.avgRatePerH) + tr("%/ч", "%/h")
+                       : fmtNum(pace.avgRatePerH * 24) + tr("%/день", "%/day")
+}
+
+/// The verdict line: what actually happens to this window if you keep going like this.
+func paceVerdict(_ p: WindowPace) -> String {
+    if p.used >= 100 { return tr("Лимит исчерпан", "Limit reached") }
+    if let at = p.runsOutAt {
+        let before = p.reset.timeIntervalSince(at) / 3600
+        return tr("Кончится в ", "Runs out at ") + fmtMoment(at) + tr(", за ", ", ") + fmtSpan(before) + tr(" до сброса", " before reset")
+    }
+    if let proj = p.projectedPct { return tr("Хватит до сброса (прогноз ", "Lasts to reset (projected ") + fmtPct(proj, decimals: 0) + ")" }
+    return tr("Хватит до сброса", "Lasts to reset")
+}
+
+// ---- View model for the Advanced screen ---------------------------------------------------
+
+/// One day of a stacked bar: the per-model split (biggest first), with models under 3% of
+/// the day folded into "other" so the stack never has a sliver you can't read.
+struct StackedDay {
+    let day: String, weekday: Int          // weekday: 1 = Monday … 7 = Sunday
+    let usd: Double, turns: Int
+    let parts: [(model: String, usd: Double)]
+    let isToday: Bool
+}
+
+struct AdvancedProduct {
+    let product: String
+    let limits: [PacedLimit]
+    let resetCredits: Int?
+    let days7: [StackedDay]
+    let legend: [String]                   // models by 7-day spend, "other" last when present
+    let calendar: [DayUsage]               // last 42 calendar days, oldest first
+    let calendarMax: Double
+    let money: MoneySummary
+    let firstSample: Date?                 // when utilization sampling began (nil = never)
+}
+
+func advancedProduct(_ d: LimitData, product: String, index: UsageIndex) -> AdvancedProduct {
+    let days = dailyUsage(product, days: 42, index: index)
+    let last7 = Array(days.suffix(7))
+    let todayKey = dayKey(Date())
+    // legend: models ranked by spend across the 7 days; anything under 3% of a day → "other"
+    var spend: [String: Double] = [:]
+    for dd in last7 { for r in dd.byModel { spend[r.model, default: 0] += r.usd } }
+    let ranked = spend.sorted { $0.value > $1.value }.map { $0.key }
+    let top = Array(ranked.prefix(3))
+    var hasOther = false
+    let stacked: [StackedDay] = last7.map { dd in
+        var parts: [(String, Double)] = []
+        var other = 0.0
+        for r in dd.byModel {
+            if top.contains(r.model), dd.usd > 0, r.usd / dd.usd >= 0.03 { parts.append((r.model, r.usd)) }
+            else { other += r.usd }
+        }
+        if other > 0 { parts.append(("other", other)); hasOther = true }
+        let wd = Calendar.current.component(.weekday, from: dayKeyFormatter.date(from: dd.day) ?? Date())
+        return StackedDay(day: dd.day, weekday: wd == 1 ? 7 : wd - 1, usd: dd.usd, turns: dd.turns,
+                          parts: parts.map { (model: $0.0, usd: $0.1) }, isToday: dd.day == todayKey)
+    }
+    let first = UsageHistory.shared.samples(product, since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
+    return AdvancedProduct(product: product, limits: pacedLimits(d, product: product), resetCredits: d.resetCredits,
+                           days7: stacked, legend: top + (hasOther ? ["other"] : []),
+                           calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0,
+                           money: moneySummary(product, plan: d.plan, index: index), firstSample: first)
+}
+
+/// Calendar cell brightness 0…1 on a square-root scale, so a couple of heavy days don't
+/// turn every other day black.
+func calendarIntensity(_ usd: Double, max: Double) -> Double {
+    guard max > 0, usd > 0 else { return 0 }
+    return Swift.max(0.12, (usd / max).squareRoot())
+}
+
+// ---- Pace ---------------------------------------------------------------------------------
+
+/// Everything the Advanced view says about one rate-limit window, derived from a single
+/// reading: where a linear plan (0% at open → 100% at reset) says you should be, how far
+/// off it you are, the average burn since the window opened, and — extrapolating that —
+/// whether the window lasts to its reset or when it runs out.
+struct WindowPace {
+    let used: Double
+    let start: Date, reset: Date, windowH: Double
+    let elapsedH: Double, remainingH: Double
+    let planPct: Double            // where the linear plan is right now
+    let deltaPts: Double           // used − plan; positive = burning faster than plan
+    let avgRatePerH: Double        // % per hour since the window opened
+    let projectedPct: Double?      // used ÷ elapsed fraction — where you'd land at reset
+    let runsOutAt: Date?           // when 100% is reached at the average rate, if before reset
+    let recentRatePerH: Double?    // % per hour over the last hour of samples, when known
+    var lasts: Bool { runsOutAt == nil }
+    /// Severity for colour: 2 = runs out before reset, 1 = projected 85–100% ("впритык"), 0 = fine.
+    var severity: Int {
+        if runsOutAt != nil { return 2 }
+        if let p = projectedPct, p >= 85 { return 1 }
+        return 0
+    }
+}
+
+func windowPace(used: Double?, reset: Date?, windowH: Double, recentRate: Double? = nil, now: Date = Date()) -> WindowPace? {
+    guard let used = used, let reset = reset else { return nil }
+    let start = reset.addingTimeInterval(-windowH * 3600)
+    let elapsedH = max(0, min(windowH, now.timeIntervalSince(start) / 3600))
+    let frac = elapsedH / windowH
+    let plan = frac * 100
+    // Ten minutes into a window the average is noise; hold off on projecting until then.
+    let rate = elapsedH >= 10.0 / 60 ? used / elapsedH : 0
+    let projected: Double? = elapsedH >= 10.0 / 60 && frac > 0 ? used / frac : nil
+    var runsOut: Date? = nil
+    if rate > 0 {
+        let at = start.addingTimeInterval(100 / rate * 3600)
+        if at < reset { runsOut = at }
+    }
+    if used >= 100 { runsOut = now }
+    return WindowPace(used: used, start: start, reset: reset, windowH: windowH, elapsedH: elapsedH,
+                      remainingH: windowH - elapsedH, planPct: plan, deltaPts: used - plan, avgRatePerH: rate,
+                      projectedPct: projected, runsOutAt: runsOut, recentRatePerH: recentRate)
+}
+
+/// The windows the Advanced view lists for a product, in display order.
+struct PacedLimit { let id: String; let name: String; let pace: WindowPace?; let color: Int }   // color: 0 session, 1 weekly, 2 scoped
+func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
+    let h = UsageHistory.shared
+    var out: [PacedLimit] = []
+    // Codex no longer has a 5-hour window (Alex, 2026-09-24): show its session row only if the
+    // backend actually reports one, never as a permanent "inactive" placeholder. Claude's
+    // session row is always there — that window is the one you hit most.
+    if product == "claude" || d.session != nil {
+        out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
+                              pace: windowPace(used: d.session, reset: d.sessionReset, windowH: 5,
+                                               recentRate: h.recentRate(product, metric: { $0.session }, minutes: 60)), color: 0))
+    }
+    // Order (Alex, 2026-09-24): session → per-model week (Fable) → all-models week. The
+    // per-model limit is the one that actually bites first, so it sits right under the session.
+    if let s = d.scoped {
+        out.append(PacedLimit(id: "scoped", name: tr("Неделя · ", "Week · ") + s.name,
+                              pace: windowPace(used: s.percent, reset: s.reset, windowH: 168,
+                                               recentRate: h.recentRate(product, metric: { $0.scoped }, minutes: 180)), color: 2))
+    }
+    out.append(PacedLimit(id: "weekly", name: product == "claude" ? tr("Неделя · все модели", "Week · all models") : tr("Неделя", "Week"),
+                          pace: windowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
+                                           recentRate: h.recentRate(product, metric: { $0.weekly }, minutes: 180)), color: 1))
+    return out
 }
 
 // MARK: - Severity & colors
@@ -868,12 +1476,17 @@ let SET_SOUND_ROW_H: CGFloat = 29        // sound-picker rows
 let SET_GAP: CGFloat = 14                // card bottom → next section caption
 let SET_CAP_H: CGFloat = 16              // caption → its card
 let SET_GEN_TOP: CGFloat = 66
-let SET_GEN_H = SET_ROW_H * 2            // language · launch at login
+let SET_GEN_H = SET_ROW_H * 3            // language · launch at login · panel view
 let SET_TRAY_CAP = SET_GEN_TOP + SET_GEN_H + SET_GAP
 let SET_TRAY_TOP = SET_TRAY_CAP + SET_CAP_H
 let SET_TRAY_H: CGFloat = 44             // the menu-bar picker card
-let SET_CAP1 = SET_TRAY_TOP + SET_TRAY_H + SET_GAP
-let SET_C1_TOP = SET_CAP1 + SET_CAP_H
+let SET_SUB_CAP = SET_TRAY_TOP + SET_TRAY_H + SET_GAP     // «ПОДПИСКИ» caption (Advanced only)
+let SET_SUB_TOP = SET_SUB_CAP + SET_CAP_H
+let SET_SUB_H = SET_ROW_H * 2
+/// Height the subscriptions block adds — zero in the Simple view, where money isn't shown.
+func setSubBlock() -> CGFloat { advancedEnabled() ? SET_CAP_H + SET_SUB_H + SET_GAP : 0 }
+func setCap1() -> CGFloat { SET_TRAY_TOP + SET_TRAY_H + SET_GAP + setSubBlock() }
+func setC1Top() -> CGFloat { setCap1() + SET_CAP_H }
 
 /// Does this card render the per-model row? Only a healthy, live card does — the
 /// sign-in-problem and stale layouts replace the reset rows with a status message.
@@ -889,7 +1502,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "2.9.2"
+let APP_VERSION = "3.0"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -1276,6 +1889,602 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
 // MARK: - Settings screen (same panel, same design language)
 
+// MARK: - Advanced panel («Темп») — pace per window, history, money
+//
+// Geometry follows design/SPEC.md for direction A (all sizes in pt, top-left origin):
+// header 40 · product cards (rows of 62 / 50 / 24) · collapsible "history & money" card
+// (187 expanded, 35 collapsed) · footer 24. Height is derived from the same row model the
+// draw pass uses, so the two can't disagree.
+
+let ADV_W: CGFloat = 360
+let ADV_CX: CGFloat = 15, ADV_CW: CGFloat = 330          // card x / width
+let ADV_IX: CGFloat = 26, ADV_IW: CGFloat = 308          // card content x / width
+let ADV_ROW_FULL: CGFloat = 62, ADV_ROW_SHORT: CGFloat = 50, ADV_ROW_CREDITS: CGFloat = 24
+let ADV_NOTICE: CGFloat = 19, ADV_PLACEHOLDER: CGFloat = 40
+let ADV_HIST_EXPANDED: CGFloat = 187, ADV_HIST_COLLAPSED: CGFloat = 35, ADV_HIST_EMPTY_EXTRA: CGFloat = 44
+
+let ADV_SESSION = NSColor(srgbRed: 0.22, green: 0.55, blue: 1.00, alpha: 1)      // #388CFF
+let ADV_WEEK    = NSColor(srgbRed: 0.78, green: 0.42, blue: 0.98, alpha: 1)      // #C76BFA
+let ADV_WARN    = NSColor(srgbRed: 1.00, green: 0.63, blue: 0.04, alpha: 1)      // #FFA00A
+let ADV_CRIT    = NSColor(srgbRed: 1.00, green: 0.27, blue: 0.23, alpha: 1)      // #FF453B
+let ADV_ACCENT  = NSColor(srgbRed: 1.00, green: 0.62, blue: 0.18, alpha: 1)      // #FF9E2E
+let ADV_LINK    = NSColor(srgbRed: 0.42, green: 0.62, blue: 0.96, alpha: 1)      // #6B9EF5
+let ADV_MODEL   = [NSColor(srgbRed: 0.20, green: 0.85, blue: 0.70, alpha: 1),    // #33D9B3
+                   NSColor(srgbRed: 0.99, green: 0.47, blue: 0.38, alpha: 1),    // #FC7861
+                   NSColor(srgbRed: 0.98, green: 0.22, blue: 0.56, alpha: 1)]    // #FA388F
+
+func advHistExpanded() -> Bool { UserDefaults.standard.bool(forKey: "advHistExpanded") }
+func advHistProduct(_ present: [String]) -> String {
+    let p = UserDefaults.standard.string(forKey: "advHistProduct") ?? ""
+    return present.contains(p) ? p : (present.first ?? "claude")
+}
+
+/// Window colour by usage (spec §7.1): the window's own hue, amber from 50%, red from 80%.
+func advWindowColor(_ kind: Int, _ used: Double?) -> NSColor {
+    let u = used ?? 0
+    if kind == 2 { return u >= 80 ? ADV_MODEL[2] : u >= 50 ? ADV_MODEL[1] : ADV_MODEL[0] }
+    if u >= 80 { return ADV_CRIT }
+    if u >= 50 { return ADV_WARN }
+    return kind == 0 ? ADV_SESSION : ADV_WEEK
+}
+
+/// Stacked-bar colour family for a model id (spec §4.1) — models in one family merge into
+/// one segment so Fable 5 and Fable 5.1 read as "Fable".
+func advModelFamily(_ id: String, product: String) -> (name: String, color: NSColor) {
+    if product == "claude" {
+        if id.hasPrefix("claude-fable") { return ("Fable", ADV_MODEL[0]) }
+        if id.hasPrefix("claude-opus") { return ("Opus", ADV_WEEK) }
+        if id == "other" { return (tr("прочие", "other"), ADV_SESSION) }
+        return (modelDisplayName(id).split(separator: " ").first.map(String.init) ?? id, ADV_SESSION)
+    }
+    if id.hasPrefix("gpt-6-astra") { return ("Astra", ADV_MODEL[1]) }
+    if id.hasPrefix("gpt-5.6") { return ("Sol 5.6", ADV_LINK) }
+    if id.hasPrefix("gpt-6-sol") { return ("Sol 6", ADV_MODEL[2]) }
+    return (tr("прочие", "other"), gray(1, 0.28))
+}
+
+/// How one limit row is drawn — resolved once from the pace so the height pass and the
+/// draw pass see the same thing.
+enum AdvRowKind { case full, inactive, stale, tooEarly, exhausted, credits }
+struct AdvRow {
+    let limit: PacedLimit?
+    let kind: AdvRowKind
+    let credits: Int?
+    var height: CGFloat {
+        switch kind {
+        case .full, .tooEarly, .exhausted: return ADV_ROW_FULL
+        case .inactive, .stale: return ADV_ROW_SHORT
+        case .credits: return ADV_ROW_CREDITS
+        }
+    }
+}
+struct AdvCard {
+    let product: String, data: LimitData, name: String, icon: String, url: String
+    let expired: Bool
+    let rows: [AdvRow]
+    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + (expired ? ADV_NOTICE : 0) }
+}
+
+func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
+    func card(_ d: LimitData, _ product: String) -> AdvCard {
+        let expired = d.auth == .expired || isStale(d)
+        var limits = pacedLimits(d, product: product)
+        if product == "codex" { limits.sort { a, _ in a.id == "weekly" } }        // Codex: week first
+        var rows: [AdvRow] = limits.map { l in
+            guard let p = l.pace else { return AdvRow(limit: l, kind: .inactive, credits: nil) }
+            if expired { return AdvRow(limit: l, kind: .stale, credits: nil) }
+            if p.used >= 100 { return AdvRow(limit: l, kind: .exhausted, credits: nil) }
+            if p.elapsedH < 10.0 / 60 || p.used < 2 { return AdvRow(limit: l, kind: .tooEarly, credits: nil) }
+            return AdvRow(limit: l, kind: .full, credits: nil)
+        }
+        if product == "codex" { rows.append(AdvRow(limit: nil, kind: .credits, credits: d.resetCredits ?? 0)) }
+        return AdvCard(product: product, data: d,
+                       name: product == "claude" ? "Claude Code" : "Codex",
+                       icon: product == "claude" ? "claude_128.png" : "codex_128.png",
+                       url: product == "claude" ? "https://claude.ai/settings/usage" : "https://chatgpt.com/codex/cloud/settings/analytics#usage",
+                       expired: expired, rows: rows)
+    }
+    var out: [AdvCard] = []
+    if claude.present { out.append(card(claude, "claude")) }
+    if codex.present { out.append(card(codex, "codex")) }
+    return out
+}
+
+func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
+    guard advHistExpanded() else { return ADV_HIST_COLLAPSED }
+    let present = cards.map { $0.product }
+    let p = advHistProduct(present)
+    let noHistory = UsageHistory.shared.samples(p, since: Date(timeIntervalSince1970: 0)).isEmpty
+    return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0)
+}
+
+func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
+    let cards = advCards(claude, codex)
+    var h: CGFloat = 94
+    for c in cards { h += 5 + c.height }
+    if cards.count == 1 { h += 5 + ADV_PLACEHOLDER }
+    h += 5 + advHistoryHeight(cards)
+    return h
+}
+
+/// Main-panel height for whichever view is on.
+func mainPanelHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
+    advancedEnabled() ? advancedHeight(claude, codex) : panelMainHeight(claude, codex)
+}
+
+// Spec §6.4 — reset moment for the metrics line: "11:50" today, else "пн, 03:00".
+func advResetShort(_ d: Date) -> String {
+    let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
+    if Calendar.current.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+    f.dateFormat = "EEE, HH:mm"
+    let s = f.string(from: d).replacingOccurrences(of: ".", with: "")
+    return appLang() == "ru" ? s.lowercased() : s
+}
+func advMomentLower(_ d: Date) -> String {
+    let s = fmtMoment(d)
+    return appLang() == "ru" ? s.prefix(1).lowercased() + s.dropFirst() : s
+}
+func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
+    guard let p = row.limit?.pace else { return tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request") }
+    switch row.kind {
+    case .stale: return tr("по данным на ", "as of ") + advMomentLower(asOf ?? Date())
+    case .exhausted: return tr("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + advMomentLower(p.reset)
+    case .tooEarly: return tr("Мало данных для темпа · сброс в ", "Not enough data for pace · resets at ") + advMomentLower(p.reset)
+    default: break
+    }
+    if let at = p.runsOutAt {
+        let before = p.reset.timeIntervalSince(at) / 3600
+        return tr("Кончится в ", "Runs out at ") + advMomentLower(at) + tr(", за ", ", ") + fmtSpan(before) + tr(" до сброса", " before reset")
+    }
+    if let proj = p.projectedPct {
+        if proj.rounded() >= 85 { return tr("Хватит впритык (прогноз ", "Barely lasts (forecast ") + fmtPct(proj, decimals: 0) + ")" }
+        return tr("Хватит до сброса (прогноз ", "Lasts until reset (forecast ") + fmtPct(proj, decimals: 0) + ")"
+    }
+    return tr("Хватит до сброса", "Lasts until reset")
+}
+
+@discardableResult
+func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
+                  interval: TimeInterval, updated: Date?, about: AboutState) -> [Hit] {
+    let W = size.width, H = size.height
+    var hits: [Hit] = []
+    let cs = CGColorSpaceCreateDeviceRGB()
+    let textHi = gray(1, 0.95), textMid = gray(1, 0.5), textLo = gray(1, 0.34)
+
+    func rectTL(_ x: CGFloat, _ topY: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: x, y: H - topY - h, width: w, height: h)
+    }
+    func attr(_ s: String, _ sz: CGFloat, _ weight: NSFont.Weight, _ color: NSColor, kern: CGFloat = 0) -> NSAttributedString {
+        let a = NSMutableAttributedString(attributedString: ctAttr(s, ctFont(sz, weight), cg(color)))
+        if kern != 0 { a.addAttribute(NSAttributedString.Key(kCTKernAttributeName as String), value: kern, range: NSRange(location: 0, length: a.length)) }
+        return a
+    }
+    func caps(_ s: String, _ sz: CGFloat, _ color: NSColor) -> NSAttributedString { attr(s.uppercased(), sz, .semibold, color, kern: sz * 0.06) }
+    func width(_ a: NSAttributedString) -> CGFloat { ceil(lineWidth(CTLineCreateWithAttributedString(a))) }
+    /// Draw with the text's cap-top at `topY` (approximated by the ascender) — the same
+    /// convention as the other screens.
+    func text(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
+        var dx = x
+        if align == 1 { dx = x - w / 2 } else if align == 2 { dx = x - w }
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - topY - asc)
+        CTLineDraw(line, ctx)
+    }
+    /// Draw with the baseline at `baseY` — for chart labels the spec positions by baseline.
+    func textB(_ s: NSAttributedString, x: CGFloat, baseY: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        let w = lineWidth(line)
+        var dx = x
+        if align == 1 { dx = x - w / 2 } else if align == 2 { dx = x - w }
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - baseY)
+        CTLineDraw(line, ctx)
+    }
+    /// Vertically centre a single line in a box of height `h` whose top is `topY`.
+    func textC(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, h: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(s)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        _ = CTLineGetTypographicBounds(line, &asc, &desc, nil)
+        text(s, x: x, topY: topY + (h - asc - desc) / 2 + desc * 0.15, align: align)
+    }
+    func roundFill(_ r: CGRect, _ rad: CGFloat, _ color: NSColor) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: min(rad, r.height / 2, r.width / 2), cornerHeight: min(rad, r.height / 2, r.width / 2), transform: nil))
+        ctx.setFillColor(cg(color)); ctx.fillPath()
+    }
+    func roundStroke(_ r: CGRect, _ rad: CGFloat, _ color: NSColor, _ lw: CGFloat) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: min(rad, r.height / 2), cornerHeight: min(rad, r.height / 2), transform: nil))
+        ctx.setStrokeColor(cg(color)); ctx.setLineWidth(lw); ctx.strokePath()
+    }
+    func hline(_ x0: CGFloat, _ x1: CGFloat, _ topY: CGFloat, _ color: NSColor) {
+        ctx.setStrokeColor(cg(color)); ctx.setLineWidth(1)
+        ctx.beginPath(); ctx.move(to: CGPoint(x: x0, y: H - topY - 0.5)); ctx.addLine(to: CGPoint(x: x1, y: H - topY - 0.5)); ctx.strokePath()
+    }
+    func dot(_ cx: CGFloat, _ cyTop: CGFloat, _ color: NSColor, r: CGFloat = 3) {
+        ctx.setFillColor(cg(color)); ctx.fillEllipse(in: CGRect(x: cx - r, y: H - cyTop - r, width: 2 * r, height: 2 * r))
+    }
+    /// A rounded pill with a label; returns its rect.
+    @discardableResult
+    func pill(_ label: NSAttributedString, x: CGFloat, topY: CGFloat, h: CGFloat, padX: CGFloat, fill: NSColor, stroke: NSColor? = nil, rightAligned: Bool = false) -> CGRect {
+        let w = width(label) + padX * 2
+        let r = rectTL(rightAligned ? x - w : x, topY, w, h)
+        roundFill(r, h / 2, fill)
+        if let s = stroke { roundStroke(r.insetBy(dx: 0.5, dy: 0.5), h / 2, s, 1) }
+        textC(label, x: r.midX, topY: topY, h: h, align: 1)
+        return r
+    }
+
+    // ---- background (same as the simple panel) ----
+    let bgPath = CGPath(roundedRect: CGRect(x: 0.5, y: 0.5, width: W - 1, height: H - 1), cornerWidth: 18, cornerHeight: 18, transform: nil)
+    ctx.saveGState(); ctx.addPath(bgPath); ctx.clip()
+    if let g = CGGradient(colorsSpace: cs, colors: [cg(gray(0.16, 1)), cg(gray(0.075, 1))] as CFArray, locations: [0, 1]) {
+        ctx.drawLinearGradient(g, start: CGPoint(x: 0, y: H), end: CGPoint(x: 0, y: 0), options: [])
+    }
+    if let glow = CGGradient(colorsSpace: cs, colors: [cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0.10)), cg(NSColor(srgbRed: 1, green: 0.5, blue: 0.2, alpha: 0))] as CFArray, locations: [0, 1]) {
+        ctx.drawRadialGradient(glow, startCenter: CGPoint(x: 30, y: H - 20), startRadius: 0, endCenter: CGPoint(x: 30, y: H - 20), endRadius: 170, options: [])
+    }
+    ctx.restoreGState()
+    ctx.addPath(bgPath); ctx.setStrokeColor(cg(gray(1, 0.08))); ctx.setLineWidth(1); ctx.strokePath()
+
+    // ---- header (y 13…53) ----
+    if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(15, 13, 40, 40)) }
+    let title = attr(tr("Лимиты", "Limits"), 16, .semibold, textHi)
+    textC(title, x: 65, topY: 15.5, h: 20)
+    pill(caps("Advanced", 9, gray(1, 0.55)), x: 65 + width(title) + 7, topY: 15.5 + 2.5, h: 15, padX: 7, fill: gray(1, 0.09))
+    // legend: ▍план сейчас · ▬ прогноз к сбросу
+    do {
+        var x: CGFloat = 65
+        let ly: CGFloat = 37.5, lh: CGFloat = 13
+        roundFill(rectTL(x + 2, ly + 1.5, 2, 10), 1, gray(1, 0.55)); x += 6 + 4
+        let a = attr(tr("план сейчас", "plan now"), 10.5, .regular, textMid); textC(a, x: x, topY: ly, h: lh); x += width(a) + 4
+        let d = attr("·", 10.5, .regular, textMid); textC(d, x: x + 2, topY: ly, h: lh); x += width(d) + 4 + 4
+        roundFill(rectTL(x, ly + 4, 16, 5), 2.5, ADV_WEEK.withAlphaComponent(0.30)); x += 16 + 4
+        textC(attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, .regular, textMid), x: x, topY: ly, h: lh)
+    }
+    let gearRect = rectTL(297, 24, 18, 18), rfRect = rectTL(327, 24, 18, 18)
+    drawSF(ctx, "gearshape", in: gearRect, textMid)
+    drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 1, dy: 1), textMid, weight: .semibold)
+    hits.append(Hit(id: "settings", rect: gearRect.insetBy(dx: -6, dy: -6)))
+    hits.append(Hit(id: "refresh", rect: rfRect.insetBy(dx: -6, dy: -6)))
+    if about.availVersion != nil || about.phase != .idle {
+        let badge = CGRect(x: gearRect.maxX - 5, y: gearRect.maxY - 5, width: 7, height: 7)
+        ctx.setFillColor(cg(gray(0.10, 1))); ctx.fillEllipse(in: badge.insetBy(dx: -1.5, dy: -1.5))
+        ctx.setFillColor(cg(ADV_ACCENT)); ctx.fillEllipse(in: badge)
+    }
+
+    // ---- product cards ----
+    let cards = advCards(claude, codex)
+    var y: CGFloat = 58
+
+    func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowAsOf: Date?) {
+        if row.kind == .credits {
+            let n = row.credits ?? 0
+            let on = n > 0
+            dot(ADV_IX + 3, yr + 14.5, on ? ADV_ACCENT : gray(1, 0.22))
+            textC(caps(tr("Сбросы в запасе", "Resets in reserve"), 9.5, on ? textMid : textLo), x: ADV_IX + 12, topY: yr + 6, h: 17)
+            let num = attr("\(n)", 11, .semibold, on ? ADV_ACCENT : textLo)
+            let pw = 6 + 11 + 4 + width(num) + 7
+            let pr = rectTL(ADV_IX + ADV_IW - pw, yr + 6, pw, 17)
+            roundFill(pr, 8.5, on ? ADV_ACCENT.withAlphaComponent(0.16) : gray(1, 0.09))
+            if on { roundStroke(pr.insetBy(dx: 0.5, dy: 0.5), 8.5, ADV_ACCENT.withAlphaComponent(0.42), 1) }
+            drawSF(ctx, "arrow.clockwise", in: CGRect(x: pr.minX + 6, y: pr.midY - 5.5, width: 11, height: 11), on ? ADV_ACCENT : textLo, weight: .semibold)
+            textC(num, x: pr.minX + 6 + 11 + 4, topY: yr + 6, h: 17)
+            return
+        }
+        guard let l = row.limit else { return }
+        let pace = l.pace
+        let live = row.kind == .full || row.kind == .exhausted || row.kind == .tooEarly || row.kind == .stale
+        let col = live ? advWindowColor(l.color, pace?.used) : gray(1, 0.22)
+        if dimmed { ctx.saveGState(); ctx.setAlpha(0.42) }
+        // L1: dot · label · percent
+        dot(ADV_IX + 3, yr + 11, live ? col : gray(1, 0.22))
+        textC(caps(l.name, 9.5, row.kind == .inactive ? textLo : textMid), x: ADV_IX + 12, topY: yr + 4, h: 14)
+        if let p = pace {
+            textC(attr(fmtPct(p.used, decimals: 0), 14, .semibold, col, kern: -0.14), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
+        } else {
+            textC(attr("—", 14, .semibold, textLo), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
+        }
+        // L2: verdict
+        let verdictColor: NSColor, verdictWeight: NSFont.Weight
+        switch row.kind {
+        case .full:
+            if let p = pace, p.runsOutAt != nil { verdictColor = ADV_CRIT; verdictWeight = .semibold }
+            else if let p = pace, let pr = p.projectedPct, pr.rounded() >= 85 { verdictColor = ADV_WARN; verdictWeight = .semibold }
+            else { verdictColor = textHi; verdictWeight = .semibold }
+        case .exhausted: verdictColor = ADV_CRIT; verdictWeight = .semibold
+        default: verdictColor = textMid; verdictWeight = .regular
+        }
+        var verdict = advVerdict(row, asOf: rowAsOf)
+        var va = attr(verdict, 12.5, verdictWeight, verdictColor)
+        if width(va) > ADV_IW {                                   // spec §3.2 truncation ladder
+            var s = verdict.replacingOccurrences(of: tr(" до сброса", " before reset"), with: "")
+            va = attr(s, 12.5, verdictWeight, verdictColor)
+            while width(va) > ADV_IW, s.count > 8 { s = String(s.dropLast(2)) + "…"; va = attr(s, 12.5, verdictWeight, verdictColor) }
+        }
+        textC(va, x: ADV_IX, topY: yr + 19, h: 16)
+        // bar
+        let barTop = yr + 38
+        roundFill(rectTL(ADV_IX, barTop, ADV_IW, 5), 2.5, gray(1, 0.08))
+        if let p = pace, live {
+            let usedW = CGFloat(min(100, max(0, p.used))) / 100 * ADV_IW
+            if row.kind == .full || row.kind == .exhausted {
+                if p.runsOutAt != nil, row.kind == .full {
+                    roundFill(rectTL(ADV_IX, barTop, ADV_IW, 5), 2.5, ADV_CRIT.withAlphaComponent(0.22))
+                } else if row.kind == .full, let pr = p.projectedPct, pr > p.used {
+                    let ghostW = CGFloat(min(100, pr)) / 100 * ADV_IW
+                    roundFill(rectTL(ADV_IX, barTop, ghostW, 5), 2.5, advWindowColor(l.color, 0).withAlphaComponent(0.18))
+                }
+            }
+            if usedW >= 1 { roundFill(rectTL(ADV_IX, barTop, max(5, usedW), 5), 2.5, col) }
+            if row.kind != .stale {
+                let tx = ADV_IX + CGFloat(p.planPct) / 100 * ADV_IW - 1
+                roundFill(rectTL(tx, barTop - 3, 2, 11), 1, gray(1, 0.55))
+            }
+        }
+        // L3: metrics
+        if row.kind == .full || row.kind == .exhausted || row.kind == .tooEarly, let p = pace {
+            let m = NSMutableAttributedString()
+            m.append(attr(tr("план ", "plan ") + fmtPct(p.planPct) + " · ", 10.5, .regular, textMid))
+            m.append(attr(fmtSignedPts(p.deltaPts), 10.5, .regular, p.deltaPts >= 0 ? ADV_WARN : textMid))
+            let rate = row.kind == .tooEarly ? "—" : fmtRate(p)
+            m.append(attr(" · " + rate + " · " + tr("сброс ", "reset ") + advResetShort(p.reset), 10.5, .regular, textMid))
+            textC(m, x: ADV_IX, topY: yr + 46, h: 12)
+        }
+        if dimmed { ctx.restoreGState() }
+    }
+
+    for c in cards {
+        let ch = c.height
+        let card = rectTL(ADV_CX, y, ADV_CW, ch)
+        roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
+        let canFix = c.product == "claude" && (c.data.auth == .loggedOut || c.data.auth == .expired)
+        // header
+        let y0 = y + 9
+        if let img = loadCGImage(assetPath(c.icon)) { ctx.draw(img, in: rectTL(ADV_IX, y0 + 1, 16, 16)) }
+        let name = attr(c.name, 13, .semibold, textHi)
+        textC(name, x: ADV_IX + 23, topY: y0, h: 18)
+        var px = ADV_IX + 23 + width(name) + 7
+        if c.expired {
+            let r = pill(attr(tr("вход истёк", "signed out"), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
+            px = r.maxX + 5
+        }
+        if let plan = c.data.plan {
+            let label = c.product == "claude" ? (plan == "max" ? (UserDefaults.standard.string(forKey: "claudeTier")?.contains("20x") == true ? "Max 20x" : "Max") : plan.capitalized) : plan
+            pill(attr(label, 9.5, .semibold, gray(1, 0.60), kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
+        }
+        let arrow = rectTL(322, y0 + 3, 12, 12)
+        drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
+        hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix ? card : arrow.insetBy(dx: -8, dy: -8)))
+        var ry = y + 29
+        if c.expired {
+            let m = NSMutableAttributedString()
+            m.append(attr(tr("Данные от ", "Data as of ") + advMomentLower(c.data.asOf ?? Date()) + tr(" · темп не считаем · ", " · pace paused · "), 10.5, .regular, ADV_WARN))
+            let code = attr("claude login", 10, .regular, gray(1, 0.8))
+            let pre = width(m)
+            let codeR = rectTL(ADV_IX + pre + 4, ry + 0.5, width(code) + 8, 14)
+            roundFill(codeR, 4, gray(1, 0.08))
+            textC(m, x: ADV_IX, topY: ry, h: 14)
+            textC(ctAttr("claude login", ctMono(10, .regular), cg(gray(1, 0.8))), x: codeR.minX + 4, topY: ry, h: 14)
+            ry += ADV_NOTICE
+        }
+        for (i, row) in c.rows.enumerated() {
+            drawRow(row, topY: ry, dimmed: c.expired && row.kind != .credits, rowAsOf: c.data.asOf)
+            ry += row.height
+            if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
+        }
+        y += ch + 5
+    }
+    if cards.count == 1 {
+        // the other product isn't set up — a dashed invitation instead of an empty card
+        let r = rectTL(ADV_CX, y, ADV_CW, ADV_PLACEHOLDER)
+        ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
+        roundStroke(r.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.14), 1)
+        roundStroke(rectTL(ADV_IX, y + 12, 16, 16).insetBy(dx: 0.5, dy: 0.5), 4, gray(1, 0.28), 1)
+        ctx.restoreGState()
+        let missing = cards[0].product == "claude" ? "Codex" : "Claude Code"
+        textC(attr(missing + tr(" не настроен", " not set up"), 13, .medium, textMid), x: ADV_IX + 23, topY: y, h: ADV_PLACEHOLDER)
+        textC(attr(tr("Настройки ›", "Settings ›"), 13, .regular, ADV_LINK), x: ADV_IX + ADV_IW, topY: y, h: ADV_PLACEHOLDER, align: 2)
+        hits.append(Hit(id: cards[0].product == "codex" ? "claudefix" : "settings", rect: r))
+        y += ADV_PLACEHOLDER + 5
+    }
+
+    // ---- history & money ----
+    let present = cards.map { $0.product }
+    let hp = advHistProduct(present)
+    let expanded = advHistExpanded()
+    let hh = advHistoryHeight(cards)
+    let hcard = rectTL(ADV_CX, y, ADV_CW, hh)
+    roundFill(hcard, 14, gray(1, 0.04)); roundStroke(hcard.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
+    let hy = y + 8                                  // border 1 + padding 7
+    drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
+    textC(caps(tr("История и деньги", "History & money"), 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
+    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, 35)))
+    do {   // Claude | Codex segmented, right-aligned
+        let items = present.map { ($0, $0 == "claude" ? "Claude" : "Codex") }
+        let widths = items.map { width(attr($0.1, 10.5, .semibold, textHi)) + 16 }
+        let total = widths.reduce(0, +) + CGFloat(items.count - 1) + 4
+        let tx = ADV_IX + ADV_IW - total
+        roundFill(rectTL(tx, hy, total, 18), 9, gray(1, 0.07))
+        var sx = tx + 2
+        for (i, it) in items.enumerated() {
+            let r = rectTL(sx, hy + 2, widths[i], 14)
+            let on = it.0 == hp
+            if on { roundFill(r, 7, gray(1, 0.18)) }
+            textC(attr(it.1, 10.5, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: hy + 2, h: 14, align: 1)
+            hits.append(Hit(id: "hist:\(it.0)", rect: r.insetBy(dx: -2, dy: -4)))
+            sx += widths[i] + 1
+        }
+    }
+    if expanded {
+        let ix = UsageLogs.shared.snapshot()
+        let d = hp == "claude" ? claude : codex
+        let ap = advancedProduct(d, product: hp, index: ix)
+        let by = hy + 18 + 4                        // body top
+        // -- 7-day stacked bars (x 26…216) --
+        let cx0 = ADV_IX, cy0 = by
+        textC(caps(tr("7 дней · $ по API", "7 days · $ at API"), 8.5, textLo), x: cx0, topY: cy0, h: 12)
+        do {
+            let lg = attr(tr("окно недели", "week window"), 8.5, .regular, textMid)
+            textC(lg, x: cx0 + 190, topY: cy0, h: 12, align: 2)
+            roundFill(rectTL(cx0 + 190 - width(lg) - 4 - 10, cy0 + 5, 10, 2), 1, ADV_WEEK.withAlphaComponent(0.7))
+        }
+        let gx = cx0, gy = cy0 + 12                 // chart local origin
+        hline(gx + 2, gx + 188, gy + 40, gray(1, 0.08))
+        let maxUsd = ap.days7.map { $0.usd }.max() ?? 0
+        let weekStart = d.weeklyReset.map { $0.addingTimeInterval(-168 * 3600) }
+        var underlineFrom: CGFloat? = nil
+        var families: [String: NSColor] = [:]; var familyOrder: [String] = []
+        for (i, day) in ap.days7.enumerated() {
+            let bx = gx + 6 + 26 * CGFloat(i)
+            if day.usd > 0, maxUsd > 0 {
+                let h = max(2, 28 * CGFloat(day.usd / maxUsd))
+                // merge parts into colour families, biggest at the bottom
+                var fam: [(String, NSColor, Double)] = []
+                for part in day.parts {
+                    let f = advModelFamily(part.model, product: hp)
+                    if let j = fam.firstIndex(where: { $0.0 == f.name }) { fam[j].2 += part.usd } else { fam.append((f.name, f.color, part.usd)) }
+                }
+                fam.sort { $0.2 > $1.2 }
+                var top = gy + 40
+                ctx.saveGState()
+                ctx.addPath(CGPath(roundedRect: rectTL(bx, gy + 40 - h, 18, h), cornerWidth: 1.5, cornerHeight: 1.5, transform: nil)); ctx.clip()
+                for f in fam {
+                    let sh = max(0.6, h * CGFloat(f.2 / day.usd))
+                    ctx.setFillColor(cg(f.1)); ctx.fill(rectTL(bx, top - sh, 18, sh)); top -= sh
+                    if families[f.0] == nil { families[f.0] = f.1; familyOrder.append(f.0) }
+                }
+                ctx.restoreGState()
+                textB(attr("$" + String(Int(day.usd.rounded())), 8.5, .semibold, gray(1, 0.7)), x: bx + 9, baseY: gy + 40 - h - 3, align: 1)
+            } else {
+                roundFill(rectTL(bx, gy + 38.5, 18, 1.5), 0.75, gray(1, 0.12))
+            }
+            let dayDate = dayKeyFormatter.date(from: day.day) ?? Date()
+            let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US"); f.dateFormat = "EEE"
+            let dn = f.string(from: dayDate).replacingOccurrences(of: ".", with: "")
+            textB(attr(appLang() == "ru" ? dn.lowercased() : dn, 9, day.isToday ? .semibold : .regular, day.isToday ? ADV_ACCENT : textMid), x: bx + 9, baseY: gy + 50, align: 1)
+            if let ws = weekStart, underlineFrom == nil, dayDate.addingTimeInterval(86400) > ws { underlineFrom = bx }
+        }
+        if let uf = underlineFrom { roundFill(rectTL(uf, gy + 53.5, gx + 6 + 26 * 6 + 18 - uf, 1.5), 0.75, ADV_WEEK.withAlphaComponent(0.55)) }
+        // legend (fixed family order per product)
+        do {
+            let order = hp == "claude" ? ["Fable", "Opus", tr("прочие", "other")] : ["Astra", "Sol 5.6", "Sol 6", tr("прочие", "other")]
+            var lx = cx0
+            for name in order {
+                let color = families[name] ?? (hp == "claude" ? advModelFamily(name == "Fable" ? "claude-fable" : name == "Opus" ? "claude-opus" : "other", product: hp).color
+                                                              : advModelFamily(name == "Astra" ? "gpt-6-astra" : name == "Sol 5.6" ? "gpt-5.6-sol" : name == "Sol 6" ? "gpt-6-sol" : "other", product: hp).color)
+                let seen = families[name] != nil
+                roundFill(rectTL(lx, cy0 + 71 + 2, 7, 7), 2, seen ? color : color.withAlphaComponent(0.25))
+                let a = attr(name, 8.5, .regular, seen ? textMid : textLo)
+                textC(a, x: lx + 11, topY: cy0 + 71, h: 11)
+                lx += 11 + width(a) + 7
+            }
+        }
+        // -- 35-day calendar (x 230…326) --
+        let kx = ADV_IX + 204, ky = cy0
+        let cal = Array(ap.calendar.suffix(35))
+        let total35 = cal.reduce(0) { $0 + $1.usd }
+        textC(caps(tr("35 дней · ", "35 days · ") + fmtUSD(total35), 8.5, textLo), x: kx, topY: ky, h: 12)
+        let letters = appLang() == "ru" ? ["п", "в", "с", "ч", "п", "с", "в"] : ["M", "T", "W", "T", "F", "S", "S"]
+        for (c, l) in letters.enumerated() { textB(attr(l, 7, .regular, textLo), x: kx + 9.5 * CGFloat(c) + 4, baseY: ky + 12 + 7, align: 1) }
+        let levels: [Double] = hp == "claude" ? [10, 30, 60] : [5, 30, 100]
+        let calCal = Calendar.current
+        var row = 0, col = 0
+        if let first = cal.first, let fd = dayKeyFormatter.date(from: first.day) {
+            let wd = calCal.component(.weekday, from: fd); col = wd == 1 ? 6 : wd - 2
+        }
+        var labelledRows = Set<Int>()
+        for (i, dd) in cal.enumerated() {
+            let cellX = kx + 9.5 * CGFloat(col), cellY = ky + 12 + 10 + 9.5 * CGFloat(row)
+            let color: NSColor
+            if dd.usd <= 0 { color = gray(1, 0.06) }
+            else { let a: CGFloat = dd.usd <= levels[0] ? 0.28 : dd.usd <= levels[1] ? 0.50 : dd.usd <= levels[2] ? 0.75 : 1.0; color = ADV_ACCENT.withAlphaComponent(a) }
+            roundFill(rectTL(cellX, cellY, 7.5, 7.5), 2, color)
+            if dd.day == dayKey(Date()) { roundStroke(rectTL(cellX, cellY, 7.5, 7.5).insetBy(dx: 0.5, dy: 0.5), 2, gray(1, 0.7), 1) }
+            if let dt = dayKeyFormatter.date(from: dd.day), (i == 0 || calCal.component(.day, from: dt) == 1), !labelledRows.contains(row) {
+                labelledRows.insert(row)
+                let mi = calCal.component(.month, from: dt) - 1
+                let names = appLang() == "ru" ? ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
+                                              : ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                textB(attr(names[mi], 7, .regular, textLo), x: kx + 71, baseY: cellY + 7)
+            }
+            col += 1; if col == 7 { col = 0; row += 1 }
+        }
+        // -- money table --
+        var my = by + 82
+        if ap.firstSample == nil {
+            // first day: no sampled history yet — say so instead of showing empty charts as data
+            let bx = rectTL(ADV_IX, my + 2, ADV_IW, ADV_HIST_EMPTY_EXTRA - 6)
+            roundFill(bx, 8, gray(1, 0.04))
+            let msg = tr("Истории пока нет — копим с сегодняшнего дня. Столбики появятся завтра, календарь заполнится за неделю. Темп выше уже работает: ему история не нужна.",
+                         "No history yet — collecting from today. Bars appear tomorrow, the calendar fills over a week. Pace above already works: it needs no history.")
+            let para = NSMutableAttributedString(attributedString: attr(msg, 10.5, .regular, textMid))
+            let ps = NSMutableParagraphStyle(); ps.lineSpacing = 1.5
+            let fs = CTFramesetterCreateWithAttributedString(para)
+            let path = CGPath(rect: bx.insetBy(dx: 8, dy: 5), transform: nil)
+            ctx.saveGState(); ctx.textMatrix = .identity
+            CTFrameDraw(CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), path, nil), ctx)
+            ctx.restoreGState()
+            my += ADV_HIST_EMPTY_EXTRA
+        }
+        hline(ADV_IX, ADV_IX + ADV_IW, my + 4, gray(1, 0.06))
+        let colX: [CGFloat] = [ADV_IX, ADV_IX + 120, ADV_IX + 203, ADV_IX + ADV_IW]
+        textC(caps(tr("по подписке", "on subscription"), 8.5, textLo), x: colX[1], topY: my + 10, h: 11)
+        textC(caps(tr("по API было бы", "at API price"), 8.5, textLo), x: colX[2], topY: my + 10, h: 11)
+        textC(caps("×", 8.5, textLo), x: colX[3], topY: my + 10, h: 11, align: 2)
+        var ry = my + 23
+        var notes: [String] = []
+        for c in cards {
+            let m = moneySummary(c.product, plan: c.data.plan, index: ix)
+            let nm = NSMutableAttributedString(attributedString: attr(c.product == "claude" ? "Claude" : "Codex", 10.5, .semibold, textHi))
+            nm.append(attr(" · " + (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + tr("/мес", "/mo"), 10.5, .regular, textMid))
+            textC(nm, x: colX[0], topY: ry, h: 13)
+            if m.subEstimated {
+                drawSF(ctx, "pencil", in: rectTL(colX[0] + width(nm) + 4, ry + 1.5, 10, 10), ADV_LINK)
+                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, 120, 15)))
+            }
+            textC(attr("≈ " + fmtUSD(m.subPerDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[1], topY: ry, h: 13)
+            if m.usdApi > 0 {
+                textC(attr("≈ " + fmtUSD(m.perCalendarDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[2], topY: ry, h: 13)
+                textC(attr(fmtNum(m.ratio), 10.5, .regular, textHi), x: colX[3], topY: ry, h: 13, align: 2)
+                notes.append((c.product == "claude" ? "Claude" : "Codex") + " ≈ " + fmtUSD(m.perActiveDay))
+            } else {
+                textC(attr(tr("пока нет", "none yet"), 10.5, .regular, textLo), x: colX[2], topY: ry, h: 13)
+                textC(attr("—", 10.5, .regular, textLo), x: colX[3], topY: ry, h: 13, align: 2)
+            }
+            ry += 15
+        }
+        if !notes.isEmpty {
+            textC(attr(tr("в активный день по API: ", "on an active day at API price: ") + notes.joined(separator: " · "), 9.5, .regular, textLo), x: colX[0], topY: my + 55, h: 11)
+        }
+    }
+    y += hh + 6
+
+    // ---- footer ----
+    let footTop = H - 35
+    let segs: [(String, Double)] = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
+    let sw = segs.map { width(attr($0.0, 12, .semibold, textHi)) + 20 }
+    let segTotal = sw.reduce(0, +) + 4
+    roundFill(rectTL(ADV_CX, footTop + 1, segTotal, 22), 11, gray(1, 0.07))
+    var sx = ADV_CX + 2
+    for (i, seg) in segs.enumerated() {
+        let r = rectTL(sx, footTop + 3, sw[i], 18)
+        let active = abs(interval - seg.1) < 1
+        if active { roundFill(r, 9, gray(1, 0.18)) }
+        textC(attr(seg.0, 12, active ? .semibold : .medium, active ? textHi : textMid), x: r.midX, topY: footTop + 3, h: 18, align: 1)
+        hits.append(Hit(id: "iv\(Int(seg.1))", rect: r))
+        sx += sw[i]
+    }
+    let pwr = rectTL(327, footTop + 3, 18, 18)
+    drawPower(ctx, pwr.insetBy(dx: 1, dy: 1), gray(1, 0.5))
+    hits.append(Hit(id: "quit", rect: pwr.insetBy(dx: -6, dy: -6)))
+    if let u = updated {
+        textC(attr(tr("обновлено ", "updated ") + clockText(u), 11, .regular, textMid), x: 315, topY: footTop + 3, h: 18, align: 2)
+    }
+    return hits
+}
+
 func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
@@ -1363,13 +2572,36 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         }
     }
     hdiv(cardX + 42, cardX + cardW, genTop + genRowH)
+    // panel-view row — the Simple | Advanced switch
+    do {
+        let rowTop = genTop + genRowH
+        drawSF(ctx, "chart.bar.xaxis", in: rectTL(cardX + 15, rowTop + (genRowH - 16) / 2, 16, 16), textMid)
+        text(attr(tr("Вид панели", "Panel view"), 13, .regular, textHi), x: cardX + 42, topY: rowTop + (genRowH - 13) / 2 - 1)
+        let adv = advancedEnabled()
+        let labels = [(false, tr("Простой", "Simple")), (true, tr("Расширенный", "Advanced"))]
+        let f = ctFont(11, .medium)
+        let widths = labels.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr($0.1, f, cg(.white))))) + 16 }
+        let segH: CGFloat = 24, ctrlW = widths.reduce(0, +) + 9
+        let trackX = cardX + cardW - 14 - ctrlW, trackTop = rowTop + (genRowH - segH) / 2
+        roundFill(rectTL(trackX, trackTop, ctrlW, segH), 7, gray(1, 0.08))
+        var sx = trackX + 3
+        for (i, o) in labels.enumerated() {
+            let sRect = rectTL(sx, trackTop + 3, widths[i], segH - 6)
+            let active = adv == o.0
+            if active { roundFill(sRect, 5, gray(1, 0.18)) }
+            text(attr(o.1, 11, active ? .semibold : .medium, active ? textHi : textMid), x: sRect.midX, topY: rowTop + (genRowH - 11) / 2 - 0.5, align: 1)
+            hits.append(Hit(id: "view:\(o.0 ? "advanced" : "simple")", rect: sRect))
+            sx += widths[i] + 3
+        }
+    }
+    hdiv(cardX + 42, cardX + cardW, genTop + genRowH * 2)
     // launch-at-login row — sparkles + label + toggle
-    drawSF(ctx, "sparkles", in: rectTL(cardX + 15, genTop + genRowH + (genRowH - 16) / 2, 16, 16), textMid)
-    text(attr(tr("Запускать при входе", "Launch at login"), 13, .regular, textHi), x: cardX + 42, topY: genTop + genRowH + (genRowH - 13) / 2 - 1)
+    drawSF(ctx, "sparkles", in: rectTL(cardX + 15, genTop + genRowH * 2 + (genRowH - 16) / 2, 16, 16), textMid)
+    text(attr(tr("Запускать при входе", "Launch at login"), 13, .regular, textHi), x: cardX + 42, topY: genTop + genRowH * 2 + (genRowH - 13) / 2 - 1)
     do {
         let tw: CGFloat = 34, th: CGFloat = 16
-        drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH + (genRowH - th) / 2, tw, th), loginEnabled())
-        hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH, cardW, genRowH)))
+        drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH * 2 + (genRowH - th) / 2, tw, th), loginEnabled())
+        hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH * 2, cardW, genRowH)))
     }
 
     // section 1 — which percentages go into the menu-bar strip
@@ -1400,9 +2632,40 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         segGroup(cardX + 14 + lw + 20, rw, 1, [nil, .session, .weekly, .model])
     }
 
+    // section 1b — subscription prices (feed the Advanced view's money figures)
+    if advancedEnabled() {
+        text(attr(tr("ПОДПИСКИ · ДЛЯ ОЦЕНКИ В ДЕНЬГАХ", "SUBSCRIPTIONS · FOR THE MONEY ESTIMATE"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SUB_CAP)
+        roundFill(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.04))
+        roundStroke(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.06), 1)
+        func subRow(_ i: Int, _ product: String, _ label: String, _ plan: String?, _ choices: [Double]) {
+            let rowTop = SET_SUB_TOP + CGFloat(i) * SET_ROW_H
+            let cur = subscriptionUSD(product, plan: plan)
+            text(attr(label, 13, .regular, textHi), x: cardX + 14, topY: rowTop + (SET_ROW_H - 13) / 2 - 1)
+            if cur.estimated {
+                text(attr(tr("оценка", "estimate"), 9.5, .regular, textLo), x: cardX + 14 + ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(13, .regular), cg(.white))))) + 6, topY: rowTop + (SET_ROW_H - 9.5) / 2)
+            }
+            let f = ctFont(11, .medium)
+            let widths = choices.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr("$\(Int($0))", f, cg(.white))))) + 14 }
+            var x = cardX + cardW - 14 - widths.reduce(0, +) - CGFloat(choices.count - 1) * 4
+            let pillH: CGFloat = 22, top = rowTop + (SET_ROW_H - pillH) / 2
+            for (j, c) in choices.enumerated() {
+                let r = rectTL(x, top, widths[j], pillH)
+                let on = abs(cur.usd - c) < 0.5
+                roundFill(r, 6, on ? (cur.estimated ? gray(1, 0.12) : gray(1, 0.18)) : gray(1, 0.06))
+                if on, cur.estimated { roundStroke(r, 6, gray(1, 0.25), 1) }
+                text(attr("$\(Int(c))", 11, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: top + 5, align: 1)
+                hits.append(Hit(id: "sub:\(product):\(Int(c))", rect: r))
+                x += widths[j] + 4
+            }
+        }
+        subRow(0, "claude", "Claude", nil, [20, 100, 200])
+        hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + SET_ROW_H)
+        subRow(1, "codex", "Codex", UserDefaults.standard.string(forKey: "codexPlan"), [8, 20, 100, 200])
+    }
+
     // section 2 — reset-sound master toggles
-    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_CAP1)
-    let c1top: CGFloat = SET_C1_TOP, rowH: CGFloat = SET_ROW_H, c1H = rowH * 2
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: setCap1())
+    let c1top: CGFloat = setC1Top(), rowH: CGFloat = SET_ROW_H, c1H = rowH * 2
     roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
     func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
         drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
@@ -1836,6 +3099,7 @@ final class LimitsPanelView: NSView {
     var onInstall: (() -> Void)?
     var onWhatsNew: (() -> Void)?
     var onTrayChanged: (() -> Void)?     // the menu-bar picker changed → redraw the strip now
+    var onViewChanged: (() -> Void)?     // Simple ↔ Advanced switched
     var mode: PanelMode = .main
     // "Connect Claude Code" walkthrough: which command was just copied (transient tick)
     var copiedCmd: String?
@@ -1856,7 +3120,7 @@ final class LimitsPanelView: NSView {
 
     /// Resize the panel (anchored at its top edge) to fit the current mode/state.
     func resizeToContent() {
-        var targetH = panelMainHeight(claude, codex)
+        var targetH = mainPanelHeight(claude, codex)
         if mode == .settings {
             targetH = settingsTotalHeight(about)
         } else if mode == .whatsnew {
@@ -1891,7 +3155,9 @@ final class LimitsPanelView: NSView {
             hits = drawClaudeFix(ctx, size: bounds.size, copiedCmd: copiedCmd,
                                  expired: claude.auth == .expired)
         } else {
-            hits = drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
+            hits = advancedEnabled()
+                ? drawAdvanced(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
+                : drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
     }
 
@@ -1928,6 +3194,22 @@ final class LimitsPanelView: NSView {
                     let key = String(h.id.dropFirst(7))
                     let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
                     needsDisplay = true
+                } else if h.id == "hist:toggle" {
+                    UserDefaults.standard.set(!advHistExpanded(), forKey: "advHistExpanded")
+                    resizeToContent()
+                } else if h.id.hasPrefix("hist:") {
+                    UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "advHistProduct")
+                    resizeToContent()
+                } else if h.id.hasPrefix("sub:") {
+                    let parts = h.id.dropFirst(4).split(separator: ":")
+                    if parts.count == 2, let v = Double(parts[1]) {
+                        UserDefaults.standard.set(v, forKey: parts[0] == "claude" ? "subClaude" : "subCodex")
+                        needsDisplay = true
+                    }
+                } else if h.id.hasPrefix("view:") {
+                    UserDefaults.standard.set(h.id == "view:advanced", forKey: "advanced")
+                    onViewChanged?()
+                    resizeToContent()
                 } else if h.id.hasPrefix("trayslot:") {
                     let parts = h.id.dropFirst(9).split(separator: ":")
                     if parts.count == 2, let slot = Int(parts[0]) {
@@ -2006,7 +3288,7 @@ final class PanelController {
         // row — i.e. change the height the content needs. The frame was sized for the data at
         // click time, so without this the taller layout draws past the bottom edge and the
         // footer line gets clipped. Resize whenever the needed height no longer matches.
-        if view.mode == .main, abs(panel.frame.height - panelMainHeight(claude, codex)) > 0.5 {
+        if view.mode == .main, abs(panel.frame.height - mainPanelHeight(claude, codex)) > 0.5 {
             view.resizeToContent()
         } else {
             view.needsDisplay = true
@@ -2015,7 +3297,7 @@ final class PanelController {
 
     func show(below button: NSStatusBarButton) {
         view.mode = .main   // always open on the main screen
-        let mainH = panelMainHeight(view.claude, view.codex)
+        let mainH = mainPanelHeight(view.claude, view.codex)
         var origin = NSPoint(x: 200, y: 200)
         if let win = button.window {
             let bf = button.frame
@@ -2068,7 +3350,7 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let c2top = SET_C1_TOP + SET_ROW_H * 2 + SET_GAP + SET_CAP_H
+    let c2top = setC1Top() + SET_ROW_H * 2 + SET_GAP + SET_CAP_H
     let cardBbottom = c2top + SET_SOUND_ROW_H * CGFloat(RESET_SOUNDS.count)
     let c3top = cardBbottom + SET_GAP + SET_CAP_H
     let cardCbottom = c3top + SET_ROW_H + SET_SOUND_ROW_H * CGFloat(REACHED_SOUNDS.count)
@@ -2281,6 +3563,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.view.onUpdate = { [weak self] url in self?.startDownload(url) }
         panelCtrl.view.onInstall = { [weak self] in self?.installAndRelaunch() }
         panelCtrl.view.onWhatsNew = { [weak self] in self?.showWhatsNew() }
+        panelCtrl.view.onViewChanged = { [weak self] in
+            // Switching to Advanced needs the local-log index; scan right away.
+            if advancedEnabled() { UsageLogs.shared.scanAsync { self?.panelCtrl.view.needsDisplay = true } }
+        }
         panelCtrl.view.onTrayChanged = { [weak self] in
             guard let self = self, let l = self.last else { return }
             self.applyTrayImage(l.0, l.1)
@@ -2297,7 +3583,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let (c, x) = self?.last { self?.applyTrayImage(c, x) }
         }
 
+        UsageHistory.shared.load()
+        UsageLogs.shared.load()
+        if advancedEnabled() { UsageLogs.shared.scanAsync { [weak self] in self?.panelCtrl.view.needsDisplay = true } }
         startTimer()
+        startLogsTimer()
         doRefresh(live: true)   // live Codex from launch, then on every timer tick
         startUpdateChecks()     // background update check shortly after launch + every 6h
     }
@@ -2305,6 +3595,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ note: Notification) {
         trayAppearanceObs?.invalidate()
         trayAppearanceObs = nil
+    }
+
+    var logsTimer: Timer?
+    func startLogsTimer() {
+        logsTimer?.invalidate()
+        let t = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
+            guard advancedEnabled() else { return }
+            UsageLogs.shared.scanAsync { self?.panelCtrl.view.needsDisplay = true }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        logsTimer = t
     }
 
     func startTimer() {
@@ -2348,6 +3649,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func render(_ claude: LimitData, _ codex: LimitData) {
         last = (claude, codex)
         applyTrayImage(claude, codex)
+        UsageHistory.shared.record(claude, product: "claude")
+        UsageHistory.shared.record(codex, product: "codex")
         panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: Date())
         checkAlarms(claude, codex)
     }
@@ -2715,6 +4018,81 @@ if CommandLine.arguments.contains("--settings-preview") {
     print("settings preview written"); exit(0)
 }
 
+
+if CommandLine.arguments.contains("--advanced-dump") {
+    let t0 = Date()
+    UsageHistory.shared.load(); UsageLogs.shared.load()
+    let changed = UsageLogs.shared.scanSync()
+    let ix = UsageLogs.shared.snapshot()
+    print(String(format: "scan: %.1fs, changed=%@, files=%d", Date().timeIntervalSince(t0), changed ? "yes" : "no", ix.files.count))
+    for product in ["claude", "codex"] {
+        print("== \(product)")
+        for d in dailyUsage(product, days: 10, index: ix) where d.turns > 0 {
+            let models = d.byModel.map { "\(modelDisplayName($0.model)) $\(String(format: "%.2f", $0.usd))" }.joined(separator: ", ")
+            print(String(format: "  %@ turns=%4d tokens=%12d usd=%7.2f  [%@]", d.day, d.turns, d.tokens, d.usd, models))
+        }
+        let m = moneySummary(product, plan: nil, index: ix)
+        print(String(format: "  money: api35=$%.2f perDay=$%.2f perActive=$%.2f sub=$%.0f/mo%@ ratio=x%.1f", m.usdApi, m.perCalendarDay, m.perActiveDay, m.subMonthly, m.subEstimated ? " (est)" : "", m.ratio))
+    }
+    var c = LimitData(), x = LimitData()
+    if let cd = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)), let cj = (try? JSONSerialization.jsonObject(with: cd)) as? [String: Any] {
+        if let m = cj["claude"] as? [String: Any] { c = dict2ld(m) }
+        if let m = cj["codex"] as? [String: Any] { x = dict2ld(m) }
+    }
+    for (name, d) in [("claude", c), ("codex", x)] {
+        for l in pacedLimits(d, product: name) {
+            guard let p = l.pace else { print("  \(name) \(l.name): no window"); continue }
+            let f = DateFormatter(); f.dateFormat = "EEE dd.MM HH:mm"
+            print(String(format: "  %@ %@: used=%.0f%% plan=%.1f%% delta=%+.1f rate=%.2f%%/h proj=%@ runsOut=%@ recent=%@", name, l.name, p.used, p.planPct, p.deltaPts, p.avgRatePerH,
+                         p.projectedPct.map { String(format: "%.0f%%", $0) } ?? "—", p.runsOutAt.map { f.string(from: $0) } ?? "lasts", p.recentRatePerH.map { String(format: "%.2f", $0) } ?? "n/a"))
+        }
+    }
+    print("history samples:", UsageHistory.shared.samples("claude", since: Date(timeIntervalSince1970: 0)).count, "/", UsageHistory.shared.samples("codex", since: Date(timeIntervalSince1970: 0)).count)
+    exit(0)
+}
+
+
+if CommandLine.arguments.contains("--advanced-preview") {
+    UsageHistory.shared.load(); UsageLogs.shared.load(); UsageLogs.shared.scanSync()
+    var c = LimitData(), x = LimitData()
+    if let cd = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)), let cj = (try? JSONSerialization.jsonObject(with: cd)) as? [String: Any] {
+        if let m = cj["claude"] as? [String: Any] { c = dict2ld(m); c.fromCache = false }
+        if let m = cj["codex"] as? [String: Any] { x = dict2ld(m); x.fromCache = false }
+    }
+    let dd = UserDefaults.standard
+    let s: CGFloat = 2
+    func save(_ ctx: CGContext, _ path: String) {
+        guard let img = ctx.makeImage() else { return }
+        let data = NSMutableData()
+        if let dst = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dst, img, nil)
+            if CGImageDestinationFinalize(dst) { try? (data as Data).write(to: URL(fileURLWithPath: path)) }
+        }
+    }
+    func render(_ cl: LimitData, _ cx: LimitData, _ path: String) {
+        let h = advancedHeight(cl, cx)
+        guard let ctx = bitmapContext(Int(PANEL_W * s), Int(h * s)) else { return }
+        ctx.scaleBy(x: s, y: s)
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: cl, codex: cx, interval: 300, updated: Date(), about: AboutState())
+        save(ctx, path); print(path, Int(h), "pt")
+    }
+    let out = CommandLine.arguments.last ?? "/tmp"
+    dd.set(true, forKey: "advanced")
+    for lang in ["ru", "en"] {
+        dd.set(lang, forKey: "lang")
+        dd.set(true, forKey: "advHistExpanded"); dd.set("claude", forKey: "advHistProduct"); render(c, x, "\(out)/adv-\(lang)-expanded.png")
+        dd.set("codex", forKey: "advHistProduct"); render(c, x, "\(out)/adv-\(lang)-codex.png")
+        dd.set(false, forKey: "advHistExpanded"); render(c, x, "\(out)/adv-\(lang)-collapsed.png")
+    }
+    dd.set("ru", forKey: "lang"); dd.set(true, forKey: "advHistExpanded"); dd.set("claude", forKey: "advHistProduct")
+    var ex = c; ex.auth = .expired; ex.error = "sign-in expired"; ex.asOf = Date().addingTimeInterval(-22 * 3600)
+    render(ex, x, "\(out)/adv-expired.png")
+    var noCodex = x; noCodex.present = false
+    render(c, noCodex, "\(out)/adv-claude-only.png")
+    dd.removeObject(forKey: "lang"); dd.removeObject(forKey: "advanced"); dd.removeObject(forKey: "advHistExpanded"); dd.removeObject(forKey: "advHistProduct")
+    exit(0)
+}
+
 // Regenerate all docs/ screenshots (RU + EN) from the live draw code. Run from the repo root.
 if CommandLine.arguments.contains("--screenshots") {
     let s2: CGFloat = 2
@@ -2772,15 +4150,51 @@ if CommandLine.arguments.contains("--screenshots") {
     }
     let dd = UserDefaults.standard, savedLang = dd.string(forKey: "lang")
     var wnAbout = AboutState(); wnAbout.availVersion = "2.2.2"; wnAbout.availURL = "x"
+    // Advanced view on demo data: a deterministic month of usage across a few models.
+    var demoIx = UsageIndex()
+    let today = Calendar.current.startOfDay(for: Date())
+    for back in 0..<42 {
+        let day = dayKey(Calendar.current.date(byAdding: .day, value: -back, to: today)!)
+        let wave = [1.0, 0.2, 0.0, 0.6, 1.4, 0.9, 0.3][back % 7] * (back < 7 ? 1.0 : 0.7)
+        if wave == 0 { continue }
+        var f = DayModelUsage(); f.input = Int(wave * 3_800_000); f.output = Int(wave * 40_000); f.turns = Int(wave * 60)
+        var o = DayModelUsage(); o.input = Int(wave * 1_500_000); o.output = Int(wave * 20_000); o.turns = Int(wave * 20)
+        demoIx.add("claude", day, "claude-fable-5-1", f); demoIx.add("claude", day, "claude-opus-5", o)
+        var a = DayModelUsage(); a.input = Int(wave * 900_000); a.output = Int(wave * 12_000); a.turns = Int(wave * 25)
+        var sl = DayModelUsage(); sl.input = Int(wave * 1_200_000); sl.output = Int(wave * 8_000); sl.turns = Int(wave * 15)
+        demoIx.add("codex", day, "gpt-6-astra", a); demoIx.add("codex", day, "gpt-5.6-sol", sl)
+    }
+    UsageLogs.shared.useForPreview(demoIx)
+    UsageHistory.shared.useForPreview([UsageSample(t: Date().timeIntervalSince1970 - 86400 * 3, product: "claude", session: 10, weekly: 30, scoped: nil, scopedName: nil, sessionReset: nil, weeklyReset: nil),
+                                       UsageSample(t: Date().timeIntervalSince1970 - 86400 * 3, product: "codex", session: nil, weekly: 20, scoped: nil, scopedName: nil, sessionReset: nil, weeklyReset: nil)])
+    var advClaude = claude; advClaude.weekly = 58; advClaude.weeklyReset = Date().addingTimeInterval(4 * 86400); advClaude.plan = "max"
+    var advCodex = codex; advCodex.session = nil; advCodex.sessionReset = nil; advCodex.plan = "pro"
+    let savedTier = dd.string(forKey: "claudeTier"), savedSubC = dd.object(forKey: "subClaude"), savedSubX = dd.object(forKey: "subCodex")
+    dd.set("default_claude_max_20x", forKey: "claudeTier"); dd.set(200.0, forKey: "subClaude"); dd.set(200.0, forKey: "subCodex")
+    let savedAdv = dd.bool(forKey: "advanced"), savedExp = dd.bool(forKey: "advHistExpanded"), savedHP = dd.string(forKey: "advHistProduct")
+    dd.set(true, forKey: "advanced"); dd.set(true, forKey: "advHistExpanded"); dd.set("claude", forKey: "advHistProduct")
+    func renderAdvanced(_ c: LimitData, _ x: LimitData, _ path: String) {
+        let h = advancedHeight(c, x)
+        guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(h * s2)) else { return }
+        ctx.scaleBy(x: s2, y: s2)
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: c, codex: x, interval: 300, updated: Date(), about: AboutState())
+        savePNG(ctx, path)
+    }
     for lang in ["ru", "en"] {
         dd.set(lang, forKey: "lang")
         let sfx = lang == "en" ? "-en" : ""
+        renderAdvanced(advClaude, advCodex, "docs/advanced\(sfx).png")
         renderPanel(claude, codex, AboutState(), "docs/panel\(sfx).png")
         renderPanel(claudeOnly, noCodex, AboutState(), "docs/panel-single\(sfx).png")
         renderSettings(AboutState(), "docs/settings\(sfx).png")
         renderWhatsNew(wnAbout, "docs/whatsnew\(sfx).png")
     }
     dd.set(savedLang, forKey: "lang")
+    dd.set(savedAdv, forKey: "advanced"); dd.set(savedExp, forKey: "advHistExpanded")
+    if let v = savedHP { dd.set(v, forKey: "advHistProduct") } else { dd.removeObject(forKey: "advHistProduct") }
+    if let v = savedTier { dd.set(v, forKey: "claudeTier") } else { dd.removeObject(forKey: "claudeTier") }
+    if let v = savedSubC { dd.set(v, forKey: "subClaude") } else { dd.removeObject(forKey: "subClaude") }
+    if let v = savedSubX { dd.set(v, forKey: "subCodex") } else { dd.removeObject(forKey: "subCodex") }
     print("screenshots written to docs/"); exit(0)
 }
 
