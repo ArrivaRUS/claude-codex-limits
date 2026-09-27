@@ -1,0 +1,15 @@
+#!/usr/bin/python3
+# Claude Codex Limits — tray app (Linux port). Needs python3-pyqt5 from the OS repository.
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+try:
+    from ccl.gui.app import main  # noqa: E402
+except ImportError as e:
+    sys.stderr.write("PyQt5 is required: sudo apt install python3-pyqt5 (%s)\n" % e)
+    sys.exit(1)
+
+if __name__ == "__main__":
+    sys.exit(main())

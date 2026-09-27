@@ -18,3 +18,7 @@ backups/
 
 # local time ledger (Юрка time-tracking — не коммитить)
 *.local.md
+
+# python
+__pycache__/
+*.pyc
