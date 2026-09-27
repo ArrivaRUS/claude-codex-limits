@@ -116,4 +116,4 @@ and updating both sides.
 One GitHub OAuth App («Claude Codex Limits», Device Flow enabled) serves every port. Its Client ID
 is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secret.
 
-**Client ID: `TBD`** — to be filled in once the OAuth App is registered.
+**Client ID: `Ov23lipk8voUWUAr59qS`** (OAuth App «Claude Codex Limits», owner ArrivaRUS, Device Flow enabled).
