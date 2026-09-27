@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -145,6 +146,7 @@ class Store:
         self.path = path
         self.defaults = defaults or {}
         self.data = {}
+        self.lock = threading.RLock()     # the tray's workers and its GUI thread share one Store
         self.reload()
 
     def reload(self):
@@ -162,28 +164,27 @@ class Store:
         return key in self.data
 
     def set(self, key, value):
-        if value is None:
-            self.data.pop(key, None)
-        else:
-            self.data[key] = value
-        self.save()
+        self.update(**{key: value})
 
     def update(self, **kw):
-        for k, v in kw.items():
-            if v is None:
-                self.data.pop(k, None)
-            else:
-                self.data[k] = v
-        self.save()
+        with self.lock:
+            for k, v in kw.items():
+                if v is None:
+                    self.data.pop(k, None)
+                else:
+                    self.data[k] = v
+            self.save()
 
     def remove(self, *keys):
-        for k in keys:
-            self.data.pop(k, None)
-        self.save()
+        with self.lock:
+            for k in keys:
+                self.data.pop(k, None)
+            self.save()
 
     def save(self):
-        ensure_dirs()
-        write_json(self.path, self.data, compact=False)
+        with self.lock:
+            ensure_dirs()
+            write_json(self.path, self.data, compact=False)
 
 
 _settings = None

@@ -106,7 +106,7 @@ def cmd_push(args):
     common.ensure_dirs()
     cb = None if args.quiet else _progress_printer()
     t0 = time.time()
-    ix, changed = usage.refresh(blocking=True, progress=cb)
+    ix, changed, _fresh = usage.refresh(blocking=True, progress=cb)
     _end_progress(cb)
     if not args.quiet:
         n = sum(len(v) for v in ix["days"].values())
@@ -119,6 +119,11 @@ def cmd_push(args):
         if not args.quiet:
             _say(common.tr("Синхронизация выключена: нет входа в GitHub (ccl-sync login).",
                            "Sync is off: not signed in to GitHub (ccl-sync login)."))
+        return 0
+    if res.skipped == "locked":
+        if not args.quiet:
+            _say(common.tr("Хранилище секретов (KWallet) заблокировано — синхронизация подождёт до разблокировки.",
+                           "The Secret Service (KWallet) is locked — sync waits until it is unlocked."))
         return 0
     if res.skipped == "revoked":
         _say(common.tr("Войдите в GitHub заново: ccl-sync login", "Sign in to GitHub again: ccl-sync login"))
@@ -175,6 +180,9 @@ def cmd_status(_args):
     if token:
         _say("GitHub: %s  (%s)" % (st.get("login") or "?", common.tr("токен: ", "token: ") + (
             common.tr("хранилище секретов", "Secret Service") if backend == "secret-service" else common.TOKEN_FILE_PATH)))
+    elif backend == "locked":
+        _say("GitHub: " + common.tr("токен в заблокированном хранилище секретов — разблокируйте KWallet",
+                                    "token is in a locked Secret Service — unlock KWallet"))
     elif st.get("revoked"):
         _say("GitHub: " + common.tr("вход отозван — войдите заново (ccl-sync login)",
                                     "sign-in revoked — sign in again (ccl-sync login)"))
@@ -230,7 +238,7 @@ def _n(v):
 def cmd_dump(args):
     if not args.no_scan:
         cb = _progress_printer()
-        ix, _ = usage.refresh(blocking=True, progress=cb)
+        ix, _changed, _fresh = usage.refresh(blocking=True, progress=cb)
         _end_progress(cb)
     else:
         ix = usage.load_index()

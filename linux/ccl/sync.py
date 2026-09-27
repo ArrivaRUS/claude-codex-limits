@@ -272,9 +272,9 @@ def sync_cycle(days, force=False, auto=False):
             res.skipped = "busy"
             return res
         st = sync_state()
-        token, _backend = vault.read()
+        token, backend = vault.read()
         if not token:
-            res.skipped = "revoked" if st.get("revoked") else "signed-out"
+            res.skipped = "locked" if backend == "locked" else "revoked" if st.get("revoked") else "signed-out"
             return res
         if time.time() < float(st.get("backoffUntil") or 0):
             res.skipped = "backoff"

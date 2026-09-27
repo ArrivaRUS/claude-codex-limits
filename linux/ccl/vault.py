@@ -43,6 +43,10 @@ class _SecretService(object):
         items = list(unlocked) + self._unlocked(list(locked))
         return items[0] if items else None
 
+    def has_locked(self):
+        _unlocked, locked = self.service.SearchItems(ATTRS)
+        return bool(locked) and not self._unlocked(list(locked))
+
     def get(self):
         path = self.find()
         if not path:
@@ -106,17 +110,23 @@ def _file_delete():
 
 
 def read():
-    """(token, backend) or (None, None). The Secret Service wins when it holds one."""
+    """(token, backend) or (None, None). The Secret Service wins when it holds one.
+    (None, "locked") means the keyring holds our token but is locked right now — the caller
+    should wait, not treat it as a sign-out."""
     ss = _ss()
+    locked = False
     if ss is not None:
         try:
             t = ss.get()
             if t:
                 return t, "secret-service"
+            locked = ss.has_locked()
         except Exception:
             pass
     t = _file_get()
-    return (t, "file") if t else (None, None)
+    if t:
+        return t, "file"
+    return (None, "locked") if locked else (None, None)
 
 
 def write(token):

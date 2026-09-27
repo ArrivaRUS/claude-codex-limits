@@ -390,6 +390,12 @@ class SettingsPage(QWidget):
                                                          a.refresh_logs(force_push=True)))
             lay.addWidget(_row(tr("Имя этой машины", "This machine's name"), name))
             return
+        if backend == "locked":
+            lay.addWidget(_label(tr("Токен GitHub лежит в хранилище секретов, но оно заблокировано — разблокируйте KWallet, "
+                                    "синхронизация продолжится сама.",
+                                    "The GitHub token is in the Secret Service, which is locked — unlock KWallet and sync "
+                                    "resumes by itself."), wrap=True))
+            return
         if st.get("revoked"):
             lay.addWidget(_label(tr("Вход в GitHub отозван — войдите заново.", "GitHub sign-in was revoked — sign in again."), wrap=True))
         lay.addWidget(_label(tr("Расход по дням и моделям (столбики, календарь, деньги) есть только в логах той машины, "
@@ -461,7 +467,7 @@ class FixPage(QWidget):
             self.lay.addWidget(_label(text, wrap=True))
             if cmd:
                 row = QHBoxLayout()
-                l = _label(cmd, "cmd")
+                l = _label(cmd, "cmd", True)
                 l.setTextInteractionFlags(Qt.TextSelectableByMouse)
                 row.addWidget(l, 1)
                 b = QPushButton(tr("Скопировать", "Copy"))
@@ -524,7 +530,9 @@ class PanelWindow(QWidget):
         scr = self.screen_rect()
         if i == 1:
             return min(scr.height() - 40, 640)
-        return min(scr.height() - 40, max(420, self.fix.sizeHint().height()))
+        lay = self.fix.layout()
+        need = lay.totalHeightForWidth(panel.PANEL_W) if lay.hasHeightForWidth() else self.fix.sizeHint().height()
+        return min(scr.height() - 40, max(360, need + 8))
 
     def screen_rect(self):
         pos = self.anchor or QCursor.pos()
@@ -776,8 +784,10 @@ class TrayApp(QObject):
         def work():
             remote = None
             try:
-                ix, _changed = usage.refresh(blocking=False)
-                res = sync.sync_cycle(ix["days"], force=force_push, auto=not force_push)
+                ix, _changed, fresh = usage.refresh(blocking=False)
+                # another process (the timer) is scanning right now and will sync the fresh
+                # index itself — pushing our older copy would only hold its write back 10 min
+                res = sync.sync_cycle(ix["days"], force=force_push, auto=not force_push) if fresh else None
                 remote = sync.load_remote()
                 days = ix["days"]
             except Exception as e:

@@ -281,18 +281,18 @@ def _codex_lines(data, end, ix, st):
 
 def refresh(blocking=True, progress=None):
     """Load the index, rescan, prune, save — under the shared lock so the tray and the timer
-    never scan at the same time. Returns (index, changed). When `blocking` is False and
-    another process is scanning, returns the index as it is on disk."""
+    never scan at the same time. Returns (index, changed, fresh). When `blocking` is False and
+    another process is scanning, returns the index as it is on disk with fresh=False."""
     with common.file_lock("usage-index", blocking=blocking) as held:
         ix = load_index()
         if not held:
-            return ix, False
+            return ix, False, False
         changed = scan(ix, progress=progress)
         if prune(ix):
             changed = True
         if changed:
             save_index(ix)
-        return ix, changed
+        return ix, changed, True
 
 
 def snapshot_days(ix, now=None):
