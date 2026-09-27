@@ -1910,7 +1910,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1"
+let APP_VERSION = "3.1.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2412,8 +2412,11 @@ func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     for c in cards { h += 5 + c.height }
     if cards.count == 1 { h += 5 + ADV_PLACEHOLDER }
     h += 5 + advHistoryHeight(cards)
-    return h
+    return h + ADV_CREDIT_H
 }
+/// Credit line under the footer (author · version · GitHub), same as in the Simple view —
+/// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
+let ADV_CREDIT_H: CGFloat = 24
 
 /// Main-panel height for whichever view is on.
 func mainPanelHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
@@ -2872,7 +2875,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     y += hh + 6
 
     // ---- footer ----
-    let footTop = H - 35
+    let footTop = H - 35 - ADV_CREDIT_H
     let segs: [(String, Double)] = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
     let sw = segs.map { width(attr($0.0, 12, .semibold, textHi)) + 20 }
     let segTotal = sw.reduce(0, +) + 4
@@ -2891,6 +2894,19 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     hits.append(Hit(id: "quit", rect: pwr.insetBy(dx: -6, dy: -6)))
     if let u = updated {
         textC(attr(tr("обновлено ", "updated ") + clockText(u), 11, .regular, textMid), x: 315, topY: footTop + 3, h: 18, align: 2)
+    }
+    // credit line: author · version · GitHub
+    do {
+        let divTop = footTop + 22 + 8
+        ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
+        ctx.beginPath(); ctx.move(to: CGPoint(x: ADV_CX, y: H - divTop)); ctx.addLine(to: CGPoint(x: ADV_CX + ADV_CW, y: H - divTop)); ctx.strokePath()
+        let pre = attr("Claude Codex Limits \(APP_VERSION) · by \(APP_AUTHOR) · ", 9.5, .regular, gray(1, 0.32))
+        let link = attr("GitHub", 9.5, .semibold, ADV_LINK)
+        let preW = width(pre), linkW = width(link)
+        let cx = (W - preW - linkW) / 2, ct = divTop + 7
+        textC(pre, x: cx, topY: ct, h: 12)
+        textC(link, x: cx + preW, topY: ct, h: 12)
+        hits.append(Hit(id: "open:\(REPO_URL)", rect: rectTL(cx + preW - 3, ct - 2, linkW + 6, 16)))
     }
     return hits
 }
