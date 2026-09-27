@@ -78,5 +78,41 @@ class TestStale(unittest.TestCase):
         self.assertFalse(limits.is_stale(d, now=1000.0))
 
 
+class TestAlarms(unittest.TestCase):
+    def reading(self, weekly, reset, fable=None, fable_reset=None):
+        c = limits.LimitData()
+        c.session, c.session_reset = 10.0, 5000.0
+        c.weekly, c.weekly_reset = weekly, reset
+        if fable is not None:
+            c.scoped = limits.Scoped("Fable", fable, fable_reset)
+        x = limits.LimitData()
+        x.present = False
+        return c, x
+
+    def test_reached_once_even_on_first_reading(self):
+        prev = {}
+        ev, upd = limits.detect_alarms(*self.reading(40.0, 9000.0, fable=100.0, fable_reset=9000.0), prev=prev, baseline=False)
+        self.assertEqual([(e["kind"], e["window"].split(" · ")[-1]) for e in ev], [("reached", "Fable")])
+        prev.update(upd)
+        ev, upd = limits.detect_alarms(*self.reading(41.0, 9000.0, fable=100.0, fable_reset=9000.0), prev=prev, baseline=True)
+        self.assertEqual(ev, [])
+
+    def test_reset_needs_rollover_and_a_drop(self):
+        prev = {}
+        _, upd = limits.detect_alarms(*self.reading(60.0, 9000.0), prev=prev, baseline=False)
+        prev.update(upd)
+        # resets_at creeping forward with usage climbing is not a reset
+        ev, upd = limits.detect_alarms(*self.reading(61.0, 9030.0), prev=prev, baseline=True)
+        self.assertEqual(ev, [])
+        prev.update(upd)
+        ev, _ = limits.detect_alarms(*self.reading(0.0, 9000.0 + 7 * 86400), prev=prev, baseline=True)
+        self.assertEqual([(e["kind"], e["is5h"]) for e in ev], [("reset", False)])
+
+    def test_no_reset_chime_on_first_reading(self):
+        prev = {"rst_c7": 1000.0, "use_c7": 50.0}
+        ev, _ = limits.detect_alarms(*self.reading(0.0, 900000.0), prev=prev, baseline=False)
+        self.assertEqual(ev, [])
+
+
 if __name__ == "__main__":
     unittest.main()

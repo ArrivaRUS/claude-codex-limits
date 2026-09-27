@@ -95,9 +95,12 @@ AccuracySec=1min
 [Install]
 WantedBy=timers.target
 EOF
-        systemctl --user daemon-reload
-        systemctl --user enable --now ccl-sync.timer >/dev/null 2>&1
-        say "Таймер: systemd --user (ccl-sync.timer), каждые 10 минут"
+        systemctl --user daemon-reload || true
+        if systemctl --user enable --now ccl-sync.timer >/dev/null 2>&1; then
+            say "Таймер: systemd --user (ccl-sync.timer), каждые 10 минут"
+        else
+            say "Не удалось включить ccl-sync.timer — синхронизация будет идти, пока запущен значок в трее."
+        fi
     elif command -v crontab >/dev/null 2>&1; then
         # cron has no session bus; point it at the user's one so the keyring stays reachable
         LINE="*/10 * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"

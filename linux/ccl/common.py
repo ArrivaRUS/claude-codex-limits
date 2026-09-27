@@ -130,6 +130,7 @@ SETTINGS_DEFAULTS = {
     "sound5h": False,
     "sound7d": False,
     "reachedOn": False,
+    "notify": True,
     "sound5hChoice": "rise",
     "sound7dChoice": "celebrate",
     "reachedChoice": "outage",

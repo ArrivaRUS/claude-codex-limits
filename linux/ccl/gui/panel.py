@@ -37,6 +37,7 @@ class Model(object):
         self.days = {}            # merged usage days (local + other machines)
         self.local_days = {}
         self.other_machines = 0
+        self.update_available = None     # newer Linux version on main → orange dot on the gear
 
 
 def background(c, W, H, glow_at):
@@ -57,6 +58,13 @@ def background(c, W, H, glow_at):
     p.setBrush(Qt.NoBrush)
     p.setPen(QPen(gray(1, 0.08), 1))
     p.drawPath(path)
+
+
+def update_badge(c, gear):
+    """The orange "update available" dot on the gear, with a dark halo for contrast."""
+    x, y = gear.right() - 5, gear.top() - 1
+    c.dot(x, y + 3.5, gray(0.10, 1), r=5)
+    c.dot(x, y + 3.5, AMBER, r=3.5)
 
 
 def metric_color(base, v):
@@ -117,6 +125,8 @@ def draw_simple(c, W, H, m):
     gear = rect_tl(W - pad - 24 - 26, pad - 2, 24, 24)
     c.icon("gear", gear.adjusted(4, 4, -4, -4), TEXT_MID, 1.5)
     hits.append(("settings", gear))
+    if m.update_available:
+        update_badge(c, gear.adjusted(4, 4, -4, -4))
 
     cards_top = 58
     card_h = 152 + (simple_height(m) - PANEL_H)
@@ -428,6 +438,8 @@ def draw_advanced(c, W, H, m):
     c.text_c(Attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, "regular", TEXT_MID), x, ly, lh)
     gear, rf = rect_tl(297, 24, 18, 18), rect_tl(327, 24, 18, 18)
     c.icon("gear", gear, TEXT_MID, 1.4)
+    if m.update_available:
+        update_badge(c, gear)
     c.icon("refresh", rf.adjusted(2, 2, -2, -2), TEXT_MID, 1.7)
     hits.append(("settings", gear.adjusted(-6, -6, 6, 6)))
     hits.append(("refresh", rf.adjusted(-6, -6, 6, 6)))

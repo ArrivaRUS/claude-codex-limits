@@ -661,3 +661,45 @@ def paced_limits(d, product, history=None):
                 "name": common.tr("Неделя · все модели", "Week · all models") if product == "claude" else common.tr("Неделя", "Week"),
                 "pace": window_pace(d.weekly, d.weekly_reset, 168, rr("w", 180))})
     return out
+
+
+# ---- reset / limit-reached events (port of checkAlarms, made pure so it can be tested) --------
+
+def detect_alarms(claude, codex, prev, baseline):
+    """Compare this reading with the remembered one. `prev` is the state dict (rst_*/use_*/rch_*
+    keys), `baseline` False on the first reading after launch. Returns (events, updates):
+    events are dicts {kind: "reset"|"reached", product, window, is5h, reset}; `updates` go back
+    into the state.
+
+    A reset is a window rolling over — resets_at jumped forward, something had been used in the
+    old window and usage did not climb — so an idle 0% never chimes and a real rollover chimes
+    once. "Reached" (≥ 99.5%, the shown 100%) is persisted, so it fires once per crossing and
+    survives restarts, including a limit hit while the app was closed."""
+    session_name = common.tr("Сессия · 5 ч", "Session · 5 h")
+    week_name = common.tr("Неделя", "Week")
+    wins = [("rst_c5", "use_c5", "rch_c5", "Claude Code", session_name, claude.session_reset, claude.session, True),
+            ("rst_x5", "use_x5", "rch_x5", "Codex", session_name, codex.session_reset, codex.session, True),
+            ("rst_c7", "use_c7", "rch_c7", "Claude Code", week_name + common.tr(" · все модели", " · all models"),
+             claude.weekly_reset, claude.weekly, False),
+            ("rst_x7", "use_x7", "rch_x7", "Codex", week_name, codex.weekly_reset, codex.weekly, False)]
+    if claude.scoped:
+        k = claude.scoped.name.lower()
+        wins.append(("rst_cs_" + k, "use_cs_" + k, "rch_cs_" + k, "Claude Code", week_name + " · " + claude.scoped.name,
+                     claude.scoped.reset, claude.scoped.percent, False))
+    events, upd = [], {}
+    for rkey, ukey, chkey, product, window, date, used, is5 in wins:
+        if date is not None:
+            old_r = float(prev.get(rkey) or 0)
+            rolled = old_r > 0 and date > old_r + 60
+            if used is not None:
+                old_u = float(prev.get(ukey) or 0)
+                if baseline and rolled and old_u > 0 and used <= old_u + 0.5:
+                    events.append({"kind": "reset", "product": product, "window": window, "is5h": is5, "reset": date})
+                upd[ukey] = used
+            upd[rkey] = date
+        if used is not None:
+            now_r = used >= 99.5
+            if now_r and not prev.get(chkey):
+                events.append({"kind": "reached", "product": product, "window": window, "is5h": is5, "reset": date})
+            upd[chkey] = now_r
+    return events, upd

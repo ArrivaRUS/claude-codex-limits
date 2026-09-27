@@ -5,6 +5,7 @@
     ccl-sync status     who is signed in, the gist, which machines are in it and when they reported
     ccl-sync push       one pass: index the local logs, write this machine's file, read the others
     ccl-sync dump       per-day, per-model summary of the local logs (to check the numbers)
+    ccl-sync update     install the newest Linux version from the repository's main branch
 """
 
 import argparse
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import time
 
-from . import APP_VERSION, common, sync, vault, usage
+from . import APP_VERSION, common, sync, update, vault, usage
 
 
 def _say(*a):
@@ -288,6 +289,29 @@ def cmd_dump(args):
     return 0
 
 
+def cmd_update(args):
+    latest, err = update.check()
+    if latest is None:
+        _say(common.tr("Проверить обновление не удалось: ", "Couldn't check for updates: ") + str(err))
+        return 1
+    if not update.is_newer(latest, APP_VERSION):
+        _say(common.tr("Установлена последняя версия: ", "Up to date: ") + APP_VERSION)
+        return 0
+    _say(common.tr("Доступна версия ", "Version available: ") + latest + common.tr(" (установлена ", " (installed ") + APP_VERSION + ")")
+    _say(common.tr("Что нового: ", "What's new: ") + update.CHANGES_URL)
+    if args.check:
+        return 0
+    try:
+        new, _out = update.apply()
+    except RuntimeError as e:
+        _say(str(e))
+        return 1
+    _say(common.tr("Обновлено до ", "Updated to ") + new + common.tr(
+        ". Значок в трее перезапустится сам при следующем входе — или перезапустите его сейчас.",
+        ". The tray icon picks it up at next login — or restart it now."))
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="ccl-sync", description=common.tr(
         "Сборщик расхода Claude Code / Codex и синхронизация через GitHub gist.",
@@ -311,10 +335,12 @@ def main(argv=None):
                                                                     "together with the other machines from the gist"))
     p.add_argument("--no-scan", action="store_true", help=common.tr("без переиндексации", "don't rescan"))
     p.add_argument("--json", action="store_true")
+    p = sub.add_parser("update", help=common.tr("обновить Linux-версию из GitHub", "update the Linux port from GitHub"))
+    p.add_argument("--check", action="store_true", help=common.tr("только проверить", "only check"))
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_help()
         return 0
     common.ensure_dirs()
     return {"login": cmd_login, "logout": cmd_logout, "status": cmd_status,
-            "push": cmd_push, "dump": cmd_dump}[args.cmd](args)
+            "push": cmd_push, "dump": cmd_dump, "update": cmd_update}[args.cmd](args)

@@ -17,7 +17,7 @@ from PyQt5.QtGui import QCursor, QDesktopServices, QFontDatabase, QGuiApplicatio
 from PyQt5.QtWidgets import (QAction, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                              QMenu, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import APP_VERSION, REPO_URL, common, limits, sync, vault, usage
+from .. import APP_VERSION, REPO_URL, common, limits, sync, update, vault, usage
 from ..common import tr
 from . import fmt, paint, panel, trayicon
 
@@ -65,6 +65,8 @@ class Bridge(QObject):
     logs_done = pyqtSignal(object, object)
     login_code = pyqtSignal(object)
     login_done = pyqtSignal(object, object)
+    update_checked = pyqtSignal(object, object)
+    update_done = pyqtSignal(object, object)
 
 
 def play_sound(sid):
@@ -276,8 +278,12 @@ class SettingsPage(QWidget):
         lay.addWidget(card)
         self.render_sync()
 
-        lay.addWidget(_label(tr("ЗВУКИ", "SOUNDS"), "cap"))
+        lay.addWidget(_label(tr("УВЕДОМЛЕНИЯ И ЗВУКИ", "NOTIFICATIONS & SOUNDS"), "cap"))
         card, cl = _card()
+        notify = QCheckBox(tr("Уведомление, когда лимит исчерпан или сброшен", "Notify when a limit is reached or reset"))
+        notify.setChecked(bool(st.get("notify")))
+        notify.toggled.connect(lambda on: st.set("notify", on))
+        cl.addWidget(notify)
         for key, choice_key, text, pool in (
                 ("sound5h", "sound5hChoice", tr("Сброс 5-часового окна", "5-hour window reset"), RESET_SOUNDS),
                 ("sound7d", "sound7dChoice", tr("Сброс недели", "Weekly reset"), RESET_SOUNDS),
@@ -305,6 +311,11 @@ class SettingsPage(QWidget):
         lay.addWidget(_label(tr("О ПРИЛОЖЕНИИ", "ABOUT"), "cap"))
         card, cl = _card()
         cl.addWidget(_label("Claude Codex Limits · Linux %s" % APP_VERSION, wrap=True))
+        self.upd_box = QWidget()
+        self.upd_lay = QVBoxLayout(self.upd_box)
+        self.upd_lay.setContentsMargins(0, 0, 0, 0)
+        cl.addWidget(self.upd_box)
+        self.render_update()
         link = QPushButton(REPO_URL.replace("https://", ""))
         link.setProperty("role", "link")
         link.clicked.connect(lambda: self.app.action("open:" + REPO_URL))
@@ -312,6 +323,35 @@ class SettingsPage(QWidget):
         cl.addWidget(_label(tr("Данные: ", "Data: ") + common.STATE_DIR.replace(common.HOME, "~"), "note", True))
         lay.addWidget(card)
         lay.addStretch(1)
+
+    def render_update(self):
+        _clear(self.upd_lay)
+        a = self.app
+        avail = a.model.update_available
+        if a.update_state == "running":
+            self.upd_lay.addWidget(_label(tr("Обновляю… значок перезапустится сам.", "Updating… the icon restarts by itself."), "note"))
+            return
+        if avail:
+            self.upd_lay.addWidget(_label(tr("Доступна версия ", "Version available: ") + avail, wrap=True))
+            row = QWidget()
+            h = QHBoxLayout(row)
+            h.setContentsMargins(0, 0, 0, 0)
+            b = QPushButton(tr("Обновить", "Update"))
+            b.setProperty("role", "accent")
+            b.clicked.connect(a.apply_update)
+            h.addWidget(b)
+            news = QPushButton(tr("Что нового", "What's new"))
+            news.setProperty("role", "link")
+            news.clicked.connect(lambda: a.action("open:" + update.CHANGES_URL))
+            h.addWidget(news)
+            h.addStretch(1)
+            self.upd_lay.addWidget(row)
+        else:
+            b = QPushButton(tr("Проверить обновления", "Check for updates"))
+            b.clicked.connect(lambda: a.check_update(manual=True))
+            self.upd_lay.addWidget(b, 0, Qt.AlignLeft)
+        if a.update_msg:
+            self.upd_lay.addWidget(_label(a.update_msg, "note", True))
 
     def on_lang(self, i):
         common.settings().set("lang", "en" if i == 1 else "ru")
@@ -593,6 +633,11 @@ class TrayApp(QObject):
         self.bridge.logs_done.connect(self.on_logs)
         self.bridge.login_code.connect(self.on_login_code)
         self.bridge.login_done.connect(self.on_login_done)
+        self.bridge.update_checked.connect(self.on_update_checked)
+        self.bridge.update_done.connect(self.on_update_done)
+        self.update_state = None
+        self.update_msg = None
+        self.model.update_available = update.available()
         self.busy_limits = False
         self.busy_logs = False
         self.force_pending = False
@@ -620,22 +665,39 @@ class TrayApp(QObject):
         self.load_local()
         self.refresh_limits()
         QTimer.singleShot(1500, self.refresh_logs)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(lambda: self.check_update(manual=False))
+        self.update_timer.start(3600 * 1000)             # hourly tick; the check itself runs every 6 h
+        QTimer.singleShot(20000, lambda: self.check_update(manual=False))
 
     # -- menu / tray --
     def build_menu(self):
-        menu = QMenu()
-        for text, cb in ((tr("Открыть панель", "Open panel"), self.win.toggle),
-                         (tr("Обновить", "Refresh"), lambda: (self.refresh_limits(), self.refresh_logs())),
-                         (tr("Настройки…", "Settings…"), self.open_settings)):
-            a = QAction(text, menu)
-            a.triggered.connect(cb)
-            menu.addAction(a)
-        menu.addSeparator()
-        q = QAction(tr("Выход", "Quit"), menu)
-        q.triggered.connect(self.qapp.quit)
-        menu.addAction(q)
-        self.menu = menu
-        self.tray.setContextMenu(menu)
+        """One menu for the app's lifetime; later calls only retitle actions and show/hide the
+        update item. Rebuilding it makes Plasma's DBusMenu exporter chase destroyed actions."""
+        if getattr(self, "menu", None) is None:
+            self.menu = QMenu()
+            # attach first: Qt's DBusMenu exporter only learns about actions added afterwards
+            self.tray.setContextMenu(self.menu)
+            self.act = {}
+            for key, cb in (("open", lambda: self.win.toggle()),
+                            ("refresh", lambda: (self.refresh_limits(), self.refresh_logs())),
+                            ("settings", self.open_settings),
+                            ("update", self.apply_update)):
+                a = QAction("", self.menu)
+                a.triggered.connect(cb)
+                self.menu.addAction(a)
+                self.act[key] = a
+            self.menu.addSeparator()
+            self.act["quit"] = QAction("", self.menu)
+            self.act["quit"].triggered.connect(self.qapp.quit)
+            self.menu.addAction(self.act["quit"])
+        self.act["open"].setText(tr("Открыть панель", "Open panel"))
+        self.act["refresh"].setText(tr("Обновить", "Refresh"))
+        self.act["settings"].setText(tr("Настройки…", "Settings…"))
+        self.act["quit"].setText(tr("Выход", "Quit"))
+        avail = self.model.update_available
+        self.act["update"].setText(tr("Обновить до ", "Update to ") + (avail or ""))
+        self.act["update"].setVisible(bool(avail))
 
     def open_settings(self):
         if not self.win.isVisible():
@@ -666,7 +728,14 @@ class TrayApp(QObject):
             if self.codex_tray is None:
                 self.codex_tray = QSystemTrayIcon()
                 self.codex_tray.activated.connect(self.on_activated)
-                self.codex_tray.setContextMenu(self.menu)
+                # its own QMenu (sharing the actions): one QMenu exported by two tray icons
+                # confuses the DBusMenu exporter ("No id for action")
+                self.codex_menu = QMenu()
+                self.codex_tray.setContextMenu(self.codex_menu)
+                for key in ("open", "refresh", "settings", "update"):
+                    self.codex_menu.addAction(self.act[key])
+                self.codex_menu.addSeparator()
+                self.codex_menu.addAction(self.act["quit"])
             self.codex_tray.setIcon(trayicon.make_icon(trayicon.values(codex, ["session", "weekly"]), trayicon.CODEX_MARK))
             self.codex_tray.setToolTip(tip)
             self.codex_tray.show()
@@ -864,54 +933,100 @@ class TrayApp(QObject):
         self.win.settings_page.render_sync()
         self.win.page0_changed()
 
+    # -- self-update from the repository's main branch --
+    def check_update(self, manual=False):
+        if self.update_state is not None or update.is_checkout() and not manual:
+            return
+        if not manual and not update.due():
+            return
+        self.update_state = "checking"
+
+        def work():
+            try:
+                latest, err = update.check()
+            except Exception as e:
+                latest, err = None, str(e)
+            self.bridge.update_checked.emit((latest, err), manual)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_update_checked(self, res, manual):
+        self.update_state = None
+        latest, err = res
+        self.model.update_available = update.available()
+        if manual:
+            if err:
+                self.update_msg = tr("Не удалось проверить: ", "Couldn't check: ") + err
+            elif not self.model.update_available:
+                self.update_msg = tr("Установлена последняя версия.", "You're up to date.")
+            else:
+                self.update_msg = None
+        self.build_menu()
+        self.win.page0_changed()
+        if self.win.isVisible() and self.win.stack.currentIndex() == 1:
+            self.win.settings_page.render_update()
+
+    def apply_update(self):
+        if self.update_state is not None:
+            return
+        if update.is_checkout():
+            self.update_msg = tr("Запущено из git-копии — обновляйте её через git pull.", "Running from a git checkout — use git pull.")
+            self.win.settings_page.render_update()
+            return
+        self.update_state = "running"
+        self.win.settings_page.render_update()
+
+        def work():
+            try:
+                new, _out = update.apply()
+                self.bridge.update_done.emit(new, None)
+            except Exception as e:
+                self.bridge.update_done.emit(None, str(e))
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_update_done(self, new, err):
+        self.update_state = None
+        if err:
+            self.update_msg = err
+            if self.win.isVisible():
+                self.win.settings_page.render_update()
+            return
+        # the installer replaced the files — start the new version in this process's place
+        # (the single-instance lock fd is close-on-exec, so the new image takes it over)
+        script = os.path.join(update.app_dir(), "claude-codex-limits")
+        self.tray.hide()
+        os.execv(sys.executable, [sys.executable, script])
+
     # -- reset / limit sounds (port of checkAlarms) --
     def check_alarms(self, claude, codex):
         st, ss = common.state(), common.settings()
-        wins = [("rst_c5", "use_c5", claude.session_reset, claude.session, True),
-                ("rst_x5", "use_x5", codex.session_reset, codex.session, True),
-                ("rst_c7", "use_c7", claude.weekly_reset, claude.weekly, False),
-                ("rst_x7", "use_x7", codex.weekly_reset, codex.weekly, False)]
-        if claude.scoped:
-            k = claude.scoped.name.lower()
-            wins.append(("rst_cs_" + k, "use_cs_" + k, claude.scoped.reset, claude.scoped.percent, False))
-        fired5 = fired7 = False
-        upd = {}
-        for rkey, ukey, date, used, is5 in wins:
-            if date is None:
-                continue
-            old_r = float(st.get(rkey) or 0)
-            rolled = old_r > 0 and date > old_r + 60
-            if used is not None:
-                old_u = float(st.get(ukey) or 0)
-                if self.sound_baseline and rolled and old_u > 0 and used <= old_u + 0.5:
-                    if is5:
-                        fired5 = True
-                    else:
-                        fired7 = True
-                upd[ukey] = used
-            upd[rkey] = date
-        reach = [("rch_c5", claude.session), ("rch_x5", codex.session), ("rch_c7", claude.weekly), ("rch_x7", codex.weekly)]
-        if claude.scoped:
-            reach.append(("rch_cs_" + claude.scoped.name.lower(), claude.scoped.percent))
-        fired_reached = False
-        for key, used in reach:
-            if used is None:
-                continue
-            now_r = used >= 99.5
-            if now_r and not st.get(key):
-                fired_reached = True
-            upd[key] = now_r
+        events, upd = limits.detect_alarms(claude, codex, st.data, self.sound_baseline)
         if upd:
             st.update(**upd)
-        first = not self.sound_baseline
         self.sound_baseline = True
-        if not first:
-            if fired5 and ss.get("sound5h"):
-                play_sound(ss.get("sound5hChoice"))
-            elif fired7 and ss.get("sound7d"):
-                play_sound(ss.get("sound7dChoice"))
-        if fired_reached and ss.get("reachedOn"):
+        resets = [e for e in events if e["kind"] == "reset"]
+        reached = [e for e in events if e["kind"] == "reached"]
+        if any(e["is5h"] for e in resets) and ss.get("sound5h"):
+            play_sound(ss.get("sound5hChoice"))
+        elif any(not e["is5h"] for e in resets) and ss.get("sound7d"):
+            play_sound(ss.get("sound7dChoice"))
+        if reached and ss.get("reachedOn"):
             play_sound(ss.get("reachedChoice"))
+        if ss.get("notify"):
+            for e in reached + resets:
+                self.notify(e)
+
+    def notify(self, e):
+        """Desktop notification (org.freedesktop.Notifications through the tray icon)."""
+        if e["kind"] == "reached":
+            title = e["product"] + tr(": лимит исчерпан", ": limit reached")
+            body = e["window"] + " — 100%" + ((tr(". Сброс ", ". Resets ") + fmt.fmt_reset(e["reset"])) if e["reset"] else "")
+            icon = QSystemTrayIcon.Warning
+        else:
+            title = e["product"] + tr(": лимит сброшен", ": limit reset")
+            body = e["window"] + tr(" — снова доступно", " — available again")
+            icon = QSystemTrayIcon.Information
+        tray = self.codex_tray if (e["product"] == "Codex" and self.codex_tray is not None) else self.tray
+        tray.showMessage(title, body, icon, 15000)
 
 
 def _share_session_bus():
@@ -949,6 +1064,7 @@ def main(argv=None):
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     qapp = QApplication(argv)
     qapp.setApplicationName("Claude Codex Limits")
+    qapp.setDesktopFileName("claude-codex-limits")        # notifications carry the app's name/icon
     qapp.setQuitOnLastWindowClosed(False)
     res_dirs = [os.path.join(HERE, "Resources"), os.path.join(os.path.dirname(HERE), "Resources")]
     paint.RES_DIRS[:] = [d for d in res_dirs if os.path.isdir(d)]
