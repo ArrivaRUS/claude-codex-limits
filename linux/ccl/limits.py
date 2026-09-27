@@ -156,7 +156,10 @@ def fetch_claude():
                     _save_claude_tokens(path, rt, tok)
                     st.remove("deadRefresh")
                 else:
-                    err = (r.json() or {}).get("error") if r.data else None
+                    body = r.json()
+                    err = body.get("error") if isinstance(body, dict) else None
+                    if isinstance(err, dict):
+                        err = err.get("type")
                     if err == "invalid_grant" or r.status in (400, 401):
                         st.set("deadRefresh", fp)
                         refused = True
@@ -292,7 +295,7 @@ def codex_from_rollout():
                 # the newest reading is near the end: read the tail only
                 f.seek(0, 2)
                 size = f.tell()
-                f.seek(max(0, size - 4 * 1024 * 1024))
+                f.seek(max(0, size - 1024 * 1024))
                 tail = f.read()
         except OSError:
             continue
@@ -405,14 +408,17 @@ def codex_usage_live():
 
 
 def fetch_codex(live=True):
-    rollout = codex_from_rollout()
-    if not rollout.present:
-        return rollout
+    if not os.path.isdir(common.CODEX_SESSIONS) and not os.path.exists(common.CODEX_AUTH):
+        d = LimitData()
+        d.present = False                  # Codex isn't set up on this machine
+        return d
     if live:
         d = codex_usage_live()
         if d is not None:
             return d
-    best = rollout
+    # offline / signed out: the freshest of the local rollout files and the last cached reading
+    best = codex_from_rollout()
+    best.present = True
     cached = (common.read_json(common.CACHE_PATH, {}) or {}).get("codex")
     if isinstance(cached, dict):
         c = LimitData.from_dict(cached)
