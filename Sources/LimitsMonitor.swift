@@ -1101,6 +1101,355 @@ func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
     return out
 }
 
+// MARK: - Cross-machine sync through a GitHub gist (docs/sync-protocol.md)
+//
+// Each computer writes one whole-snapshot file of daily per-model token totals into a secret
+// gist and reads everyone else's. Only aggregates travel; the token never leaves the Keychain
+// except in the Authorization header, and is never logged.
+
+let GITHUB_CLIENT_ID = "Ov23lipk8voUWUAr59qS"
+let SYNC_KC_SERVICE = "Claude Codex Limits GitHub"
+let SYNC_REMOTE_PATH = DATA_DIR + "/sync-remote.json"
+let MACHINE_ID_PATH = DATA_DIR + "/machine-id"
+let SYNC_KEEP_DAYS: Double = 45
+let SYNC_MANIFEST = "ccl-sync.json"
+
+/// Keychain through /usr/bin/security (like the Claude credentials): an ad-hoc-signed app
+/// would get an access prompt after every update if it owned the item itself. The secret is
+/// written through `security -i` on stdin so it never appears in a process's arguments.
+func syncTokenRead() -> String? {
+    let r = shell("/usr/bin/security", ["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"])
+    let t = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+    return r.code == 0 && !t.isEmpty ? t : nil
+}
+func syncTokenWrite(_ token: String) {
+    guard token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else { return }
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    p.arguments = ["-i"]
+    let inp = Pipe(); p.standardInput = inp
+    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { return }
+    let cmd = "add-generic-password -U -a \"\(NSUserName())\" -s \"\(SYNC_KC_SERVICE)\" -w \(token)\n"
+    inp.fileHandleForWriting.write(Data(cmd.utf8))
+    try? inp.fileHandleForWriting.close()
+    p.waitUntilExit()
+}
+func syncTokenDelete() { _ = shell("/usr/bin/security", ["delete-generic-password", "-s", SYNC_KC_SERVICE]) }
+
+struct SyncCachedMachine: Codable { var id: String; var name: String; var os: String; var updated: Date? }
+struct SyncRemoteCache: Codable {
+    var machines: [SyncCachedMachine] = []
+    var days: [String: [String: [String: DayModelUsage]]] = [:]
+}
+
+final class GitHubSync {
+    static let shared = GitHubSync()
+    private let q = DispatchQueue(label: "ccl.sync", qos: .utility)
+    private let lock = NSLock()
+    private var _ui = SyncUIState()
+    private var _remote = SyncRemoteCache()
+    private var loginCancelled = false
+    private(set) var verifyURL = "https://github.com/login/device"
+    private var backoffUntil = Date.distantPast
+    var onChange: (() -> Void)?
+
+    var ui: SyncUIState { lock.lock(); defer { lock.unlock() }; return _ui }
+    func remoteDays() -> [String: [String: [String: DayModelUsage]]] {
+        lock.lock(); defer { lock.unlock() }; return _ui.phase == .on ? _remote.days : [:]
+    }
+    /// `f` runs under the lock — it must not call anything that takes the lock again
+    /// (machineList(), ui, remoteDays()); compute those first and capture the values.
+    private func setUI(_ f: (inout SyncUIState) -> Void) {
+        lock.lock(); f(&_ui); lock.unlock()
+        DispatchQueue.main.async { self.onChange?() }
+    }
+
+    lazy var machineId: String = {
+        if let s = try? String(contentsOfFile: MACHINE_ID_PATH, encoding: .utf8) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { return t }
+        }
+        let id = UUID().uuidString.lowercased()
+        try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+        try? (id + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
+        return id
+    }()
+    lazy var machineName: String = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+    var osName: String {
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(v.majorVersion).\(v.minorVersion)"
+    }
+
+    /// Restore the last known state at launch, so the history shows other machines offline.
+    func load() {
+        let d = UserDefaults.standard
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: SYNC_REMOTE_PATH)),
+           let c = try? JSONDecoder().decode(SyncRemoteCache.self, from: data) {
+            lock.lock(); _remote = c; lock.unlock()
+        }
+        q.async {
+            if syncTokenRead() != nil {
+                let ms = self.machineList()
+                self.setUI { $0.phase = .on; $0.login = d.string(forKey: "syncLogin"); $0.machines = ms }
+            } else if d.bool(forKey: "syncRevoked") {
+                self.setUI { $0.phase = .revoked; $0.login = d.string(forKey: "syncLogin") }
+            }
+        }
+    }
+
+    private func machineList() -> [SyncMachine] {
+        lock.lock(); let r = _remote; lock.unlock()
+        let pushed = UserDefaults.standard.object(forKey: "syncPushedAt") as? Date
+        var out = [SyncMachine(name: machineName, os: osName, updated: pushed, isSelf: true)]
+        out += r.machines.sorted { $0.name < $1.name }.map { SyncMachine(name: $0.name, os: $0.os, updated: $0.updated, isSelf: false) }
+        return out
+    }
+
+    private func gh(_ path: String, _ method: String = "GET", token: String, body: Any? = nil) -> (status: Int, json: Any?) {
+        var h = ["Authorization": "Bearer \(token)", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ClaudeCodexLimits"]
+        var data: Data? = nil
+        if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
+        let url = path.hasPrefix("https://") ? path : "https://api.github.com" + path
+        let r = http(url, method: method, headers: h, body: data, timeout: 20)
+        return (r.status, r.data.flatMap { try? JSONSerialization.jsonObject(with: $0) })
+    }
+
+    // MARK: sign-in (OAuth Device Flow)
+
+    func startLogin() {
+        loginCancelled = false
+        setUI { $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil }
+        q.async { self.runLogin() }
+    }
+    func cancelLogin() {
+        loginCancelled = true
+        setUI { $0.phase = .off; $0.userCode = nil }
+    }
+    private func form(_ url: String, _ fields: [String: String]) -> [String: Any]? {
+        let body = fields.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }.joined(separator: "&")
+        let r = http(url, method: "POST", headers: ["Accept": "application/json", "User-Agent": "ClaudeCodexLimits",
+                                                  "Content-Type": "application/x-www-form-urlencoded"], body: Data(body.utf8))
+        return r.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+    }
+    private func runLogin() {
+        guard let j = form("https://github.com/login/device/code", ["client_id": GITHUB_CLIENT_ID, "scope": "gist"]),
+              let deviceCode = j["device_code"] as? String, let userCode = j["user_code"] as? String else {
+            setUI { $0.phase = .off; $0.error = tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again.") }
+            return
+        }
+        verifyURL = (j["verification_uri"] as? String) ?? verifyURL
+        var interval = (j["interval"] as? Double) ?? 5
+        let deadline = Date().addingTimeInterval((j["expires_in"] as? Double) ?? 900)
+        setUI { $0.userCode = userCode }
+        while !loginCancelled, Date() < deadline {
+            Thread.sleep(forTimeInterval: interval)
+            if loginCancelled { return }
+            guard let t = form("https://github.com/login/oauth/access_token",
+                               ["client_id": GITHUB_CLIENT_ID, "device_code": deviceCode,
+                                "grant_type": "urn:ietf:params:oauth:grant-type:device_code"]) else { continue }
+            if let token = t["access_token"] as? String {
+                syncTokenWrite(token)
+                guard syncTokenRead() == token else {
+                    setUI { $0.phase = .off; $0.error = tr("Не удалось сохранить вход в Связку ключей.", "Couldn't save the sign-in to the Keychain.") }
+                    return
+                }
+                let me = gh("/user", token: token)
+                let login = (me.json as? [String: Any])?["login"] as? String
+                let d = UserDefaults.standard
+                d.set(login, forKey: "syncLogin"); d.set(false, forKey: "syncRevoked")
+                let ms = machineList()
+                setUI { $0.phase = .on; $0.login = login; $0.userCode = nil; $0.error = nil; $0.machines = ms }
+                syncBody(force: true)
+                return
+            }
+            switch t["error"] as? String {
+            case "authorization_pending": continue
+            case "slow_down": interval += 5
+            case "access_denied":
+                setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Вход отклонён в GitHub.", "Sign-in was declined on GitHub.") }
+                return
+            default:
+                setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again.") }
+                return
+            }
+        }
+        if !loginCancelled { setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again.") } }
+    }
+
+    func logout() {
+        loginCancelled = true
+        q.async {
+            syncTokenDelete()
+            let d = UserDefaults.standard
+            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked"] { d.removeObject(forKey: k) }
+            self.lock.lock(); self._remote = SyncRemoteCache(); self.lock.unlock()
+            try? FileManager.default.removeItem(atPath: SYNC_REMOTE_PATH)
+            self.setUI { $0 = SyncUIState() }
+        }
+    }
+
+    private func revoked() {
+        syncTokenDelete()
+        let d = UserDefaults.standard
+        d.set(true, forKey: "syncRevoked"); d.removeObject(forKey: "syncGistId"); d.removeObject(forKey: "syncPushHash")
+        setUI { $0.phase = .revoked }
+    }
+
+    // MARK: push + pull
+
+    func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
+
+    private func snapshotJSON() -> (days: [String: Any], hash: String) {
+        let ix = UsageLogs.shared.snapshot()
+        let cutoff = dayKey(Date().addingTimeInterval(-SYNC_KEEP_DAYS * 86400))
+        var days: [String: Any] = [:]
+        for (p, byDay) in ix.days {
+            var pd: [String: Any] = [:]
+            for (day, byModel) in byDay where day >= cutoff {
+                var md: [String: Any] = [:]
+                for (m, u) in byModel {
+                    md[m] = ["input": u.input, "output": u.output, "cacheRead": u.cacheRead,
+                             "cacheWrite5m": u.cacheWrite5m, "cacheWrite1h": u.cacheWrite1h, "turns": u.turns]
+                }
+                pd[day] = md
+            }
+            days[p] = pd
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: days, options: [.sortedKeys])) ?? Data()
+        return (days, String(fnv64(String(decoding: data, as: UTF8.self)), radix: 16))
+    }
+    private func machineFile(_ days: [String: Any]) -> String {
+        let iso = ISO8601DateFormatter()
+        let obj: [String: Any] = [
+            "schema": 1,
+            "machine": ["id": machineId, "name": machineName, "os": osName, "app": "macos " + APP_VERSION],
+            "updated": iso.string(from: Date()),
+            "tz": TimeZone.current.identifier,
+            "days": days,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Oldest gist holding the manifest, or nil. Status 0/401/… is passed back to the caller.
+    private func findGist(_ token: String) -> (id: String?, status: Int) {
+        var best: (id: String, created: String)?
+        for page in 1...10 {
+            let r = gh("/gists?per_page=100&page=\(page)", token: token)
+            guard r.status == 200, let arr = r.json as? [[String: Any]] else { return (nil, r.status) }
+            for g in arr {
+                guard let files = g["files"] as? [String: Any], files[SYNC_MANIFEST] != nil,
+                      let id = g["id"] as? String else { continue }
+                let created = g["created_at"] as? String ?? ""
+                if best == nil || created < best!.created { best = (id, created) }
+            }
+            if arr.count < 100 { break }
+        }
+        return (best?.id, 200)
+    }
+
+    private func syncBody(force: Bool) {
+        guard ui.phase == .on, Date() >= backoffUntil, let token = syncTokenRead() else { return }
+        let d = UserDefaults.standard
+        let snap = snapshotJSON()
+        let myFile = "machine-\(machineId).json"
+        func handle(_ status: Int) -> Bool {       // true = stop this cycle
+            if status == 401 { revoked(); return true }
+            if status == 403 || status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60); return true }
+            return status != 200 && status != 201
+        }
+
+        var gistId = d.string(forKey: "syncGistId")
+        if gistId == nil {
+            let f = findGist(token)
+            if handle(f.status) { return }
+            if let id = f.id { gistId = id }
+            else {
+                let manifest = "{\"about\":\"https://github.com/ArrivaRUS/claude-codex-limits/blob/main/docs/sync-protocol.md\",\"created\":\"\(ISO8601DateFormatter().string(from: Date()))\",\"schema\":1}"
+                let c = gh("/gists", "POST", token: token, body: [
+                    "description": "Claude Codex Limits — usage sync (do not edit)", "public": false,
+                    "files": [SYNC_MANIFEST: ["content": manifest], myFile: ["content": machineFile(snap.days)]]])
+                if handle(c.status) { return }
+                guard let id = (c.json as? [String: Any])?["id"] as? String else { return }
+                gistId = id
+                d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
+            }
+            d.set(gistId, forKey: "syncGistId")
+        }
+        guard let gid = gistId else { return }
+
+        if force || d.string(forKey: "syncPushHash") != snap.hash {
+            let p = gh("/gists/\(gid)", "PATCH", token: token, body: ["files": [myFile: ["content": machineFile(snap.days)]]])
+            if p.status == 404 { d.removeObject(forKey: "syncGistId"); return }
+            if handle(p.status) { return }
+            d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
+        }
+
+        let g = gh("/gists/\(gid)", token: token)
+        if g.status == 404 { d.removeObject(forKey: "syncGistId"); return }
+        if handle(g.status) { return }
+        guard let files = (g.json as? [String: Any])?["files"] as? [String: [String: Any]] else { return }
+        var contents: [String: String] = [:]
+        for (name, f) in files where name.hasPrefix("machine-") && name.hasSuffix(".json") && name != myFile {
+            var content = f["content"] as? String
+            if (f["truncated"] as? Bool) == true, let raw = f["raw_url"] as? String {
+                let r = gh(raw, token: token)
+                content = r.json.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) }
+            }
+            if let c = content { contents[name] = c }
+        }
+        let cache = GitHubSync.merge(contents, excluding: machineId)
+        lock.lock(); _remote = cache; lock.unlock()
+        if let data = try? JSONEncoder().encode(cache) { try? data.write(to: URL(fileURLWithPath: SYNC_REMOTE_PATH), options: .atomic) }
+        let ms = machineList()
+        setUI { $0.machines = ms; $0.lastSync = Date() }
+    }
+
+    /// Parse other machines' files (name → JSON text) into one summed cache. Pure — no network.
+    static func merge(_ contents: [String: String], excluding myId: String, now: Date = Date()) -> SyncRemoteCache {
+        var cache = SyncRemoteCache()
+        let iso = ISO8601DateFormatter()
+        let oldest = now.addingTimeInterval(-SYNC_KEEP_DAYS * 86400)
+        for (_, c) in contents {
+            guard let obj = (try? JSONSerialization.jsonObject(with: Data(c.utf8))) as? [String: Any],
+                  (obj["schema"] as? Int) == 1,
+                  let m = obj["machine"] as? [String: Any], let id = m["id"] as? String, id != myId else { continue }
+            let updated = (obj["updated"] as? String).flatMap { iso.date(from: $0) }
+            if let u = updated, u < oldest { continue }
+            cache.machines.append(SyncCachedMachine(id: id, name: m["name"] as? String ?? "?", os: m["os"] as? String ?? "", updated: updated))
+            guard let days = obj["days"] as? [String: [String: [String: [String: Any]]]] else { continue }
+            for (p, byDay) in days {
+                for (day, byModel) in byDay {
+                    for (model, v) in byModel {
+                        var u = DayModelUsage()
+                        u.input = v["input"] as? Int ?? 0; u.output = v["output"] as? Int ?? 0
+                        u.cacheRead = v["cacheRead"] as? Int ?? 0; u.cacheWrite5m = v["cacheWrite5m"] as? Int ?? 0
+                        u.cacheWrite1h = v["cacheWrite1h"] as? Int ?? 0; u.turns = v["turns"] as? Int ?? 0
+                        var cur = cache.days[p, default: [:]][day, default: [:]][model, default: DayModelUsage()]
+                        cur.add(u)
+                        cache.days[p, default: [:]][day, default: [:]][model] = cur
+                    }
+                }
+            }
+        }
+        return cache
+    }
+    /// Test seam: the file this machine would write, and the merge of arbitrary files.
+    func selfTestFile() -> String { machineFile(snapshotJSON().days) }
+    func setRemoteForPreview(_ c: SyncRemoteCache) { lock.lock(); _remote = c; _ui.phase = .on; lock.unlock() }
+}
+
+/// Local index plus every other machine's days from the gist — what the history draws from.
+func mergedUsageIndex() -> UsageIndex {
+    var ix = UsageLogs.shared.snapshot()
+    for (p, byDay) in GitHubSync.shared.remoteDays() {
+        for (day, byModel) in byDay { for (m, u) in byModel { ix.add(p, day, m, u) } }
+    }
+    return ix
+}
+
 // MARK: - Severity & colors
 
 func severity(_ v: Double?) -> Int {
@@ -1485,7 +1834,66 @@ let SET_SUB_TOP = SET_SUB_CAP + SET_CAP_H
 let SET_SUB_H = SET_ROW_H * 2
 /// Height the subscriptions block adds — zero in the Simple view, where money isn't shown.
 func setSubBlock() -> CGFloat { advancedEnabled() ? SET_CAP_H + SET_SUB_H + SET_GAP : 0 }
-func setCap1() -> CGFloat { SET_TRAY_TOP + SET_TRAY_H + SET_GAP + setSubBlock() }
+
+// Cross-machine sync through a GitHub gist (docs/sync-protocol.md). UI state only here; the
+// transport lives in GitHubSync. Advanced view only — it feeds the history & money figures.
+enum SyncPhase { case off, awaitingCode, on, revoked }
+struct SyncMachine { var name: String; var os: String; var updated: Date?; var isSelf: Bool }
+struct SyncUIState {
+    var phase: SyncPhase = .off
+    var login: String? = nil
+    var userCode: String? = nil
+    var machines: [SyncMachine] = []
+    var lastSync: Date? = nil
+    var error: String? = nil
+}
+var SYNC_PREVIEW: SyncUIState? = nil
+/// The settings block stays hidden until the GitHub transport is built — no dead buttons.
+let SYNC_READY = true
+func syncBlockShown() -> Bool { advancedEnabled() && (SYNC_READY || SYNC_PREVIEW != nil) }
+func syncUIState() -> SyncUIState { SYNC_PREVIEW ?? GitHubSync.shared.ui }
+/// Other machines currently merged into the history (0 when sync is off).
+func syncOtherMachines() -> Int {
+    let s = syncUIState(); return s.phase == .on ? s.machines.filter { !$0.isSelf }.count : 0
+}
+let SET_SYNC_MROW_H: CGFloat = 30
+let SET_SYNC_NOTE_H: CGFloat = 60
+func setSyncCardH() -> CGFloat {
+    let s = syncUIState()
+    switch s.phase {
+    case .off, .revoked: return SET_ROW_H + SET_SYNC_NOTE_H
+    case .awaitingCode:  return SET_ROW_H + 44 + 26
+    case .on:            return SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
+    }
+}
+let SET_SYNC_CAP = SET_SUB_TOP + SET_SUB_H + SET_GAP
+let SET_SYNC_TOP = SET_SYNC_CAP + SET_CAP_H
+func setSyncBlock() -> CGFloat { syncBlockShown() ? SET_CAP_H + setSyncCardH() + SET_GAP : 0 }
+/// Sounds are set once and forgotten, so in Settings they are one summary row «Звуки ›» that
+/// opens their own screen (PanelMode.sounds) — unfolded in place they didn't fit the screen.
+func setSndTop() -> CGFloat { SET_TRAY_TOP + SET_TRAY_H + SET_GAP + setSubBlock() + setSyncBlock() }
+/// Top of the «О ПРИЛОЖЕНИИ» caption, right under the sounds row.
+func setAboutCap() -> CGFloat { setSndTop() + SET_ROW_H + SET_GAP }
+/// On the sounds screen the first caption sits where «ОБЩИЕ» sits in Settings.
+func setCap1() -> CGFloat { 50 }
+func soundsPageHeight() -> CGFloat {
+    let c2top = setC1Top() + SET_ROW_H * 2 + SET_GAP + SET_CAP_H
+    let cardBbottom = c2top + SET_SOUND_ROW_H * CGFloat(RESET_SOUNDS.count)
+    let c3top = cardBbottom + SET_GAP + SET_CAP_H
+    return c3top + SET_ROW_H + SET_SOUND_ROW_H * CGFloat(REACHED_SOUNDS.count) + 16
+}
+func soundsSummary() -> String {
+    let d = UserDefaults.standard
+    var parts: [String] = []
+    switch (d.bool(forKey: "sound5h"), d.bool(forKey: "sound7d")) {
+    case (true, true):  parts.append(tr("сброс 5 ч и недели", "5 h & week reset"))
+    case (true, false): parts.append(tr("сброс 5 ч", "5 h reset"))
+    case (false, true): parts.append(tr("сброс недели", "week reset"))
+    default: break
+    }
+    if d.bool(forKey: "reachedOn") { parts.append(tr("лимит", "limit reached")) }
+    return parts.isEmpty ? tr("выключены", "off") : parts.joined(separator: " · ")
+}
 func setC1Top() -> CGFloat { setCap1() + SET_CAP_H }
 
 /// Does this card render the per-model row? Only a healthy, live card does — the
@@ -1501,8 +1909,8 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
-enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "3.0.1"
+enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
+let APP_VERSION = "3.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2299,7 +2707,9 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     roundFill(hcard, 14, gray(1, 0.04)); roundStroke(hcard.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
     let hy = y + 8                                  // border 1 + padding 7
     drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
-    textC(caps(tr("История и деньги", "History & money"), 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
+    let others = syncOtherMachines()
+    let histCap = tr("История и деньги", "History & money") + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
+    textC(caps(histCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
     hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, 35)))
     do {   // Claude | Codex segmented, right-aligned
         let items = present.map { ($0, $0 == "claude" ? "Claude" : "Codex") }
@@ -2318,7 +2728,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         }
     }
     if expanded {
-        let ix = UsageLogs.shared.snapshot()
+        let ix = mergedUsageIndex()
         let d = hp == "claude" ? claude : codex
         let ap = advancedProduct(d, product: hp, index: ix)
         let by = hy + 18 + 4                        // body top
@@ -2485,7 +2895,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     return hits
 }
 
-func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
+func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage: Bool = false) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -2547,8 +2957,79 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
     // header: back + title
     let backRect = rectTL(pad - 4, pad - 4, 28, 28)
     drawSF(ctx, "chevron.left", in: backRect.insetBy(dx: 7, dy: 6), textMid, weight: .semibold)
-    hits.append(Hit(id: "back", rect: backRect))
-    text(attr(tr("Настройки", "Settings"), 16, .semibold, textHi), x: pad + 24, topY: pad)
+    hits.append(Hit(id: soundsPage ? "backsettings" : "back", rect: backRect))
+    text(attr(soundsPage ? tr("Звуки", "Sounds") : tr("Настройки", "Settings"), 16, .semibold, textHi), x: pad + 24, topY: pad)
+    if soundsPage {
+    // section 2 — reset-sound master toggles
+    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: setCap1())
+    let c1top: CGFloat = setC1Top(), rowH: CGFloat = SET_ROW_H, c1H = rowH * 2
+    roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
+    func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
+        drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
+        text(attr(label, 13, .regular, textHi), x: cardX + 42, topY: rowTop + (rowH - 13) / 2 - 1)
+        let tw: CGFloat = 34, th: CGFloat = 16
+        let tRect = rectTL(cardX + cardW - 14 - tw, rowTop + (rowH - th) / 2, tw, th)
+        drawToggle(tRect, d.bool(forKey: key))
+        hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
+    }
+    toggleRow(c1top, "clock", tr("5-часовой лимит (сессия)", "5-hour limit (session)"), "sound5h")
+    hdiv(cardX + 42, cardX + cardW, c1top + rowH)
+    toggleRow(c1top + rowH, "calendar", tr("Недельный лимит", "Weekly limit"), "sound7d")
+
+    // section 3 — per-event sound choice (two radio columns: 5h | weekly)
+    let cap2 = c1top + c1H + 14
+    text(attr(tr("ЗВУК", "SOUND"), 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
+    let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
+    text(attr(tr("5ч", "5h"), 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
+    text(attr(tr("нед", "wk"), 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
+    let c2top = cap2 + 16, sRowH: CGFloat = 29, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
+    roundFill(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.06), 1)
+    func dot(_ cx: CGFloat, _ centerTop: CGFloat, _ on: Bool) {
+        let r: CGFloat = 7, rect = CGRect(x: cx - r, y: H - centerTop - r, width: 2 * r, height: 2 * r)
+        if on { ctx.setFillColor(cg(orange)); ctx.fillEllipse(in: rect) }
+        else { ctx.setStrokeColor(cg(gray(1, 0.32))); ctx.setLineWidth(1.5); ctx.strokeEllipse(in: rect.insetBy(dx: 0.75, dy: 0.75)) }
+    }
+    let cur5 = sound5hId(), cur7 = sound7dId()
+    for (i, s) in RESET_SOUNDS.enumerated() {
+        let rt = c2top + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
+        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
+        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
+        drawSF(ctx, "play.fill", in: CGRect(x: playcx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
+        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, playcx + 8 - cardX, sRowH)))
+        dot(dot5cx, cTop, s.id == cur5)
+        hits.append(Hit(id: "set5:\(s.id)", rect: CGRect(x: dot5cx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        dot(dot7cx, cTop, s.id == cur7)
+        hits.append(Hit(id: "set7:\(s.id)", rect: CGRect(x: dot7cx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        if i < RESET_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
+    }
+
+    // section 4 — limit-reached sound (any 5h/weekly/per-model limit hit)
+    let capC = c2top + c2H + 14
+    text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛЮБОГО ЛИМИТА", "WHEN ANY LIMIT IS REACHED"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
+    let c3top = capC + 16, toggleH: CGFloat = 36, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
+    roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
+    drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
+    text(attr(tr("Звук при достижении лимита", "Sound when a limit is reached"), 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
+    do {
+        let tw: CGFloat = 34, th: CGFloat = 16
+        drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
+        hits.append(Hit(id: "toggle:reachedOn", rect: rectTL(cardX, c3top, cardW, toggleH)))
+    }
+    hdiv(cardX + 14, cardX + cardW, c3top + toggleH)
+    let curR = reachedId(), rDotcx = cardX + cardW - 22, rPlaycx = cardX + cardW - 52
+    for (i, s) in REACHED_SOUNDS.enumerated() {
+        let rt = c3top + toggleH + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
+        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
+        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
+        drawSF(ctx, "play.fill", in: CGRect(x: rPlaycx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
+        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, rPlaycx + 8 - cardX, sRowH)))
+        dot(rDotcx, cTop, s.id == curR)
+        hits.append(Hit(id: "setR:\(s.id)", rect: CGRect(x: rDotcx - 13, y: H - cTop - 13, width: 26, height: 26)))
+        if i < REACHED_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
+    }
+
+        return hits
+    }
 
     // section 0 — general: interface language + launch at login
     text(attr(tr("ОБЩИЕ", "GENERAL"), 9.5, .semibold, textLo), x: pad + 2, topY: 50)
@@ -2661,78 +3142,108 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState) -> [Hit] {
         subRow(0, "claude", "Claude", nil, [20, 100, 200])
         hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + SET_ROW_H)
         subRow(1, "codex", "Codex", UserDefaults.standard.string(forKey: "codexPlan"), [8, 20, 100, 200])
+
+        // section 1c — cross-machine sync through GitHub
+        if syncBlockShown() {
+        let sy = syncUIState(), syTop = SET_SYNC_TOP, syH = setSyncCardH()
+        text(attr(tr("ДРУГИЕ КОМПЬЮТЕРЫ · ЧЕРЕЗ GITHUB", "OTHER COMPUTERS · VIA GITHUB"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SYNC_CAP)
+        roundFill(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.04))
+        roundStroke(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.06), 1)
+        func button(_ label: String, right: CGFloat, rowTop: CGFloat, id: String, primary: Bool) -> CGFloat {
+            let a = attr(label, 11, .semibold, primary ? NSColor(srgbRed: 0.1, green: 0.07, blue: 0.03, alpha: 1) : textHi)
+            let w = ceil(lineWidth(CTLineCreateWithAttributedString(a))) + 20, h: CGFloat = 22
+            let r = rectTL(right - w, rowTop + (SET_ROW_H - h) / 2, w, h)
+            roundFill(r, 6, primary ? orange : gray(1, 0.12))
+            text(a, x: r.midX, topY: rowTop + (SET_ROW_H - h) / 2 + 5, align: 1)
+            hits.append(Hit(id: id, rect: r)); return w
+        }
+        func link(_ label: String, right: CGFloat, topY: CGFloat, id: String) {
+            let a = attr(label, 11, .medium, ADV_LINK)
+            let w = ceil(lineWidth(CTLineCreateWithAttributedString(a)))
+            text(a, x: right - w, topY: topY)
+            hits.append(Hit(id: id, rect: rectTL(right - w - 4, topY - 4, w + 8, 20)))
+        }
+        func note(_ s: String, _ top: CGFloat) {
+            let a = attr(s, 10.5, .regular, textMid)
+            let fs = CTFramesetterCreateWithAttributedString(a)
+            let r = rectTL(cardX + 14, top, cardW - 28, SET_SYNC_NOTE_H - 6)
+            let fr = CTFramesetterCreateFrame(fs, CFRange(location: 0, length: 0), CGPath(rect: r, transform: nil), nil)
+            ctx.textMatrix = .identity; CTFrameDraw(fr, ctx)
+        }
+        let rowMid = syTop + (SET_ROW_H - 13) / 2 - 1
+        switch sy.phase {
+        case .off, .revoked:
+            let revoked = sy.phase == .revoked
+            drawSF(ctx, revoked ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), revoked ? ADV_WARN : textMid)
+            text(attr(revoked ? tr("Вход в GitHub отозван", "GitHub sign-in revoked") : tr("Сводить расход", "Combine usage"), 13, .regular, textHi), x: cardX + 42, topY: rowMid)
+            _ = button(revoked ? tr("Войти заново", "Sign in again") : tr("Войти через GitHub", "Sign in with GitHub"), right: cardX + cardW - 12, rowTop: syTop, id: "sync:login", primary: true)
+            if let err = sy.error, !revoked {
+                let a = attr(err, 10.5, .regular, ADV_WARN)
+                text(a, x: cardX + 14, topY: syTop + SET_ROW_H - 2)
+            } else {
+            note(revoked
+                 ? tr("Расход других компьютеров не обновляется. Последние полученные данные остаются в истории.",
+                      "Other computers' usage isn't updating. The last data received stays in the history.")
+                 : tr("Столбики и деньги учтут компьютеры, вошедшие в тот же GitHub. Функция позволяет организовывать сводную статистику с нескольких компьютеров, на которых применяется один и тот же аккаунт.",
+                      "Bars and money will include every computer signed in to the same GitHub. It combines statistics from several computers that use the same account."),
+                 syTop + SET_ROW_H - 4)
+            }
+        case .awaitingCode:
+            text(attr(tr("Введите код на github.com/login/device", "Enter the code at github.com/login/device"), 12, .regular, textHi), x: cardX + 14, topY: rowMid + 1)
+            let codeTop = syTop + SET_ROW_H - 2
+            text(ctAttr(sy.userCode ?? "····-····", (NSFont.monospacedSystemFont(ofSize: 22, weight: .semibold) as CTFont), cg(textHi)), x: cardX + 14, topY: codeTop + 8)
+            var right = cardX + cardW - 12
+            right -= button(tr("Открыть", "Open"), right: right, rowTop: codeTop + 4, id: "sync:open", primary: true) + 6
+            _ = button(tr("Скопировать", "Copy"), right: right, rowTop: codeTop + 4, id: "sync:copy", primary: false)
+            hdiv(cardX + 14, cardX + cardW - 14, codeTop + 44)
+            text(attr(tr("Ждём подтверждения в браузере…", "Waiting for approval in the browser…"), 10.5, .regular, textMid), x: cardX + 14, topY: codeTop + 51)
+            link(tr("Отмена", "Cancel"), right: cardX + cardW - 14, topY: codeTop + 51, id: "sync:cancel")
+        case .on:
+            drawSF(ctx, "checkmark.circle.fill", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), NSColor(srgbRed: 0.2, green: 0.85, blue: 0.7, alpha: 1))
+            let who = NSMutableAttributedString(attributedString: attr("GitHub · ", 13, .regular, textMid))
+            who.append(attr(sy.login ?? "—", 13, .semibold, textHi))
+            text(who, x: cardX + 42, topY: rowMid)
+            link(tr("Выйти", "Sign out"), right: cardX + cardW - 14, topY: rowMid + 1, id: "sync:logout")
+            for (i, m) in sy.machines.enumerated() {
+                let rt = syTop + SET_ROW_H + CGFloat(i) * SET_SYNC_MROW_H
+                hdiv(cardX + 42, cardX + cardW, rt)
+                let isMac = m.os.lowercased().hasPrefix("mac")
+                drawSF(ctx, isMac ? "laptopcomputer" : "desktopcomputer", in: rectTL(cardX + 14, rt + (SET_SYNC_MROW_H - 16) / 2, 19, 16), textMid)
+                let stale = m.updated.map { Date().timeIntervalSince($0) > 86400 } ?? false
+                let when = m.isSelf ? tr("этот компьютер", "this computer")
+                    : m.updated.map { tr("данные от ", "data from ") + fmtMoment($0).lowercased() } ?? tr("ещё не присылал", "no data yet")
+                let whenA = attr(when, 10.5, .regular, stale ? ADV_WARN : textMid)
+                text(whenA, x: cardX + cardW - 14, topY: rt + (SET_SYNC_MROW_H - 10.5) / 2 - 1, align: 2)
+                // Name (+ OS when it fits) must stop short of the right-hand status.
+                let room = cardW - 14 - 42 - ceil(lineWidth(CTLineCreateWithAttributedString(whenA))) - 12
+                func wd(_ a: NSAttributedString) -> CGFloat { ceil(lineWidth(CTLineCreateWithAttributedString(a))) }
+                var name = m.name
+                var nm = NSMutableAttributedString(attributedString: attr(name, 12, .medium, textHi))
+                let withOS = NSMutableAttributedString(attributedString: nm); withOS.append(attr("  " + m.os, 10.5, .regular, textLo))
+                if wd(withOS) <= room { nm = withOS }
+                else {
+                    while wd(nm) > room, name.count > 3 {
+                        name.removeLast(); nm = NSMutableAttributedString(attributedString: attr(name.trimmingCharacters(in: .whitespaces) + "…", 12, .medium, textHi))
+                    }
+                }
+                text(nm, x: cardX + 42, topY: rt + (SET_SYNC_MROW_H - 12) / 2 - 1)
+            }
+        }
+        }
     }
 
-    // section 2 — reset-sound master toggles
-    text(attr(tr("ВКЛЮЧИТЬ ЗВУК ПРИ СБРОСЕ", "PLAY A SOUND ON RESET"), 9.5, .semibold, textLo), x: pad + 2, topY: setCap1())
-    let c1top: CGFloat = setC1Top(), rowH: CGFloat = SET_ROW_H, c1H = rowH * 2
-    roundFill(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c1top, cardW, c1H), 12, gray(1, 0.06), 1)
-    func toggleRow(_ rowTop: CGFloat, _ icon: String, _ label: String, _ key: String) {
-        drawSF(ctx, icon, in: rectTL(cardX + 15, rowTop + (rowH - 16) / 2, 16, 16), textMid)
-        text(attr(label, 13, .regular, textHi), x: cardX + 42, topY: rowTop + (rowH - 13) / 2 - 1)
-        let tw: CGFloat = 34, th: CGFloat = 16
-        let tRect = rectTL(cardX + cardW - 14 - tw, rowTop + (rowH - th) / 2, tw, th)
-        drawToggle(tRect, d.bool(forKey: key))
-        hits.append(Hit(id: "toggle:\(key)", rect: rectTL(cardX, rowTop, cardW, rowH)))
-    }
-    toggleRow(c1top, "clock", tr("5-часовой лимит (сессия)", "5-hour limit (session)"), "sound5h")
-    hdiv(cardX + 42, cardX + cardW, c1top + rowH)
-    toggleRow(c1top + rowH, "calendar", tr("Недельный лимит", "Weekly limit"), "sound7d")
-
-    // section 3 — per-event sound choice (two radio columns: 5h | weekly)
-    let cap2 = c1top + c1H + 14
-    text(attr(tr("ЗВУК", "SOUND"), 9.5, .semibold, textLo), x: pad + 2, topY: cap2)
-    let dot7cx = cardX + cardW - 22, dot5cx = cardX + cardW - 54, playcx = cardX + cardW - 86
-    text(attr(tr("5ч", "5h"), 9.5, .regular, textLo), x: dot5cx, topY: cap2, align: 1)
-    text(attr(tr("нед", "wk"), 9.5, .regular, textLo), x: dot7cx, topY: cap2, align: 1)
-    let c2top = cap2 + 16, sRowH: CGFloat = 29, c2H = sRowH * CGFloat(RESET_SOUNDS.count)
-    roundFill(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c2top, cardW, c2H), 12, gray(1, 0.06), 1)
-    func dot(_ cx: CGFloat, _ centerTop: CGFloat, _ on: Bool) {
-        let r: CGFloat = 7, rect = CGRect(x: cx - r, y: H - centerTop - r, width: 2 * r, height: 2 * r)
-        if on { ctx.setFillColor(cg(orange)); ctx.fillEllipse(in: rect) }
-        else { ctx.setStrokeColor(cg(gray(1, 0.32))); ctx.setLineWidth(1.5); ctx.strokeEllipse(in: rect.insetBy(dx: 0.75, dy: 0.75)) }
-    }
-    let cur5 = sound5hId(), cur7 = sound7dId()
-    for (i, s) in RESET_SOUNDS.enumerated() {
-        let rt = c2top + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
-        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
-        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
-        drawSF(ctx, "play.fill", in: CGRect(x: playcx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
-        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, playcx + 8 - cardX, sRowH)))
-        dot(dot5cx, cTop, s.id == cur5)
-        hits.append(Hit(id: "set5:\(s.id)", rect: CGRect(x: dot5cx - 13, y: H - cTop - 13, width: 26, height: 26)))
-        dot(dot7cx, cTop, s.id == cur7)
-        hits.append(Hit(id: "set7:\(s.id)", rect: CGRect(x: dot7cx - 13, y: H - cTop - 13, width: 26, height: 26)))
-        if i < RESET_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
-    }
-
-    // section 4 — limit-reached sound (any 5h/weekly/per-model limit hit)
-    let capC = c2top + c2H + 14
-    text(attr(tr("ПРИ ДОСТИЖЕНИИ ЛЮБОГО ЛИМИТА", "WHEN ANY LIMIT IS REACHED"), 9.5, .semibold, textLo), x: pad + 2, topY: capC)
-    let c3top = capC + 16, toggleH: CGFloat = 36, c3H = toggleH + sRowH * CGFloat(REACHED_SOUNDS.count)
-    roundFill(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c3top, cardW, c3H), 12, gray(1, 0.06), 1)
-    drawSF(ctx, "exclamationmark.triangle", in: rectTL(cardX + 15, c3top + (toggleH - 16) / 2, 16, 16), textMid)
-    text(attr(tr("Звук при достижении лимита", "Sound when a limit is reached"), 13, .regular, textHi), x: cardX + 42, topY: c3top + (toggleH - 13) / 2 - 1)
+    // sounds group — one summary row; the three cards below only when unfolded
     do {
-        let tw: CGFloat = 34, th: CGFloat = 16
-        drawToggle(rectTL(cardX + cardW - 14 - tw, c3top + (toggleH - th) / 2, tw, th), d.bool(forKey: "reachedOn"))
-        hits.append(Hit(id: "toggle:reachedOn", rect: rectTL(cardX, c3top, cardW, toggleH)))
+        let top = setSndTop()
+        roundFill(rectTL(cardX, top, cardW, SET_ROW_H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, top, cardW, SET_ROW_H), 12, gray(1, 0.06), 1)
+        drawSF(ctx, "speaker.wave.2", in: rectTL(cardX + 14, top + (SET_ROW_H - 16) / 2, 18, 16), textMid)
+        text(attr(tr("Звуки", "Sounds"), 13, .regular, textHi), x: cardX + 42, topY: top + (SET_ROW_H - 13) / 2 - 1)
+        drawSF(ctx, "chevron.right", in: rectTL(cardX + cardW - 14 - 7, top + (SET_ROW_H - 11) / 2, 7, 11), textMid, weight: .semibold)
+        text(attr(soundsSummary(), 11, .regular, textMid), x: cardX + cardW - 14 - 7 - 10, topY: top + (SET_ROW_H - 11) / 2 - 1, align: 2)
+        hits.append(Hit(id: "sounds:open", rect: rectTL(cardX, top, cardW, SET_ROW_H)))
     }
-    hdiv(cardX + 14, cardX + cardW, c3top + toggleH)
-    let curR = reachedId(), rDotcx = cardX + cardW - 22, rPlaycx = cardX + cardW - 52
-    for (i, s) in REACHED_SOUNDS.enumerated() {
-        let rt = c3top + toggleH + CGFloat(i) * sRowH, cTop = rt + sRowH / 2
-        drawSF(ctx, "music.note", in: rectTL(cardX + 15, rt + (sRowH - 14) / 2, 12, 14), textMid)
-        text(attr(s.name, 13, .regular, textHi), x: cardX + 38, topY: rt + (sRowH - 13) / 2 - 1)
-        drawSF(ctx, "play.fill", in: CGRect(x: rPlaycx - 6, y: H - cTop - 6, width: 12, height: 12), textLo)
-        hits.append(Hit(id: "preview:\(s.id)", rect: rectTL(cardX, rt, rPlaycx + 8 - cardX, sRowH)))
-        dot(rDotcx, cTop, s.id == curR)
-        hits.append(Hit(id: "setR:\(s.id)", rect: CGRect(x: rDotcx - 13, y: H - cTop - 13, width: 26, height: 26)))
-        if i < REACHED_SOUNDS.count - 1 { hdiv(cardX + 38, cardX + cardW, rt + sRowH) }
-    }
-
     // section 5 — about / check for updates
-    let capD = c3top + c3H + 14
+    let capD = setAboutCap()
     text(attr(tr("О ПРИЛОЖЕНИИ", "ABOUT"), 9.5, .semibold, textLo), x: pad + 2, topY: capD)
     let c4top = capD + 16, c4H: CGFloat = 44
     roundFill(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.04)); roundStroke(rectTL(cardX, c4top, cardW, c4H), 12, gray(1, 0.06), 1)
@@ -3123,6 +3634,8 @@ final class LimitsPanelView: NSView {
         var targetH = mainPanelHeight(claude, codex)
         if mode == .settings {
             targetH = settingsTotalHeight(about)
+        } else if mode == .sounds {
+            targetH = soundsPageHeight()
         } else if mode == .whatsnew {
             notesContentH = (notesLoading || notes.isEmpty) ? 0 : notesContentHeight(notesAttributedString(notes), width: WN_CONTENT_W)
             let bodyH = (notesLoading || notes.isEmpty) ? 64 : notesContentH
@@ -3145,8 +3658,8 @@ final class LimitsPanelView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        if mode == .settings {
-            hits = drawSettings(ctx, size: bounds.size, about: about)
+        if mode == .settings || mode == .sounds {
+            hits = drawSettings(ctx, size: bounds.size, about: about, soundsPage: mode == .sounds)
         } else if mode == .whatsnew {
             hits = drawWhatsNew(ctx, size: bounds.size, notes: notes, loading: notesLoading,
                                 error: notesError, scroll: scroll, contentH: notesContentH,
@@ -3194,6 +3707,18 @@ final class LimitsPanelView: NSView {
                     let key = String(h.id.dropFirst(7))
                     let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
                     needsDisplay = true
+                } else if h.id == "sync:login" {
+                    GitHubSync.shared.startLogin()
+                } else if h.id == "sync:cancel" {
+                    GitHubSync.shared.cancelLogin()
+                } else if h.id == "sync:logout" {
+                    GitHubSync.shared.logout()
+                } else if h.id == "sync:copy" || h.id == "sync:open" {
+                    // The device page asks for the code — put it on the clipboard either way.
+                    if let code = GitHubSync.shared.ui.userCode { copyToClipboard(code) }
+                    if h.id == "sync:open", let u = URL(string: GitHubSync.shared.verifyURL) { NSWorkspace.shared.open(u) }
+                } else if h.id == "sounds:open" {
+                    setMode(.sounds)
                 } else if h.id == "hist:toggle" {
                     UserDefaults.standard.set(!advHistExpanded(), forKey: "advHistExpanded")
                     resizeToContent()
@@ -3350,11 +3875,7 @@ func sound5hId() -> String { validSound(UserDefaults.standard.string(forKey: "so
 func sound7dId() -> String { validSound(UserDefaults.standard.string(forKey: "sound7dChoice"), RESET_SOUNDS, "celebrate") }
 func reachedId() -> String { validSound(UserDefaults.standard.string(forKey: "reachedChoice"), REACHED_SOUNDS, "outage") }
 func settingsTotalHeight(_ about: AboutState) -> CGFloat {
-    let c2top = setC1Top() + SET_ROW_H * 2 + SET_GAP + SET_CAP_H
-    let cardBbottom = c2top + SET_SOUND_ROW_H * CGFloat(RESET_SOUNDS.count)
-    let c3top = cardBbottom + SET_GAP + SET_CAP_H
-    let cardCbottom = c3top + SET_ROW_H + SET_SOUND_ROW_H * CGFloat(REACHED_SOUNDS.count)
-    let c4top = cardCbottom + SET_GAP + SET_CAP_H
+    let c4top = setAboutCap() + SET_CAP_H
     let needsLine = about.availVersion != nil || about.msg != .none || about.phase != .idle
     return c4top + 44 + (needsLine ? 22 : 0) + 16
 }
@@ -3585,7 +4106,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         UsageHistory.shared.load()
         UsageLogs.shared.load()
-        if advancedEnabled() { UsageLogs.shared.scanAsync { [weak self] in self?.panelCtrl.view.needsDisplay = true } }
+        GitHubSync.shared.onChange = { [weak self] in
+            guard let v = self?.panelCtrl.view else { return }
+            if v.mode == .settings { v.resizeToContent() } else { v.needsDisplay = true }
+        }
+        GitHubSync.shared.load()
+        if advancedEnabled() {
+            UsageLogs.shared.scanAsync { [weak self] in
+                self?.panelCtrl.view.needsDisplay = true
+                GitHubSync.shared.syncNow()
+            }
+        }
         startTimer()
         startLogsTimer()
         doRefresh(live: true)   // live Codex from launch, then on every timer tick
@@ -3602,7 +4133,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logsTimer?.invalidate()
         let t = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
             guard advancedEnabled() else { return }
-            UsageLogs.shared.scanAsync { self?.panelCtrl.view.needsDisplay = true }
+            UsageLogs.shared.scanAsync {
+                self?.panelCtrl.view.needsDisplay = true
+                GitHubSync.shared.syncNow()
+            }
         }
         RunLoop.main.add(t, forMode: .common)
         logsTimer = t
@@ -4019,6 +4553,29 @@ if CommandLine.arguments.contains("--settings-preview") {
 }
 
 
+if CommandLine.arguments.contains("--sync-selftest") {
+    UsageLogs.shared.load(); _ = UsageLogs.shared.scanSync()
+    let mine = GitHubSync.shared.selfTestFile()
+    // Pretend the same data came from another machine: swap the id, keep everything else.
+    guard var obj = (try? JSONSerialization.jsonObject(with: Data(mine.utf8))) as? [String: Any],
+          var m = obj["machine"] as? [String: Any] else { print("FAIL: own file unparsable"); exit(1) }
+    m["id"] = "00000000-test"; m["name"] = "astra-test"; m["os"] = "Astra Linux SE"; obj["machine"] = m
+    let other = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+    let stale = other.replacingOccurrences(of: "00000000-test", with: "11111111-old")
+        .replacingOccurrences(of: "\"updated\":\"", with: "\"updated\":\"2020-01-01T00:00:00Z\",\"x\":\"")
+    let cache = GitHubSync.merge(["machine-a.json": other, "machine-self.json": mine, "machine-old.json": stale, "machine-bad.json": "{"],
+                                 excluding: GitHubSync.shared.machineId)
+    print("machines merged:", cache.machines.map { $0.name })
+    GitHubSync.shared.setRemoteForPreview(cache)
+    for p in ["claude", "codex"] {
+        let local = dailyUsage(p, days: 7, index: UsageLogs.shared.snapshot()).reduce(0) { $0 + $1.turns }
+        let merged = dailyUsage(p, days: 7, index: mergedUsageIndex()).reduce(0) { $0 + $1.turns }
+        print("\(p): turns 7d local=\(local) merged=\(merged) \(merged == 2 * local ? "OK (doubled)" : "MISMATCH")")
+    }
+    print("file bytes:", mine.utf8.count, "machine id:", GitHubSync.shared.machineId.prefix(8) + "…")
+    exit(0)
+}
+
 if CommandLine.arguments.contains("--advanced-dump") {
     let t0 = Date()
     UsageHistory.shared.load(); UsageLogs.shared.load()
@@ -4077,6 +4634,9 @@ if CommandLine.arguments.contains("--advanced-preview") {
         save(ctx, path); print(path, Int(h), "pt")
     }
     let out = CommandLine.arguments.last ?? "/tmp"
+    // The preview shares the app's defaults domain — snapshot the user's settings and put them
+    // back afterwards instead of wiping them (it once switched a user's panel back to Simple).
+    let keep = ["lang", "advanced", "advHistExpanded", "advHistProduct"].map { ($0, dd.object(forKey: $0)) }
     dd.set(true, forKey: "advanced")
     for lang in ["ru", "en"] {
         dd.set(lang, forKey: "lang")
@@ -4089,7 +4649,39 @@ if CommandLine.arguments.contains("--advanced-preview") {
     render(ex, x, "\(out)/adv-expired.png")
     var noCodex = x; noCodex.present = false
     render(c, noCodex, "\(out)/adv-claude-only.png")
-    dd.removeObject(forKey: "lang"); dd.removeObject(forKey: "advanced"); dd.removeObject(forKey: "advHistExpanded"); dd.removeObject(forKey: "advHistProduct")
+    // Sync states: settings block (off / code / on / revoked) + the history header with 2 PCs.
+    func renderSettings(_ path: String) {
+        let about = AboutState(), sh = settingsTotalHeight(about)
+        guard let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) else { return }
+        ctx.scaleBy(x: s, y: s)
+        _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: about)
+        save(ctx, path); print(path, Int(sh), "pt")
+    }
+    let mac = SyncMachine(name: Host.current().localizedName ?? "Mac", os: "macOS", updated: Date(), isSelf: true)
+    let astra = SyncMachine(name: "astra-desktop", os: "Astra Linux SE", updated: Date().addingTimeInterval(-7 * 60), isSelf: false)
+    for lang in ["ru", "en"] {
+        dd.set(lang, forKey: "lang")
+        SYNC_PREVIEW = SyncUIState(); renderSettings("\(out)/sync-\(lang)-off.png")
+        SYNC_PREVIEW = SyncUIState(phase: .awaitingCode, userCode: "WDJB-MJHT"); renderSettings("\(out)/sync-\(lang)-code.png")
+        SYNC_PREVIEW = SyncUIState(phase: .on, login: "ArrivaRUS", machines: [mac, astra], lastSync: Date()); renderSettings("\(out)/sync-\(lang)-on.png")
+        render(c, x, "\(out)/sync-\(lang)-panel.png")
+        SYNC_PREVIEW = SyncUIState(phase: .revoked, login: "ArrivaRUS"); renderSettings("\(out)/sync-\(lang)-revoked.png")
+    }
+    dd.set("ru", forKey: "lang")
+    SYNC_PREVIEW = SyncUIState(phase: .on, login: "ArrivaRUS", machines: [mac, astra], lastSync: Date())
+    renderSettings("\(out)/settings-sounds-closed.png")
+    do {
+        let sh = soundsPageHeight()
+        if let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) {
+            ctx.scaleBy(x: s, y: s)
+            _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: AboutState(), soundsPage: true)
+            save(ctx, "\(out)/settings-sounds-page.png"); print("\(out)/settings-sounds-page.png", Int(sh), "pt")
+        }
+    }
+    dd.set(false, forKey: "advanced"); SYNC_PREVIEW = nil
+    renderSettings("\(out)/settings-simple-closed.png")
+    SYNC_PREVIEW = nil
+    for (k, v) in keep { if let v = v { dd.set(v, forKey: k) } else { dd.removeObject(forKey: k) } }
     exit(0)
 }
 
