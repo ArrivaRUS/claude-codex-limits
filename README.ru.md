@@ -3,7 +3,7 @@
 [English](README.md) · **Русский**
 
 <p align="center">
-  <img src="docs/banner.png?v=300" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
+  <img src="docs/banner.png?v=301" alt="Claude Codex Limits — лимиты в строке меню macOS" width="820">
 </p>
 
 Маленькое приложение для строки меню macOS, которое показывает, сколько у вас осталось
@@ -14,9 +14,9 @@
 По клику на иконку в трее открывается подробная панель.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=300" width="180" alt="Строка меню (тёмная)">
+  <img src="docs/menubar-dark.png?v=301" width="180" alt="Строка меню (тёмная)">
   &nbsp;&nbsp;
-  <img src="docs/panel.png?v=300" width="320" alt="Панель">
+  <img src="docs/panel.png?v=301" width="320" alt="Панель">
 </p>
 
 ## Возможности
@@ -41,19 +41,19 @@
 - **Автозапуск при входе** — тумблер прямо в настройках; без иконки в Dock, без сторонних зависимостей.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=300" width="140" alt="Один продукт (строка меню)">
+  <img src="docs/menubar-single.png?v=301" width="140" alt="Один продукт (строка меню)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single.png?v=300" width="300" alt="Один продукт (панель)">
+  <img src="docs/panel-single.png?v=301" width="300" alt="Один продукт (панель)">
 </p>
 <p align="center"><sub>Если настроена только одна подписка — трей и панель сворачиваются в одну строку / карточку.</sub></p>
 
-<p align="center"><img src="docs/advanced.png?v=300" width="320" alt="Расширенный режим"></p>
+<p align="center"><img src="docs/advanced.png?v=301" width="320" alt="Расширенный режим"></p>
 <p align="center"><sub>Расширенный режим: строка темпа и вердикт словами по каждому окну, 7 дней стопкой по моделям, календарь за 35 дней и сколько стоит день по подписке против цен API.</sub></p>
 
-<p align="center"><img src="docs/settings.png?v=300" width="250" alt="Экран настроек"></p>
+<p align="center"><img src="docs/settings.png?v=301" width="250" alt="Экран настроек"></p>
 <p align="center"><sub>Настройки (⚙): язык интерфейса · вид панели · автозапуск · какие два числа показывать в строке меню · свой звук для каждого события (сбросы и достижение лимита) · встроенные обновления.</sub></p>
 
-<p align="center"><img src="docs/whatsnew.png?v=300" width="320" alt="Экран «Что нового»"></p>
+<p align="center"><img src="docs/whatsnew.png?v=301" width="320" alt="Экран «Что нового»"></p>
 <p align="center"><sub>«Что нового»: релиз-ноуты за все пропущенные версии и обновление прямо оттуда.</sub></p>
 
 ## Как это работает
@@ -105,7 +105,7 @@ Gatekeeper** — приложение, скачанное через `curl`, н�
 
 ### 2. Из .dmg
 
-1. Скачайте `ClaudeCodexLimits-3.0.dmg` со страницы [Releases](../../releases).
+1. Скачайте `ClaudeCodexLimits-3.0.1.dmg` со страницы [Releases](../../releases).
 2. Откройте и перетащите **Claude Codex Limits** в **Applications**.
 3. Запустите. Сборка не нотаризована, поэтому на **macOS Sequoia / Tahoe** первый
    запуск блокируется. Сделайте один раз:
@@ -141,7 +141,7 @@ cd claude-codex-limits
 ## Сборка релиза
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.0.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.0.1.dmg
 ```
 
 ## Структура проекта

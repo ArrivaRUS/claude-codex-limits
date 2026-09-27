@@ -1502,7 +1502,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, whatsnew, claudeFix }
-let APP_VERSION = "3.0"
+let APP_VERSION = "3.0.1"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2140,7 +2140,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         roundFill(rectTL(x + 2, ly + 1.5, 2, 10), 1, gray(1, 0.55)); x += 6 + 4
         let a = attr(tr("план сейчас", "plan now"), 10.5, .regular, textMid); textC(a, x: x, topY: ly, h: lh); x += width(a) + 4
         let d = attr("·", 10.5, .regular, textMid); textC(d, x: x + 2, topY: ly, h: lh); x += width(d) + 4 + 4
-        roundFill(rectTL(x, ly + 4, 16, 5), 2.5, ADV_WEEK.withAlphaComponent(0.30)); x += 16 + 4
+        roundFill(rectTL(x, ly + 4, 16, 5), 2.5, gray(1, 0.30)   /* neutral: the tail takes each row's own colour */); x += 16 + 4
         textC(attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, .regular, textMid), x: x, topY: ly, h: lh)
     }
     let gearRect = rectTL(297, 24, 18, 18), rfRect = rectTL(327, 24, 18, 18)
@@ -2214,7 +2214,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
                     roundFill(rectTL(ADV_IX, barTop, ADV_IW, 5), 2.5, ADV_CRIT.withAlphaComponent(0.22))
                 } else if row.kind == .full, let pr = p.projectedPct, pr > p.used {
                     let ghostW = CGFloat(min(100, pr)) / 100 * ADV_IW
-                    roundFill(rectTL(ADV_IX, barTop, ghostW, 5), 2.5, advWindowColor(l.color, 0).withAlphaComponent(0.18))
+                    roundFill(rectTL(ADV_IX, barTop, ghostW, 5), 2.5, col.withAlphaComponent(0.30))   // same hue as the fill (Alex, 2026-09-27)
                 }
             }
             if usedW >= 1 { roundFill(rectTL(ADV_IX, barTop, max(5, usedW), 5), 2.5, col) }
