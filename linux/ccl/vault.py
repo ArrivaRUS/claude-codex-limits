@@ -129,6 +129,20 @@ def read():
     return (None, "locked") if locked else (None, None)
 
 
+def reachable():
+    return _ss() is not None
+
+
+def delete_if(token):
+    """Delete the stored token only if it is still `token` — a sync cycle that got a 401 with
+    an old token must not wipe a new one saved by a fresh sign-in meanwhile."""
+    cur, _ = read()
+    if cur == token:
+        delete()
+        return True
+    return False
+
+
 def write(token):
     """Store the token; returns the backend used. Verifies by reading it back."""
     if not token or not all(c.isalnum() or c in "_-" for c in token):

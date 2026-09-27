@@ -99,7 +99,8 @@ EOF
         systemctl --user enable --now ccl-sync.timer >/dev/null 2>&1
         say "Таймер: systemd --user (ccl-sync.timer), каждые 10 минут"
     elif command -v crontab >/dev/null 2>&1; then
-        LINE="*/10 * * * * $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"
+        # cron has no session bus; point it at the user's one so the keyring stays reachable
+        LINE="*/10 * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"
         ( crontab -l 2>/dev/null | grep -v 'ccl-sync" push' ; printf '%s\n' "$LINE" ) | crontab -
         say "Таймер: cron, каждые 10 минут"
     else

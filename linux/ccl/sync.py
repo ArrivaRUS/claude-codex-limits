@@ -98,24 +98,24 @@ def device_poll(dev, cancelled=lambda: False, sleep=time.sleep):
 
 def login_finish(token):
     """Step 4: store the token, learn who we are. Returns the GitHub login."""
-    backend = vault.write(token)
     me = gh("/user", token).json() or {}
     login = me.get("login")
-    st = sync_state()
-    st.update(login=login, revoked=False, tokenBackend=backend, lastError=None)
+    with common.file_lock("sync", timeout=60):        # never interleave with a running cycle
+        backend = vault.write(token)
+        sync_state().update(login=login, revoked=False, tokenBackend=backend, lastError=None)
     return login
 
 
 def logout():
     """Sign-out deletes the local token; the gist stays."""
-    vault.delete()
-    st = sync_state()
-    st.remove("login", "gistId", "pushHash", "pushedAt", "revoked", "backoffUntil", "lastError",
-              "tokenBackend", "lastSync")
-    try:
-        os.unlink(common.SYNC_REMOTE_PATH)
-    except OSError:
-        pass
+    with common.file_lock("sync", timeout=60):
+        vault.delete()
+        sync_state().remove("login", "gistId", "pushHash", "pushedAt", "revoked", "backoffUntil", "lastError",
+                            "tokenBackend", "lastSync", "discoveredAt")
+        try:
+            os.unlink(common.SYNC_REMOTE_PATH)
+        except OSError:
+            pass
 
 
 # ---- the files ----------------------------------------------------------------------------
@@ -233,25 +233,27 @@ class SyncResult(object):
         self.remote = None
 
 
-def _handle(r, st, res):
+def _handle(r, st, res, token):
     """Common HTTP failure handling. Returns True when the cycle must stop."""
     if r.status in (200, 201):
         return False
     if r.status == 401:
-        vault.delete()
-        st.update(revoked=True, gistId=None, pushHash=None,
-                  lastError=common.tr("Войдите в GitHub заново", "Sign in to GitHub again"))
+        if vault.delete_if(token):
+            st.update(revoked=True, gistId=None, pushHash=None,
+                      lastError=common.tr("Войдите в GitHub заново", "Sign in to GitHub again"))
         res.error = "401"
         return True
     if r.status in (403, 429):
-        reset = r.headers.get("x-ratelimit-reset")
+        # secondary limits say Retry-After; x-ratelimit-reset only matters once the primary
+        # budget is actually spent (GitHub sends it on every response)
         retry = r.headers.get("retry-after")
+        reset = r.headers.get("x-ratelimit-reset") if r.headers.get("x-ratelimit-remaining") == "0" else None
         until = time.time() + 15 * 60
         try:
-            if reset:
-                until = float(reset) + 5
-            elif retry:
+            if retry:
                 until = time.time() + float(retry)
+            elif reset:
+                until = float(reset) + 5
         except ValueError:
             pass
         st.update(backoffUntil=until, lastError="HTTP %d" % r.status)
@@ -274,7 +276,12 @@ def sync_cycle(days, force=False, auto=False):
         st = sync_state()
         token, backend = vault.read()
         if not token:
-            res.skipped = "locked" if backend == "locked" else "revoked" if st.get("revoked") else "signed-out"
+            if backend == "locked":
+                res.skipped = "locked"
+            elif st.get("tokenBackend") == "secret-service" and st.get("login") and not vault.reachable():
+                res.skipped = "unreachable"          # e.g. cron without the session bus — not a sign-out
+            else:
+                res.skipped = "revoked" if st.get("revoked") else "signed-out"
             return res
         if time.time() < float(st.get("backoffUntil") or 0):
             res.skipped = "backoff"
@@ -284,19 +291,28 @@ def sync_cycle(days, force=False, auto=False):
         h = snapshot_hash(snap)
         mine = my_file_name()
 
+        # If two machines ever created a gist each, "earliest created_at wins" must keep being
+        # applied, not only on the first discovery — look again after a create and once a day.
+        if st.get("gistId") and time.time() - float(st.get("discoveredAt") or 0) > 86400:
+            gid, bad = _find_gist(token)
+            if bad is None:
+                st.update(discoveredAt=time.time())
+                if gid and gid != st.get("gistId"):
+                    st.update(gistId=gid, pushHash=None)
+
         gist = None
         for attempt in range(2):
             gid = st.get("gistId")
             if not gid:
                 gid, bad = _find_gist(token)
                 if bad is not None:
-                    _handle(bad, st, res)
+                    _handle(bad, st, res, token)
                     return res
                 if not gid:
                     c = gh("/gists", token, "POST", {
                         "description": DESCRIPTION, "public": False,
                         "files": {MANIFEST: {"content": manifest()}, mine: {"content": machine_file(snap)}}})
-                    if _handle(c, st, res):
+                    if _handle(c, st, res, token):
                         return res
                     gid = (c.json() or {}).get("id")
                     if not gid:
@@ -304,12 +320,16 @@ def sync_cycle(days, force=False, auto=False):
                         return res
                     st.update(pushHash=h, pushedAt=time.time())
                     res.pushed = True
-                st.update(gistId=gid)
+                    again, _bad = _find_gist(token)      # did another machine create one at the same time?
+                    if again and again != gid:
+                        gid = again
+                        st.update(pushHash=None)
+                st.update(gistId=gid, discoveredAt=time.time())
             g = gh("/gists/" + gid, token)
             if g.status == 404:                        # deleted or not ours any more → rediscover
                 st.update(gistId=None, pushHash=None)
                 continue
-            if _handle(g, st, res):
+            if _handle(g, st, res, token):
                 return res
             gist = g.json() or {}
             break
@@ -330,13 +350,14 @@ def sync_cycle(days, force=False, auto=False):
                 st.update(gistId=None, pushHash=None)
                 res.error = "gist gone"
                 return res
-            if _handle(p, st, res):
+            if _handle(p, st, res, token):
                 return res
             st.update(pushHash=h, pushedAt=time.time())
             res.pushed = True
 
         # read + merge everyone else
         contents = {}
+        incomplete = False
         for name, f in files.items():
             if not (name.startswith("machine-") and name.endswith(".json")) or name == mine:
                 continue
@@ -344,8 +365,16 @@ def sync_cycle(days, force=False, auto=False):
             if f.get("truncated") and f.get("raw_url"):
                 r = gh(f["raw_url"], token, timeout=30)
                 text = r.data.decode("utf-8", "replace") if r.status == 200 and r.data else None
+                if text is None:
+                    incomplete = True
             if text:
                 contents[name] = text
+        if incomplete:
+            # a machine we couldn't download would vanish from the sum — keep the last merge
+            st.update(lastError="raw_url fetch failed")
+            res.ok = True
+            res.remote = load_remote()
+            return res
         remote = merge(contents, common.machine_id())
         remote["fetched"] = time.time()
         common.write_json(common.SYNC_REMOTE_PATH, remote)

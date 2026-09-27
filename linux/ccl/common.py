@@ -167,24 +167,28 @@ class Store:
         self.update(**{key: value})
 
     def update(self, **kw):
-        with self.lock:
+        """Read-modify-write of only the given keys, under a cross-process lock: the tray and
+        the timer both write sync-state.json, and writing back a whole stale copy would undo
+        the other process's changes (e.g. resurrect a login right after a sign-out)."""
+        with self.lock, file_lock("store-" + os.path.basename(self.path)):
+            self.reload()
             for k, v in kw.items():
                 if v is None:
                     self.data.pop(k, None)
                 else:
                     self.data[k] = v
-            self.save()
+            self._write()
 
     def remove(self, *keys):
-        with self.lock:
-            for k in keys:
-                self.data.pop(k, None)
-            self.save()
+        self.update(**{k: None for k in keys})
 
     def save(self):
-        with self.lock:
-            ensure_dirs()
-            write_json(self.path, self.data, compact=False)
+        with self.lock, file_lock("store-" + os.path.basename(self.path)):
+            self._write()
+
+    def _write(self):
+        ensure_dirs()
+        write_json(self.path, self.data, compact=False)
 
 
 _settings = None
@@ -216,19 +220,38 @@ def tr(ru, en):
 
 # ---- machine identity (docs/sync-protocol.md) ----------------------------------------------
 
+def _read_machine_id():
+    with open(MACHINE_ID_PATH, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
 def machine_id():
-    try:
-        with open(MACHINE_ID_PATH, "r", encoding="utf-8") as f:
-            t = f.read().strip()
+    """The id is created once and never replaced: a new id would leave the old
+    machine-<id>.json in the gist, and the other machines would count this one twice for
+    up to 45 days. So only a missing file creates one — atomically (O_EXCL), and if another
+    process wins the race, its id is used."""
+    for _ in range(50):
+        try:
+            t = _read_machine_id()
             if t:
                 return t
-    except OSError:
-        pass
-    import uuid
-    mid = str(uuid.uuid4()).lower()
-    ensure_dirs()
-    write_atomic(MACHINE_ID_PATH, mid + "\n", 0o600)
-    return mid
+        except FileNotFoundError:
+            import uuid
+            mid = str(uuid.uuid4()).lower()
+            ensure_dirs()
+            tmp = MACHINE_ID_PATH + ".%d.tmp" % os.getpid()
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(mid + "\n")
+            os.chmod(tmp, 0o600)
+            try:
+                os.link(tmp, MACHINE_ID_PATH)           # fails if someone else created it first
+                return mid
+            except FileExistsError:
+                pass
+            finally:
+                os.unlink(tmp)
+        time.sleep(0.1)                                 # empty = mid-write elsewhere; unreadable → retry
+    raise OSError("cannot read " + MACHINE_ID_PATH)
 
 
 def machine_name():

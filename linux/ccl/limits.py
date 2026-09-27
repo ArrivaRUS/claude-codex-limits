@@ -125,6 +125,14 @@ def fetch_claude():
         d.auth = LOGGED_OUT
         return d
 
+    p = _PENDING.get("claude")
+    if p is not None:
+        if oauth.get("refreshToken") == p["old"]:
+            _save_claude_tokens(path, p["old"], p["tok"], p["t"], creds)
+            _claude_apply_pair(oauth, p["tok"], p["t"])      # use the new pair even if the write failed again
+        else:
+            _PENDING.pop("claude", None)
+
     d.plan = oauth.get("subscriptionType")
     tier = oauth.get("rateLimitTier")
     if tier and st.get("claudeTier") != tier:
@@ -153,7 +161,7 @@ def fetch_claude():
                 tok = r.json() if r.status == 200 else None
                 if isinstance(tok, dict) and tok.get("access_token"):
                     at = tok["access_token"]
-                    _save_claude_tokens(path, rt, tok)
+                    _save_claude_tokens(path, rt, tok, time.time(), creds)
                     st.remove("deadRefresh")
                 else:
                     body = r.json()
@@ -184,23 +192,47 @@ def fetch_claude():
     return d
 
 
-def _save_claude_tokens(path, old_rt, tok):
-    """Write the rotated pair back — re-reading the file first so nothing the CLI wrote in the
-    meantime is lost, and only if the file still holds the refresh token we just spent."""
-    try:
-        with open(path, "rb") as f:
-            creds = json.loads(f.read().decode("utf-8"))
-    except (OSError, ValueError):
-        return
-    oauth = creds.get("claudeAiOauth")
-    if not isinstance(oauth, dict) or oauth.get("refreshToken") != old_rt:
-        return                      # the CLI refreshed on its own meanwhile — its pair wins
+# A refreshed pair that could not be written back yet (file unreadable mid-write, disk full…).
+# The server has already rotated the refresh token, so losing this pair would sign the CLI out:
+# it is kept in memory, used for readings, and the write is retried on every poll.
+_PENDING = {}
+
+
+def _read_json_retry(path, tries=5):
+    for i in range(tries):
+        try:
+            with open(path, "rb") as f:
+                return json.loads(f.read().decode("utf-8"))
+        except (OSError, ValueError):
+            if i + 1 < tries:
+                time.sleep(0.2)
+    return None
+
+
+def _claude_apply_pair(oauth, tok, t):
     oauth["accessToken"] = tok["access_token"]
     if tok.get("refresh_token"):
         oauth["refreshToken"] = tok["refresh_token"]
-    oauth["expiresAt"] = int((time.time() + float(tok.get("expires_in") or 28800)) * 1000)
-    creds["claudeAiOauth"] = oauth
-    _rewrite_json(path, creds)
+    oauth["expiresAt"] = int((t + float(tok.get("expires_in") or 28800)) * 1000)
+
+
+def _save_claude_tokens(path, old_rt, tok, t, first):
+    """Write the rotated pair back — re-reading the file first so nothing the CLI wrote in the
+    meantime is lost (falling back to the copy read before the refresh), and only if the file
+    still holds the refresh token we just spent."""
+    creds = _read_json_retry(path)
+    if not isinstance(creds, dict):
+        creds = first
+    oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+    if not isinstance(oauth, dict) or oauth.get("refreshToken") != old_rt:
+        _PENDING.pop("claude", None)     # the CLI refreshed on its own meanwhile — its pair wins
+        return
+    _claude_apply_pair(oauth, tok, t)
+    try:
+        _rewrite_json(path, creds)
+        _PENDING.pop("claude", None)
+    except OSError:
+        _PENDING["claude"] = {"old": old_rt, "tok": tok, "t": t}
 
 
 def _apply_claude_usage(d, j):
@@ -340,6 +372,31 @@ def _jwt_exp(jwt):
         return None
 
 
+def _codex_apply_pair(root, tok):
+    for k in ("access_token", "id_token", "refresh_token"):
+        if tok.get(k):
+            root["tokens"][k] = tok[k]
+    root["last_refresh"] = common.iso_utc()
+
+
+def _save_codex_tokens(old_rt, tok, first):
+    """Same rules as the Claude write-back: re-read, only over the refresh token we spent,
+    keep the pair in memory when the write fails."""
+    root = _read_json_retry(common.CODEX_AUTH)
+    if not isinstance(root, dict):
+        root = first
+    if not (isinstance(root, dict) and isinstance(root.get("tokens"), dict)
+            and root["tokens"].get("refresh_token") == old_rt):
+        _PENDING.pop("codex", None)
+        return
+    _codex_apply_pair(root, tok)
+    try:
+        _rewrite_json(common.CODEX_AUTH, root)
+        _PENDING.pop("codex", None)
+    except OSError:
+        _PENDING["codex"] = {"old": old_rt, "tok": tok}
+
+
 def codex_access_token():
     """(access_token, account_id) from ~/.codex/auth.json, refreshed through the official
     OpenAI token endpoint (and written back) if it has expired."""
@@ -349,7 +406,16 @@ def codex_access_token():
     tokens = root.get("tokens")
     if not isinstance(tokens, dict):
         return None
-    acc, at = tokens.get("account_id"), tokens.get("access_token")
+    acc = tokens.get("account_id")
+    p = _PENDING.get("codex")
+    if p is not None:
+        if tokens.get("refresh_token") == p["old"]:
+            _save_codex_tokens(p["old"], p["tok"], root)
+            _codex_apply_pair(root, p["tok"])
+            tokens = root["tokens"]
+        else:
+            _PENDING.pop("codex", None)
+    at = tokens.get("access_token")
     if not acc or not at:
         return None
     exp = _jwt_exp(at)
@@ -370,15 +436,7 @@ def codex_access_token():
         if r.status in (400, 401):
             st.set("deadCodexRefresh", fp)
         return None
-    # re-read and write back only if the CLI hasn't rotated the pair itself meanwhile
-    root = common.read_json(common.CODEX_AUTH)
-    if isinstance(root, dict) and isinstance(root.get("tokens"), dict) and root["tokens"].get("refresh_token") == rt:
-        root["tokens"]["access_token"] = tok["access_token"]
-        for k in ("id_token", "refresh_token"):
-            if tok.get(k):
-                root["tokens"][k] = tok[k]
-        root["last_refresh"] = common.iso_utc()
-        _rewrite_json(common.CODEX_AUTH, root)
+    _save_codex_tokens(rt, tok, root)
     return tok["access_token"], acc
 
 

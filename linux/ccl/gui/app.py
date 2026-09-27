@@ -595,6 +595,7 @@ class TrayApp(QObject):
         self.bridge.login_done.connect(self.on_login_done)
         self.busy_limits = False
         self.busy_logs = False
+        self.force_pending = False
         self.login_state = None
         self.login_code = None
         self.login_uri = None
@@ -738,14 +739,21 @@ class TrayApp(QObject):
             return
         self.busy_limits = True
 
-        def work():
+        def one(fetch):
             try:
-                claude = limits.fetch_claude()
-                codex = limits.fetch_codex(live=True)
+                return fetch()
+            except Exception as e:  # never let one product's failure blank the other
+                d = limits.LimitData()
+                d.error = str(e) or e.__class__.__name__
+                return d
+
+        def work():
+            claude = one(limits.fetch_claude)
+            codex = one(lambda: limits.fetch_codex(live=True))
+            try:
                 claude, codex = limits.apply_cache(claude, codex)
-            except Exception as e:  # never let a worker kill the tray
-                claude, codex = limits.LimitData(), limits.LimitData()
-                claude.error = codex.error = str(e)
+            except Exception:
+                pass
             self.bridge.limits_done.emit(claude, codex)
         threading.Thread(target=work, daemon=True).start()
 
@@ -777,9 +785,13 @@ class TrayApp(QObject):
             m.other_machines = 0
 
     def refresh_logs(self, force_push=False):
+        if force_push:
+            self.force_pending = True
         if self.busy_logs:
-            return
+            return                          # a queued force is picked up when this pass ends
         self.busy_logs = True
+        force_push = self.force_pending
+        self.force_pending = False
 
         def work():
             remote = None
@@ -794,12 +806,16 @@ class TrayApp(QObject):
                 days, remote = usage.load_index()["days"], sync.load_remote()
                 sync.sync_state().set("lastError", str(e))
                 res = None
-            self.bridge.logs_done.emit(days, (remote, res))
+            self.bridge.logs_done.emit(days, (remote, res, force_push))
         threading.Thread(target=work, daemon=True).start()
 
     def on_logs(self, days, payload):
         self.busy_logs = False
-        remote, _res = payload
+        remote, res, forced = payload
+        if forced and (res is None or res.skipped == "busy"):
+            self.force_pending = True       # the timer was mid-scan/sync — try again shortly
+        if self.force_pending:
+            QTimer.singleShot(20000, self.refresh_logs)
         self.apply_days(days, remote)
         self.win.page0_changed()
         if self.win.isVisible() and self.win.stack.currentIndex() == 1 and self.login_state is None:
@@ -898,6 +914,19 @@ class TrayApp(QObject):
             play_sound(ss.get("reachedChoice"))
 
 
+def _share_session_bus():
+    """The sync timer reads the GitHub token from the keyring over D-Bus. Some sessions start
+    the systemd user manager without the bus address; hand it over (best effort)."""
+    try:
+        r = subprocess.run(["systemctl", "--user", "show-environment"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=5)
+        if r.returncode == 0 and b"DBUS_SESSION_BUS_ADDRESS=" not in r.stdout and os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+            subprocess.run(["systemctl", "--user", "import-environment", "DBUS_SESSION_BUS_ADDRESS"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def pick_family():
     fams = set(QFontDatabase().families())
     for f in ("Noto Sans", "PT Astra Sans", "Roboto"):
@@ -935,6 +964,7 @@ def main(argv=None):
             time.sleep(1)
             if QSystemTrayIcon.isSystemTrayAvailable():
                 break
+    _share_session_bus()
     app = TrayApp(qapp)
     qapp._ccl = app
     return qapp.exec_()

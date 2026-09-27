@@ -120,6 +120,10 @@ def cmd_push(args):
             _say(common.tr("Синхронизация выключена: нет входа в GitHub (ccl-sync login).",
                            "Sync is off: not signed in to GitHub (ccl-sync login)."))
         return 0
+    if res.skipped == "unreachable":
+        sys.stderr.write(common.tr("Хранилище секретов недоступно (нет сессии D-Bus) — токен GitHub не прочитать.\n",
+                                   "The Secret Service is unreachable (no D-Bus session) — can't read the GitHub token.\n"))
+        return 3
     if res.skipped == "locked":
         if not args.quiet:
             _say(common.tr("Хранилище секретов (KWallet) заблокировано — синхронизация подождёт до разблокировки.",
