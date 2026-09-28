@@ -22,9 +22,9 @@ class TestSettingsFit(unittest.TestCase):
         styles = [s for s in ("Fusion", "Breeze") if s in QStyleFactory.keys()]
         for style in styles:
             for lang in ("ru", "en"):
-                for state in ("out", "in"):
+                for state in ("out", "in", "in deb"):
                     with self.subTest(style=style, lang=lang, sync=state):
-                        r = subprocess.run([sys.executable, PROBE, style, lang, state], stdout=subprocess.PIPE,
+                        r = subprocess.run([sys.executable, PROBE, style, lang] + state.split(), stdout=subprocess.PIPE,
                                            stderr=subprocess.PIPE, timeout=120)
                         out = r.stdout.decode("utf-8", "replace").strip()     # Qt's warnings go to stderr
                         self.assertEqual(out, "OK", out + r.stderr.decode("utf-8", "replace")[-400:])

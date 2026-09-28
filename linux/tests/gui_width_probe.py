@@ -1,5 +1,6 @@
 """Helper for test_gui_layout: build the settings page offscreen for one style / language /
-sync state and print "OK" or "OVERFLOW …". Everything outside the process is stubbed — the
+sync state (+ optionally "deb": installed from the package with an update waiting) and print
+"OK" or "OVERFLOW …". Everything outside the process is stubbed — the
 keyring (NOT isolated by XDG dirs), the gist, the limits APIs and the log index."""
 
 import os
@@ -8,6 +9,7 @@ import sys
 import tempfile
 
 style, lang, signed = sys.argv[1], sys.argv[2], sys.argv[3] == "in"
+deb = "deb" in sys.argv[4:]
 tmp = tempfile.mkdtemp()
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["XDG_CONFIG_HOME"] = os.path.join(tmp, "config")
@@ -17,7 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from PyQt5.QtCore import QPoint  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 
-from ccl import common, limits, sync, usage, vault  # noqa: E402
+from ccl import common, limits, sync, update, usage, vault  # noqa: E402
 
 vault._ss = lambda: None
 vault.read = (lambda: ("stub", "secret-service")) if signed else (lambda: (None, None))
@@ -28,6 +30,9 @@ usage.refresh = lambda blocking=True, progress=None: (usage.new_index(), False, 
 common.settings().set("lang", lang)
 if signed:
     sync.sync_state().update(login="someone")
+if deb:
+    update.is_packaged = lambda: True
+    common.state().update(updateAvailable="99.0", updateDebUrl="https://example.invalid/x_all.deb")
 
 import ccl.gui.app as A  # noqa: E402
 

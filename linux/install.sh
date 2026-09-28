@@ -34,6 +34,10 @@ if "$PY" -c 'import PyQt5.QtWidgets' 2>/dev/null; then GUI=1; else
     say "PyQt5 не найден — ставлю только ccl-sync. Для значка в трее: sudo apt install python3-pyqt5"
 fi
 
+if [ -d /usr/share/claude-codex-limits ]; then
+    say "Внимание: уже установлен пакет claude-codex-limits (.deb). Эта копия в домашнем каталоге будет его"
+    say "перекрывать; обычно достаточно пакета. Удалить эту копию потом: sh linux/uninstall.sh"
+fi
 say "Копирую в $DEST"
 mkdir -p "$DEST/Resources" "$BIN"
 rm -rf "$DEST/ccl"
@@ -58,7 +62,7 @@ Comment=Лимиты Claude Code и Codex в трее
 Exec=$PY \"$DEST/claude-codex-limits\"
 Icon=$DEST/Resources/appicon.png
 Terminal=false
-Categories=Utility;Development;
+Categories=Utility;
 "
 printf '%s' "$DESKTOP_ENTRY" > "${XDG_DATA_HOME:-$HOME/.local/share}/applications/claude-codex-limits.desktop"
 

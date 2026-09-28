@@ -26,7 +26,7 @@ Click the tray icon for a detailed popover.
 - **Honest when a login lapses** — if Claude Code's saved credentials expire for good, the card says so (“Sign-in expired · How to fix?”) and tapping it walks you through `claude` → `/login`; meanwhile the app stops hammering the API with a token it already knows is dead. One fresh sign-in and it heals on its own.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
 - **Advanced view** — a second panel layout for people who want to *manage* their limits, not just glance at them. Every window gets a pace line: where a linear plan says you should be by now, how many points you're ahead of it, your average burn rate, and a plain verdict — “Lasts until reset (forecast 53%)” or “Runs out at 09:37, 2 h 13 min before reset”. Below: 7 days of consumption as bars stacked by model, a 35‑day calendar heatmap, and money — what a day costs you out of the subscription versus what the same tokens would cost at API prices. Separately for Claude Code and Codex. Settings → *Panel view*.
-- **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Only daily token totals per model travel — no prompts, paths or project names. A Linux port for Astra Linux is in progress ([protocol](docs/sync-protocol.md)).
+- **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Only daily token totals per model travel — no prompts, paths or project names. There is a Linux port for Astra Linux — see [Linux](#linux-astra-linux) ([protocol](docs/sync-protocol.md)).
 - **You choose what the menu bar shows** — pick which number sits on each side of the slash (5‑hour, weekly, or the per‑model limit) and in which order, or clear the right‑hand one for a single figure. Settings → *In the menu bar*. The strip updates the moment you tap.
 - **Codex reset credits** — if you've banked rate‑limit resets, a small ⟳ badge on the Codex card shows how many you have.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
@@ -128,6 +128,23 @@ cd claude-codex-limits
 ```
 
 Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages to install.
+
+### Linux (Astra Linux)
+
+The Linux port is tested on Astra Linux SE 1.8 (KDE / Fly). It gives a tray icon with the same
+percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
+the same gist.
+
+1. Download `claude-codex-limits_0.3.0_all.deb` from the [Linux 0.3.0](../../releases/tag/linux-v0.3.0) release.
+2. Double-click it and press Install, or install it from a terminal:
+   ```bash
+   sudo apt install ./claude-codex-limits_0.3.0_all.deb
+   ```
+   apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
+3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
+
+Without admin rights, install into your home folder instead: `git clone`, then `sh linux/install.sh`.
+Details: [linux/README.md](linux/README.md) (in Russian).
 
 ## Usage
 
