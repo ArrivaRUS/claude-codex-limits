@@ -1283,7 +1283,7 @@ final class GitHubSync {
         q.async {
             syncTokenDelete()
             let d = UserDefaults.standard
-            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked"] { d.removeObject(forKey: k) }
+            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked", "syncDiscoveredAt"] { d.removeObject(forKey: k) }
             self.lock.lock(); self._remote = SyncRemoteCache(); self.lock.unlock()
             try? FileManager.default.removeItem(atPath: SYNC_REMOTE_PATH)
             self.setUI { $0 = SyncUIState() }
@@ -1294,6 +1294,7 @@ final class GitHubSync {
         syncTokenDelete()
         let d = UserDefaults.standard
         d.set(true, forKey: "syncRevoked"); d.removeObject(forKey: "syncGistId"); d.removeObject(forKey: "syncPushHash")
+        d.removeObject(forKey: "syncDiscoveredAt")
         setUI { $0.phase = .revoked }
     }
 
@@ -1362,6 +1363,23 @@ final class GitHubSync {
         }
 
         var gistId = d.string(forKey: "syncGistId")
+        // Earliest-created wins must keep being applied, not only on first discovery: two
+        // machines that each created a gist would otherwise never see each other's files
+        // (issue #3). Re-check once a day; on a switch, forget the push hash so our file is
+        // written into the gist we moved to.
+        if let cur = gistId {
+            let last = d.object(forKey: "syncDiscoveredAt") as? Date ?? .distantPast
+            if Date().timeIntervalSince(last) > 86400 {
+                let f = findGist(token)
+                if handle(f.status) { return }
+                d.set(Date(), forKey: "syncDiscoveredAt")
+                if let id = f.id, id != cur {
+                    gistId = id
+                    d.set(id, forKey: "syncGistId")
+                    d.removeObject(forKey: "syncPushHash")
+                }
+            }
+        }
         if gistId == nil {
             let f = findGist(token)
             if handle(f.status) { return }
@@ -1375,7 +1393,14 @@ final class GitHubSync {
                 guard let id = (c.json as? [String: Any])?["id"] as? String else { return }
                 gistId = id
                 d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
+                // Did another machine create one at the same moment? Converge on the earliest.
+                let again = findGist(token)
+                if again.status == 200, let a = again.id, a != id {
+                    gistId = a
+                    d.removeObject(forKey: "syncPushHash")
+                }
             }
+            d.set(Date(), forKey: "syncDiscoveredAt")
             d.set(gistId, forKey: "syncGistId")
         }
         guard let gid = gistId else { return }
@@ -1910,7 +1935,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.1"
+let APP_VERSION = "3.1.2"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2911,7 +2936,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     return hits
 }
 
-func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage: Bool = false) -> [Hit] {
+func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage: Bool = false, copied: String? = nil) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -3165,8 +3190,8 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         text(attr(tr("ДРУГИЕ КОМПЬЮТЕРЫ · ЧЕРЕЗ GITHUB", "OTHER COMPUTERS · VIA GITHUB"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SYNC_CAP)
         roundFill(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.04))
         roundStroke(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.06), 1)
-        func button(_ label: String, right: CGFloat, rowTop: CGFloat, id: String, primary: Bool) -> CGFloat {
-            let a = attr(label, 11, .semibold, primary ? NSColor(srgbRed: 0.1, green: 0.07, blue: 0.03, alpha: 1) : textHi)
+        func button(_ label: String, right: CGFloat, rowTop: CGFloat, id: String, primary: Bool, tint: NSColor? = nil) -> CGFloat {
+            let a = attr(label, 11, .semibold, tint ?? (primary ? NSColor(srgbRed: 0.1, green: 0.07, blue: 0.03, alpha: 1) : textHi))
             let w = ceil(lineWidth(CTLineCreateWithAttributedString(a))) + 20, h: CGFloat = 22
             let r = rectTL(right - w, rowTop + (SET_ROW_H - h) / 2, w, h)
             roundFill(r, 6, primary ? orange : gray(1, 0.12))
@@ -3210,7 +3235,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             text(ctAttr(sy.userCode ?? "····-····", (NSFont.monospacedSystemFont(ofSize: 22, weight: .semibold) as CTFont), cg(textHi)), x: cardX + 14, topY: codeTop + 8)
             var right = cardX + cardW - 12
             right -= button(tr("Открыть", "Open"), right: right, rowTop: codeTop + 4, id: "sync:open", primary: true) + 6
-            _ = button(tr("Скопировать", "Copy"), right: right, rowTop: codeTop + 4, id: "sync:copy", primary: false)
+            // Copy flips to a teal «Скопировано» for a moment (copyToClipboard clears it) — both buttons
+            // put the code on the clipboard, so either one lights it up.
+            let justCopied = copied != nil && copied == sy.userCode
+            _ = button(justCopied ? tr("Скопировано", "Copied!") : tr("Скопировать", "Copy"), right: right, rowTop: codeTop + 4, id: "sync:copy", primary: false,
+                       tint: justCopied ? ADV_MODEL[0] : nil)
             hdiv(cardX + 14, cardX + cardW - 14, codeTop + 44)
             text(attr(tr("Ждём подтверждения в браузере…", "Waiting for approval in the browser…"), 10.5, .regular, textMid), x: cardX + 14, topY: codeTop + 51)
             link(tr("Отмена", "Cancel"), right: cardX + cardW - 14, topY: codeTop + 51, id: "sync:cancel")
@@ -3675,7 +3704,7 @@ final class LimitsPanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         if mode == .settings || mode == .sounds {
-            hits = drawSettings(ctx, size: bounds.size, about: about, soundsPage: mode == .sounds)
+            hits = drawSettings(ctx, size: bounds.size, about: about, soundsPage: mode == .sounds, copied: copiedCmd)
         } else if mode == .whatsnew {
             hits = drawWhatsNew(ctx, size: bounds.size, notes: notes, loading: notesLoading,
                                 error: notesError, scroll: scroll, contentH: notesContentH,
@@ -4679,6 +4708,14 @@ if CommandLine.arguments.contains("--advanced-preview") {
         dd.set(lang, forKey: "lang")
         SYNC_PREVIEW = SyncUIState(); renderSettings("\(out)/sync-\(lang)-off.png")
         SYNC_PREVIEW = SyncUIState(phase: .awaitingCode, userCode: "WDJB-MJHT"); renderSettings("\(out)/sync-\(lang)-code.png")
+        do {
+            let sh = settingsTotalHeight(AboutState())
+            if let ctx = bitmapContext(Int(PANEL_W * s), Int(sh * s)) {
+                ctx.scaleBy(x: s, y: s)
+                _ = drawSettings(ctx, size: CGSize(width: PANEL_W, height: sh), about: AboutState(), copied: "WDJB-MJHT")
+                save(ctx, "\(out)/sync-\(lang)-code-copied.png")
+            }
+        }
         SYNC_PREVIEW = SyncUIState(phase: .on, login: "ArrivaRUS", machines: [mac, astra], lastSync: Date()); renderSettings("\(out)/sync-\(lang)-on.png")
         render(c, x, "\(out)/sync-\(lang)-panel.png")
         SYNC_PREVIEW = SyncUIState(phase: .revoked, login: "ArrivaRUS"); renderSettings("\(out)/sync-\(lang)-revoked.png")
