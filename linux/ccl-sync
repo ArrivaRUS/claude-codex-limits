@@ -1,0 +1,12 @@
+#!/usr/bin/python3
+# ccl-sync — Claude Code / Codex usage collector + GitHub gist sync (Linux port).
+# Runs on the OS's own Python 3 (standard library only). See linux/README.md.
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from ccl.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
