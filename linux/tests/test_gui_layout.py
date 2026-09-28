@@ -1,5 +1,6 @@
 """The settings page must fit the popup in every style, language and sync state — a wider
-style (Breeze on KDE/Fly) once pushed its right edge under the scroll bar."""
+style (Breeze on KDE/Fly) once pushed its right edge under the scroll bar — and the About
+row's pills must not clip their text."""
 
 import os
 import subprocess

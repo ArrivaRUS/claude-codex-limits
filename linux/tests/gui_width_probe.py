@@ -17,7 +17,8 @@ os.environ["XDG_STATE_HOME"] = os.path.join(tmp, "state")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from PyQt5.QtCore import QPoint  # noqa: E402
-from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
+from PyQt5.QtGui import QFontMetricsF  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QPushButton, QWidget  # noqa: E402
 
 from ccl import common, limits, sync, update, usage, vault  # noqa: E402
 
@@ -50,5 +51,12 @@ vp = page.scroll.viewport().width()
 over = [(type(x).__name__, x.mapTo(page.body, QPoint(x.width(), 0)).x())
         for x in page.body.findChildren(QWidget) if x.isVisible() and x.mapTo(page.body, QPoint(x.width(), 0)).x() > vp]
 bodymin = page.body.minimumSizeHint().width()
-print("OK" if bodymin <= vp and not over else "OVERFLOW viewport=%d bodymin=%d %s" % (vp, bodymin, over[:3]))
+# pills are sized from their text (as on the Mac) — the text must still fit inside the padding
+clipped = [b.text() for b in page.body.findChildren(QPushButton)
+           if str(b.property("role")).startswith("pill") and b.isVisible()
+           and QFontMetricsF(b.font()).horizontalAdvance(b.text()) + 2 * 9 > b.width()]
+if clipped:
+    print("CLIPPED %s" % clipped)
+else:
+    print("OK" if bodymin <= vp and not over else "OVERFLOW viewport=%d bodymin=%d %s" % (vp, bodymin, over[:3]))
 shutil.rmtree(tmp, ignore_errors=True)
