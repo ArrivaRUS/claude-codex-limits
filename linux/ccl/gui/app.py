@@ -5,6 +5,7 @@ Limits are polled every 1/5/15 minutes; local logs are indexed and synced throug
 gist every 10 minutes (the same code `ccl-sync push --auto` runs from the systemd timer).
 """
 
+import math
 import os
 import shlex
 import shutil
@@ -14,11 +15,11 @@ import threading
 import time
 
 from PyQt5.QtCore import QObject, QRectF, Qt, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QCursor, QDesktopServices, QFontDatabase, QGuiApplication, QPainter
+from PyQt5.QtGui import QCursor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter
 from PyQt5.QtWidgets import (QAction, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                              QMenu, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import APP_VERSION, REPO_URL, common, limits, sync, update, vault, usage
+from .. import APP_VERSION, common, limits, sync, update, vault, usage
 from ..common import tr
 from . import fmt, paint, panel, trayicon
 
@@ -66,6 +67,16 @@ QPushButton { color: white; background: rgba(255,255,255,0.09); border: 1px soli
 QPushButton:hover { background: rgba(255,255,255,0.15); }
 QPushButton[role="accent"] { background: rgba(255,158,46,0.18); border-color: rgba(255,158,46,0.5); color: #FF9E2E; font-weight: 600; }
 QPushButton[role="link"] { background: transparent; border: none; color: #6B9EF5; padding: 2px 4px; }
+QPushButton[role="pill"], QPushButton[role="pill-accent"] {
+    border: none; border-radius: 8px; padding: 0 9px; min-height: 26px; max-height: 26px; font-size: 11px; }
+QPushButton[role="pill"] { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.95); font-weight: 500; }
+QPushButton[role="pill"]:hover { background: rgba(255,255,255,0.20); }
+QPushButton[role="pill-accent"] { background: #FF9E2E; color: #1A1A1A; font-weight: 600; }
+QPushButton[role="pill-accent"]:hover { background: #FFAD4D; }
+QLabel[role="row"] { color: rgba(255,255,255,0.95); font-size: 13px; }
+QLabel[role="busy"] { color: rgba(255,255,255,0.50); font-size: 12px; }
+QLabel[role="status"] { color: rgba(255,255,255,0.34); font-size: 11px; }
+QLabel[role="status-hot"] { color: #FF9E2E; font-size: 11px; }
 QScrollArea { background: transparent; border: none; }
 QScrollBar:vertical { background: transparent; width: 8px; }
 QScrollBar::handle:vertical { background: rgba(255,255,255,0.18); border-radius: 4px; min-height: 30px; }
@@ -184,6 +195,47 @@ class WrapCheck(QWidget):
 
     def isChecked(self):
         return self.box.isChecked()
+
+
+class _Icon(QWidget):
+    """One of the panel's vector icons (paint.Canvas.icon) as a widget — the SF Symbols of the
+    Mac's settings rows."""
+
+    def __init__(self, name, size=16):
+        super().__init__()
+        self.name = name
+        self.setFixedSize(size, size)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        paint.Canvas(p).icon(self.name, QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), paint.TEXT_MID, 1.3)
+        p.end()
+
+
+def _pill(text, accent=False):
+    b = QPushButton(text)
+    b.setProperty("role", "pill-accent" if accent else "pill")
+    b.setCursor(Qt.PointingHandCursor)
+    return b
+
+
+def _fit_pill(b):
+    """Text + padding, as the Mac sizes its pills; the style's own button margins would add
+    another ~15 px. Measured with the font the stylesheet gives pills (11 px, medium / semibold,
+    the application's family) — the page may not be polished yet when this runs."""
+    f = QFont(b.font())
+    f.setPixelSize(11)
+    # what Qt makes of the stylesheet's font-weight 600 / 500
+    f.setWeight(QFont.Bold if b.property("role") == "pill-accent" else QFont.DemiBold)
+    b.setFixedWidth(int(math.ceil(QFontMetricsF(f).horizontalAdvance(b.text()))) + 20)
+
+
+def _set_role(w, role):
+    """Change a styled role on a live widget (the stylesheet is only re-applied on polish)."""
+    w.setProperty("role", role)
+    w.style().unpolish(w)
+    w.style().polish(w)
 
 
 def _card():
@@ -355,52 +407,62 @@ class SettingsPage(QWidget):
         cl.addWidget(_label(tr("Выбор звука в списке сразу его проигрывает.", "Picking a sound plays it."), "note", True))
         lay.addWidget(card)
 
+        # about: one row as on the Mac — ⓘ Version x.y.z … [action pills], a status line below
         lay.addWidget(_label(tr("О ПРИЛОЖЕНИИ", "ABOUT"), "cap"))
-        card, cl = _card()
-        cl.addWidget(_label("Claude Codex Limits · Linux %s" % APP_VERSION, wrap=True))
+        card = QFrame()
+        card.setProperty("role", "card")
+        card.setMinimumHeight(44)
+        h = QHBoxLayout(card)
+        h.setContentsMargins(14, 8, 12, 8)
+        h.setSpacing(0)
+        h.addWidget(_Icon("info"), 0, Qt.AlignVCenter)
+        h.addSpacing(10)
+        h.addWidget(_label(tr("Версия ", "Version ") + APP_VERSION, "row"), 0, Qt.AlignVCenter)
+        h.addStretch(1)
         self.upd_box = QWidget()
-        self.upd_lay = QVBoxLayout(self.upd_box)
-        self.upd_lay.setContentsMargins(0, 0, 0, 0)
-        cl.addWidget(self.upd_box)
-        self.render_update()
-        link = QPushButton(REPO_URL.replace("https://", ""))
-        link.setProperty("role", "link")
-        link.clicked.connect(lambda: self.app.action("open:" + REPO_URL))
-        cl.addWidget(link)
-        cl.addWidget(_label(tr("Данные: ", "Data: ") + common.STATE_DIR.replace(common.HOME, "~"), "note", True))
+        self.upd_lay = QHBoxLayout(self.upd_box)
+        self.upd_lay.setContentsMargins(6, 0, 0, 0)
+        self.upd_lay.setSpacing(8)
+        h.addWidget(self.upd_box, 0, Qt.AlignVCenter)
         lay.addWidget(card)
+        self.upd_status = _label("", "status", True)
+        self.upd_status.setContentsMargins(4, 0, 4, 0)
+        lay.addWidget(self.upd_status)
+        self.render_update()
         lay.addStretch(1)
 
     def render_update(self):
+        """The right side of the About row and the status line under it (drawAbout on the Mac)."""
         _clear(self.upd_lay)
         a = self.app
         avail = a.model.update_available
+        act = tr("Скачать", "Download") if update.is_packaged() else tr("Обновить", "Update")
+        status, hot = None, False
         if a.update_state == "running":
-            self.upd_lay.addWidget(_label(tr("Скачиваю пакет…", "Downloading the package…") if update.is_packaged()
-                                          else tr("Обновляю… значок перезапустится сам.", "Updating… the icon restarts by itself."),
-                                          "note", True))
-            return
-        if avail:
-            self.upd_lay.addWidget(_label(tr("Доступна версия ", "Version available: ") + avail, wrap=True))
-            row = QWidget()
-            h = QHBoxLayout(row)
-            h.setContentsMargins(0, 0, 0, 0)
-            b = QPushButton(tr("Скачать и установить", "Download and install") if update.is_packaged() else tr("Обновить", "Update"))
-            b.setProperty("role", "accent")
-            b.clicked.connect(a.apply_update)
-            h.addWidget(b)
-            news = QPushButton(tr("Что нового", "What's new"))
-            news.setProperty("role", "link")
+            self.upd_lay.addWidget(_label(tr("Загрузка…", "Downloading…") if update.is_packaged()
+                                          else tr("Обновление…", "Updating…"), "busy"))
+        elif a.update_state == "checking":
+            self.upd_lay.addWidget(_label(tr("Проверка…", "Checking…"), "busy"))
+        elif avail:
+            news = _pill(tr("Что нового", "What's new"))
             news.clicked.connect(lambda: a.action("open:" + update.changes_url()))
-            h.addWidget(news)
-            h.addStretch(1)
-            self.upd_lay.addWidget(row)
+            go = _pill(act, accent=True)
+            go.clicked.connect(a.apply_update)
+            self.upd_lay.addWidget(news)
+            self.upd_lay.addWidget(go)
+            _fit_pill(news)
+            _fit_pill(go)
+            status, hot = tr("Доступна версия %s — нажмите «%s»", "Version %s available — tap «%s»") % (avail, act), True
         else:
-            b = QPushButton(tr("Проверить обновления", "Check for updates"))
+            b = _pill(tr("Проверить обновление", "Check for updates"))
             b.clicked.connect(lambda: a.check_update(manual=True))
-            self.upd_lay.addWidget(b, 0, Qt.AlignLeft)
-        if a.update_msg:
-            self.upd_lay.addWidget(_label(a.update_msg, "note", True))
+            self.upd_lay.addWidget(b)
+            _fit_pill(b)
+        if a.update_msg and a.update_state is None:
+            status, hot = a.update_msg, a.update_msg_hot
+        _set_role(self.upd_status, "status-hot" if hot else "status")
+        self.upd_status.setText(status or "")
+        self.upd_status.setVisible(bool(status))
 
     def on_lang(self, i):
         common.settings().set("lang", "en" if i == 1 else "ru")
@@ -686,6 +748,7 @@ class TrayApp(QObject):
         self.bridge.update_done.connect(self.on_update_done)
         self.update_state = None
         self.update_msg = None
+        self.update_msg_hot = False
         self.model.update_available = update.available()
         self.busy_limits = False
         self.busy_logs = False
@@ -1002,6 +1065,9 @@ class TrayApp(QObject):
         if not manual and not update.due():
             return
         self.update_state = "checking"
+        if manual:
+            self.update_msg = None
+            self.win.settings_page.render_update()
 
         def work():
             try:
@@ -1016,10 +1082,11 @@ class TrayApp(QObject):
         latest, err = res
         self.model.update_available = update.available()
         if manual:
+            self.update_msg_hot = False
             if err:
-                self.update_msg = tr("Не удалось проверить: ", "Couldn't check: ") + err
+                self.update_msg = tr("Не удалось проверить обновление (%s)", "Couldn't check for updates (%s)") % err
             elif not self.model.update_available:
-                self.update_msg = tr("Установлена последняя версия.", "You're up to date.")
+                self.update_msg = tr("Установлена последняя версия (%s)", "You're on the latest version (%s)") % APP_VERSION
             else:
                 self.update_msg = None
         self.build_menu()
@@ -1032,6 +1099,7 @@ class TrayApp(QObject):
             return
         if update.is_checkout():
             self.update_msg = tr("Запущено из git-копии — обновляйте её через git pull.", "Running from a git checkout — use git pull.")
+            self.update_msg_hot = False
             self.win.settings_page.render_update()
             return
         self.update_state = "running"
@@ -1053,7 +1121,7 @@ class TrayApp(QObject):
     def on_update_done(self, new, err):
         self.update_state = None
         if err:
-            self.update_msg = err
+            self.update_msg, self.update_msg_hot = err, False
             if self.win.isVisible():
                 self.win.settings_page.render_update()
             return
@@ -1061,11 +1129,13 @@ class TrayApp(QObject):
             # root installs the package, not us: hand it to the system package installer;
             # check_disk_version() restarts the icon once dpkg has put the new files in place
             path = new[1]
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-            self.update_msg = (tr("Пакет скачан: ", "Package downloaded: ") + path.replace(common.HOME, "~")
-                               + tr(". Открыл установщик пакетов — нажмите «Установить». Если он не открылся: "
-                                    "sudo apt install ", ". Opened the package installer — press Install. If it didn't open: "
-                                    "sudo apt install ") + shlex.quote(path))
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(path)):
+                self.update_msg = tr("Готово — в открывшемся установщике нажмите «Установить»",
+                                     "Ready — press «Install» in the package installer")
+            else:
+                self.update_msg = tr("Пакет в «Загрузках». Установите: sudo apt install ",
+                                     "The package is in Downloads. Install it: sudo apt install ") + shlex.quote(path)
+            self.update_msg_hot = True
             if self.win.isVisible():
                 self.win.settings_page.render_update()
             return

@@ -225,6 +225,12 @@ class Canvas(object):
         elif name == "pencil":
             p.drawLine(QPointF(r.left() + s * 0.2, r.bottom() - s * 0.2), QPointF(r.right() - s * 0.15, r.top() + s * 0.15))
             p.drawLine(QPointF(r.left() + s * 0.12, r.bottom() - s * 0.12), QPointF(r.left() + s * 0.3, r.bottom() - s * 0.12))
+        elif name == "info":
+            p.drawEllipse(QPointF(cx, cy), s * 0.45, s * 0.45)
+            p.drawLine(QPointF(cx, cy - s * 0.04), QPointF(cx, cy + s * 0.24))
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(color))
+            p.drawEllipse(QPointF(cx, cy - s * 0.22), s * 0.075, s * 0.075)
         elif name == "power":
             rad = s * 0.42
             path = QPainterPath()
