@@ -6,6 +6,7 @@ gist every 10 minutes (the same code `ccl-sync push --auto` runs from the system
 """
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,18 @@ REACHED_SOUNDS = [("outage", "Отбой", "Lights out", "snd-outage"), ("sunset
 
 AUTOSTART = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.HOME, ".config"),
                          "autostart", "claude-codex-limits.desktop")
+
+
+def _version_stamp():
+    """(mtime, APP_VERSION) of the installed ccl/__init__.py, or None when it can't be read."""
+    path = os.path.join(update.app_dir(), "ccl", "__init__.py")
+    try:
+        mtime = os.stat(path).st_mtime
+        with open(path, encoding="utf-8") as f:
+            return mtime, update.parse_version(f.read())
+    except OSError:
+        return None
+
 
 STYLE = """
 QWidget#page { background: transparent; }
@@ -138,6 +151,41 @@ def _label(text, role=None, wrap=False):
     return l
 
 
+class _ClickLabel(QLabel):
+    def __init__(self, text, on_click):
+        super().__init__(text)
+        self._on_click = on_click
+        self.setWordWrap(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._on_click()
+
+
+class WrapCheck(QWidget):
+    """A checkbox whose caption wraps. QCheckBox's own text never wraps, so a long caption (or
+    a wider style such as Breeze) made the settings page wider than the popup, and the right
+    edge ended up under the scroll bar."""
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, text):
+        super().__init__()
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.box = QCheckBox()
+        self.box.toggled.connect(self.toggled)
+        h.addWidget(self.box, 0, Qt.AlignTop)
+        h.addWidget(_ClickLabel(text, self.box.toggle), 1)
+
+    def setChecked(self, on):
+        self.box.setChecked(on)
+
+    def isChecked(self):
+        return self.box.isChecked()
+
+
 def _card():
     f = QFrame()
     f.setProperty("role", "card")
@@ -220,7 +268,7 @@ class SettingsPage(QWidget):
         self.lang.setCurrentIndex(1 if common.app_lang() == "en" else 0)
         self.lang.currentIndexChanged.connect(self.on_lang)
         cl.addWidget(_row(tr("Язык", "Language"), self.lang))
-        self.autostart = QCheckBox(tr("Запускать при входе в систему", "Launch at login"))
+        self.autostart = WrapCheck(tr("Запускать при входе в систему", "Launch at login"))
         self.autostart.setChecked(os.path.exists(AUTOSTART))
         self.autostart.toggled.connect(self.app.set_autostart)
         cl.addWidget(self.autostart)
@@ -248,7 +296,7 @@ class SettingsPage(QWidget):
             cb.currentIndexChanged.connect(self.on_tray)
             self.slots.append(cb)
             cl.addWidget(_row(name, cb))
-        self.codex_tray = QCheckBox(tr("Отдельный значок для Codex", "Separate icon for Codex"))
+        self.codex_tray = WrapCheck(tr("Отдельный значок для Codex", "Separate icon for Codex"))
         self.codex_tray.setChecked(bool(st.get("codexTray")))
         self.codex_tray.toggled.connect(lambda on: (st.set("codexTray", on), self.app.update_tray()))
         cl.addWidget(self.codex_tray)
@@ -280,22 +328,21 @@ class SettingsPage(QWidget):
 
         lay.addWidget(_label(tr("УВЕДОМЛЕНИЯ И ЗВУКИ", "NOTIFICATIONS & SOUNDS"), "cap"))
         card, cl = _card()
-        notify = QCheckBox(tr("Уведомление, когда лимит исчерпан или сброшен", "Notify when a limit is reached or reset"))
+        notify = WrapCheck(tr("Уведомление, когда лимит исчерпан или сброшен", "Notify when a limit is reached or reset"))
         notify.setChecked(bool(st.get("notify")))
         notify.toggled.connect(lambda on: st.set("notify", on))
         cl.addWidget(notify)
         for key, choice_key, text, pool in (
-                ("sound5h", "sound5hChoice", tr("Сброс 5-часового окна", "5-hour window reset"), RESET_SOUNDS),
+                ("sound5h", "sound5hChoice", tr("Сброс окна 5 ч", "5-hour reset"), RESET_SOUNDS),
                 ("sound7d", "sound7dChoice", tr("Сброс недели", "Weekly reset"), RESET_SOUNDS),
                 ("reachedOn", "reachedChoice", tr("Лимит исчерпан", "Limit reached"), REACHED_SOUNDS)):
             w = QWidget()
             h = QHBoxLayout(w)
             h.setContentsMargins(0, 0, 0, 0)
-            chk = QCheckBox(text)
+            chk = WrapCheck(text)
             chk.setChecked(bool(st.get(key)))
             chk.toggled.connect(lambda on, k=key: st.set(k, on))
-            h.addWidget(chk)
-            h.addStretch(1)
+            h.addWidget(chk, 1)
             cb = _combo()
             cb.setMinimumContentsLength(9)
             for sid, ru, en, _f in pool:
@@ -329,20 +376,22 @@ class SettingsPage(QWidget):
         a = self.app
         avail = a.model.update_available
         if a.update_state == "running":
-            self.upd_lay.addWidget(_label(tr("Обновляю… значок перезапустится сам.", "Updating… the icon restarts by itself."), "note"))
+            self.upd_lay.addWidget(_label(tr("Скачиваю пакет…", "Downloading the package…") if update.is_packaged()
+                                          else tr("Обновляю… значок перезапустится сам.", "Updating… the icon restarts by itself."),
+                                          "note", True))
             return
         if avail:
             self.upd_lay.addWidget(_label(tr("Доступна версия ", "Version available: ") + avail, wrap=True))
             row = QWidget()
             h = QHBoxLayout(row)
             h.setContentsMargins(0, 0, 0, 0)
-            b = QPushButton(tr("Обновить", "Update"))
+            b = QPushButton(tr("Скачать и установить", "Download and install") if update.is_packaged() else tr("Обновить", "Update"))
             b.setProperty("role", "accent")
             b.clicked.connect(a.apply_update)
             h.addWidget(b)
             news = QPushButton(tr("Что нового", "What's new"))
             news.setProperty("role", "link")
-            news.clicked.connect(lambda: a.action("open:" + update.CHANGES_URL))
+            news.clicked.connect(lambda: a.action("open:" + update.changes_url()))
             h.addWidget(news)
             h.addStretch(1)
             self.upd_lay.addWidget(row)
@@ -669,6 +718,15 @@ class TrayApp(QObject):
         self.update_timer.timeout.connect(lambda: self.check_update(manual=False))
         self.update_timer.start(3600 * 1000)             # hourly tick; the check itself runs every 6 h
         QTimer.singleShot(20000, lambda: self.check_update(manual=False))
+        self.disk_stamp = _version_stamp()
+        self.disk_timer = QTimer(self)
+        self.disk_timer.timeout.connect(self.check_disk_version)
+        self.disk_timer.start(60 * 1000)
+        if update.is_packaged() and not common.state().get("pkgAutostartSet"):
+            # the .deb can't reach into home folders: the first launch turns autostart on,
+            # as install.sh does; after that the Settings checkbox is the user's
+            self.set_autostart(True)
+            common.state().set("pkgAutostartSet", True)
 
     # -- menu / tray --
     def build_menu(self):
@@ -789,13 +847,17 @@ class TrayApp(QObject):
     def set_autostart(self, on):
         if on:
             os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
-            exe = os.path.join(HERE, "claude-codex-limits")
-            icon = paint.res_path("appicon.png") or ""
+            if update.is_packaged():
+                # TryExec: once the package is removed, the session skips the entry
+                run = ["Exec=/usr/bin/claude-codex-limits", "TryExec=/usr/bin/claude-codex-limits",
+                       "Icon=claude-codex-limits"]
+            else:
+                run = ['Exec=/usr/bin/python3 "%s"' % os.path.join(HERE, "claude-codex-limits"),
+                       "Icon=" + (paint.res_path("appicon.png") or "")]
             common.write_atomic(AUTOSTART, "\n".join([
                 "[Desktop Entry]", "Type=Application", "Name=Claude Codex Limits",
-                "Comment=" + tr("Лимиты Claude Code и Codex в трее", "Claude Code & Codex limits in the tray"),
-                'Exec=/usr/bin/python3 "%s"' % exe, "Icon=" + icon, "Terminal=false",
-                "X-GNOME-Autostart-enabled=true", "X-KDE-autostart-after=panel", ""]), 0o644)
+                "Comment=" + tr("Лимиты Claude Code и Codex в трее", "Claude Code & Codex limits in the tray")]
+                + run + ["Terminal=false", "X-GNOME-Autostart-enabled=true", "X-KDE-autostart-after=panel", ""]), 0o644)
         else:
             try:
                 os.unlink(AUTOSTART)
@@ -973,12 +1035,17 @@ class TrayApp(QObject):
             self.win.settings_page.render_update()
             return
         self.update_state = "running"
+        self.update_msg = None
         self.win.settings_page.render_update()
 
         def work():
             try:
-                new, _out = update.apply()
-                self.bridge.update_done.emit(new, None)
+                if update.is_packaged():
+                    _ver, path = update.fetch_deb()
+                    self.bridge.update_done.emit(("deb", path), None)
+                else:
+                    new, _out = update.apply()
+                    self.bridge.update_done.emit(new, None)
             except Exception as e:
                 self.bridge.update_done.emit(None, str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -990,11 +1057,40 @@ class TrayApp(QObject):
             if self.win.isVisible():
                 self.win.settings_page.render_update()
             return
-        # the installer replaced the files — start the new version in this process's place
-        # (the single-instance lock fd is close-on-exec, so the new image takes it over)
+        if isinstance(new, tuple):
+            # root installs the package, not us: hand it to the system package installer;
+            # check_disk_version() restarts the icon once dpkg has put the new files in place
+            path = new[1]
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+            self.update_msg = (tr("Пакет скачан: ", "Package downloaded: ") + path.replace(common.HOME, "~")
+                               + tr(". Открыл установщик пакетов — нажмите «Установить». Если он не открылся: "
+                                    "sudo apt install ", ". Opened the package installer — press Install. If it didn't open: "
+                                    "sudo apt install ") + shlex.quote(path))
+            if self.win.isVisible():
+                self.win.settings_page.render_update()
+            return
+        self.restart()
+
+    def restart(self):
+        """Start the installed version in this process's place (the single-instance lock fd is
+        close-on-exec, so the new image takes it over)."""
         script = os.path.join(update.app_dir(), "claude-codex-limits")
+        if not os.path.exists(script):
+            return
         self.tray.hide()
+        if self.codex_tray is not None:
+            self.codex_tray.hide()
         os.execv(sys.executable, [sys.executable, script])
+
+    def check_disk_version(self):
+        """A package upgrade (or a re-run of install.sh) replaced the files under us: restart
+        into the new version — a little later, so dpkg has finished moving files in."""
+        stamp = _version_stamp()
+        if stamp is None or stamp == self.disk_stamp:
+            return
+        self.disk_stamp = stamp
+        if stamp[1] and stamp[1] != APP_VERSION and self.update_state is None:
+            QTimer.singleShot(10000, self.restart)
 
     # -- reset / limit sounds (port of checkAlarms) --
     def check_alarms(self, claude, codex):

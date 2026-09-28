@@ -10,6 +10,7 @@
 
 import argparse
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -298,8 +299,20 @@ def cmd_update(args):
         _say(common.tr("Установлена последняя версия: ", "Up to date: ") + APP_VERSION)
         return 0
     _say(common.tr("Доступна версия ", "Version available: ") + latest + common.tr(" (установлена ", " (installed ") + APP_VERSION + ")")
-    _say(common.tr("Что нового: ", "What's new: ") + update.CHANGES_URL)
+    _say(common.tr("Что нового: ", "What's new: ") + update.changes_url())
     if args.check:
+        return 0
+    if update.is_packaged():
+        try:
+            _ver, path = update.fetch_deb()
+        except RuntimeError as e:
+            _say(str(e))
+            return 1
+        _say(common.tr("Пакет скачан: ", "Package downloaded: ") + path)
+        _say(common.tr("Установите его (нужен пароль администратора):", "Install it (needs the administrator password):"))
+        _say("  sudo apt install " + shlex.quote(path))
+        _say(common.tr("или откройте файл двойным щелчком. Значок в трее перезапустится сам.",
+                       "or open the file with a double click. The tray icon restarts by itself."))
         return 0
     try:
         new, _out = update.apply()
@@ -340,6 +353,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if not args.cmd:
         ap.print_help()
+        return 0
+    if args.cmd == "push" and args.auto and not sync.sync_state().has("login"):
+        # The .deb enables the timer for every user of the machine; for those who never signed
+        # in to GitHub it has nothing to do — leave their home folder alone.
         return 0
     common.ensure_dirs()
     return {"login": cmd_login, "logout": cmd_logout, "status": cmd_status,
