@@ -138,6 +138,41 @@ def _label(text, role=None, wrap=False):
     return l
 
 
+class _ClickLabel(QLabel):
+    def __init__(self, text, on_click):
+        super().__init__(text)
+        self._on_click = on_click
+        self.setWordWrap(True)
+        self.setCursor(Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._on_click()
+
+
+class WrapCheck(QWidget):
+    """A checkbox whose caption wraps. QCheckBox's own text never wraps, so a long caption (or
+    a wider style such as Breeze) made the settings page wider than the popup, and the right
+    edge ended up under the scroll bar."""
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, text):
+        super().__init__()
+        h = QHBoxLayout(self)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        self.box = QCheckBox()
+        self.box.toggled.connect(self.toggled)
+        h.addWidget(self.box, 0, Qt.AlignTop)
+        h.addWidget(_ClickLabel(text, self.box.toggle), 1)
+
+    def setChecked(self, on):
+        self.box.setChecked(on)
+
+    def isChecked(self):
+        return self.box.isChecked()
+
+
 def _card():
     f = QFrame()
     f.setProperty("role", "card")
@@ -220,7 +255,7 @@ class SettingsPage(QWidget):
         self.lang.setCurrentIndex(1 if common.app_lang() == "en" else 0)
         self.lang.currentIndexChanged.connect(self.on_lang)
         cl.addWidget(_row(tr("Язык", "Language"), self.lang))
-        self.autostart = QCheckBox(tr("Запускать при входе в систему", "Launch at login"))
+        self.autostart = WrapCheck(tr("Запускать при входе в систему", "Launch at login"))
         self.autostart.setChecked(os.path.exists(AUTOSTART))
         self.autostart.toggled.connect(self.app.set_autostart)
         cl.addWidget(self.autostart)
@@ -248,7 +283,7 @@ class SettingsPage(QWidget):
             cb.currentIndexChanged.connect(self.on_tray)
             self.slots.append(cb)
             cl.addWidget(_row(name, cb))
-        self.codex_tray = QCheckBox(tr("Отдельный значок для Codex", "Separate icon for Codex"))
+        self.codex_tray = WrapCheck(tr("Отдельный значок для Codex", "Separate icon for Codex"))
         self.codex_tray.setChecked(bool(st.get("codexTray")))
         self.codex_tray.toggled.connect(lambda on: (st.set("codexTray", on), self.app.update_tray()))
         cl.addWidget(self.codex_tray)
@@ -280,22 +315,21 @@ class SettingsPage(QWidget):
 
         lay.addWidget(_label(tr("УВЕДОМЛЕНИЯ И ЗВУКИ", "NOTIFICATIONS & SOUNDS"), "cap"))
         card, cl = _card()
-        notify = QCheckBox(tr("Уведомление, когда лимит исчерпан или сброшен", "Notify when a limit is reached or reset"))
+        notify = WrapCheck(tr("Уведомление, когда лимит исчерпан или сброшен", "Notify when a limit is reached or reset"))
         notify.setChecked(bool(st.get("notify")))
         notify.toggled.connect(lambda on: st.set("notify", on))
         cl.addWidget(notify)
         for key, choice_key, text, pool in (
-                ("sound5h", "sound5hChoice", tr("Сброс 5-часового окна", "5-hour window reset"), RESET_SOUNDS),
+                ("sound5h", "sound5hChoice", tr("Сброс окна 5 ч", "5-hour reset"), RESET_SOUNDS),
                 ("sound7d", "sound7dChoice", tr("Сброс недели", "Weekly reset"), RESET_SOUNDS),
                 ("reachedOn", "reachedChoice", tr("Лимит исчерпан", "Limit reached"), REACHED_SOUNDS)):
             w = QWidget()
             h = QHBoxLayout(w)
             h.setContentsMargins(0, 0, 0, 0)
-            chk = QCheckBox(text)
+            chk = WrapCheck(text)
             chk.setChecked(bool(st.get(key)))
             chk.toggled.connect(lambda on, k=key: st.set(k, on))
-            h.addWidget(chk)
-            h.addStretch(1)
+            h.addWidget(chk, 1)
             cb = _combo()
             cb.setMinimumContentsLength(9)
             for sid, ru, en, _f in pool:
