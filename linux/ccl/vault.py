@@ -31,14 +31,38 @@ _I_COLLECTION = "org.freedesktop.Secret.Collection"
 _worker = threading.local()
 
 
+class _SecretServiceAbsent(Exception):
+    """No Secret Service backend exists; other connection failures are retryable."""
+
+
 class _SecretService(object):
     def __init__(self):
-        import dbus  # python3-dbus from the OS repository
+        try:
+            import dbus  # python3-dbus from the OS repository
+        except ImportError as e:
+            raise _SecretServiceAbsent() from e
         self.dbus = dbus
-        self.bus = dbus.SessionBus(private=True)
+        try:
+            self.bus = dbus.SessionBus(private=True)
+        except FileNotFoundError as e:
+            raise _SecretServiceAbsent() from e
+        except dbus.DBusException as e:
+            if e.get_dbus_name() in (
+                    "org.freedesktop.DBus.Error.NotSupported",
+                    "org.freedesktop.DBus.Error.FileNotFound",
+                    "org.freedesktop.DBus.Error.NoServer"):
+                raise _SecretServiceAbsent() from e
+            raise
         # Register before the first D-Bus call, including a failing/hung constructor.
         _worker.buses.append(self.bus)
-        obj = self.bus.get_object(_SS, _SS_PATH)
+        try:
+            obj = self.bus.get_object(_SS, _SS_PATH)
+        except dbus.DBusException as e:
+            if e.get_dbus_name() in (
+                    "org.freedesktop.DBus.Error.ServiceUnknown",
+                    "org.freedesktop.DBus.Error.NameHasNoOwner"):
+                raise _SecretServiceAbsent() from e
+            raise
         self.service = dbus.Interface(obj, _I_SERVICE)
         _, self.session = self.service.OpenSession("plain", dbus.String("", variant_level=1))
 
@@ -113,7 +137,7 @@ class _SecretService(object):
 def _ss():
     try:
         return _SecretService()
-    except Exception:
+    except _SecretServiceAbsent:
         return None
 
 
@@ -165,7 +189,14 @@ def _timed(fn):
             del _worker.cleanup
     t = threading.Thread(target=run, name="ccl-vault", daemon=True)
     t.start()
-    if not done.wait(TIMEOUT):
+    try:
+        completed = done.wait(TIMEOUT)
+    except BaseException:
+        with guard:
+            if not done.is_set():
+                abandoned.set()
+        raise
+    if not completed:
         with guard:
             if not done.is_set():
                 abandoned.set()
@@ -228,6 +259,29 @@ def _file_delete(generation):
         return False
 
 
+def _delete_all_token_files():
+    """Sweep crash remnants under the sync lock; unlink names, never symlink targets."""
+    base = os.path.basename(common.TOKEN_FILE_PATH)
+    try:
+        names = os.listdir(common.CONFIG_DIR)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    ok = True
+    for name in names:
+        # write_atomic's main and staged temp names both start with '.' + base + '.'.
+        if (name == base or name.startswith(base + ".pending-") or
+                name.startswith("." + base + ".")):
+            try:
+                os.unlink(os.path.join(common.CONFIG_DIR, name))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                ok = False
+    return ok
+
+
 def active(st):
     # An explicit empty generation is a tombstone, never an invitation to migrate again.
     generation = st.get("tokenGeneration") if st.has("tokenGeneration") else "legacy"
@@ -287,7 +341,7 @@ def _delete_stored(generation, backend):
     if backend == "secret-service" or legacy_discovery:
         def ss_delete():
             ss = _ss()
-            return ss is not None and ss.delete(generation)
+            return legacy_discovery if ss is None else ss.delete(generation)
         try:
             ok = bool(_timed(ss_delete))
         except Exception:
@@ -326,12 +380,20 @@ def store(token):
     if not token or not all(c.isalnum() or c in "_-" for c in token):
         raise ValueError("unexpected token format")
     generation = secrets.token_hex(8)
+    ss_write_started = threading.Event()
+    st = common.Store(common.SYNC_STATE_PATH)
+    ss_ref = [generation, "secret-service"]
+    # Persist intent before a worker can create a copy, including one that outlives us.
+    st.update(tokenDeletePending=_pending(st, ss_ref))
 
     def ss_write(generation=generation):
         ss = _ss()
         if ss is None:
             return None                   # no CreateItem was attempted
         _worker.cleanup = lambda: ss.delete(generation)
+        # Publish intent before checking abandonment: after _timed abandons under its
+        # guard, an unset flag guarantees this worker cannot subsequently call set.
+        ss_write_started.set()
         if _worker.abandoned.is_set():
             return False
         ss.set(token, generation)
@@ -341,18 +403,22 @@ def store(token):
             return False
         return ss.get(generation) == token
     backend = "file"
-    ss_result = False
     try:
-        ss_result = _timed(ss_write)
-        if ss_result:
+        if _timed(ss_write):
             backend = "secret-service"
     except Exception:                   # incl. Timeout → a distinct file generation
         pass
-    if backend == "file":
-        if ss_result is not None:
+    finally:
+        # _timed marks abandonment before propagating BaseException/Timeout. A worker
+        # that has not set this flag can no longer reach set after abandonment.
+        if not ss_write_started.is_set():
             st = common.Store(common.SYNC_STATE_PATH)
-            st.update(tokenDeletePending=_pending(st, [generation, "secret-service"]))
+            pending = [p for p in _pending(st) if p != ss_ref]
+            st.update(tokenDeletePending=pending or None)
+    if backend == "file":
         generation = secrets.token_hex(8)
+        st = common.Store(common.SYNC_STATE_PATH)
+        st.update(tokenDeletePending=_pending(st, [generation, "file"]))
         _file_set(token, generation)
         if _file_get(generation, staged=True) != token:
             delete_ref(generation, "file")
@@ -396,4 +462,10 @@ def delete():
     st.update(tokenGeneration="", tokenBackend=None, tokenDeletePending=pending)
     for ref in pending:
         delete_ref(ref)
+    # Addressed deletion cannot find files left between replace and state publication,
+    # or write_atomic's temporary files. Sweep even when another deletion failed.
+    files_deleted = _delete_all_token_files()
+    if not files_deleted:
+        st = common.Store(common.SYNC_STATE_PATH)
+        st.update(tokenDeletePending=_pending(st, ["legacy", "file"]))
     return not common.Store(common.SYNC_STATE_PATH).get("tokenDeletePending")

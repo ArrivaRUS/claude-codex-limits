@@ -1403,8 +1403,11 @@ final class GitHubSync {
         defaults.bool(forKey: "syncRevoked") || defaults.string(forKey: "syncLogin") != nil ? .revoked : .off
     }
     func cancelLogin() {
-        let phase = cancelledLoginPhase
-        setUI { loginID = nil; $0.phase = phase; $0.userCode = nil }
+        setUI {
+            guard loginID != nil else { return }
+            let phase = cancelledLoginPhase
+            loginID = nil; $0.phase = phase; $0.userCode = nil
+        }
     }
     private func loginIsCurrent(_ id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }; return loginID == id
@@ -1454,10 +1457,18 @@ final class GitHubSync {
                 // A cancelled login may have written a token without publishing syncLogin.
                 // Never delete a newer login's token, and never do Keychain work in setUI.
                 func removeUnpublishedToken() {
-                    if case .token(let s) = readKeychain(userInitiated: true), s == token {
-                        let result = deleteKeychain(userInitiated: true)
-                        setUI { $0.keychainItemLeft = result != .success && result != .missing }
+                    // Without a published login, the serial queue owns any leftover item.
+                    if defaults.string(forKey: "syncLogin") != nil {
+                        switch readKeychain(userInitiated: true) {
+                        case .token(let s) where s == token: break
+                        case .missing:
+                            setUI { $0.keychainItemLeft = false }; return
+                        case .token, .timedOut, .failure:
+                            setUI { $0.keychainItemLeft = true }; return
+                        }
                     }
+                    let result = deleteKeychain(userInitiated: true)
+                    setUI { $0.keychainItemLeft = result != .success && result != .missing }
                 }
                 loginCheckpoint("afterWrite")
                 guard loginIsCurrent(id) else { removeUnpublishedToken(); return }
@@ -2286,6 +2297,9 @@ struct SyncUIState {
     var lastUploadAt: Date? = nil          // last PATCH of this machine's file (syncPushedAt)
     var lastError: String? = nil           // syncLastError — cleared by a good cycle
     var lastErrorAt: Date? = nil
+    var canSignOut: Bool {
+        phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
+    }
 }
 var SYNC_PREVIEW: SyncUIState? = nil
 /// No good cycle for this long while signed in → say so on the main screen (sync-protocol.md → Errors).
@@ -2343,9 +2357,9 @@ func syncSignOutHint(_ lang: String = appLang()) -> String {
 }
 func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
     switch s.phase {
-    case .off:          return SET_ROW_H + SET_SYNC_NOTE_H
+    case .off:          return SET_ROW_H + SET_SYNC_NOTE_H + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
     case .revoked:      return SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H : 0)
-                                + (s.keychainItemLeft ? SET_SYNC_SIGNOUT_HINT_H : 0)
+                                + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
     case .awaitingCode:  return SET_ROW_H + 44 + 26
     case .on:            return SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
                                 + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 : 0)
@@ -3691,7 +3705,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             drawSF(ctx, revoked ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), revoked ? ADV_WARN : textMid)
             let loginW = button(revoked ? tr("Войти заново", "Sign in again") : tr("Войти через GitHub", "Sign in with GitHub"), right: cardX + cardW - 12, rowTop: syTop, id: "sync:login", primary: true)
             var titleRight = cardX + cardW - 12 - loginW - 10
-            if revoked, sy.keychainItemLeft {
+            if sy.canSignOut {
                 let label = tr("Выйти", "Sign out")
                 link(label, right: titleRight, topY: rowMid + 1, id: "sync:logout")
                 titleRight -= ceil(lineWidth(CTLineCreateWithAttributedString(attr(label, 11, .medium, ADV_LINK)))) + 10
@@ -3714,7 +3728,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
                      x: cardX + 14, topY: syTop + SET_ROW_H + SET_SYNC_NOTE_H)
             }
-            if revoked, sy.keychainItemLeft {
+            if sy.canSignOut {
                 note(syncSignOutHint(), syTop + syH - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
             }
         case .awaitingCode:
@@ -5672,7 +5686,10 @@ if CommandLine.arguments.contains("--sync-selftest") {
             s.selfTestLoginCheckpoint = { [weak s] checkpoint in
                 if checkpoint == point {
                     s?.cancelLogin()
-                    if replacement { store.token = tokB }
+                    if replacement {
+                        store.token = tokB
+                        selfTestDefaults.set("replacement-login", forKey: "syncLogin")
+                    }
                 }
             }
             s.startLogin()
@@ -5680,15 +5697,17 @@ if CommandLine.arguments.contains("--sync-selftest") {
             expect(store.writes == 1 && store.deletes == (replacement ? 0 : 1)
                    && store.token == (replacement ? tokB : nil) && s.ui.phase == (wasRevoked ? .revoked : .off)
                    && (!wasRevoked || s.ui.keychainItemLeft == replacement)
-                   && selfTestDefaults.string(forKey: "syncLogin") == nil && http.calls.count == 3,
+                   && selfTestDefaults.string(forKey: "syncLogin") == (replacement ? "replacement-login" : nil)
+                   && http.calls.count == 3,
                    "13 \(point), revoked=\(wasRevoked): cancelled login unpublished, \(replacement ? "token B retained" : "token A deleted"), no sync")
-            // tester 2026-09-30: a restart after the cancel sees no published sign-in.
+            // A restart sees only the replacement sign-in, if one was published.
             let reloadHTTP = SelfTestHTTP { _ in reply(599) }
             let reloaded = makeSync(reloadHTTP, store)
             reloaded.loadSynchronously()
-            expect(reloaded.ui.phase == (wasRevoked ? .revoked : .off) && reloaded.ui.login == nil
+            expect(reloaded.ui.phase == (wasRevoked ? .revoked : replacement ? .on : .off)
+                   && reloaded.ui.login == (replacement ? "replacement-login" : nil)
                    && reloadHTTP.calls.isEmpty && store.writes == 1,
-                   "13 \(point), revoked=\(wasRevoked), B=\(replacement): reload after cancel -> \(wasRevoked ? "revoked" : "off")")
+                   "13 \(point), revoked=\(wasRevoked), B=\(replacement): reload preserves only the published replacement")
         }
     }
     do {
@@ -5754,6 +5773,82 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
     }
 
+    // M-1/M-2. Cancelled first sign-in cleanup and cancellation after publication.
+    do {
+        func loginHTTP() -> SelfTestHTTP {
+            SelfTestHTTP { c in
+                switch c.url {
+                case "https://github.com/login/device/code":
+                    return reply(200, ["device_code": "dc", "user_code": "UC-M1", "interval": 0, "expires_in": 60])
+                case "https://github.com/login/oauth/access_token": return reply(200, ["access_token": tokA])
+                case api + "/user": return reply(200, ["login": "selftest-login"])
+                default: return reply(599)
+                }
+            }
+        }
+        for point in ["afterWrite", "afterRead", "beforePublish"] {
+            for status in [SyncKeychainStatus.failure(-1), .timedOut] {
+                selfTestDefaults.removePersistentDomain(forName: suite)
+                let store = SelfTestKeychainStore(nil); store.deleteStatus = status
+                let http = loginHTTP(), s = makeSync(http, store)
+                s.selfTestLoginCheckpoint = { [weak s] checkpoint in
+                    if checkpoint == point { s?.cancelLogin() }
+                }
+                s.startLogin()
+                check(s.selfTestWaitForQueue(), "M-1 \(point), \(status): cancellation queue finished")
+                expect(s.ui.phase == .off && s.ui.keychainItemLeft && s.ui.canSignOut
+                       && store.token == tokA && store.writes == 1 && store.deletes == 1
+                       && selfTestDefaults.string(forKey: "syncLogin") == nil && http.calls.count == 3,
+                       "M-1 \(point), \(status): first login cancelled, off with Sign out available")
+                store.deleteStatus = .success
+                s.logout()
+                check(s.selfTestWaitForQueue(), "M-1 retry logout queue finished")
+                expect(s.ui.phase == .off && !s.ui.keychainItemLeft && !s.ui.canSignOut
+                       && store.token == nil && store.deletes == 2 && s.ui.lastError == nil
+                       && selfTestDefaults.string(forKey: "syncLogin") == nil && http.calls.count == 3,
+                       "M-1 \(point), \(status): manual Sign out clears token and cleanup flag")
+            }
+        }
+        for knownLogin in [false, true] {
+            for result in [SyncKeychainRead.token(tokB), .missing, .timedOut, .failure(-1)] {
+                selfTestDefaults.removePersistentDomain(forName: suite)
+                if knownLogin { selfTestDefaults.set("selftest-login", forKey: "syncLogin") }
+                let store = SelfTestKeychainStore(nil), http = loginHTTP()
+                let s = makeSync(http, store)
+                s.selfTestLoginCheckpoint = { [weak s] point in
+                    if point == "afterWrite" {
+                        s?.cancelLogin()
+                        store.token = tokB; store.reads = [result]
+                    }
+                }
+                s.startLogin()
+                check(s.selfTestWaitForQueue(), "M-1 cleanup read queue finished")
+                let left: Bool
+                if case .missing = result { left = false } else { left = knownLogin }
+                expect(s.ui.phase == (knownLogin ? .revoked : .off) && s.ui.keychainItemLeft == left
+                       && s.ui.canSignOut == left && store.readCount == (knownLogin ? 1 : 0)
+                       && store.deletes == (knownLogin ? 0 : 1) && store.token == (knownLogin ? tokB : nil)
+                       && selfTestDefaults.string(forKey: "syncLogin") == (knownLogin ? "selftest-login" : nil)
+                       && http.calls.count == 3,
+                       "M-1 knownLogin=\(knownLogin), read=\(result): protect published token; otherwise delete without reading")
+            }
+        }
+        selfTestDefaults.removePersistentDomain(forName: suite)
+        let store = SelfTestKeychainStore(nil), http = loginHTTP()
+        let s = makeSync(http, store)
+        s.startLogin()
+        check(s.selfTestWaitForQueue(), "M-2 publication queue finished")
+        expect(s.ui.phase == .on && s.ui.login == "selftest-login"
+               && selfTestDefaults.string(forKey: "syncLogin") == "selftest-login", "M-2 sign-in published")
+        let calls = http.calls.count, reads = store.readCount
+        s.cancelLogin()
+        expect(s.ui.phase == .on && s.ui.login == "selftest-login" && s.ui.keychainItemLeft
+               && selfTestDefaults.string(forKey: "syncLogin") == "selftest-login"
+               && !selfTestDefaults.bool(forKey: "syncRevoked") && store.token == tokA
+               && store.writes == 1 && store.deletes == 0 && store.readCount == reads && http.calls.count == calls,
+               "M-2 cancel after publication is a no-op: live sign-in and token retained")
+    }
+
     // 16. Clamp both a valid large sum and the accumulator returned after overflow.
     expect(usageSum(900_000_000_000_000, 900_000_000_000_000) == 1_000_000_000_000_000,
            "16 two 9e14 contributions sum to 1e15")
@@ -5772,14 +5867,14 @@ if CommandLine.arguments.contains("--sync-selftest") {
                && hint.components(separatedBy: "\n").last == "github.com/settings/applications",
                "17 \(lang) sign-out hint fits two lines; applications address intact")
     }
-    for phase in [SyncPhase.on, .revoked] {
+    for phase in [SyncPhase.on, .revoked, .off] {
         var st = SyncUIState(phase: phase, keychainItemLeft: true)
         st.machines = (1...3).map { SyncMachine(name: "selftest-\($0)", os: "macOS", updated: nil, isSelf: $0 == 1) }
         st.lastError = "selftest error"
         let cardH = setSyncCardH(st)
         let beforeCardH = phase == .on
             ? SET_ROW_H + 3 * SET_SYNC_MROW_H + 4 + SET_SYNC_STATUS_H + SET_SYNC_STATUS_H - 4
-            : SET_ROW_H + SET_SYNC_NOTE_H + SET_SYNC_STATUS_H
+            : SET_ROW_H + SET_SYNC_NOTE_H + (phase == .revoked ? SET_SYNC_STATUS_H : 0)
         // Advanced settings: sync card -> gap -> sounds row -> gap -> About caption.
         let caption = SET_SYNC_TOP + cardH + SET_GAP + SET_ROW_H + SET_GAP
         let beforeCaption = SET_SYNC_TOP + beforeCardH + SET_GAP + SET_ROW_H + SET_GAP
@@ -5790,9 +5885,10 @@ if CommandLine.arguments.contains("--sync-selftest") {
             expect(after <= 860 && after - before == SET_SYNC_SIGNOUT_HINT_H,
                    "17 settings \(phase), 3 machines, lastError, About line=\(extraAboutLine): \(Int(before)) -> \(Int(after)) pt <= 860")
         }
-        if phase == .revoked {
+        if phase == .revoked || phase == .off {
             st.keychainItemLeft = false
-            expect(setSyncCardH(st) == beforeCardH, "17 revoked without Keychain item: no sign-out hint height")
+            expect(setSyncCardH(st) == beforeCardH && !st.canSignOut,
+                   "17 \(phase) without Keychain item: no sign-out link or hint height")
         }
     }
 

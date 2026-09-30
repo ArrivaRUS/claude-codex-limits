@@ -147,7 +147,6 @@ class TestK1Invariant(Base):
         self.assertEqual(self.token_files(), [])
         self.assertFalse(sync.delete_pending())
 
-    @unittest.expectedFailure
     def test_machine_without_secret_service_signs_out_completely(self):
         """FINDING (tester 2026-09-30, regression of cycle 3 / N3): on a machine where the Secret
         Service is never reachable (`vault._ss()` → None) a fresh install has no `tokenGeneration`,
@@ -164,7 +163,6 @@ class TestK1Invariant(Base):
         self.assertEqual(rc, 0, out)                    # … but sign-out is reported incomplete
         self.assert_signed_out_clean()
 
-    @unittest.expectedFailure
     def test_ctrl_c_during_hung_keyring_write_leaves_no_orphan(self):
         """FINDING (tester 2026-09-30, K1): Ctrl+C in `ccl-sync login` while the keyring write
         hangs interrupts `done.wait(TIMEOUT)` in `vault._timed` with KeyboardInterrupt. The

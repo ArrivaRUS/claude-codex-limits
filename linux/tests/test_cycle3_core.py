@@ -87,7 +87,7 @@ class TestVaultCopies(env.SyncEnv):
                     ref = vault.store(self.token)
                 self.assertEqual(ref[1], "file")
                 pending = self.st().get("tokenDeletePending")
-                self.assertEqual(pending, [[next(iter(self.ss.items)), "secret-service"]])
+                self.assertEqual(pending, [[next(iter(self.ss.items)), "secret-service"], list(ref)])
                 vault.publish(ref)
                 self.assertEqual(self.ss.items, {})
                 self.assertFalse(sync.delete_pending())

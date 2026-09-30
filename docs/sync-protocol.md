@@ -198,12 +198,15 @@ to the shared file format require bumping `schema` and updating both sides.
 - **Linux token generations.** A Secret Service item carries a `generation` attribute; sync state
   selects `tokenGeneration` plus `tokenBackend`. Reads use only the active pair and discard a
   result if the pair changed during the read.
-  - Under the sync lock: store a fresh generation → verify → publish the active pair → retire
+  - Under the sync lock: persist a fresh reference in `tokenDeletePending` → store its secret →
+    verify → publish the active pair → retire
     the previous `(generation, backend)` and pending references by addressed deletion. No sweep
     deletes items by common application/service attributes; unrelated generations are left alone.
   - Failed deletions and generations of failed/timed-out Secret Service writes are retained in
     `tokenDeletePending`, deduplicated and retried on the next publication or sign-out. The newly
-    published pair is excluded. An unavailable Secret Service (`ss_write` returns `None`) adds no reference.
+    published pair is excluded; cancellation deletes its reference. Secret Service intent is registered
+    before starting the timed worker, file intent before writing the staged file. If no Secret Service
+    write was started (including `ss_write` returning `None`), its provisional reference is removed.
   - A late `CreateItem` after timeout attempts to delete its own generation on the same connection; timeout
     during verification also triggers worker cleanup. A late delete cannot address a newer generation.
   - File fallback uses a different fresh generation in a `0600` staged file (token on the first
@@ -212,10 +215,21 @@ to the shared file format require bumping `schema` and updating both sides.
   - Items/files without a generation and state without `tokenGeneration` are treated as `legacy`,
     preserving existing sign-ins. Only legacy state with an unknown backend may discover a legacy
     copy across backends; legacy searches filter out newer generations. An empty generation disables reads.
+    Publication still retires `(legacy, None)` even without a login, for compatibility with the existing
+    regression contract. For this unknown legacy backend, an absent Secret Service counts as successful
+    SS cleanup; a temporarily unreachable or timed-out service is a failure. An explicitly recorded
+    Secret Service reference is not cleared merely because the service is absent.
   - Sign-out invalidates the active pair before deleting it and all pending references. With cleanup
     complete, two consecutive sign-ins leave one stored copy; sign-out leaves no tracked application
-    items or token files, including staged files. Failed addressed deletions remain pending; late writes must
-    finish their cleanup before this invariant holds. Unknown generations are not swept.
+    items or token files, including staged files. After addressed deletions, sign-out always unlinks
+    `github-token`, `github-token.pending-*`, and write_atomic remnants `.github-token.*` (including
+    staged-file temporaries), only in `CONFIG_DIR`, without recursion or following symlinks. Any unlink
+    failure except an already missing name prevents success and retains a file cleanup reference for retry.
+    Failed addressed deletions remain pending. Unknown Secret Service generations are not swept.
+  - Unconfirmed writes have no separate age/attempt retention policy yet: a successful empty SS deletion
+    can clear their pending reference. Late writes must finish their cleanup before the no-copies invariant
+    holds; if the process dies and an empty deletion precedes the late `CreateItem`, that copy can escape
+    subsequent cleanup. Pre-registration covers a late item already present at the next sign-out.
   - `sign_out_incomplete` means nonempty `tokenDeletePending` **and** (no login or a revoked login):
     show «Выход не завершён» / «Sign-out isn't complete» and allow retrying sign-out. Pending cleanup
     alone during a live sign-in does not mean sign-out is incomplete.
