@@ -146,6 +146,9 @@ def cmd_push(args):
         return 0
     if not res.ok:
         _say(common.tr("Ошибка синхронизации: ", "Sync failed: ") + str(res.error))
+        if sync.sync_state().get("revoked"):
+            _say(common.tr("Войдите в GitHub заново: ccl-sync login", "Sign in to GitHub again: ccl-sync login"))
+            return 2
         return 1
     if not args.quiet:
         _say((common.tr("Отправлено в gist.", "Written to the gist.") if res.pushed
@@ -183,28 +186,36 @@ def cmd_status(_args):
     _say("Claude Codex Limits (linux %s)" % APP_VERSION)
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
         common.machine_name(), common.os_name(), common.machine_id()))
-    if token:
+    if st.get("revoked"):
+        _say("GitHub: " + common.tr("вход отозван — войдите заново (ccl-sync login)",
+                                    "sign-in revoked — sign in again (ccl-sync login)"))
+    elif token:
         _say("GitHub: %s  (%s)" % (st.get("login") or "?", common.tr("токен: ", "token: ") + (
             common.tr("хранилище секретов", "Secret Service") if backend == "secret-service" else common.TOKEN_FILE_PATH)))
     elif backend == "locked":
         _say("GitHub: " + common.tr("токен в заблокированном хранилище секретов — разблокируйте KWallet",
                                     "token is in a locked Secret Service — unlock KWallet"))
-    elif st.get("revoked"):
-        _say("GitHub: " + common.tr("вход отозван — войдите заново (ccl-sync login)",
-                                    "sign-in revoked — sign in again (ccl-sync login)"))
+    elif backend == "timeout":
+        _say("GitHub: " + vault.timeout_text())
     else:
         _say("GitHub: " + common.tr("вход не выполнен (ccl-sync login)", "not signed in (ccl-sync login)"))
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
     gid = st.get("gistId")
     if gid:
         _say("Gist: https://gist.github.com/%s  (%s)" % (gid, common.tr("секретный", "secret")))
-    _say(common.tr("Отправлено: ", "Last write: ") + _fmt_time(st.get("pushedAt"))
-         + "  ·  " + common.tr("синхронизация: ", "last sync: ") + _fmt_time(st.get("lastSync")))
+    _say(common.tr("Последняя отправка: ", "Last upload: ") + _fmt_time(st.get("pushedAt"))
+         + " · " + common.tr("чтение: ", "read: ") + _fmt_time(sync.last_ok_at(st)))
+    _say(common.tr("Последняя попытка: ", "Last attempt: ") + _fmt_time(st.get("lastAttemptAt")))
     if st.get("lastError"):
-        _say(common.tr("Последняя ошибка: ", "Last error: ") + str(st.get("lastError")))
+        at = st.get("lastErrorAt")
+        _say(common.tr("Последняя ошибка", "Last error") + (" (%s)" % _fmt_time(at) if at else "") + ": "
+             + str(st.get("lastError")))
+    warn = sync.warning(st, moment=_fmt_time)
+    if warn:
+        _say("! " + warn)
 
     machines = None
-    if token and gid:
+    if token and gid and not st.get("revoked"):
         g = sync.gh("/gists/" + gid, token)
         if g.status == 200:
             files = (g.json() or {}).get("files") or {}

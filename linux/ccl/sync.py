@@ -20,6 +20,7 @@ ABOUT = "https://github.com/ArrivaRUS/claude-codex-limits/blob/main/docs/sync-pr
 SCHEMA = 1
 KEEP_DAYS = 45
 MIN_PUSH_INTERVAL = 10 * 60
+STALE_AFTER = 30 * 60        # signed in, no good cycle for this long → say so on the main screen
 UA = "ClaudeCodexLimits"
 API = "https://api.github.com"
 
@@ -34,19 +35,28 @@ def my_file_name():
 
 # ---- GitHub API ---------------------------------------------------------------------------
 
+def _transport(url, method, headers, body, timeout):
+    return common.http(url, method, headers, body, timeout)
+
+
+# Test seam: every request of this module (gist, /user, Device Flow) goes through `transport`
+# (url, method, headers, body, timeout) → common.Resp. Replace it to run a cycle offline.
+transport = _transport
+
+
 def gh(path, token, method="GET", body=None, timeout=20):
     h = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": UA}
     if body is not None:
         h["Content-Type"] = "application/json"
     url = path if path.startswith("https://") else API + path
-    return common.http(url, method, h, body, timeout)
+    return transport(url, method, h, body, timeout)
 
 
 def _form(url, fields):
     body = urllib.parse.urlencode(fields)
-    r = common.http(url, "POST", {"Accept": "application/json", "User-Agent": UA,
-                                  "Content-Type": "application/x-www-form-urlencoded"}, body)
+    r = transport(url, "POST", {"Accept": "application/json", "User-Agent": UA,
+                                "Content-Type": "application/x-www-form-urlencoded"}, body, 15)
     j = r.json()
     return j if isinstance(j, dict) else None
 
@@ -102,7 +112,8 @@ def login_finish(token):
     login = me.get("login")
     with common.file_lock("sync", timeout=60):        # never interleave with a running cycle
         backend = vault.write(token)
-        sync_state().update(login=login, revoked=False, tokenBackend=backend, lastError=None)
+        # the only place a revoked sign-in is lifted: a token found in a store by chance isn't
+        sync_state().update(login=login, revoked=False, tokenBackend=backend, lastError=None, lastErrorAt=None)
     return login
 
 
@@ -111,7 +122,7 @@ def logout():
     with common.file_lock("sync", timeout=60):
         vault.delete()
         sync_state().remove("login", "gistId", "pushHash", "pushedAt", "revoked", "backoffUntil", "lastError",
-                            "tokenBackend", "lastSync", "discoveredAt")
+                            "lastErrorAt", "lastOkAt", "lastAttemptAt", "tokenBackend", "lastSync", "discoveredAt")
         try:
             os.unlink(common.SYNC_REMOTE_PATH)
         except OSError:
@@ -228,40 +239,83 @@ class SyncResult(object):
     def __init__(self):
         self.ok = False
         self.pushed = False
-        self.skipped = None        # why nothing was done ("signed-out", "revoked", "backoff", "busy")
+        self.skipped = None        # why nothing was done ("signed-out", "revoked", "backoff", "busy",
+        #                            "locked", "unreachable")
         self.error = None
         self.remote = None
 
 
-def _handle(r, st, res, token):
-    """Common HTTP failure handling. Returns True when the cycle must stop."""
+def record_error(msg, st=None):
+    """Remember the last error with its time (docs/sync-protocol.md → Errors → Visibility)."""
+    (st or sync_state()).update(lastError=msg, lastErrorAt=time.time())
+
+
+def _fail(st, res, msg):
+    res.error = msg
+    record_error(msg, st)
+    return True
+
+
+def status_text(r):
+    """An HTTP answer for a human: 0 is a transport failure (no network, timeout), not a code."""
+    return common.tr("ответ %d" % r.status, "HTTP %d" % r.status) if r.status else \
+        common.tr("нет связи с GitHub", "no connection to GitHub")
+
+
+def _backoff_until(r):
+    # secondary limits say Retry-After; x-ratelimit-reset only matters once the primary
+    # budget is actually spent (GitHub sends it on every response)
+    retry = r.headers.get("retry-after")
+    reset = r.headers.get("x-ratelimit-reset") if r.headers.get("x-ratelimit-remaining") == "0" else None
+    until = time.time() + 15 * 60
+    try:
+        if retry:
+            until = time.time() + float(retry)
+        elif reset:
+            until = float(reset) + 5
+    except ValueError:
+        pass
+    return until
+
+
+def _revoked(st, res, token):
+    """`GET /user` answered 401 with `token`: the token itself is dead. It is deleted only when
+    the store still holds exactly that token — a different one there is a newer sign-in, so
+    nothing is revoked and the next cycle uses it."""
+    outcome = vault.delete_if(token)
+    if outcome == "other":
+        return _fail(st, res, common.tr("Вход в хранилище изменился; повторим синхронизацию",
+                                        "The stored sign-in changed; sync will retry"))
+    note = common.tr("Вход в GitHub отозван", "GitHub sign-in revoked")
+    if outcome == "timeout":
+        # can't tell which token is stored, so it stays; revoked=True keeps it unused
+        note += " · " + vault.timeout_text()
+    st.update(revoked=True, gistId=None, pushHash=None, discoveredAt=None)
+    return _fail(st, res, note)
+
+
+def _handle(r, st, res, token, what):
+    """Common HTTP failure handling for request `what` ("GET /gists/{id}" …).
+    Returns True when the cycle must stop."""
     if r.status in (200, 201):
         return False
     if r.status == 401:
-        if vault.delete_if(token):
-            st.update(revoked=True, gistId=None, pushHash=None,
-                      lastError=common.tr("Войдите в GitHub заново", "Sign in to GitHub again"))
-        res.error = "401"
-        return True
+        # a single 401 is not proof of revocation (GitHub sends stray ones): ask /user
+        me = gh("/user", token)
+        if me.status == 200:
+            return _fail(st, res, common.tr("401 на %s, вход подтверждён" % what,
+                                            "401 on %s, sign-in confirmed" % what))
+        if me.status == 401:
+            return _revoked(st, res, token)
+        # can't tell (network, 5xx, rate limit): keep the token, retry next cycle
+        if me.status in (403, 429):
+            st.update(backoffUntil=_backoff_until(me))
+        return _fail(st, res, common.tr("401 на %s, проверка входа не прошла (%s)" % (what, status_text(me)),
+                                        "401 on %s, sign-in check failed (%s)" % (what, status_text(me))))
     if r.status in (403, 429):
-        # secondary limits say Retry-After; x-ratelimit-reset only matters once the primary
-        # budget is actually spent (GitHub sends it on every response)
-        retry = r.headers.get("retry-after")
-        reset = r.headers.get("x-ratelimit-reset") if r.headers.get("x-ratelimit-remaining") == "0" else None
-        until = time.time() + 15 * 60
-        try:
-            if retry:
-                until = time.time() + float(retry)
-            elif reset:
-                until = float(reset) + 5
-        except ValueError:
-            pass
-        st.update(backoffUntil=until, lastError="HTTP %d" % r.status)
-        res.error = "HTTP %d (rate limit)" % r.status
-        return True
-    res.error = ("HTTP %d" % r.status) if r.status else (r.error or "network")
-    st.update(lastError=res.error)
-    return True
+        st.update(backoffUntil=_backoff_until(r))
+        return _fail(st, res, "%s: %s" % (what, status_text(r)) + common.tr(" (лимит запросов)", " (rate limit)"))
+    return _fail(st, res, "%s: %s" % (what, status_text(r)))
 
 
 def sync_cycle(days, force=False, auto=False):
@@ -274,17 +328,35 @@ def sync_cycle(days, force=False, auto=False):
             res.skipped = "busy"
             return res
         st = sync_state()
-        token, backend = vault.read()
-        if not token:
-            if backend == "locked":
-                res.skipped = "locked"
-            elif st.get("tokenBackend") == "secret-service" and st.get("login") and not vault.reachable():
-                res.skipped = "unreachable"          # e.g. cron without the session bus — not a sign-out
-            else:
-                res.skipped = "revoked" if st.get("revoked") else "signed-out"
+        if st.get("revoked"):
+            # stays off until a new sign-in (login_finish) — not lifted by a token that happens
+            # to be found in a store
+            res.skipped = "revoked"
             return res
         if time.time() < float(st.get("backoffUntil") or 0):
             res.skipped = "backoff"
+            return res
+        signed_in = bool(st.get("login"))
+        if signed_in:
+            st.update(lastAttemptAt=time.time())
+        token, backend = vault.read()
+        if not token:
+            if backend == "timeout":
+                if signed_in:
+                    _fail(st, res, vault.timeout_text())
+                else:
+                    res.skipped = "signed-out"
+            elif backend == "locked":
+                res.skipped = "locked"
+                if signed_in:
+                    record_error(common.tr("Хранилище секретов заблокировано", "The Secret Service is locked"), st)
+            elif st.get("tokenBackend") == "secret-service" and signed_in and not vault.reachable():
+                res.skipped = "unreachable"          # e.g. cron without the session bus — not a sign-out
+            else:
+                res.skipped = "signed-out"
+                if signed_in:
+                    record_error(common.tr("Токен GitHub не найден — войдите заново",
+                                           "GitHub token not found — sign in again"), st)
             return res
 
         snap = usage.snapshot_days({"days": days})
@@ -306,17 +378,17 @@ def sync_cycle(days, force=False, auto=False):
             if not gid:
                 gid, bad = _find_gist(token)
                 if bad is not None:
-                    _handle(bad, st, res, token)
+                    _handle(bad, st, res, token, "GET /gists")
                     return res
                 if not gid:
                     c = gh("/gists", token, "POST", {
                         "description": DESCRIPTION, "public": False,
                         "files": {MANIFEST: {"content": manifest()}, mine: {"content": machine_file(snap)}}})
-                    if _handle(c, st, res, token):
+                    if _handle(c, st, res, token, "POST /gists"):
                         return res
                     gid = (c.json() or {}).get("id")
                     if not gid:
-                        res.error = "gist create: no id"
+                        _fail(st, res, "POST /gists: " + common.tr("нет id в ответе", "no id in the answer"))
                         return res
                     st.update(pushHash=h, pushedAt=time.time())
                     res.pushed = True
@@ -329,12 +401,12 @@ def sync_cycle(days, force=False, auto=False):
             if g.status == 404:                        # deleted or not ours any more → rediscover
                 st.update(gistId=None, pushHash=None)
                 continue
-            if _handle(g, st, res, token):
+            if _handle(g, st, res, token, "GET /gists/{id}"):
                 return res
             gist = g.json() or {}
             break
         if gist is None:
-            res.error = "gist not found"
+            _fail(st, res, "GET /gists/{id}: " + common.tr("gist не найден", "gist not found"))
             return res
         files = gist.get("files") or {}
 
@@ -348,9 +420,9 @@ def sync_cycle(days, force=False, auto=False):
             p = gh("/gists/" + st.get("gistId"), token, "PATCH", {"files": {mine: {"content": machine_file(snap)}}})
             if p.status == 404:
                 st.update(gistId=None, pushHash=None)
-                res.error = "gist gone"
+                _fail(st, res, "PATCH /gists/{id}: " + common.tr("gist пропал, найдём заново", "gist gone, will rediscover"))
                 return res
-            if _handle(p, st, res, token):
+            if _handle(p, st, res, token, "PATCH /gists/{id}"):
                 return res
             st.update(pushHash=h, pushedAt=time.time())
             res.pushed = True
@@ -364,24 +436,56 @@ def sync_cycle(days, force=False, auto=False):
             text = f.get("content")
             if f.get("truncated") and f.get("raw_url"):
                 r = gh(f["raw_url"], token, timeout=30)
+                if r.status == 401:
+                    _handle(r, st, res, token, "GET raw_url")
+                    return res
                 text = r.data.decode("utf-8", "replace") if r.status == 200 and r.data else None
                 if text is None:
-                    incomplete = True
+                    incomplete = r
             if text:
                 contents[name] = text
         if incomplete:
-            # a machine we couldn't download would vanish from the sum — keep the last merge
-            st.update(lastError="raw_url fetch failed")
+            # a machine we couldn't download would vanish from the sum — keep the last merge;
+            # not a good cycle, so lastOkAt stays where it was
+            record_error("GET raw_url: " + status_text(incomplete), st)
             res.ok = True
             res.remote = load_remote()
             return res
         remote = merge(contents, common.machine_id())
         remote["fetched"] = time.time()
         common.write_json(common.SYNC_REMOTE_PATH, remote)
-        st.update(lastSync=time.time(), lastError=None, backoffUntil=None)
+        st.update(lastOkAt=time.time(), lastSync=None, lastError=None, lastErrorAt=None, backoffUntil=None)
         res.ok = True
         res.remote = remote
         return res
+
+
+def last_ok_at(st=None):
+    """Time of the last good cycle (read included); `lastSync` is the pre-0.3.2 name."""
+    st = st or sync_state()
+    return st.get("lastOkAt") or st.get("lastSync")
+
+
+def warning(st=None, now=None, moment=None):
+    """The orange line for the main screen, or None when sync is fine or off
+    (docs/sync-protocol.md → Errors → Visibility). `moment` formats a time ("HH:MM")."""
+    st = st or sync_state()
+    now = time.time() if now is None else now
+    moment = moment or (lambda t: time.strftime("%H:%M", time.localtime(t)))
+    if st.get("revoked"):
+        return common.tr("Войдите в GitHub заново — суммы без других компьютеров",
+                         "Sign in to GitHub again — totals exclude other computers")
+    if not st.get("login"):
+        return None
+    err = st.get("lastError")
+    since = last_ok_at(st) or st.get("pushedAt")
+    if not since:
+        return (common.tr("Синхронизация не работает: ", "Sync isn't working: ") + str(err)) if err else None
+    if now - float(since) <= STALE_AFTER:
+        return None
+    cause = str(err) if err else common.tr("ждём ответа GitHub", "waiting for GitHub")
+    return common.tr("Синхронизация стоит с %s: %s" % (moment(float(since)), cause),
+                     "Sync stalled since %s: %s" % (moment(float(since)), cause))
 
 
 def machine_list():

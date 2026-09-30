@@ -4,6 +4,6 @@ The macOS app (`Sources/LimitsMonitor.swift`) is the reference for behaviour, fo
 formulas; this package mirrors it with the Python 3 standard library (+ PyQt5 for the tray).
 """
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 APP_AUTHOR = "Alex Kovalev"
 REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"

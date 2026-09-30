@@ -522,7 +522,7 @@ class SettingsPage(QWidget):
             lay.addWidget(w)
             lay.addWidget(_label(tr("Жду подтверждения в GitHub…", "Waiting for GitHub…"), "note"))
             return
-        token, backend = vault.read()
+        token, backend = vault.read() if not st.get("revoked") else (None, None)
         if token:
             lay.addWidget(_row("GitHub: " + (st.get("login") or "?"), self._btn(tr("Выйти", "Sign out"), a.logout)))
             for mch in sync.machine_list():
@@ -530,8 +530,14 @@ class SettingsPage(QWidget):
                 when = (tr("обновлён ", "updated ") + fmt.fmt_reset(upd)) if upd else tr("ещё не отправлял", "not sent yet")
                 lay.addWidget(_label(("● " if mch.get("self") else "○ ") + mch["name"]
                                      + (tr(" (эта)", " (this)") if mch.get("self") else "") + " · " + when, "note", True))
+            # when sync last actually worked, and why it didn't since (docs/sync-protocol.md → Errors)
+            upl, ok = st.get("pushedAt"), sync.last_ok_at(st)
+            lay.addWidget(_label(tr("Последняя отправка: ", "Last upload: ") + (fmt.fmt_moment(upl) if upl else "—")
+                                 + tr(" · чтение: ", " · read: ") + (fmt.fmt_moment(ok) if ok else "—"), "note", True))
             if st.get("lastError"):
-                lay.addWidget(_label(tr("Ошибка: ", "Error: ") + str(st.get("lastError")), "note", True))
+                at = st.get("lastErrorAt")
+                lay.addWidget(_label(tr("Ошибка ", "Error ") + (fmt.fmt_moment(at) + ": " if at else ": ")
+                                     + str(st.get("lastError")), "note", True))
             lay.addWidget(_label(tr("Токен: ", "Token: ") + (tr("хранилище секретов (KWallet)", "Secret Service (KWallet)")
                                                              if backend == "secret-service" else common.TOKEN_FILE_PATH.replace(common.HOME, "~")),
                                  "note", True))
@@ -540,6 +546,10 @@ class SettingsPage(QWidget):
             name.editingFinished.connect(lambda w=name: (common.settings().set("machineName", w.text().strip() or None),
                                                          a.refresh_logs(force_push=True)))
             lay.addWidget(_row(tr("Имя этой машины", "This machine's name"), name))
+            return
+        if backend == "timeout":
+            lay.addWidget(_label(vault.timeout_text() + tr(" — синхронизация повторит попытку сама.",
+                                                           " — sync will try again by itself."), wrap=True))
             return
         if backend == "locked":
             lay.addWidget(_label(tr("Токен GitHub лежит в хранилище секретов, но оно заблокировано — разблокируйте KWallet, "
@@ -959,6 +969,7 @@ class TrayApp(QObject):
         m.updated = time.time()
         m.history.record(claude, "claude")
         m.history.record(codex, "codex")
+        self.update_sync_warning()           # «стоит с HH:mm» ages with the clock, not only with syncs
         self.check_alarms(claude, codex)
         self.update_tray()
         self.win.page0_changed()
@@ -970,13 +981,23 @@ class TrayApp(QObject):
     def apply_days(self, local_days, remote):
         m = self.model
         m.local_days = local_days
-        token, _ = vault.read() if remote.get("machines") else (None, None)
-        if token:
+        # signed in and not revoked → add the other machines. Decided from the sync state, not
+        # from a keyring read: this runs on the GUI thread, and a revoked sign-in is not hidden
+        # here — update_sync_warning says it on the main screen.
+        st = sync.sync_state()
+        if remote.get("machines") and st.get("login") and not st.get("revoked"):
             m.days = usage.merge_days(local_days, remote.get("days", {}))
             m.other_machines = len(remote.get("machines", []))
         else:
             m.days = local_days
             m.other_machines = 0
+        self.update_sync_warning(st)
+
+    def update_sync_warning(self, st=None):
+        try:
+            self.model.sync_warning = sync.warning(st, moment=fmt.fmt_moment)
+        except Exception:
+            self.model.sync_warning = None
 
     def refresh_logs(self, force_push=False):
         if force_push:
@@ -998,7 +1019,7 @@ class TrayApp(QObject):
                 days = ix["days"]
             except Exception as e:
                 days, remote = usage.load_index()["days"], sync.load_remote()
-                sync.sync_state().set("lastError", str(e))
+                sync.record_error(str(e) or e.__class__.__name__)
                 res = None
             self.bridge.logs_done.emit(days, (remote, res, force_push))
         threading.Thread(target=work, daemon=True).start()

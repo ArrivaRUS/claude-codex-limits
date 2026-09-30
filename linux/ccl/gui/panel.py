@@ -37,6 +37,7 @@ class Model(object):
         self.days = {}            # merged usage days (local + other machines)
         self.local_days = {}
         self.other_machines = 0
+        self.sync_warning = None         # sync stalled / sign-in revoked → orange line in «История и деньги»
         self.update_available = None     # newer Linux version on main → orange dot on the gear
 
 
@@ -365,10 +366,11 @@ def hist_empty(m, product):
 
 
 def hist_height(m, cards):
+    warn = NOTICE if m.sync_warning else 0          # orange sync line under the header
     if not common.settings().get("advHistExpanded"):
-        return HIST_COLLAPSED
+        return HIST_COLLAPSED + warn
     p = hist_product(m, [c["product"] for c in cards])
-    return HIST_EXPANDED + (HIST_EMPTY_EXTRA if hist_empty(m, p) else 0)
+    return HIST_EXPANDED + (HIST_EMPTY_EXTRA if hist_empty(m, p) else 0) + warn
 
 
 def advanced_height(m):
@@ -598,7 +600,8 @@ def draw_advanced(c, W, H, m):
     if m.other_machines > 0:
         cap += tr(" · %d ПК" % (m.other_machines + 1), " · %d PCs" % (m.other_machines + 1))
     c.text_c(caps(cap, 9.5, TEXT_LO), ADV_IX + 14, hy, 18)
-    hits.append(("hist:toggle", rect_tl(ADV_CX, y, 200, 35)))
+    # stops above the orange sync line when there is one (hit-test takes the first match)
+    hits.append(("hist:toggle", rect_tl(ADV_CX, y, 200, hy + 18 - y if m.sync_warning else 35)))
     if present:
         items = [(x, "Claude" if x == "claude" else "Codex") for x in present]
         widths = [Attr(t, 10.5, "semibold", TEXT_HI).width() + 16 for _, t in items]
@@ -614,8 +617,20 @@ def draw_advanced(c, W, H, m):
             c.text_c(Attr(t, 10.5, "semibold" if on else "medium", TEXT_HI if on else TEXT_MID), r.center().x(), hy + 2, 14, align=1)
             hits.append(("hist:" + pid, r.adjusted(-2, -4, 2, 4)))
             sx += widths[i] + 1
+    # Sync stalled / revoked: one orange line under the header, collapsed or expanded — the
+    # totals below silently miss the other computers otherwise. Click → Settings.
+    warn_h = 0
+    if m.sync_warning:
+        s = m.sync_warning
+        wa = Attr(s, 10.5, "regular", WARN)
+        while wa.width() > ADV_IW and len(s) > 8:
+            s = s[:-2] + "…"
+            wa = Attr(s, 10.5, "regular", WARN)
+        c.text_c(wa, ADV_IX, hy + 18 + 1, NOTICE - 2)
+        hits.append(("settings", rect_tl(ADV_IX, hy + 18, ADV_IW, NOTICE)))
+        warn_h = NOTICE
     if expanded:
-        draw_history(c, m, cards, hp, hy + 22, hits)
+        draw_history(c, m, cards, hp, hy + 22 + warn_h, hits)
     y += hh + 6
 
     # footer

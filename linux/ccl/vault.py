@@ -5,9 +5,14 @@ org.freedesktop.secrets) when it is reachable and unlocked, otherwise a 0600 fil
 Only non-interactive Secret Service calls are made: if the keyring would need a password
 prompt (locked collection, no default collection), we fall back to the file rather than pop
 a dialog from a background timer.
+
+Every Secret Service operation runs under a deadline (`TIMEOUT`, docs/sync-protocol.md →
+Errors): a keyring that hangs on D-Bus must not hold the sync cycle (and its lock) forever.
+Test seams: `_ss` (the Secret Service factory) and `TIMEOUT`.
 """
 
 import os
+import threading
 
 from . import common
 
@@ -88,6 +93,49 @@ def _ss():
         return None
 
 
+TIMEOUT = 15.0          # seconds per Secret Service operation (connect + calls)
+
+
+class Timeout(Exception):
+    """The Secret Service didn't answer within TIMEOUT."""
+
+
+def timeout_text():
+    return common.tr("Хранилище секретов не ответило за %g с" % TIMEOUT,
+                     "The Secret Service didn't answer in %g s" % TIMEOUT)
+
+
+def _timed(fn):
+    """Run `fn` in a daemon thread and wait at most TIMEOUT. Raises Timeout (the thread is
+    left behind — a hung D-Bus call can't be cancelled) or whatever `fn` raised."""
+    box = {}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except BaseException as e:      # handed to the caller below
+            box["e"] = e
+    t = threading.Thread(target=run, name="ccl-vault", daemon=True)
+    t.start()
+    t.join(TIMEOUT)
+    if t.is_alive():
+        raise Timeout()
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _ss_read():
+    """(token or None, locked) from the Secret Service; (None, False) when it isn't there."""
+    ss = _ss()
+    if ss is None:
+        return None, False
+    t = ss.get()
+    if t:
+        return t, False
+    return None, ss.has_locked()
+
+
 def _file_get():
     try:
         with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
@@ -112,50 +160,65 @@ def _file_delete():
 def read():
     """(token, backend) or (None, None). The Secret Service wins when it holds one.
     (None, "locked") means the keyring holds our token but is locked right now — the caller
-    should wait, not treat it as a sign-out."""
-    ss = _ss()
-    locked = False
-    if ss is not None:
-        try:
-            t = ss.get()
-            if t:
-                return t, "secret-service"
-            locked = ss.has_locked()
-        except Exception:
-            pass
+    should wait, not treat it as a sign-out. (None, "timeout") means the Secret Service didn't
+    answer in time and there is no file token either — the caller can't tell, so it must not
+    treat it as a sign-out."""
+    locked = timed_out = False
+    try:
+        t, locked = _timed(_ss_read)
+        if t:
+            return t, "secret-service"
+    except Timeout:
+        timed_out = True
+    except Exception:
+        pass
     t = _file_get()
     if t:
         return t, "file"
+    if timed_out:
+        return None, "timeout"
     return (None, "locked") if locked else (None, None)
 
 
 def reachable():
-    return _ss() is not None
+    try:
+        return _timed(lambda: _ss() is not None)
+    except Exception:
+        return False
 
 
 def delete_if(token):
     """Delete the stored token only if it is still `token` — a sync cycle that got a 401 with
-    an old token must not wipe a new one saved by a fresh sign-in meanwhile."""
-    cur, _ = read()
-    if cur == token:
-        delete()
-        return True
-    return False
+    an old token must not wipe a new one saved by a fresh sign-in meanwhile.
+    Returns "deleted", "missing" (nothing stored), "other" (a different token is stored — keep
+    it), or "timeout" (the store didn't answer — the token may still be there)."""
+    cur, backend = read()
+    if backend == "timeout":
+        return "timeout"
+    if cur is None:
+        return "missing"
+    if cur != token:
+        return "other"
+    return "deleted" if delete() else "timeout"
 
 
 def write(token):
     """Store the token; returns the backend used. Verifies by reading it back."""
     if not token or not all(c.isalnum() or c in "_-" for c in token):
         raise ValueError("unexpected token format")
-    ss = _ss()
-    if ss is not None:
-        try:
-            ss.set(token)
-            if ss.get() == token:
-                _file_delete()          # one copy only
-                return "secret-service"
-        except Exception:
-            pass
+
+    def ss_write():
+        ss = _ss()
+        if ss is None:
+            return False
+        ss.set(token)
+        return ss.get() == token
+    try:
+        if _timed(ss_write):
+            _file_delete()              # one copy only
+            return "secret-service"
+    except Exception:                   # incl. Timeout → the file below
+        pass
     _file_set(token)
     if _file_get() != token:
         raise OSError("could not save the token")
@@ -163,10 +226,18 @@ def write(token):
 
 
 def delete():
-    ss = _ss()
-    if ss is not None:
-        try:
+    """Remove the token from both places. False when the Secret Service didn't answer in time
+    (its copy may still be there); other Secret Service errors are ignored, as before."""
+    def ss_delete():
+        ss = _ss()
+        if ss is not None:
             ss.delete()
-        except Exception:
-            pass
+    ok = True
+    try:
+        _timed(ss_delete)
+    except Timeout:
+        ok = False
+    except Exception:
+        pass
     _file_delete()
+    return ok
