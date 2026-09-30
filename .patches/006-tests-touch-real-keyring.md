@@ -18,3 +18,15 @@
 Любой тест или скрипт, который создаёт `TrayApp` или вызывает `sync`/`vault`, обязан заглушить
 `vault._ss` (или `vault.read`) и `sync.sync_cycle`. Изоляция через XDG-папки не распространяется
 на keyring, gist и файлы учётных данных CLI. Образец — `linux/tests/gui_width_probe.py`.
+
+## Дополнение 2026-09-30 — изоляция на уровне импорта
+
+Ранние прогоны Linux-тестов на Маке (до `linux/tests/_isolate.py`) создали в настоящем доме
+`~/.config/claude-codex-limits/machine-id` и `~/.local/state/claude-codex-limits/`: пути в
+`common.py` вычисляются при импорте, а тесты импортировали `ccl` без `XDG_*`.
+
+Правило (дополнено): `XDG_*` выставляются ДО импорта `ccl` — через `_isolate.py` первым импортом
+каждого `test_*.py`; кроме `vault._ss` глушить `vault._file_get`/`TOKEN_FILE_PATH`, резать сеть
+на `sync.transport`/`common.http`; блокирующиеся фейки отпускать в `tearDown`; раннер проверяет,
+что реальные файлы не изменились (`test_zz_isolation.py`). Агентам — никаких вызовов
+`/usr/bin/security`, даже read-only.
