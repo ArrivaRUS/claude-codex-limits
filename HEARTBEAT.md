@@ -42,6 +42,11 @@
   - Linux `sync.py:437`: `raw_url` при 403/429 без backoff, при ошибке `res.ok=True` (расхождение с macOS, в основном было до дифа).
   - macOS `:1443`: backoff 15 мин без `x-ratelimit-reset`/`Retry-After` (было до дифа; `SyncHTTP` не отдаёт заголовки).
   - Совпало с Claude-ревью: Linux `logout` игнорирует `False` от `vault.delete()`; чтение хранилища в GUI-потоке (`app.py:525`).
+- ИБ-ревью Linux `3ca05f2` (T2, без Astra) — готово: **blocker 0, major 1**, вердикт «можно дальше после цикла правок».
+  - **M1 — зомби-операции хранилища:** `_timed` бросает поток, но запрос уже у kwalletd и исполнится позже. Векторы: (A) воскрешение токена после выхода — трей/`push` синкают токеном, из которого вышли; (B) запоздавшее удаление сносит свежий вход → перевход → сожжённый слот лимита 10 → каскад отзывов; (C) запоздавшая запись подменяет новый токен старым. Фикс: (1) `sync_cycle`/`cmd_status`/`render_sync` без `login` в состоянии токен не используют; (2) `logout` при `delete()==False` ставит флаг и говорит пользователю правду; (3) compare-and-delete (удалять только равный ожидаемому) + счётчик поколений в `ss_write`; (4) пока жив просроченный поток — новая мутирующая операция сразу «timeout», `SessionBus(private=True)`; (5) `cmd_login` решает по состоянию. Пп. 1, 2, 5 — обязательно в этот цикл, 3–4 — тем же заходом, если влезает.
+  - m1 allow-list хостов + opener без редиректов для запросов с токеном (urllib сохраняет `Authorization` при редиректе на чужой хост); m2 `file_lock` без проверки `held`, в `_revoked` сначала флаг, потом удаление; m3 `login_finish` при `/user`≠200 не сохраняет токен (= M2 код-ревью); m4 `read()` учитывает `tokenBackend`; m5 тупик `ccl-sync login` после отзыва; m6 изоляция тестов: `XDG_*` до импорта `ccl`, глушить `vault._file_get`/`TOKEN_FILE_PATH`, резать на `sync.transport`, отпускать фейки в `tearDown` — **дописать в урок 006**. nit: потолок `retry-after` 1 ч.
+  - В test-plan: 12 обязательных проверок (1–4 пути 401; 5–7 зомби и честный выход; 8 нет подстроки токена; 9 чужой хост и 302; 10 `/user`≠200; 11 занятый лок; 12 настоящие файлы не тронуты).
+  - Юрке руками на ThinkPad: закрыть кошелёк → `status` ≤ 15 с; открыть — запись задним числом не появилась/не исчезла; `journalctl … | grep -c gho_` = 0; `grep -c gho_ sync-state.json` = 0; `ps` во время входа; после `logout` `status` = «вход не выполнен».
 - Следующее:
   1. те же два ревью по Linux `3ca05f2`;
   2. правки по находкам ревью macOS (M1 + minor выше) и Linux одним заходом `developer`, затем повторное ревью только правок (не больше 3 циклов);
@@ -63,4 +68,4 @@
 - Проверить github.com/settings/applications и почту за 28–29.09; на ThinkPad `ccl-sync status`; перевойти на обеих машинах.
 
 ## Счётчики сессии 2026-09-29
-- delegations: 6 (debugger · developer-codex Astra, оборвался на 403 · developer Opus на macOS и Linux · code-reviewer · security-analyst) · yurka_direct_actions: 0
+- delegations: 10 (debugger · developer-codex Astra, оборвался на 403 · developer Opus на macOS и Linux · code-reviewer ×3 (macOS, Linux, Codex-проход Sol) · security-analyst ×3 (macOS, Linux, второе мнение Astra)) · yurka_direct_actions: 0
