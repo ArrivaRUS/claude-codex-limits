@@ -22,6 +22,24 @@ CLAUDE_URL = "https://claude.ai/settings/usage"
 CODEX_URL = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
 CREDIT = "Claude Codex Limits %s · by %s · " % (APP_VERSION, APP_AUTHOR)
 
+# Refresh interval choices, seconds. No 1 minute (issue #6): the Mac and this machine polled one
+# account every minute and GET /api/oauth/usage answered 429 for hours.
+POLL_CHOICES = (300, 900)
+POLL_MIN = POLL_CHOICES[0]
+
+
+def poll_interval(value):
+    """A stored or clicked interval, clamped to the choices: anything else (the old 60, junk) → 5 min."""
+    try:
+        sec = int(value)
+    except (TypeError, ValueError):
+        return POLL_MIN
+    return sec if sec in POLL_CHOICES else POLL_MIN
+
+
+def poll_segments():
+    return [(tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES]
+
 
 class Model(object):
     """Everything the panel draws from."""
@@ -31,7 +49,7 @@ class Model(object):
         self.codex = limits.LimitData()
         self.claude.present = self.codex.present = False
         self.loaded = False
-        self.interval = 60
+        self.interval = POLL_MIN
         self.updated = None
         self.history = limits.History()
         self.days = {}            # merged usage days (local + other machines)
@@ -257,9 +275,9 @@ def draw_simple(c, W, H, m):
 
 def footer_simple(c, W, foot, m, hits):
     pad = 16
-    segs = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
+    segs = poll_segments()
     sw, sh = 40, 24
-    c.round_fill(rect_tl(pad, foot, sw * 3, sh), 8, gray(1, 0.06))
+    c.round_fill(rect_tl(pad, foot, sw * len(segs), sh), 8, gray(1, 0.06))
     for i, (label, sec) in enumerate(segs):
         r = rect_tl(pad + i * sw, foot, sw, sh)
         on = abs(m.interval - sec) < 1
@@ -635,7 +653,7 @@ def draw_advanced(c, W, H, m):
 
     # footer
     foot = H - 35 - CREDIT_H
-    segs = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
+    segs = poll_segments()
     sw = [Attr(s, 12, "semibold", TEXT_HI).width() + 20 for s, _ in segs]
     c.round_fill(rect_tl(ADV_CX, foot + 1, sum(sw) + 4, 22), 11, gray(1, 0.07))
     sx = ADV_CX + 2

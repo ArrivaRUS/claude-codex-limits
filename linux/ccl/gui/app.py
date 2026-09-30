@@ -774,7 +774,9 @@ class TrayApp(QObject):
         self.qapp = qapp
         self.model = panel.Model()
         st = common.settings()
-        self.model.interval = int(st.get("interval") or 60) if int(st.get("interval") or 60) in (60, 300, 900) else 60
+        self.model.interval = panel.poll_interval(st.get("interval"))
+        if st.get("interval") != self.model.interval:        # the removed 1 minute → 5 minutes, for good
+            st.set("interval", self.model.interval)
         self.model.history.load()
         self.bridge = Bridge()
         self.bridge.limits_done.connect(self.on_limits)
@@ -933,7 +935,7 @@ class TrayApp(QObject):
             QDesktopServices.openUrl(QUrl(hid[5:]))
             self.win.hide()
         elif hid.startswith("iv"):
-            sec = int(hid[2:])
+            sec = panel.poll_interval(hid[2:])
             self.model.interval = sec
             st.set("interval", sec)
             self.timer.start(sec * 1000)
