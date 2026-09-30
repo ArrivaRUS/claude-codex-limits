@@ -5682,6 +5682,13 @@ if CommandLine.arguments.contains("--sync-selftest") {
                    && (!wasRevoked || s.ui.keychainItemLeft == replacement)
                    && selfTestDefaults.string(forKey: "syncLogin") == nil && http.calls.count == 3,
                    "13 \(point), revoked=\(wasRevoked): cancelled login unpublished, \(replacement ? "token B retained" : "token A deleted"), no sync")
+            // tester 2026-09-30: a restart after the cancel sees no published sign-in.
+            let reloadHTTP = SelfTestHTTP { _ in reply(599) }
+            let reloaded = makeSync(reloadHTTP, store)
+            reloaded.loadSynchronously()
+            expect(reloaded.ui.phase == (wasRevoked ? .revoked : .off) && reloaded.ui.login == nil
+                   && reloadHTTP.calls.isEmpty && store.writes == 1,
+                   "13 \(point), revoked=\(wasRevoked), B=\(replacement): reload after cancel -> \(wasRevoked ? "revoked" : "off")")
         }
     }
     do {
