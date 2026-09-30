@@ -36,6 +36,12 @@
   - **M2:** `login_finish` при 0/5xx на `/user` сохраняет токен без `login` → `apply_days` (`app.py:988`) молча не складывает другие машины и не предупреждает. Фикс: без `login` — `LoginError` до `vault.write`.
   - minor в заход: `ccl-sync login` при `revoked` не пускает перевойти (`cli.py:58`); `logout` игнорирует неудачу `vault.delete()`; `file_lock(timeout=60)` без проверки `held` в `login_finish`/`logout` (TOCTOU с `delete_if`); ветка `unreachable` не пишет `lastError`; `Isolated` в тестах не переносит `TOKEN_FILE_PATH` и `SYNC_REMOTE_PATH` (**урок 006: иначе тест сотрёт реальный токен ThinkPad**); в `.revoked` Настройки не показывают `lastError`; allow-list хостов (в т.ч. URL из `Link` в `_find_gist`, `sync.py:223`); `fmt.py:93` знак сравнения (простой в 3 недели показан как «с пн»).
   - minor по желанию: при таймауте Secret Service не отдавать файловый токен; поздние потоки `_timed`; чтение хранилища в GUI-потоке (`app.py:525`); 403 без rate-limit заголовков = ошибка доступа; `gui_width_probe` без `sync_warning`; nit: `--auto` код 2 и failed-юнит systemd.
+- Codex-проход (Sol @high, `d566b56..3ca05f2`) — готово: 7 находок, 1 ложная (гонка `revoked` — невозможна: single-instance `flock` + одна очередь `ccl.sync`), 6 подтверждены, все **minor**, blocker/major нет. Новое сверх Claude-ревью:
+  - macOS `:1294`: `loadSynchronously` затирает `.awaitingCode`, если «Войти» нажали во время медленного чтения Связки (регрессия дифа) → не трогать фазу при `.awaitingCode`.
+  - Linux `vault._timed`: запоздавший брошенный `ss.set`/`ss.delete` может вернуть старый токен → живой вход пометится отозванным; фикс — счётчик поколений или запрет новой операции, пока жив прошлый поток.
+  - Linux `sync.py:437`: `raw_url` при 403/429 без backoff, при ошибке `res.ok=True` (расхождение с macOS, в основном было до дифа).
+  - macOS `:1443`: backoff 15 мин без `x-ratelimit-reset`/`Retry-After` (было до дифа; `SyncHTTP` не отдаёт заголовки).
+  - Совпало с Claude-ревью: Linux `logout` игнорирует `False` от `vault.delete()`; чтение хранилища в GUI-потоке (`app.py:525`).
 - Следующее:
   1. те же два ревью по Linux `3ca05f2`;
   2. правки по находкам ревью macOS (M1 + minor выше) и Linux одним заходом `developer`, затем повторное ревью только правок (не больше 3 циклов);
