@@ -76,14 +76,21 @@ and updating both sides.
     model from the latest `turn_context.payload.model`.
   - Day = local date of the line's `timestamp`.
 
+## Sync cycle
+
+- Run one cycle **at start** and then **every 10 minutes**, whether or not local usage changed:
+  other machines' data only arrives by reading, so a cycle must never depend on local changes.
+- A cycle = write (only if needed, below) → read and merge.
+
 ## Write
 
-- At most once every **10 minutes**, and only when the serialized snapshot changed (compare a
-  hash). `PATCH /gists/{id}` with `{"files": {"machine-<id>.json": {"content": "<json>"}}}`.
+- `PATCH /gists/{id}` with `{"files": {"machine-<id>.json": {"content": "<json>"}}}` — only when
+  the serialized snapshot changed since the last successful write (compare a hash). An unchanged
+  snapshot skips the write, never the read.
 
 ## Read and merge
 
-- `GET /gists/{id}`; for a file with `"truncated": true`, fetch its `raw_url`.
+- `GET /gists/{id}` **every cycle**; for a file with `"truncated": true`, fetch its `raw_url`.
 - Take every `machine-*.json` **except this machine's own id** (own data always comes from the local
   index, never from the gist). Skip files with a different `schema`, unparsable JSON, or `updated`
   older than 45 days.
@@ -94,10 +101,26 @@ and updating both sides.
 
 ## Errors
 
-- `401` → the token was revoked: show «Войдите в GitHub заново», stop syncing until re‑login.
+- A single `401` on a gist request is **not** proof of revocation (GitHub returns stray 401s).
+  Confirm with `GET /user` using the **same token**:
+  - `200` → the sign-in is fine: end this cycle as an error («401 on <request>, sign-in
+    confirmed»), keep the token, retry next cycle.
+  - `401` → the token is revoked: show «Войдите в GitHub заново», stop syncing until re‑login.
+    Delete the stored token **only if the store still holds that same token** (a newer sign-in
+    may have replaced it); if the store can't be read, keep it and just mark the sign-in revoked.
+  - anything else (network, `5xx`, rate limit) → can't tell: keep the token, record the error,
+    retry next cycle.
 - `403`/`429` with rate‑limit headers → back off until `x-ratelimit-reset`.
 - Network failure → keep the last merged result, retry next cycle. Sync must never block or break
   the limits display.
+- The token store may hang (a locked Keychain / Secret Service waiting for an unlock prompt): every
+  call to it gets a timeout (~15 s); a timeout ends the cycle as an error.
+- **Visibility.** Keep the time of the last successful cycle (read included), the last attempt and
+  the last error (text + time). Settings show «last upload · read» times and the last error. The
+  main screen should say so when sync is signed in but has had no successful cycle for
+  **more than 30 minutes** («Синхронизация стоит с HH:mm: <причина>»), and when the sign-in was
+  revoked («Войдите в GitHub заново — суммы без других компьютеров»). Sync must never stop
+  silently.
 
 ## Device Flow, step by step
 

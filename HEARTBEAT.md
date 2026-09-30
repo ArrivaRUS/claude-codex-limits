@@ -6,6 +6,7 @@
 - **Версии:** macOS 3.1.2 · Linux 0.3.1 (`main` = b146339).
 - **Фаза:** баг-фикс синхронизации через гист (ветка `fix/sync-401-silent-revoke`), поток B «runtime» из `error-handling.md`.
 - **Риск-теги:** security-поверхность (токен GitHub, Связка ключей, Secret Service) · данные (гист) → developer-codex на Astra @high, ИБ-ревью диффа (T2).
+- ⚠️ Codex-лимит с 2026-09-30 (Sol и Astra): developer → Claude `developer` (Opus @high); Codex-проход ревью пропущен; ИБ-мнение Astra недоступно → второй взгляд Opus, пометка.
 - ⚠️ Fable-лимит с 2026-09-27: сессия Юрки на Opus 5.5 @high; Fable-агентов запускать с `model: "opus"`, если Fable недоступен.
 
 ## Инцидент 2026-09-29 (диагноз debugger)
@@ -25,4 +26,4 @@
 - Проверить github.com/settings/applications и почту за 28–29.09; на ThinkPad `ccl-sync status`; перевойти на обеих машинах.
 
 ## Счётчики сессии 2026-09-29
-- delegations: 1 (debugger) · yurka_direct_actions: 0
+- delegations: 3 (debugger · developer-codex Astra — оборвался на 403, частичный диф сохранён · developer Opus) · yurka_direct_actions: 0

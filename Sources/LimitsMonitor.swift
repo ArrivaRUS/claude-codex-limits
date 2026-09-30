@@ -650,18 +650,18 @@ final class UsageLogs {
 
     /// Same as `scanAsync`, on the calling thread — for command-line hooks with no run loop.
     @discardableResult
-    func scanSync() -> Bool {
+    func scanSync(persist: Bool = true) -> Bool {
         lock.lock(); var ix = index; lock.unlock()
         let changed = UsageLogs.scan(&ix)
         lock.lock(); index = ix; lastScan = Date(); lock.unlock()
-        if changed, let d = try? JSONEncoder().encode(ix) { try? d.write(to: URL(fileURLWithPath: USAGE_INDEX_PATH)) }
+        if persist && changed, let d = try? JSONEncoder().encode(ix) { try? d.write(to: URL(fileURLWithPath: USAGE_INDEX_PATH)) }
         return changed
     }
 
-    /// Incremental rescan on a background queue; `done` runs on main when the index changed.
-    func scanAsync(done: (() -> Void)? = nil) {
+    /// Completion always runs on main; an already-running scan reports no new change.
+    func scanAsync(done: ((Bool) -> Void)? = nil) {
         lock.lock()
-        if scanning { lock.unlock(); return }
+        if scanning { lock.unlock(); DispatchQueue.main.async { done?(false) }; return }
         scanning = true
         var ix = index
         lock.unlock()
@@ -673,7 +673,7 @@ final class UsageLogs {
             ix.seen = ix.seen.filter { $0.key >= cutoff }
             self.lock.lock(); self.index = ix; self.scanning = false; self.lastScan = Date(); self.lock.unlock()
             if changed, let d = try? JSONEncoder().encode(ix) { try? d.write(to: URL(fileURLWithPath: USAGE_INDEX_PATH)) }
-            if changed { DispatchQueue.main.async { done?() } }
+            DispatchQueue.main.async { done?(changed) }
         }
     }
 
@@ -1117,25 +1117,90 @@ let SYNC_MANIFEST = "ccl-sync.json"
 /// Keychain through /usr/bin/security (like the Claude credentials): an ad-hoc-signed app
 /// would get an access prompt after every update if it owned the item itself. The secret is
 /// written through `security -i` on stdin so it never appears in a process's arguments.
-func syncTokenRead() -> String? {
-    let r = shell("/usr/bin/security", ["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"])
-    let t = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
-    return r.code == 0 && !t.isEmpty ? t : nil
+enum SyncKeychainRead {
+    case token(String), missing, timedOut, failure(Int32)
 }
-func syncTokenWrite(_ token: String) {
-    guard token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else { return }
-    let p = Process()
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-    p.arguments = ["-i"]
-    let inp = Pipe(); p.standardInput = inp
-    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { return }
-    let cmd = "add-generic-password -U -a \"\(NSUserName())\" -s \"\(SYNC_KC_SERVICE)\" -w \(token)\n"
-    inp.fileHandleForWriting.write(Data(cmd.utf8))
-    try? inp.fileHandleForWriting.close()
-    p.waitUntilExit()
+enum SyncKeychainStatus: Equatable {
+    case success, missing, timedOut, failure(Int32)
 }
-func syncTokenDelete() { _ = shell("/usr/bin/security", ["delete-generic-password", "-s", SYNC_KC_SERVICE]) }
+protocol SyncKeychain {
+    func read() -> SyncKeychainRead
+    func write(_ token: String) -> SyncKeychainStatus
+    func delete() -> SyncKeychainStatus
+}
+
+/// One /usr/bin/security call with a hard 15 s deadline. A locked Keychain (or its unlock
+/// prompt) must not hang the serial ccl.sync queue forever: pipes are pumped on helper
+/// threads, and after terminate() nothing waits for the process again.
+private final class SyncSecurityOutput {
+    private let lock = NSLock()
+    private var data = Data()
+    func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+    func string() -> String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
+}
+private func syncSecurity(_ args: [String], input: String? = nil) -> (status: SyncKeychainStatus, out: String) {
+    let p = Process(), output = Pipe(), stdin = Pipe()
+    let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
+    let result = SyncSecurityOutput()
+    let deadline = DispatchTime.now() + 15
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/security"); p.arguments = args
+    p.standardOutput = output; p.standardError = FileHandle.nullDevice
+    if input == nil { p.standardInput = FileHandle.nullDevice } else { p.standardInput = stdin }
+    p.terminationHandler = { _ in ended.signal() }
+    do { try p.run() } catch { return (.failure(-1), "") }
+    DispatchQueue.global(qos: .utility).async {
+        result.store(output.fileHandleForReading.readDataToEndOfFile())
+        try? output.fileHandleForReading.close()
+        drained.signal()
+    }
+    if let input = input {
+        // A child that already died must not SIGPIPE the whole app: EPIPE is just an error here.
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        DispatchQueue.global(qos: .utility).async {
+            try? stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+            try? stdin.fileHandleForWriting.close()
+        }
+    }
+    guard ended.wait(timeout: deadline) == .success,
+          drained.wait(timeout: deadline) == .success else {
+        if p.isRunning { p.terminate() }
+        return (.timedOut, "")
+    }
+    let code = p.terminationStatus
+    return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
+}
+struct SecuritySyncKeychain: SyncKeychain {
+    func read() -> SyncKeychainRead {
+        let r = syncSecurity(["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"])
+        switch r.status {
+        case .success:
+            let token = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return token.isEmpty ? .failure(-1) : .token(token)
+        case .missing: return .missing
+        case .timedOut: return .timedOut
+        case .failure(let code): return .failure(code)
+        }
+    }
+    func write(_ token: String) -> SyncKeychainStatus {
+        guard !token.isEmpty, token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else { return .failure(-1) }
+        let command = "add-generic-password -U -a \"\(NSUserName())\" -s \"\(SYNC_KC_SERVICE)\" -w \(token)\n"
+        return syncSecurity(["-i"], input: command).status
+    }
+    func delete() -> SyncKeychainStatus {
+        syncSecurity(["delete-generic-password", "-s", SYNC_KC_SERVICE]).status
+    }
+}
+typealias SyncHTTP = (String, String, [String: String], Data?, Double) -> (status: Int, data: Data?, err: String?)
+
+func syncKeychainTimeout() -> String { tr("Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s") }
+func syncKeychainReadError(_ result: SyncKeychainRead) -> String {
+    switch result {
+    case .timedOut: return syncKeychainTimeout()
+    case .missing: return tr("Вход не найден в Связке ключей", "Sign-in not found in Keychain")
+    case .failure(let code): return tr("Ошибка Связки ключей: \(code)", "Keychain error: \(code)")
+    case .token: return tr("Вход в Связке ключей изменился; повторим синхронизацию", "Keychain sign-in changed; sync will retry")
+    }
+}
 
 struct SyncCachedMachine: Codable { var id: String; var name: String; var os: String; var updated: Date? }
 struct SyncRemoteCache: Codable {
@@ -1154,6 +1219,27 @@ final class GitHubSync {
     private var backoffUntil = Date.distantPast
     var onChange: (() -> Void)?
 
+    private let transport: SyncHTTP
+    private let keychain: SyncKeychain
+    private let defaults: UserDefaults
+    private let remotePath: String
+    private let suppliedMachineId: String?
+    private var machineIdNeedsSave = false
+
+    init(transport: @escaping SyncHTTP = { http($0, method: $1, headers: $2, body: $3, timeout: $4) },
+         keychain: SyncKeychain = SecuritySyncKeychain(), defaults: UserDefaults = .standard,
+         remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil) {
+        self.transport = transport; self.keychain = keychain; self.defaults = defaults
+        self.remotePath = remotePath; self.suppliedMachineId = machineId
+        _ui.login = defaults.string(forKey: "syncLogin")
+        _ui.phase = defaults.bool(forKey: "syncRevoked") ? .revoked : (_ui.login == nil ? .off : .on)
+        _ui.lastSync = defaults.object(forKey: "syncLastOkAt") as? Date
+        _ui.lastAttemptAt = defaults.object(forKey: "syncLastAttemptAt") as? Date
+        _ui.lastUploadAt = defaults.object(forKey: "syncPushedAt") as? Date
+        _ui.lastError = defaults.string(forKey: "syncLastError")
+        _ui.lastErrorAt = defaults.object(forKey: "syncLastErrorAt") as? Date
+    }
+
     var ui: SyncUIState { lock.lock(); defer { lock.unlock() }; return _ui }
     func remoteDays() -> [String: [String: [String: DayModelUsage]]] {
         lock.lock(); defer { lock.unlock() }; return _ui.phase == .on ? _remote.days : [:]
@@ -1166,13 +1252,13 @@ final class GitHubSync {
     }
 
     lazy var machineId: String = {
+        if let id = suppliedMachineId { return id }
         if let s = try? String(contentsOfFile: MACHINE_ID_PATH, encoding: .utf8) {
             let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if !t.isEmpty { return t }
         }
         let id = UUID().uuidString.lowercased()
-        try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
-        try? (id + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
+        machineIdNeedsSave = true   // Persist only in a real sync cycle; selftest stays read-only.
         return id
     }()
     lazy var machineName: String = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
@@ -1182,25 +1268,36 @@ final class GitHubSync {
     }
 
     /// Restore the last known state at launch, so the history shows other machines offline.
-    func load() {
-        let d = UserDefaults.standard
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: SYNC_REMOTE_PATH)),
+    func load() { q.async { self.loadSynchronously() } }
+
+    /// For isolated callers without a run loop; do not overlap with queued operations.
+    func loadSynchronously() {
+        let d = defaults
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: remotePath)),
            let c = try? JSONDecoder().decode(SyncRemoteCache.self, from: data) {
             lock.lock(); _remote = c; lock.unlock()
         }
-        q.async {
-            if syncTokenRead() != nil {
-                let ms = self.machineList()
-                self.setUI { $0.phase = .on; $0.login = d.string(forKey: "syncLogin"); $0.machines = ms }
-            } else if d.bool(forKey: "syncRevoked") {
-                self.setUI { $0.phase = .revoked; $0.login = d.string(forKey: "syncLogin") }
-            }
+        // «Revoked» wins over a token still in the Keychain: a confirmed-dead token may stay
+        // there when its deletion timed out. Only a new sign-in clears the flag.
+        // A missing/unreadable token with a known login stays «on» and is reported, never
+        // silently turned off — the next cycle retries.
+        let phase: SyncPhase
+        var keychainError: String? = nil
+        if d.bool(forKey: "syncRevoked") { phase = .revoked }
+        else {
+            let result = keychain.read()
+            if case .token = result { phase = .on }
+            else if d.string(forKey: "syncLogin") == nil { phase = .off }
+            else { phase = .on; keychainError = syncKeychainReadError(result) }
         }
+        let ms = machineList()
+        setUI { $0.phase = phase; $0.login = d.string(forKey: "syncLogin"); $0.machines = ms }
+        if let e = keychainError { recordError(e) }
     }
 
     private func machineList() -> [SyncMachine] {
         lock.lock(); let r = _remote; lock.unlock()
-        let pushed = UserDefaults.standard.object(forKey: "syncPushedAt") as? Date
+        let pushed = defaults.object(forKey: "syncPushedAt") as? Date
         var out = [SyncMachine(name: machineName, os: osName, updated: pushed, isSelf: true)]
         out += r.machines.sorted { $0.name < $1.name }.map { SyncMachine(name: $0.name, os: $0.os, updated: $0.updated, isSelf: false) }
         return out
@@ -1212,7 +1309,7 @@ final class GitHubSync {
         var data: Data? = nil
         if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
         let url = path.hasPrefix("https://") ? path : "https://api.github.com" + path
-        let r = http(url, method: method, headers: h, body: data, timeout: 20)
+        let r = transport(url, method, h, data, 20)
         return (r.status, r.data.flatMap { try? JSONSerialization.jsonObject(with: $0) })
     }
 
@@ -1229,8 +1326,8 @@ final class GitHubSync {
     }
     private func form(_ url: String, _ fields: [String: String]) -> [String: Any]? {
         let body = fields.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }.joined(separator: "&")
-        let r = http(url, method: "POST", headers: ["Accept": "application/json", "User-Agent": "ClaudeCodexLimits",
-                                                  "Content-Type": "application/x-www-form-urlencoded"], body: Data(body.utf8))
+        let r = transport(url, "POST", ["Accept": "application/json", "User-Agent": "ClaudeCodexLimits",
+                                                  "Content-Type": "application/x-www-form-urlencoded"], Data(body.utf8), 15)
         return r.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
     }
     private func runLogin() {
@@ -1250,14 +1347,14 @@ final class GitHubSync {
                                ["client_id": GITHUB_CLIENT_ID, "device_code": deviceCode,
                                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code"]) else { continue }
             if let token = t["access_token"] as? String {
-                syncTokenWrite(token)
-                guard syncTokenRead() == token else {
-                    setUI { $0.phase = .off; $0.error = tr("Не удалось сохранить вход в Связку ключей.", "Couldn't save the sign-in to the Keychain.") }
+                let saved = keychain.write(token)
+                guard saved == .success, case .token(let stored) = keychain.read(), stored == token else {
+                    setUI { $0.phase = .off; $0.error = saved == .timedOut ? syncKeychainTimeout() : tr("Не удалось сохранить вход в Связку ключей.", "Couldn't save the sign-in to the Keychain.") }
                     return
                 }
                 let me = gh("/user", token: token)
                 let login = (me.json as? [String: Any])?["login"] as? String
-                let d = UserDefaults.standard
+                let d = defaults
                 d.set(login, forKey: "syncLogin"); d.set(false, forKey: "syncRevoked")
                 let ms = machineList()
                 setUI { $0.phase = .on; $0.login = login; $0.userCode = nil; $0.error = nil; $0.machines = ms }
@@ -1281,26 +1378,86 @@ final class GitHubSync {
     func logout() {
         loginCancelled = true
         q.async {
-            syncTokenDelete()
-            let d = UserDefaults.standard
-            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked", "syncDiscoveredAt"] { d.removeObject(forKey: k) }
+            let result = self.keychain.delete()
+            guard result == .success || result == .missing else {
+                self.recordError(result == .timedOut ? syncKeychainTimeout() : tr("Не удалось удалить вход из Связки ключей", "Couldn't delete the sign-in from Keychain"))
+                return
+            }
+            let d = self.defaults
+            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked", "syncDiscoveredAt", "syncLastOkAt", "syncLastAttemptAt", "syncLastError", "syncLastErrorAt"] { d.removeObject(forKey: k) }
             self.lock.lock(); self._remote = SyncRemoteCache(); self.lock.unlock()
-            try? FileManager.default.removeItem(atPath: SYNC_REMOTE_PATH)
+            try? FileManager.default.removeItem(atPath: self.remotePath)
             self.setUI { $0 = SyncUIState() }
         }
     }
 
-    private func revoked() {
-        syncTokenDelete()
-        let d = UserDefaults.standard
+    private func recordError(_ message: String) {
+        let now = Date()
+        defaults.set(message, forKey: "syncLastError"); defaults.set(now, forKey: "syncLastErrorAt")
+        let pushed = defaults.object(forKey: "syncPushedAt") as? Date
+        setUI { $0.lastError = message; $0.lastErrorAt = now; $0.lastUploadAt = pushed }
+    }
+
+    /// `GET /user` answered 401 with `token` — the token itself is dead. The Keychain item is
+    /// deleted only when it still holds exactly that token; a different token there means a
+    /// newer sign-in, so nothing is revoked and the next cycle uses it.
+    private func revoked(token: String) {
+        let current = keychain.read()
+        var note = tr("Вход в GitHub отозван", "GitHub sign-in revoked")
+        switch current {
+        case .token(let stored) where stored != token:
+            recordError(syncKeychainReadError(current)); return
+        case .token:
+            let result = keychain.delete()
+            if result != .success && result != .missing {
+                note += " · " + (result == .timedOut ? syncKeychainTimeout() : tr("не удалось удалить вход из Связки ключей", "couldn't delete the sign-in from Keychain"))
+            }
+        case .missing:
+            break
+        case .timedOut, .failure:
+            // Can't tell which token is stored, so it stays; syncRevoked keeps it unused.
+            note += " · " + syncKeychainReadError(current)
+        }
+        let d = defaults
         d.set(true, forKey: "syncRevoked"); d.removeObject(forKey: "syncGistId"); d.removeObject(forKey: "syncPushHash")
         d.removeObject(forKey: "syncDiscoveredAt")
+        recordError(note)
         setUI { $0.phase = .revoked }
+    }
+
+    /// true = stop this cycle. A gist 401 alone never proves token revocation.
+    private func handle(_ status: Int, request: String, token: String) -> Bool {
+        if status == 401 {
+            let me = gh("/user", token: token)
+            switch me.status {
+            case 200: recordError(tr("401 на \(request), вход подтверждён", "401 on \(request), sign-in confirmed"))
+            case 401: revoked(token: token)
+            default:
+                // Couldn't confirm either way (network, 5xx, rate limit): keep the token, retry.
+                if me.status == 403 || me.status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60) }
+                recordError(tr("401 на \(request), проверка входа не прошла (\(GitHubSync.statusText(me.status)))",
+                               "401 on \(request), sign-in check failed (\(GitHubSync.statusText(me.status)))"))
+            }
+            return true
+        }
+        if status == 403 || status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60) }
+        guard status == 200 || status == 201 else {
+            recordError(tr("\(request): \(GitHubSync.statusText(status))", "\(request): \(GitHubSync.statusText(status))")); return true
+        }
+        return false
+    }
+
+    /// Status for a human: 0 is a transport failure (no network, timeout), not an HTTP code.
+    static func statusText(_ status: Int) -> String {
+        status == 0 ? tr("нет связи с GitHub", "no connection to GitHub") : tr("ответ \(status)", "HTTP \(status)")
     }
 
     // MARK: push + pull
 
     func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
+
+    /// Synchronous test seam; use injected dependencies and do not overlap with q work.
+    func syncSynchronously(force: Bool = false) { syncBody(force: force) }
 
     private func snapshotJSON() -> (days: [String: Any], hash: String) {
         let ix = UsageLogs.shared.snapshot()
@@ -1334,12 +1491,15 @@ final class GitHubSync {
         return String(decoding: data, as: UTF8.self)
     }
 
-    /// Oldest gist holding the manifest, or nil. Status 0/401/… is passed back to the caller.
-    private func findGist(_ token: String) -> (id: String?, status: Int) {
+    /// Oldest gist holding the manifest, or nil. Errors are recorded here; `failed` = stop the cycle.
+    private func findGist(_ token: String) -> (id: String?, failed: Bool) {
         var best: (id: String, created: String)?
         for page in 1...10 {
             let r = gh("/gists?per_page=100&page=\(page)", token: token)
-            guard r.status == 200, let arr = r.json as? [[String: Any]] else { return (nil, r.status) }
+            if handle(r.status, request: "GET /gists?page=\(page)", token: token) { return (nil, true) }
+            guard let arr = r.json as? [[String: Any]] else {
+                recordError(tr("Некорректный ответ GET /gists", "Invalid GET /gists response")); return (nil, true)
+            }
             for g in arr {
                 guard let files = g["files"] as? [String: Any], files[SYNC_MANIFEST] != nil,
                       let id = g["id"] as? String else { continue }
@@ -1348,18 +1508,22 @@ final class GitHubSync {
             }
             if arr.count < 100 { break }
         }
-        return (best?.id, 200)
+        return (best?.id, false)
     }
 
     private func syncBody(force: Bool) {
-        guard ui.phase == .on, Date() >= backoffUntil, let token = syncTokenRead() else { return }
-        let d = UserDefaults.standard
+        guard ui.phase == .on, Date() >= backoffUntil else { return }
+        let d = defaults, attempt = Date()
+        d.set(attempt, forKey: "syncLastAttemptAt")
+        setUI { $0.lastAttemptAt = attempt }
+        let credential = keychain.read()
+        guard case .token(let token) = credential else { recordError(syncKeychainReadError(credential)); return }
         let snap = snapshotJSON()
         let myFile = "machine-\(machineId).json"
-        func handle(_ status: Int) -> Bool {       // true = stop this cycle
-            if status == 401 { revoked(); return true }
-            if status == 403 || status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60); return true }
-            return status != 200 && status != 201
+        if machineIdNeedsSave {
+            try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+            try? (machineId + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
+            machineIdNeedsSave = false
         }
 
         var gistId = d.string(forKey: "syncGistId")
@@ -1371,7 +1535,7 @@ final class GitHubSync {
             let last = d.object(forKey: "syncDiscoveredAt") as? Date ?? .distantPast
             if Date().timeIntervalSince(last) > 86400 {
                 let f = findGist(token)
-                if handle(f.status) { return }
+                if f.failed { return }
                 d.set(Date(), forKey: "syncDiscoveredAt")
                 if let id = f.id, id != cur {
                     gistId = id
@@ -1382,20 +1546,23 @@ final class GitHubSync {
         }
         if gistId == nil {
             let f = findGist(token)
-            if handle(f.status) { return }
+            if f.failed { return }
             if let id = f.id { gistId = id }
             else {
                 let manifest = "{\"about\":\"https://github.com/ArrivaRUS/claude-codex-limits/blob/main/docs/sync-protocol.md\",\"created\":\"\(ISO8601DateFormatter().string(from: Date()))\",\"schema\":1}"
                 let c = gh("/gists", "POST", token: token, body: [
                     "description": "Claude Codex Limits — usage sync (do not edit)", "public": false,
                     "files": [SYNC_MANIFEST: ["content": manifest], myFile: ["content": machineFile(snap.days)]]])
-                if handle(c.status) { return }
-                guard let id = (c.json as? [String: Any])?["id"] as? String else { return }
+                if handle(c.status, request: "POST /gists", token: token) { return }
+                guard let id = (c.json as? [String: Any])?["id"] as? String else {
+                    recordError(tr("Некорректный ответ POST /gists", "Invalid POST /gists response")); return
+                }
                 gistId = id
                 d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
                 // Did another machine create one at the same moment? Converge on the earliest.
                 let again = findGist(token)
-                if again.status == 200, let a = again.id, a != id {
+                if again.failed { return }
+                if let a = again.id, a != id {
                     gistId = a
                     d.removeObject(forKey: "syncPushHash")
                 }
@@ -1407,29 +1574,38 @@ final class GitHubSync {
 
         if force || d.string(forKey: "syncPushHash") != snap.hash {
             let p = gh("/gists/\(gid)", "PATCH", token: token, body: ["files": [myFile: ["content": machineFile(snap.days)]]])
-            if p.status == 404 { d.removeObject(forKey: "syncGistId"); return }
-            if handle(p.status) { return }
+            if p.status == 404 { d.removeObject(forKey: "syncGistId") }
+            if handle(p.status, request: "PATCH /gists/{id}", token: token) { return }
             d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
         }
 
         let g = gh("/gists/\(gid)", token: token)
-        if g.status == 404 { d.removeObject(forKey: "syncGistId"); return }
-        if handle(g.status) { return }
-        guard let files = (g.json as? [String: Any])?["files"] as? [String: [String: Any]] else { return }
+        if g.status == 404 { d.removeObject(forKey: "syncGistId") }
+        if handle(g.status, request: "GET /gists/{id}", token: token) { return }
+        guard let files = (g.json as? [String: Any])?["files"] as? [String: [String: Any]] else {
+            recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
+        }
         var contents: [String: String] = [:]
         for (name, f) in files where name.hasPrefix("machine-") && name.hasSuffix(".json") && name != myFile {
             var content = f["content"] as? String
-            if (f["truncated"] as? Bool) == true, let raw = f["raw_url"] as? String {
+            if (f["truncated"] as? Bool) == true {
+                guard let raw = f["raw_url"] as? String else {
+                    recordError(tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url")); return
+                }
                 let r = gh(raw, token: token)
+                if handle(r.status, request: "GET raw_url", token: token) { return }
                 content = r.json.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) }
             }
             if let c = content { contents[name] = c }
         }
         let cache = GitHubSync.merge(contents, excluding: machineId)
         lock.lock(); _remote = cache; lock.unlock()
-        if let data = try? JSONEncoder().encode(cache) { try? data.write(to: URL(fileURLWithPath: SYNC_REMOTE_PATH), options: .atomic) }
+        if let data = try? JSONEncoder().encode(cache) { try? data.write(to: URL(fileURLWithPath: remotePath), options: .atomic) }
         let ms = machineList()
-        setUI { $0.machines = ms; $0.lastSync = Date() }
+        let ok = Date(), pushed = d.object(forKey: "syncPushedAt") as? Date
+        d.set(ok, forKey: "syncLastOkAt")
+        d.removeObject(forKey: "syncLastError"); d.removeObject(forKey: "syncLastErrorAt")
+        setUI { $0.machines = ms; $0.lastSync = ok; $0.lastUploadAt = pushed; $0.lastError = nil; $0.lastErrorAt = nil }
     }
 
     /// Parse other machines' files (name → JSON text) into one summed cache. Pure — no network.
@@ -1467,9 +1643,9 @@ final class GitHubSync {
 }
 
 /// Local index plus every other machine's days from the gist — what the history draws from.
-func mergedUsageIndex() -> UsageIndex {
+func mergedUsageIndex(_ sync: GitHubSync = .shared) -> UsageIndex {
     var ix = UsageLogs.shared.snapshot()
-    for (p, byDay) in GitHubSync.shared.remoteDays() {
+    for (p, byDay) in sync.remoteDays() {
         for (day, byModel) in byDay { for (m, u) in byModel { ix.add(p, day, m, u) } }
     }
     return ix
@@ -1869,10 +2045,47 @@ struct SyncUIState {
     var login: String? = nil
     var userCode: String? = nil
     var machines: [SyncMachine] = []
-    var lastSync: Date? = nil
-    var error: String? = nil
+    var lastSync: Date? = nil              // last full cycle that read the gist (syncLastOkAt)
+    var error: String? = nil               // sign-in flow only
+    var lastAttemptAt: Date? = nil         // syncLastAttemptAt
+    var lastUploadAt: Date? = nil          // last PATCH of this machine's file (syncPushedAt)
+    var lastError: String? = nil           // syncLastError — cleared by a good cycle
+    var lastErrorAt: Date? = nil
 }
 var SYNC_PREVIEW: SyncUIState? = nil
+/// No good cycle for this long while signed in → say so on the main screen (sync-protocol.md → Errors).
+let SYNC_STALE_AFTER: TimeInterval = 30 * 60
+/// The orange line for the main screen, or nil when sync is fine / off. Revoked always shows:
+/// the totals silently lose the other computers otherwise.
+func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String? {
+    switch s.phase {
+    case .revoked:
+        return tr("Войдите в GitHub заново — суммы без других компьютеров", "Sign in to GitHub again — totals exclude other computers")
+    case .on:
+        let cause = s.lastError ?? tr("ждём ответа GitHub", "waiting for GitHub")
+        guard let since = s.lastSync ?? s.lastUploadAt else {
+            return s.lastError.map { tr("Синхронизация не работает: ", "Sync isn't working: ") + $0 }
+        }
+        guard now.timeIntervalSince(since) > SYNC_STALE_AFTER else { return nil }
+        return tr("Синхронизация стоит с \(fmtMoment(since)): \(cause)", "Sync stalled since \(fmtMoment(since)): \(cause)")
+    case .off, .awaitingCode:
+        return nil
+    }
+}
+/// `s` in one line no wider than `maxW`, cut with «…» when it doesn't fit.
+/// `make` is the caller's own `attr` (each drawing routine styles text its own way).
+func fitAttr(_ s: String, maxW: CGFloat, _ make: (String) -> NSAttributedString) -> NSAttributedString {
+    func w(_ a: NSAttributedString) -> CGFloat { ceil(lineWidth(CTLineCreateWithAttributedString(a))) }
+    var a = make(s)
+    guard w(a) > maxW else { return a }
+    var t = s
+    while t.count > 1 {
+        t.removeLast()
+        a = make(t.trimmingCharacters(in: .whitespaces) + "…")
+        if w(a) <= maxW { break }
+    }
+    return a
+}
 /// The settings block stays hidden until the GitHub transport is built — no dead buttons.
 let SYNC_READY = true
 func syncBlockShown() -> Bool { advancedEnabled() && (SYNC_READY || SYNC_PREVIEW != nil) }
@@ -1889,8 +2102,10 @@ func setSyncCardH() -> CGFloat {
     case .off, .revoked: return SET_ROW_H + SET_SYNC_NOTE_H
     case .awaitingCode:  return SET_ROW_H + 44 + 26
     case .on:            return SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
+                                + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 : 0)
     }
 }
+let SET_SYNC_STATUS_H: CGFloat = 20      // «Последняя отправка · чтение» (+ the last error) under the machines
 let SET_SYNC_CAP = SET_SUB_TOP + SET_SUB_H + SET_GAP
 let SET_SYNC_TOP = SET_SYNC_CAP + SET_CAP_H
 func setSyncBlock() -> CGFloat { syncBlockShown() ? SET_CAP_H + setSyncCardH() + SET_GAP : 0 }
@@ -1935,7 +2150,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.2"
+let APP_VERSION = "3.1.3"
 let APP_AUTHOR = "Alex Kovalev"
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2424,11 +2639,12 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
 }
 
 func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
-    guard advHistExpanded() else { return ADV_HIST_COLLAPSED }
+    let warn: CGFloat = syncWarning() != nil ? ADV_NOTICE : 0      // orange sync line under the header
+    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
     let present = cards.map { $0.product }
     let p = advHistProduct(present)
     let noHistory = UsageHistory.shared.samples(p, since: Date(timeIntervalSince1970: 0)).isEmpty
-    return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0)
+    return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
 }
 
 func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
@@ -2738,7 +2954,8 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
     let others = syncOtherMachines()
     let histCap = tr("История и деньги", "History & money") + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
     textC(caps(histCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
-    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, 35)))
+    // Stops above the orange sync line when there is one (hit-test takes the first match).
+    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, syncWarning() != nil ? hy + 18 - y : 35)))
     do {   // Claude | Codex segmented, right-aligned
         let items = present.map { ($0, $0 == "claude" ? "Claude" : "Codex") }
         let widths = items.map { width(attr($0.1, 10.5, .semibold, textHi)) + 16 }
@@ -2755,11 +2972,20 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
             sx += widths[i] + 1
         }
     }
+    // Sync stalled / revoked: one orange line under the header, in both collapsed and expanded
+    // states — the totals below silently miss the other computers otherwise. Tap → Settings.
+    var warnH: CGFloat = 0
+    if let w = syncWarning() {
+        let a = fitAttr(w, maxW: ADV_IW) { attr($0, 10.5, .regular, ADV_WARN) }
+        textC(a, x: ADV_IX, topY: hy + 18 + 1, h: ADV_NOTICE - 2)
+        hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18, ADV_IW, ADV_NOTICE)))
+        warnH = ADV_NOTICE
+    }
     if expanded {
         let ix = mergedUsageIndex()
         let d = hp == "claude" ? claude : codex
         let ap = advancedProduct(d, product: hp, index: ix)
-        let by = hy + 18 + 4                        // body top
+        let by = hy + 18 + 4 + warnH                // body top
         // -- 7-day stacked bars (x 26…216) --
         let cx0 = ADV_IX, cy0 = by
         textC(caps(tr("7 дней · $ по API", "7 days · $ at API"), 8.5, textLo), x: cx0, topY: cy0, h: 12)
@@ -3272,6 +3498,17 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                     }
                 }
                 text(nm, x: cardX + 42, topY: rt + (SET_SYNC_MROW_H - 12) / 2 - 1)
+            }
+            // When sync last actually worked, and why it didn't since (docs/sync-protocol.md → Errors).
+            let st = syTop + SET_ROW_H + CGFloat(max(1, sy.machines.count)) * SET_SYNC_MROW_H
+            hdiv(cardX + 14, cardX + cardW - 14, st)
+            let upl = sy.lastUploadAt.map { fmtMoment($0) } ?? "—", rd = sy.lastSync.map { fmtMoment($0) } ?? "—"
+            text(attr(tr("Последняя отправка: \(upl) · чтение: \(rd)", "Last upload: \(upl) · read: \(rd)"), 10.5, .regular, textMid),
+                 x: cardX + 14, topY: st + (SET_SYNC_STATUS_H - 10.5) / 2)
+            if let err = sy.lastError {
+                let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
+                text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
+                     x: cardX + 14, topY: st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2)
             }
         }
         }
@@ -4131,7 +4368,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.view.onWhatsNew = { [weak self] in self?.showWhatsNew() }
         panelCtrl.view.onViewChanged = { [weak self] in
             // Switching to Advanced needs the local-log index; scan right away.
-            if advancedEnabled() { UsageLogs.shared.scanAsync { self?.panelCtrl.view.needsDisplay = true } }
+            // Sync too: the timer skips cycles while Advanced is off, so the gist may be stale.
+            if advancedEnabled() {
+                UsageLogs.shared.scanAsync { changed in
+                    if changed { self?.panelCtrl.view.needsDisplay = true }
+                    GitHubSync.shared.syncNow()
+                }
+            }
         }
         panelCtrl.view.onTrayChanged = { [weak self] in
             guard let self = self, let l = self.last else { return }
@@ -4152,13 +4395,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UsageHistory.shared.load()
         UsageLogs.shared.load()
         GitHubSync.shared.onChange = { [weak self] in
+            // Main and Settings heights both depend on sync state (orange line, status rows).
             guard let v = self?.panelCtrl.view else { return }
-            if v.mode == .settings { v.resizeToContent() } else { v.needsDisplay = true }
+            if v.mode == .settings || v.mode == .main { v.resizeToContent() } else { v.needsDisplay = true }
         }
         GitHubSync.shared.load()
         if advancedEnabled() {
-            UsageLogs.shared.scanAsync { [weak self] in
-                self?.panelCtrl.view.needsDisplay = true
+            UsageLogs.shared.scanAsync { [weak self] changed in
+                if changed { self?.panelCtrl.view.needsDisplay = true }
                 GitHubSync.shared.syncNow()
             }
         }
@@ -4178,8 +4422,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logsTimer?.invalidate()
         let t = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
             guard advancedEnabled() else { return }
-            UsageLogs.shared.scanAsync {
-                self?.panelCtrl.view.needsDisplay = true
+            UsageLogs.shared.scanAsync { changed in
+                if changed { self?.panelCtrl.view.needsDisplay = true }
                 GitHubSync.shared.syncNow()
             }
         }
@@ -4598,9 +4842,23 @@ if CommandLine.arguments.contains("--settings-preview") {
 }
 
 
+/// Selftest stand-ins: no network, no Keychain. Everything the sync touches is injected.
+struct OfflineSyncKeychain: SyncKeychain {
+    func read() -> SyncKeychainRead { .missing }
+    func write(_ token: String) -> SyncKeychainStatus { .failure(-1) }
+    func delete() -> SyncKeychainStatus { .failure(-1) }
+}
+let OFFLINE_SYNC_HTTP: SyncHTTP = { _, _, _, _, _ in (0, nil, "selftest: network disabled") }
+
 if CommandLine.arguments.contains("--sync-selftest") {
-    UsageLogs.shared.load(); _ = UsageLogs.shared.scanSync()
-    let mine = GitHubSync.shared.selfTestFile()
+    // Read-only and offline (lesson 006): no GitHub, no Keychain item, nothing read or written
+    // under ~/.claude-limits-monitor or in the app's defaults — the index is rebuilt in memory
+    // from the CLIs' transcripts and never saved.
+    let selfTestDefaults = UserDefaults(suiteName: "com.arrivarus.claudecodexlimits.selftest") ?? UserDefaults()
+    let sync = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: OfflineSyncKeychain(), defaults: selfTestDefaults,
+                          remotePath: NSTemporaryDirectory() + "ccl-selftest-remote.json", machineId: "selftest-self")
+    _ = UsageLogs.shared.scanSync(persist: false)
+    let mine = sync.selfTestFile()
     // Pretend the same data came from another machine: swap the id, keep everything else.
     guard var obj = (try? JSONSerialization.jsonObject(with: Data(mine.utf8))) as? [String: Any],
           var m = obj["machine"] as? [String: Any] else { print("FAIL: own file unparsable"); exit(1) }
@@ -4609,15 +4867,15 @@ if CommandLine.arguments.contains("--sync-selftest") {
     let stale = other.replacingOccurrences(of: "00000000-test", with: "11111111-old")
         .replacingOccurrences(of: "\"updated\":\"", with: "\"updated\":\"2020-01-01T00:00:00Z\",\"x\":\"")
     let cache = GitHubSync.merge(["machine-a.json": other, "machine-self.json": mine, "machine-old.json": stale, "machine-bad.json": "{"],
-                                 excluding: GitHubSync.shared.machineId)
+                                 excluding: sync.machineId)
     print("machines merged:", cache.machines.map { $0.name })
-    GitHubSync.shared.setRemoteForPreview(cache)
+    sync.setRemoteForPreview(cache)
     for p in ["claude", "codex"] {
         let local = dailyUsage(p, days: 7, index: UsageLogs.shared.snapshot()).reduce(0) { $0 + $1.turns }
-        let merged = dailyUsage(p, days: 7, index: mergedUsageIndex()).reduce(0) { $0 + $1.turns }
+        let merged = dailyUsage(p, days: 7, index: mergedUsageIndex(sync)).reduce(0) { $0 + $1.turns }
         print("\(p): turns 7d local=\(local) merged=\(merged) \(merged == 2 * local ? "OK (doubled)" : "MISMATCH")")
     }
-    print("file bytes:", mine.utf8.count, "machine id:", GitHubSync.shared.machineId.prefix(8) + "…")
+    print("file bytes:", mine.utf8.count, "machine id:", sync.machineId.prefix(8) + "…")
     exit(0)
 }
 
