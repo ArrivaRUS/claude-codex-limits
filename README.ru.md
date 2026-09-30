@@ -106,7 +106,7 @@ Gatekeeper** — приложение, скачанное через `curl`, н�
 
 ### 2. Из .dmg
 
-1. Скачайте `ClaudeCodexLimits-3.1.2.dmg` со страницы [Releases](../../releases).
+1. Скачайте `ClaudeCodexLimits-3.1.4.dmg` со страницы [Releases](../../releases).
 2. Откройте и перетащите **Claude Codex Limits** в **Applications**.
 3. Запустите. Сборка не нотаризована, поэтому на **macOS Sequoia / Tahoe** первый
    запуск блокируется. Сделайте один раз:
@@ -158,7 +158,7 @@ cd claude-codex-limits
 ## Сборка релиза
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.4.dmg
 ```
 
 ## Структура проекта

@@ -105,7 +105,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.1.2.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.1.4.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -158,7 +158,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.2.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.4.dmg
 ```
 
 ## Project layout
