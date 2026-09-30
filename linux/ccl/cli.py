@@ -61,53 +61,60 @@ def cmd_login(args):
         _say(common.tr("Уже выполнен вход в GitHub", "Already signed in to GitHub") + (": " + login if login else "")
              + common.tr(". Выйти: ccl-sync logout", ". Sign out: ccl-sync logout"))
         return 0
+    attempt = sync.begin_login()
+    cancelled = lambda: not sync.is_current(attempt)
     try:
-        dev = sync.device_start()
-    except sync.LoginError as e:
-        _say(str(e))
-        return 1
-    url = dev["verification_uri"]
-    _say(common.tr("Откройте в браузере:  ", "Open in a browser:  ") + url)
-    _say(common.tr("и введите код:        ", "and enter the code:  ") + dev["user_code"])
-    _say(common.tr("(доступ нужен только к gist — секретный gist для синхронизации расхода)",
-                   "(only gist access is requested — one secret gist for the usage sync)"))
-    if not args.no_browser and os.environ.get("DISPLAY"):
         try:
-            subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            pass
-    _say(common.tr("Жду подтверждения…", "Waiting for confirmation…"))
-    try:
-        token = sync.device_poll(dev)
-    except sync.LoginError as e:
-        _say(str(e))
-        return 1
+            dev = sync.device_start()
+        except sync.LoginError as e:
+            _say(str(e))
+            return 1
+        url = dev["verification_uri"]
+        _say(common.tr("Откройте в браузере:  ", "Open in a browser:  ") + url)
+        _say(common.tr("и введите код:        ", "and enter the code:  ") + dev["user_code"])
+        _say(common.tr("(доступ нужен только к gist — секретный gist для синхронизации расхода)",
+                       "(only gist access is requested — one secret gist for the usage sync)"))
+        if not args.no_browser and os.environ.get("DISPLAY"):
+            try:
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                pass
+        _say(common.tr("Жду подтверждения…", "Waiting for confirmation…"))
+        try:
+            token = sync.device_poll(dev, cancelled=cancelled)
+        except sync.LoginError as e:
+            _say(str(e))
+            return 1
+        try:
+            login = sync.login_finish(token, cancelled=cancelled, attempt=attempt)
+        except (sync.LoginError, OSError, ValueError) as e:
+            _say(common.tr("Не удалось сохранить вход: ", "Couldn't save the sign-in: ") + str(e))
+            return 1
+        backend = sync.sync_state().get("tokenBackend")
+        _say(common.tr("Готово. GitHub: ", "Done. GitHub: ") + (login or "?") + "  ("
+             + (common.tr("токен в хранилище секретов", "token in the Secret Service") if backend == "secret-service"
+                else common.tr("токен в файле ", "token in file ") + common.TOKEN_FILE_PATH) + ")")
+        return cmd_push(argparse.Namespace(force=True, auto=False, quiet=False))
     except KeyboardInterrupt:
+        sync.cancel_login(attempt)
         _say(common.tr("Отменено.", "Cancelled."))
         return 130
-    try:
-        login = sync.login_finish(token)
-    except (sync.LoginError, OSError, ValueError) as e:
-        _say(common.tr("Не удалось сохранить вход: ", "Couldn't save the sign-in: ") + str(e))
-        return 1
-    backend = sync.sync_state().get("tokenBackend")
-    _say(common.tr("Готово. GitHub: ", "Done. GitHub: ") + (login or "?") + "  ("
-         + (common.tr("токен в хранилище секретов", "token in the Secret Service") if backend == "secret-service"
-            else common.tr("токен в файле ", "token in file ") + common.TOKEN_FILE_PATH) + ")")
-    return cmd_push(argparse.Namespace(force=True, auto=False, quiet=False))
 
 
 def cmd_logout(_args):
     try:
         deleted = sync.logout()
     except sync.LoginError as e:
-        _say(str(e))
+        _say(sync._delete_pending_text() if sync.sign_out_incomplete() else str(e))
         return 1
-    if not deleted:
-        _say(sync.sync_state().get("lastError"))
+    if not deleted or sync.delete_pending():
+        _say(sync._delete_pending_text())
         return 1
     _say(common.tr("Вход в GitHub удалён с этой машины. Gist остался в GitHub.",
                    "GitHub sign-in removed from this machine. The gist stays on GitHub."))
+    _say(common.tr(
+        "Вход удаляется только на этом компьютере. Отозвать доступ приложения полностью — github.com/settings/applications",
+        "This signs out only this computer. To revoke the app's access entirely, visit github.com/settings/applications"))
     return 0
 
 
@@ -129,6 +136,9 @@ def cmd_push(args):
             _say(common.tr("Синхронизация выключена: нет входа в GitHub (ccl-sync login).",
                            "Sync is off: not signed in to GitHub (ccl-sync login)."))
         return 0
+    if res.skipped == "timeout":
+        _say(common.tr("Ошибка синхронизации: ", "Sync failed: ") + (res.error or vault.timeout_text()))
+        return 1
     if res.skipped == "unreachable":
         sys.stderr.write(common.tr("Хранилище секретов недоступно (нет сессии D-Bus) — токен GitHub не прочитать.\n",
                                    "The Secret Service is unreachable (no D-Bus session) — can't read the GitHub token.\n"))
@@ -189,11 +199,24 @@ def _timer_status():
 
 def cmd_status(_args):
     st = sync.sync_state()
-    token, backend = vault.read() if st.get("login") and not st.get("revoked") else (None, None)
+    token, backend, gist = None, None, None
+    with common.file_lock("sync", blocking=False) as held:
+        if held:
+            st.reload()
+            if st.get("login") and not st.get("revoked"):
+                token, backend = vault.read()
+                if token and st.get("gistId"):
+                    g = sync.gh("/gists/" + st.get("gistId"), token)
+                    if g.status == 200:
+                        gist = g.json()
+    pending = sync.sign_out_incomplete(st)
     _say("Claude Codex Limits (linux %s)" % APP_VERSION)
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
         common.machine_name(), common.os_name(), common.machine_id()))
-    if st.get("revoked"):
+    if pending:
+        _say(sync._delete_pending_text())
+        _say(common.tr("Повторить выход: ccl-sync logout", "Retry sign-out: ccl-sync logout"))
+    elif st.get("revoked"):
         _say("GitHub: " + common.tr("вход отозван — войдите заново (ccl-sync login)",
                                     "sign-in revoked — sign in again (ccl-sync login)"))
     elif token:
@@ -202,8 +225,12 @@ def cmd_status(_args):
     elif backend == "locked":
         _say("GitHub: " + common.tr("токен в заблокированном хранилище секретов — разблокируйте KWallet",
                                     "token is in a locked Secret Service — unlock KWallet"))
-    elif backend == "timeout":
-        _say("GitHub: " + vault.timeout_text())
+    elif backend in ("timeout", "unreachable"):
+        _say("GitHub: " + (vault.timeout_text() if backend == "timeout" else common.tr(
+            "Хранилище секретов недоступно", "The Secret Service is unreachable"))
+             + common.tr(" — синхронизация повторит попытку сама", " — sync will try again by itself"))
+    elif not held and st.get("login"):
+        _say("GitHub: " + st.get("login"))
     else:
         _say("GitHub: " + common.tr("вход не выполнен (ccl-sync login)", "not signed in (ccl-sync login)"))
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
@@ -217,27 +244,31 @@ def cmd_status(_args):
         at = st.get("lastErrorAt")
         _say(common.tr("Последняя ошибка", "Last error") + (" (%s)" % _fmt_time(at) if at else "") + ": "
              + str(st.get("lastError")))
-    warn = sync.warning(st, moment=_fmt_time)
+    warn = None if pending else sync.warning(st, moment=_fmt_time, require_attempt=False)
     if warn:
         _say("! " + warn)
 
+    if not held:
+        _say(common.tr("Синхронизация идёт в другом процессе — показан кэш",
+                       "Sync is running in another process — showing cached machines"))
     machines = None
-    if token and gid and not st.get("revoked"):
-        g = sync.gh("/gists/" + gid, token)
-        if g.status == 200:
-            files = (g.json() or {}).get("files") or {}
-            contents = {n: f.get("content") or "" for n, f in files.items()
-                        if n.startswith("machine-") and n.endswith(".json")}
-            machines = []
-            import json
-            for name, text in sorted(contents.items()):
-                try:
-                    o = json.loads(text)
-                    m = o.get("machine") or {}
-                    machines.append((m.get("name") or "?", m.get("os") or "", m.get("app") or "",
-                                     common.parse_iso(o.get("updated")), m.get("id") == common.machine_id()))
-                except ValueError:
-                    machines.append((name, "?", "", None, False))
+    if isinstance(gist, dict) and isinstance(gist.get("files"), dict):
+        machines = []
+        import json
+        for name, f in sorted(gist["files"].items()):
+            if not (name.startswith("machine-") and name.endswith(".json")) or not isinstance(f, dict):
+                continue
+            try:
+                obj = json.loads(f.get("content") or "")
+            except (ValueError, TypeError, RecursionError):
+                continue
+            if not isinstance(obj, dict) or not isinstance(obj.get("machine"), dict):
+                continue
+            m = obj["machine"]
+            if any(not isinstance(m.get(k, ""), str) for k in ("name", "os", "app")):
+                continue
+            machines.append((m.get("name") or "?", m.get("os", ""), m.get("app", ""),
+                             common.parse_iso(obj.get("updated")), m.get("id") == common.machine_id()))
     if machines is None:
         machines = [(m["name"], m.get("os", ""), m.get("app", ""), m.get("updated"), False)
                     for m in sync.load_remote().get("machines", [])]

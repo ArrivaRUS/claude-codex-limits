@@ -51,7 +51,7 @@ class TestRevokeConfirmation(env.SyncEnv):
         st = self.st()
         self.assertIs(st.get("revoked"), True)
         self.assertIsNone(st.get("gistId"))
-        self.assertEqual(self.ss.deleted, [self.active[0]])
+        self.assertEqual(self.ss.deleted, ["legacy", self.active[0]])
         self.assertEqual(flag_at_delete, [True], "revoked flag is persisted before the delete")
         self.assertNotIn(self.active[0], self.ss.items)
         self.assertEqual(self.ss.items["orphan-gen"], other)
@@ -138,7 +138,7 @@ class TestRevokeConfirmation(env.SyncEnv):
         self.assertEqual(self.gh.urls(), [("GET", "/gists/g1"), ("GET", "/user")], "no second /user")
         st = self.st()
         self.assertFalse(st.get("revoked"))
-        self.assertEqual(self.ss.deleted, [])
+        self.assertEqual(self.ss.deleted, ["legacy", self.active[0]], "publication retires only the old generation")
         self.assertEqual(vault.read(), (new, "secret-service"))
         self.assertIn("изменился", st.get("lastError"))
 
@@ -152,7 +152,7 @@ class TestRevokeConfirmation(env.SyncEnv):
         self.cycle()
         st = self.st()
         self.assertFalse(st.get("revoked"))
-        self.assertEqual(self.ss.deleted, [])
+        self.assertEqual(self.ss.deleted, ["legacy", self.active[0]], "publication retires only the old generation")
         self.assertEqual(vault.read(), (new, "secret-service"))
 
 

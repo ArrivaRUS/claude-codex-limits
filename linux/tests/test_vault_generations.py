@@ -10,6 +10,7 @@ import contextlib
 import io
 import os
 import time
+import threading
 import unittest
 
 from ccl import cli, common, sync, vault
@@ -30,22 +31,25 @@ class TestZombies(env.SyncEnv):
         self.assertEqual(login, "me")
         st = self.st()
         self.assertEqual(st.get("tokenBackend"), "file", "timed-out keyring write falls back to the file")
-        file_generation = st.get("tokenGeneration")
         self.assertTrue(sync.logout())
         self.assertFalse(os.path.exists(common.TOKEN_FILE_PATH))
-        # the keyring finally answers: the late CreateItem lands as an orphan generation
+        # A late CreateItem cleans itself on the same connection, even after sign-out.
+        cleaned = threading.Event()
+        original_delete = self.ss.delete
+        def delete_and_signal(generation):
+            result = original_delete(generation)
+            cleaned.set()
+            return result
+        self.ss.delete = delete_and_signal
         self.ss.hang_set.set()
-        self.assertTrue(self.ss.zombie_done.wait(5))
-        self.assertEqual(list(self.ss.items.values()), [self.token])
-        orphan = next(iter(self.ss.items))
-        self.assertNotEqual(orphan, file_generation)
-        st = self.st()
-        self.assertNotEqual(st.get("tokenGeneration"), orphan)
+        self.assertTrue(cleaned.wait(5))
+        self.assertEqual(self.ss.items, {})
+        self.assertFalse(os.path.exists(common.TOKEN_FILE_PATH))
         self.assertEqual(vault.read(), (None, None))
         self.gh.calls.clear()
         res = self.cycle()
         self.assertEqual(res.skipped, "signed-out")
-        self.assertEqual(self.gh.calls, [], "the orphan token is never sent anywhere")
+        self.assertEqual(self.gh.calls, [], "the deleted token is never sent anywhere")
         out = io.StringIO()
         cli._timer_status, saved = (lambda: "stub"), cli._timer_status
         try:
@@ -70,7 +74,8 @@ class TestZombies(env.SyncEnv):
         # the late DeleteItem of the old sign-out finally runs
         self.ss._events[0].set()
         self.assertTrue(self.ss.zombie_done.wait(5))
-        self.assertEqual(self.ss.deleted, [old_generation])
+        self.assertEqual(self.ss.deleted, ["legacy", old_generation, old_generation],
+                         "publication retries pending deletion; the late delete is still addressed")
         self.assertEqual(vault.read(), (new, "secret-service"))
         self.st().update(gistId=env.GIST, discoveredAt=time.time())
         self.mark_pushed()
@@ -180,13 +185,13 @@ class TestHonestLogout(env.SyncEnv):
         with contextlib.redirect_stdout(out):
             rc = cli.main(["logout"])
         self.assertEqual(rc, 1)
-        self.assertIn("KWallet", out.getvalue())
+        self.assertIn("Выход не завершён", out.getvalue())
         st = self.st()
         self.assertIsNone(st.get("login"))
         self.assertIs(st.get("revoked"), True)
         self.assertEqual(st.get("tokenGeneration"), "")
         self.assertEqual(st.get("tokenDeletePending"), [[generation, backend]])
-        self.assertIn("KWallet", st.get("lastError"))
+        self.assertIn("Выход не завершён", st.get("lastError"))
         self.assertIn(generation, self.ss.items, "token still stored — and the user was told so")
         self.assertEqual(vault.read(), (None, None), "the retained token is never used")
         # keyring unlocked: a second sign-out finishes the job

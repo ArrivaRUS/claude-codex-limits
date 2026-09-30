@@ -53,7 +53,7 @@ def read_json(path, default=None):
     try:
         with open(path, "rb") as f:
             return json.loads(f.read().decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return default
 
 
@@ -362,7 +362,7 @@ class Resp(object):
     def json(self):
         try:
             return json.loads(self.data.decode("utf-8")) if self.data else None
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
 
 

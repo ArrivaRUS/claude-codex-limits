@@ -87,8 +87,9 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 class Bridge(QObject):
     limits_done = pyqtSignal(object, object)
     logs_done = pyqtSignal(object, object)
-    login_code = pyqtSignal(object)
-    login_done = pyqtSignal(object, object)
+    login_code = pyqtSignal(object, object)
+    login_done = pyqtSignal(object, object, object)
+    logout_done = pyqtSignal(bool, object)
     update_checked = pyqtSignal(object, object)
     update_done = pyqtSignal(object, object)
 
@@ -501,6 +502,18 @@ class SettingsPage(QWidget):
         _clear(lay)
         a = self.app
         st = sync.sync_state()
+        pending = sync.sign_out_incomplete(st)
+        if pending or a.logout_busy or a.logout_error:
+            if pending:
+                lay.addWidget(_label(sync._delete_pending_text(), wrap=True))
+            if a.logout_error and a.logout_error != (sync._delete_pending_text() if pending else None):
+                lay.addWidget(_label(a.logout_error, "note", True))
+            b = self._btn(tr("Выйти", "Sign out"), a.logout)
+            b.setEnabled(not a.logout_busy)
+            lay.addWidget(b)
+            lay.addWidget(_label(self._logout_note(), "note", True))
+            if a.logout_busy or a.logout_error:
+                return
         if a.login_state == "awaiting":
             lay.addWidget(_label(tr("Откройте github.com/login/device и введите код:",
                                     "Open github.com/login/device and enter the code:"), wrap=True))
@@ -522,9 +535,10 @@ class SettingsPage(QWidget):
             lay.addWidget(w)
             lay.addWidget(_label(tr("Жду подтверждения в GitHub…", "Waiting for GitHub…"), "note"))
             return
-        token, backend = vault.read() if st.get("login") and not st.get("revoked") else (None, None)
+        token, backend = vault.read() if st.get("login") and not st.get("revoked") and not pending else (None, None)
         if token:
             lay.addWidget(_row("GitHub: " + (st.get("login") or "?"), self._btn(tr("Выйти", "Sign out"), a.logout)))
+            lay.addWidget(_label(self._logout_note(), "note", True))
             for mch in sync.machine_list():
                 upd = mch.get("updated")
                 when = (tr("обновлён ", "updated ") + fmt.fmt_reset(upd)) if upd else tr("ещё не отправлял", "not sent yet")
@@ -547,9 +561,11 @@ class SettingsPage(QWidget):
                                                          a.refresh_logs(force_push=True)))
             lay.addWidget(_row(tr("Имя этой машины", "This machine's name"), name))
             return
-        if backend == "timeout":
-            lay.addWidget(_label(vault.timeout_text() + tr(" — синхронизация повторит попытку сама.",
-                                                           " — sync will try again by itself."), wrap=True))
+        if backend in ("timeout", "unreachable"):
+            text = vault.timeout_text() if backend == "timeout" else tr(
+                "Хранилище секретов недоступно", "The Secret Service is unreachable")
+            lay.addWidget(_label(text + tr(" — синхронизация повторит попытку сама",
+                                          " — sync will try again by itself"), wrap=True))
             return
         if backend == "locked":
             lay.addWidget(_label(tr("Токен GitHub лежит в хранилище секретов, но оно заблокировано — разблокируйте KWallet, "
@@ -557,15 +573,13 @@ class SettingsPage(QWidget):
                                     "The GitHub token is in the Secret Service, which is locked — unlock KWallet and sync "
                                     "resumes by itself."), wrap=True))
             return
-        if st.get("revoked"):
+        if st.get("revoked") and not pending:
             lay.addWidget(_label(tr("Вход в GitHub отозван — войдите заново.", "GitHub sign-in was revoked — sign in again."), wrap=True))
             upl, ok = st.get("pushedAt"), sync.last_ok_at(st)
             lay.addWidget(_label(tr("Последняя отправка: ", "Last upload: ") + (fmt.fmt_moment(upl) if upl else "—")
                                  + tr(" · чтение: ", " · read: ") + (fmt.fmt_moment(ok) if ok else "—"), "note", True))
             if st.get("lastError"):
                 lay.addWidget(_label(str(st.get("lastError")), "note", True))
-            if st.get("tokenDeletePending"):
-                lay.addWidget(self._btn(tr("Выйти", "Sign out"), a.logout))
         lay.addWidget(_label(tr("Расход по дням и моделям (столбики, календарь, деньги) есть только в логах той машины, "
                                 "где работал CLI. Синхронизация складывает его с Mac и другими ПК через ваш секретный gist.",
                                 "Per-day usage (bars, calendar, money) lives only in the logs of the machine where the CLI ran. "
@@ -575,6 +589,12 @@ class SettingsPage(QWidget):
         b = self._btn(tr("Войти через GitHub", "Sign in with GitHub"), a.start_login)
         b.setProperty("role", "accent")
         lay.addWidget(b)
+
+    @staticmethod
+    def _logout_note():
+        return tr(
+            "Вход удаляется только на этом компьютере. Отозвать доступ приложения полностью — github.com/settings/applications",
+            "This signs out only this computer. To revoke the app's access entirely, visit github.com/settings/applications")
 
     @staticmethod
     def _btn(text, cb):
@@ -761,6 +781,7 @@ class TrayApp(QObject):
         self.bridge.logs_done.connect(self.on_logs)
         self.bridge.login_code.connect(self.on_login_code)
         self.bridge.login_done.connect(self.on_login_done)
+        self.bridge.logout_done.connect(self.on_logout_done)
         self.bridge.update_checked.connect(self.on_update_checked)
         self.bridge.update_done.connect(self.on_update_done)
         self.update_state = None
@@ -774,7 +795,9 @@ class TrayApp(QObject):
         self.login_code = None
         self.login_uri = None
         self.login_error = None
-        self.login_cancel = False
+        self.login_attempt = None
+        self.logout_busy = False
+        self.logout_error = None
         self.sound_baseline = False
 
         self.win = PanelWindow(self)
@@ -1045,29 +1068,38 @@ class TrayApp(QObject):
 
     # -- GitHub sign-in (Device Flow) --
     def start_login(self):
-        self.login_state, self.login_code, self.login_error, self.login_cancel = "awaiting", None, None, False
+        if self.logout_busy:
+            return
+        attempt = self.login_attempt = sync.begin_login()
+        self.login_state, self.login_code, self.login_error = "awaiting", None, None
+        self.logout_error = None
         self.win.settings_page.render_sync()
 
         def work():
+            cancelled = lambda: not sync.is_current(attempt)
             try:
                 dev = sync.device_start()
-                self.bridge.login_code.emit(dev)
-                token = sync.device_poll(dev, cancelled=lambda: self.login_cancel)
-                login = sync.login_finish(token, cancelled=lambda: self.login_cancel)
-                self.bridge.login_done.emit(login, None)
+                self.bridge.login_code.emit(attempt, dev)
+                token = sync.device_poll(dev, cancelled=cancelled)
+                login = sync.login_finish(token, cancelled=cancelled, attempt=attempt)
+                self.bridge.login_done.emit(attempt, login, None)
             except sync.LoginError as e:
-                self.bridge.login_done.emit(None, None if str(e) == "cancelled" else str(e))
+                self.bridge.login_done.emit(attempt, None, None if str(e) == "cancelled" else str(e))
             except Exception as e:
-                self.bridge.login_done.emit(None, str(e))
+                self.bridge.login_done.emit(attempt, None, str(e))
         threading.Thread(target=work, daemon=True).start()
 
-    def on_login_code(self, dev):
+    def on_login_code(self, attempt, dev):
+        if attempt != self.login_attempt or not sync.is_current(attempt):
+            return
         self.login_code = dev.get("user_code")
         self.login_uri = dev.get("verification_uri")
         QDesktopServices.openUrl(QUrl(self.login_uri))
         self.win.settings_page.render_sync()
 
-    def on_login_done(self, login, error):
+    def on_login_done(self, attempt, login, error):
+        if attempt != self.login_attempt or not sync.is_current(attempt):
+            return
         self.login_state = None
         self.login_error = error
         if self.win.isVisible():
@@ -1076,12 +1108,32 @@ class TrayApp(QObject):
             self.refresh_logs(force_push=True)
 
     def cancel_login(self):
-        self.login_cancel = True
+        sync.cancel_login(self.login_attempt)
         self.login_state = None
         self.win.settings_page.render_sync()
 
     def logout(self):
-        sync.logout()
+        if self.logout_busy:
+            return
+        sync.cancel_login(self.login_attempt)
+        self.login_state = None
+        self.logout_busy, self.logout_error = True, None
+        self.win.settings_page.render_sync()
+
+        def work():
+            try:
+                ok = sync.logout()
+                error = None if ok else sync._delete_pending_text()
+            except sync.LoginError as e:
+                ok, error = False, str(e)
+            except Exception as e:
+                ok, error = False, str(e)
+            self.bridge.logout_done.emit(ok, error)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_logout_done(self, ok, error):
+        self.logout_busy = False
+        self.logout_error = error if not ok else None
         self.load_local()
         self.win.settings_page.render_sync()
         self.win.page0_changed()

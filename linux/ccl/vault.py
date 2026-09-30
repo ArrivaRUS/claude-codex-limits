@@ -133,25 +133,43 @@ def _timed(fn):
     """Run `fn` in a daemon thread and wait at most TIMEOUT. Raises Timeout (the thread is
     left behind — a hung D-Bus call can't be cancelled) or whatever `fn` raised."""
     box = {}
+    abandoned = threading.Event()
+    done = threading.Event()
+    guard = threading.Lock()
 
     def run():
         _worker.buses = []
+        _worker.abandoned = abandoned
+        _worker.cleanup = None
         try:
             box["v"] = fn()
         except BaseException as e:      # handed to the caller below
             box["e"] = e
         finally:
+            # Completion and abandonment must be ordered even at the deadline boundary.
+            with guard:
+                cleanup = _worker.cleanup if abandoned.is_set() else None
+                done.set()
+            if cleanup is not None:
+                try:
+                    cleanup()
+                except Exception:
+                    pass                 # the reference remains eligible for a retry
             for bus in _worker.buses:
                 try:
                     bus.close()
                 except Exception:
                     pass
             del _worker.buses
+            del _worker.abandoned
+            del _worker.cleanup
     t = threading.Thread(target=run, name="ccl-vault", daemon=True)
     t.start()
-    t.join(TIMEOUT)
-    if t.is_alive():
-        raise Timeout()
+    if not done.wait(TIMEOUT):
+        with guard:
+            if not done.is_set():
+                abandoned.set()
+                raise Timeout()
     if "e" in box:
         raise box["e"]
     return box.get("v")
@@ -168,9 +186,15 @@ def _ss_read(generation):
     return None, ss.has_locked(generation)
 
 
-def _file_get(generation="legacy"):
+def _staged_path(generation):
+    # Encode the reference so a generation read from state can never introduce a path.
+    return common.TOKEN_FILE_PATH + ".pending-" + generation.encode("utf-8").hex()
+
+
+def _file_get(generation="legacy", staged=False):
     try:
-        with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
+        with open(_staged_path(generation) if staged else common.TOKEN_FILE_PATH,
+                  "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
         stored_generation = lines[1] if len(lines) > 1 else "legacy"
         return (lines[0].strip() or None) if lines and stored_generation == generation else None
@@ -180,11 +204,17 @@ def _file_get(generation="legacy"):
 
 def _file_set(token, generation):
     common.ensure_dirs()
-    common.write_atomic(common.TOKEN_FILE_PATH, token + "\n" + generation + "\n", 0o600)
+    common.write_atomic(_staged_path(generation), token + "\n" + generation + "\n", 0o600)
 
 
 def _file_delete(generation):
     # Mutating callers hold the sync lock, including this compare + unlink.
+    try:
+        os.unlink(_staged_path(generation))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
     try:
         with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()
@@ -198,7 +228,7 @@ def _file_delete(generation):
         return False
 
 
-def _active(st):
+def active(st):
     # An explicit empty generation is a tombstone, never an invitation to migrate again.
     generation = st.get("tokenGeneration") if st.has("tokenGeneration") else "legacy"
     return generation, st.get("tokenBackend")
@@ -235,10 +265,10 @@ def read():
     Installations without tokenGeneration still read their existing legacy token.
     """
     st = common.Store(common.SYNC_STATE_PATH)
-    active = _active(st)
-    result = _read(*active)
+    ref = active(st)
+    result = _read(*ref)
     st.reload()
-    return result if _active(st) == active else (None, None)
+    return result if active(st) == ref else (None, None)
 
 
 def reachable():
@@ -248,7 +278,7 @@ def reachable():
         return False
 
 
-def _delete(generation, backend):
+def _delete_stored(generation, backend):
     """Delete a captured reference, never whatever happens to be active later."""
     if not generation:
         return True
@@ -267,25 +297,32 @@ def _delete(generation, backend):
     return ok
 
 
-def delete_if(token):
-    """Compare and delete only the captured generation. Call with the sync lock held.
-    Returns deleted/missing/other/timeout; unreadable copies are left alone.
-    """
-    generation, backend = _active(common.Store(common.SYNC_STATE_PATH))
-    cur, found_backend = _read(generation, backend)
-    if found_backend in ("timeout", "locked", "unreachable"):
-        return "timeout"
-    if cur is None:
-        return "missing"
-    if cur != token:
-        return "other"
-    return "deleted" if _delete(generation, found_backend) else "timeout"
+def _pending(st, *refs):
+    pending = []
+    for ref in list(st.get("tokenDeletePending") or []) + list(refs):
+        ref = list(ref)
+        if ref[0] and ref not in pending:
+            pending.append(ref)
+    return pending
 
 
-def write(token):
-    """Store a new generation, then publish it. Caller must hold the sync lock.
-    A timed-out D-Bus write can only leave an orphan, never replace a later generation.
-    """
+def delete_ref(ref_or_generation, backend=None):
+    """Delete only this reference; remember failures. Caller must hold the sync lock."""
+    ref = list(ref_or_generation) if isinstance(ref_or_generation, (tuple, list)) else [ref_or_generation, backend]
+    ok = _delete_stored(*ref)
+    st = common.Store(common.SYNC_STATE_PATH)
+    pending = _pending(st)
+    if ok:
+        pending = [p for p in pending if p != ref]
+    else:
+        pending = _pending(st, ref)
+    if pending != (st.get("tokenDeletePending") or []):
+        st.update(tokenDeletePending=pending or None)
+    return ok
+
+
+def store(token):
+    """Store and verify a new, unpublished reference. Caller must hold the sync lock."""
     if not token or not all(c.isalnum() or c in "_-" for c in token):
         raise ValueError("unexpected token format")
     generation = secrets.token_hex(8)
@@ -293,22 +330,61 @@ def write(token):
     def ss_write(generation=generation):
         ss = _ss()
         if ss is None:
+            return None                   # no CreateItem was attempted
+        _worker.cleanup = lambda: ss.delete(generation)
+        if _worker.abandoned.is_set():
             return False
         ss.set(token, generation)
+        if _worker.abandoned.is_set():
+            ss.delete(generation)          # same connection as the late CreateItem
+            _worker.cleanup = None
+            return False
         return ss.get(generation) == token
     backend = "file"
+    ss_result = False
     try:
-        if _timed(ss_write):
+        ss_result = _timed(ss_write)
+        if ss_result:
             backend = "secret-service"
     except Exception:                   # incl. Timeout → a distinct file generation
         pass
     if backend == "file":
+        if ss_result is not None:
+            st = common.Store(common.SYNC_STATE_PATH)
+            st.update(tokenDeletePending=_pending(st, [generation, "secret-service"]))
         generation = secrets.token_hex(8)
         _file_set(token, generation)
-        if _file_get(generation) != token:
+        if _file_get(generation, staged=True) != token:
+            delete_ref(generation, "file")
             raise OSError("could not save the token")
-    common.Store(common.SYNC_STATE_PATH).update(tokenGeneration=generation, tokenBackend=backend)
+    return generation, backend
+
+
+def publish(ref, cleanup=True):
+    """Publish under the sync lock; optionally return old references for deferred retirement."""
+    generation, backend = ref
+    st = common.Store(common.SYNC_STATE_PATH)
+    prev = active(st)
+    if backend == "file":
+        os.replace(_staged_path(generation), common.TOKEN_FILE_PATH)
+    pending = _pending(st, prev)
+    pending = [p for p in pending if p != list(ref)]
+    st.update(tokenGeneration=generation, tokenBackend=backend, tokenDeletePending=pending or None)
+    if not cleanup:
+        return pending
+    retire(pending)
     return backend
+
+
+def retire(refs):
+    """Retire captured copies after publication. Caller must still hold the sync lock."""
+    for ref in refs:
+        delete_ref(ref)
+
+
+def write(token):
+    """Store, verify and publish a new token. Caller must hold the sync lock."""
+    return publish(store(token))
 
 
 def delete():
@@ -316,12 +392,8 @@ def delete():
     Caller must hold the sync lock. No delayed operation can address a newer generation.
     """
     st = common.Store(common.SYNC_STATE_PATH)
-    generation, backend = _active(st)
-    pending = list(st.get("tokenDeletePending") or [])
-    ref = [generation, backend]
-    if generation and ref not in pending:
-        pending.append(ref)
+    pending = _pending(st, active(st))
     st.update(tokenGeneration="", tokenBackend=None, tokenDeletePending=pending)
-    failed = [ref for ref in pending if not _delete(*ref)]
-    st.update(tokenDeletePending=failed or None)
-    return not failed
+    for ref in pending:
+        delete_ref(ref)
+    return not common.Store(common.SYNC_STATE_PATH).get("tokenDeletePending")

@@ -183,7 +183,7 @@ class SyncEnv(unittest.TestCase):
         self._saved = [(vault, "_ss", vault._ss), (vault, "TIMEOUT", vault.TIMEOUT),
                        (sync, "transport", sync.transport), (sync, "REVOKE_RECHECK_DELAY", sync.REVOKE_RECHECK_DELAY),
                        (sync, "_sleep", sync._sleep), (sync, "LOGIN_LOCK_TIMEOUT", sync.LOGIN_LOCK_TIMEOUT),
-                       (sync, "_first_attempt_done", sync._first_attempt_done)]
+                       (sync, "_first_attempt_at", sync._first_attempt_at)]
         self.ss = FakeSecretService()
         vault._ss = self.ss.factory
         vault.TIMEOUT = self.TIMEOUT
@@ -193,7 +193,7 @@ class SyncEnv(unittest.TestCase):
         self.sleeps = []
         sync._sleep = self.sleeps.append
         sync.LOGIN_LOCK_TIMEOUT = 0.3
-        sync._first_attempt_done = False
+        sync._first_attempt_at = None
         self.token = make_token()
 
     def tearDown(self):
@@ -217,7 +217,7 @@ class SyncEnv(unittest.TestCase):
             backend = vault.write(token or self.token)
         self.st().update(login="me", revoked=False, gistId=gist, discoveredAt=time.time())
         self.assertEqual(backend, "secret-service")
-        return vault._active(self.st())
+        return vault.active(self.st())
 
     def empty_hash(self):
         return sync.snapshot_hash(usage.snapshot_days({"days": {}}))

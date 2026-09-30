@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 import urllib.parse
 
@@ -27,7 +28,10 @@ API = "https://api.github.com"
 LOGIN_LOCK_TIMEOUT = 60.0   # test seam: deadline for sign-in/out serialization
 REVOKE_RECHECK_DELAY = 4.0
 _sleep = time.sleep
-_first_attempt_done = False
+_first_attempt_at = None
+_login_lock = threading.RLock()
+_login_counter = 0
+_login_current = None
 
 
 def sync_state():
@@ -94,6 +98,27 @@ class LoginError(Exception):
     pass
 
 
+def begin_login():
+    """Start a process-local attempt, superseding any earlier sign-in."""
+    global _login_counter, _login_current
+    with _login_lock:
+        _login_counter += 1
+        _login_current = _login_counter
+        return _login_current
+
+
+def cancel_login(attempt):
+    global _login_current
+    with _login_lock:
+        if _login_current == attempt:
+            _login_current = None
+
+
+def is_current(attempt):
+    with _login_lock:
+        return attempt is not None and attempt == _login_current
+
+
 def device_start():
     """Step 1: ask GitHub for a device code. Returns the response dict (user_code, …)."""
     j = _form("https://github.com/login/device/code", {"client_id": GITHUB_CLIENT_ID, "scope": "gist"})
@@ -135,7 +160,7 @@ def device_poll(dev, cancelled=lambda: False, sleep=time.sleep):
     raise LoginError(common.tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again."))
 
 
-def login_finish(token, cancelled=lambda: False):
+def login_finish(token, cancelled=lambda: False, attempt=None):
     """Step 4: verify identity before storing the token. Returns the GitHub login."""
     if cancelled():
         raise LoginError("cancelled")
@@ -152,10 +177,39 @@ def login_finish(token, cancelled=lambda: False):
             raise LoginError(common.tr("Синхронизация занята, повторите", "Sync is busy, try again"))
         if cancelled():
             raise LoginError("cancelled")
-        backend = vault.write(token)
-        # the only place a revoked sign-in is lifted: a token found in a store by chance isn't
-        sync_state().update(login=login, revoked=False, tokenBackend=backend, lastError=None, lastErrorAt=None)
+        ref = vault.store(token)
+        # Cancellation can happen while the keyring call is in flight. Serialize the
+        # final check and publication with begin/cancel, as well as other processes.
+        with _login_lock:
+            aborted = cancelled() or (attempt is not None and not is_current(attempt))
+            if not aborted:
+                retired = vault.publish(ref, cleanup=False)
+                # Only an explicit sign-in lifts revocation.
+                sync_state().update(login=login, revoked=False, lastError=None, lastErrorAt=None)
+        # Secret Service deletion may block; begin/cancel must remain responsive.
+        if aborted:
+            vault.delete_ref(ref)
+            raise LoginError("cancelled")
+        vault.retire(retired)
     return login
+
+
+def delete_pending():
+    """Whether stored references still need removal, including during a live sign-in."""
+    return bool(sync_state().get("tokenDeletePending"))
+
+
+def sign_out_incomplete(st=None) -> bool:
+    """Whether pending deletions belong to a missing or revoked sign-in."""
+    if st is None:
+        st = sync_state()
+    return bool(st.get("tokenDeletePending") and (not st.get("login") or st.get("revoked")))
+
+
+def _delete_pending_text():
+    return common.tr(
+        "Выход не завершён: хранилище не ответило, токен мог остаться — повторите выход",
+        "Sign-out isn't complete: the keyring didn't answer, the token may still be stored — sign out again")
 
 
 def logout():
@@ -164,11 +218,7 @@ def logout():
         if not held:
             raise LoginError(common.tr("Синхронизация занята, повторите", "Sync is busy, try again"))
         deleted = vault.delete()
-        error = None if deleted else common.tr(
-            "Хранилище не ответило, токен мог остаться — повторите выход после разблокировки KWallet "
-            "или удалите запись “Claude Codex Limits GitHub” в KWallet Manager",
-            "The keyring didn't answer, the token may still be stored — sign out again after unlocking KWallet, "
-            "or delete the “Claude Codex Limits GitHub” entry in KWallet Manager")
+        error = None if deleted else _delete_pending_text()
         sync_state().update(login=None, gistId=None, pushHash=None, pushedAt=None,
                             revoked=True if not deleted else None, backoffUntil=None, lastError=error,
                             lastErrorAt=time.time() if error else None, lastOkAt=None, lastAttemptAt=None,
@@ -214,9 +264,9 @@ def merge(contents, my_id, now=None):
     for name in sorted(contents):
         try:
             obj = json.loads(contents[name])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             continue
-        if not isinstance(obj, dict) or obj.get("schema") != SCHEMA:
+        if not isinstance(obj, dict) or type(obj.get("schema")) is not int or obj["schema"] != SCHEMA:
             continue
         m = obj.get("machine")
         if not isinstance(m, dict):
@@ -360,14 +410,18 @@ def _backoff_until(r):
 def _revoked(st, res, active):
     """Two /user 401s confirmed the captured sign-in; invalidate before deleting it."""
     st.reload()
-    if vault._active(st) != active:
+    if vault.active(st) != active:
         return _fail(st, res, common.tr("Вход в хранилище изменился; повторим синхронизацию",
                                         "The stored sign-in changed; sync will retry"))
     note = common.tr("Вход в GitHub отозван", "GitHub sign-in revoked")
+    pending = list(st.get("tokenDeletePending") or [])
+    if active[0] and list(active) not in pending:
+        pending.append(list(active))
     st.update(revoked=True, gistId=None, pushHash=None, discoveredAt=None,
-              lastError=note, lastErrorAt=time.time())
-    if not vault._delete(*active):
-        note += " · " + vault.timeout_text()
+              lastError=note, lastErrorAt=time.time(), tokenDeletePending=pending or None)
+    vault.delete_ref(active)
+    if sign_out_incomplete():
+        note = _delete_pending_text()
     return _fail(st, res, note)
 
 
@@ -382,7 +436,7 @@ def _handle(r, st, res, token, what, active):
         if me.status == 401:
             _sleep(REVOKE_RECHECK_DELAY)
             st.reload()
-            if vault._active(st) != active:
+            if vault.active(st) != active:
                 return _fail(st, res, common.tr("Вход в хранилище изменился; повторим синхронизацию",
                                                 "The stored sign-in changed; sync will retry"))
             me = gh("/user", token)
@@ -406,16 +460,12 @@ def sync_cycle(days, force=False, auto=False):
     """One pass: make sure the gist exists, write this machine's snapshot when it changed,
     read and merge everyone else's. `days` = this machine's local index days.
     `auto` (timer / tray) honours the 10-minute minimum between writes."""
-    global _first_attempt_done
     res = SyncResult()
-    try:
-        return _sync_cycle(days, force, auto, res)
-    finally:
-        if res.attempted:
-            _first_attempt_done = True
+    return _sync_cycle(days, force, auto, res)
 
 
 def _sync_cycle(days, force, auto, res):
+    global _first_attempt_at
     with common.file_lock("sync", blocking=False) as held:
         if not held:
             res.skipped = "busy"
@@ -432,16 +482,21 @@ def _sync_cycle(days, force, auto, res):
         if time.time() < float(st.get("backoffUntil") or 0):
             res.skipped = "backoff"
             return res
-        active = vault._active(st)
+        active = vault.active(st)
         res.attempted = True
+        attempted_at = time.time()
+        if _first_attempt_at is None:
+            _first_attempt_at = attempted_at
         signed_in = bool(st.get("login"))
         if signed_in:
-            st.update(lastAttemptAt=time.time())
+            st.update(lastAttemptAt=attempted_at)
         token, backend = vault.read()
         if not token:
-            if backend == "timeout":
+            if backend in ("timeout", "unreachable"):
+                res.skipped = backend
                 if signed_in:
-                    _fail(st, res, vault.timeout_text())
+                    _fail(st, res, vault.timeout_text() if backend == "timeout" else common.tr(
+                        "Хранилище секретов недоступно", "The Secret Service is unreachable"))
                 else:
                     res.skipped = "signed-out"
             elif backend == "locked":
@@ -568,7 +623,7 @@ def last_ok_at(st=None):
     return st.get("lastOkAt") or st.get("lastSync")
 
 
-def warning(st=None, now=None, moment=None):
+def warning(st=None, now=None, moment=None, require_attempt=True):
     """The orange line for the main screen, or None when sync is fine or off
     (docs/sync-protocol.md → Errors → Visibility). `moment` formats a time ("HH:MM")."""
     st = st or sync_state()
@@ -577,20 +632,20 @@ def warning(st=None, now=None, moment=None):
     if st.get("revoked"):
         return common.tr("Войдите в GitHub заново — суммы без других компьютеров",
                          "Sign in to GitHub again — totals exclude other computers")
-    if not st.get("login") or not _first_attempt_done:
+    if not st.get("login") or (require_attempt and _first_attempt_at is None):
         return None
     err = st.get("lastError")
     since = last_ok_at(st) or st.get("pushedAt")
     if not since:
         return (common.tr("Синхронизация не работает: ", "Sync isn't working: ") + str(err)) if err else None
-    # An error after the last success marks the start of the failed interval. The process
-    # must have completed an attempt too, so stale persisted state alone cannot warn.
+    # A post-threshold error confirms the stall; sleeping through the threshold doesn't.
     try:
         since, error_at = float(since), float(st.get("lastErrorAt") or 0)
     except (TypeError, ValueError, OverflowError):
         return None
     if (not math.isfinite(since) or not math.isfinite(error_at) or
-            now - since <= STALE_AFTER or not err or error_at <= since):
+            now - since <= STALE_AFTER or not err or error_at <= since + STALE_AFTER or
+            (require_attempt and error_at < _first_attempt_at)):
         return None
     try:
         since_text = moment(since)

@@ -98,11 +98,8 @@ class TestHostileMerge(unittest.TestCase):
         self.assertEqual([m["id"] for m in r["machines"]], ["good"])
         self.assertEqual(r["days"]["claude"][DAY][MODEL]["input"], 10)
 
-    @unittest.expectedFailure
     def test_schema_true_is_not_schema_1(self):
-        """FINDING (minor, parity): Linux accepts `"schema": true` because True == 1 in Python
-        (sync.py:219 `obj.get("schema") != SCHEMA`); macOS rejects it (syncCount rejects CFBoolean)
-        and the protocol says booleans are not numbers. Expected: the file is skipped."""
+        """Schema must be an integer; JSON booleans are not schema numbers."""
         r = sync.merge({"machine-sb.json": file_("sb", schema=True)}, "me")
         self.assertEqual(r["machines"], [])
 
