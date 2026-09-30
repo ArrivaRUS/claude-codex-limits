@@ -16,7 +16,10 @@ Test seams (replace before exercising sync/vault): `_ss` (Secret Service factory
 
 import os
 import secrets
+import signal
 import threading
+from contextlib import contextmanager
+from threading import current_thread, main_thread
 
 from . import common
 
@@ -153,6 +156,45 @@ def timeout_text():
                      "The Secret Service didn't answer in %g s" % TIMEOUT)
 
 
+@contextmanager
+def _sigint_deferred():
+    """Replay at most one SIGINT after restoring the previous Python handler.
+
+    Nested sections and non-main threads are no-ops, as are non-Python handlers
+    and interpreters where signal.signal is unavailable. If the body also raises,
+    a replayed KeyboardInterrupt wins; the body's exception stays in __context__.
+    """
+    if current_thread() is not main_thread():
+        yield
+        return
+    prev = signal.getsignal(signal.SIGINT)
+    if not callable(prev) or getattr(prev, "_ccl_sigint_deferred", False):
+        yield
+        return
+    received = False
+    interrupted_frame = None
+
+    def defer(signum, frame):
+        nonlocal received, interrupted_frame
+        interrupted_frame = frame
+        received = True
+
+    # The installed handler itself identifies the outer section, without a separate
+    # depth flag that could be left stale when installing/restoring a handler fails.
+    defer._ccl_sigint_deferred = True
+    try:
+        signal.signal(signal.SIGINT, defer)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, prev)
+        if received:
+            prev(signal.SIGINT, interrupted_frame)
+
+
 def _timed(fn):
     """Run `fn` in a daemon thread and wait at most TIMEOUT. Raises Timeout (the thread is
     left behind — a hung D-Bus call can't be cancelled) or whatever `fn` raised."""
@@ -191,16 +233,21 @@ def _timed(fn):
     try:
         t.start()
         completed = done.wait(TIMEOUT)
+        if not completed:
+            with guard:
+                if not done.is_set():
+                    abandoned.set()
+                    raise Timeout()
     except BaseException:
-        with guard:
-            if not done.is_set():
-                abandoned.set()
+        try:
+            with guard:
+                if not done.is_set():
+                    abandoned.set()
+        finally:
+            # Also suppress a not-yet-started write if acquiring guard itself raises
+            # (e.g. a second, directly raised KeyboardInterrupt, rather than SIGINT).
+            abandoned.set()
         raise
-    if not completed:
-        with guard:
-            if not done.is_set():
-                abandoned.set()
-                raise Timeout()
     if "e" in box:
         raise box["e"]
     return box.get("v")
@@ -378,17 +425,18 @@ def _pending(st, *refs):
 
 def delete_ref(ref_or_generation, backend=None):
     """Delete only this reference; remember failures. Caller must hold the sync lock."""
-    ref = list(ref_or_generation) if isinstance(ref_or_generation, (tuple, list)) else [ref_or_generation, backend]
-    ok = _delete_stored(*ref)
-    st = common.Store(common.SYNC_STATE_PATH)
-    pending = _pending(st)
-    if ok:
-        pending = [p for p in pending if p != ref]
-    else:
-        pending = _pending(st, ref)
-    if pending != (st.get("tokenDeletePending") or []):
-        st.update(tokenDeletePending=pending or None)
-    return ok
+    with _sigint_deferred():
+        ref = list(ref_or_generation) if isinstance(ref_or_generation, (tuple, list)) else [ref_or_generation, backend]
+        ok = _delete_stored(*ref)
+        st = common.Store(common.SYNC_STATE_PATH)
+        pending = _pending(st)
+        if ok:
+            pending = [p for p in pending if p != ref]
+        else:
+            pending = _pending(st, ref)
+        if pending != (st.get("tokenDeletePending") or []):
+            st.update(tokenDeletePending=pending or None)
+        return ok
 
 
 def store(token):
@@ -399,59 +447,61 @@ def store(token):
     ss_write_started = threading.Event()
     st = common.Store(common.SYNC_STATE_PATH)
     ss_ref = [generation, "secret-service"]
-    # Persist intent before a worker can create a copy, including one that outlives us.
-    st.update(tokenDeletePending=_pending(st, ss_ref))
+    with _sigint_deferred():
+        # Persist intent before a worker can create a copy, including one that outlives us.
+        st.update(tokenDeletePending=_pending(st, ss_ref))
 
-    def ss_write(generation=generation):
-        ss = _ss()
-        if ss is None:
-            return None                   # no CreateItem was attempted
-        _worker.cleanup = lambda: ss.delete(generation)
-        # Publish intent before checking abandonment: after _timed abandons under its
-        # guard, an unset flag guarantees this worker cannot subsequently call set.
-        ss_write_started.set()
-        if _worker.abandoned.is_set():
-            return False
-        ss.set(token, generation)
-        if _worker.abandoned.is_set():
-            ss.delete(generation)          # same connection as the late CreateItem
-            _worker.cleanup = None
-            return False
-        return ss.get(generation) == token
-    backend = "file"
-    try:
-        if _timed(ss_write):
-            backend = "secret-service"
-    except Exception:                   # incl. Timeout → a distinct file generation
-        pass
-    finally:
-        # _timed marks abandonment before propagating BaseException/Timeout. A worker
-        # that has not set this flag can no longer reach set after abandonment.
-        if not ss_write_started.is_set():
+        def ss_write(generation=generation):
+            ss = _ss()
+            if ss is None:
+                return None                   # no CreateItem was attempted
+            _worker.cleanup = lambda: ss.delete(generation)
+            # Publish intent before checking abandonment: after _timed abandons under its
+            # guard, an unset flag guarantees this worker cannot subsequently call set.
+            ss_write_started.set()
+            if _worker.abandoned.is_set():
+                return False
+            ss.set(token, generation)
+            if _worker.abandoned.is_set():
+                ss.delete(generation)          # same connection as the late CreateItem
+                _worker.cleanup = None
+                return False
+            return ss.get(generation) == token
+        backend = "file"
+        try:
+            if _timed(ss_write):
+                backend = "secret-service"
+        except Exception:                   # incl. Timeout → a distinct file generation
+            pass
+        finally:
+            # _timed marks abandonment before propagating BaseException/Timeout. A worker
+            # that has not set this flag can no longer reach set after abandonment.
+            if not ss_write_started.is_set():
+                st = common.Store(common.SYNC_STATE_PATH)
+                pending = [p for p in _pending(st) if p != ss_ref]
+                st.update(tokenDeletePending=pending or None)
+        if backend == "file":
+            generation = secrets.token_hex(8)
             st = common.Store(common.SYNC_STATE_PATH)
-            pending = [p for p in _pending(st) if p != ss_ref]
-            st.update(tokenDeletePending=pending or None)
-    if backend == "file":
-        generation = secrets.token_hex(8)
-        st = common.Store(common.SYNC_STATE_PATH)
-        st.update(tokenDeletePending=_pending(st, [generation, "file"]))
-        _file_set(token, generation)
-        if _file_get(generation, staged=True) != token:
-            delete_ref(generation, "file")
-            raise OSError("could not save the token")
-    return generation, backend
+            st.update(tokenDeletePending=_pending(st, [generation, "file"]))
+            _file_set(token, generation)
+            if _file_get(generation, staged=True) != token:
+                delete_ref(generation, "file")
+                raise OSError("could not save the token")
+        return generation, backend
 
 
 def publish(ref, cleanup=True):
     """Publish under the sync lock; optionally return old references for deferred retirement."""
-    generation, backend = ref
-    st = common.Store(common.SYNC_STATE_PATH)
-    prev = active(st)
-    if backend == "file":
-        os.replace(_staged_path(generation), common.TOKEN_FILE_PATH)
-    pending = _pending(st, prev)
-    pending = [p for p in pending if p != list(ref)]
-    st.update(tokenGeneration=generation, tokenBackend=backend, tokenDeletePending=pending or None)
+    with _sigint_deferred():
+        generation, backend = ref
+        st = common.Store(common.SYNC_STATE_PATH)
+        prev = active(st)
+        if backend == "file":
+            os.replace(_staged_path(generation), common.TOKEN_FILE_PATH)
+        pending = _pending(st, prev)
+        pending = [p for p in pending if p != list(ref)]
+        st.update(tokenGeneration=generation, tokenBackend=backend, tokenDeletePending=pending or None)
     if not cleanup:
         return pending
     retire(pending)
@@ -460,6 +510,8 @@ def publish(ref, cleanup=True):
 
 def retire(refs):
     """Retire captured copies after publication. Caller must still hold the sync lock."""
+    # Each delete_ref is a section: pending already tracks the remaining copies,
+    # so SIGINT need not wait through several consecutive Secret Service timeouts.
     for ref in refs:
         delete_ref(ref)
 
@@ -473,15 +525,18 @@ def delete():
     """Invalidate before deletion; retain failed references for a repeated sign-out.
     Caller must hold the sync lock. No delayed operation can address a newer generation.
     """
-    st = common.Store(common.SYNC_STATE_PATH)
-    pending = _pending(st, active(st))
-    st.update(tokenGeneration="", tokenBackend=None, tokenDeletePending=pending)
+    with _sigint_deferred():
+        st = common.Store(common.SYNC_STATE_PATH)
+        pending = _pending(st, active(st))
+        st.update(tokenGeneration="", tokenBackend=None, tokenDeletePending=pending)
+    # Interruption between references is safe now that all copies are pending.
     for ref in pending:
         delete_ref(ref)
-    # Addressed deletion cannot find files left between replace and state publication,
-    # or write_atomic's temporary files. Sweep even when another deletion failed.
-    files_deleted = _delete_all_token_files()
-    if not files_deleted:
-        st = common.Store(common.SYNC_STATE_PATH)
-        st.update(tokenDeletePending=_pending(st, ["legacy", "file"]))
-    return not common.Store(common.SYNC_STATE_PATH).get("tokenDeletePending")
+    with _sigint_deferred():
+        # Addressed deletion cannot find files left between replace and state publication,
+        # or write_atomic's temporary files. Sweep even when another deletion failed.
+        files_deleted = _delete_all_token_files()
+        if not files_deleted:
+            st = common.Store(common.SYNC_STATE_PATH)
+            st.update(tokenDeletePending=_pending(st, ["legacy", "file"]))
+        return not common.Store(common.SYNC_STATE_PATH).get("tokenDeletePending")
