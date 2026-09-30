@@ -3,7 +3,7 @@
 **English** · [Русский](README.ru.md)
 
 <p align="center">
-  <img src="docs/banner.png?v=312" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
+  <img src="docs/banner.png?v=314" alt="Claude Codex Limits — macOS menu bar usage limits" width="820">
 </p>
 
 A tiny macOS menu-bar app that shows how much of your **Claude Code** and **Codex**
@@ -14,9 +14,9 @@ window), with the product's icon to its left — and you decide which two number
 Click the tray icon for a detailed popover.
 
 <p align="center">
-  <img src="docs/menubar-dark.png?v=312" width="180" alt="Menu bar (dark)">
+  <img src="docs/menubar-dark.png?v=314" width="180" alt="Menu bar (dark)">
   &nbsp;&nbsp;
-  <img src="docs/panel-en.png?v=312" width="320" alt="Popover">
+  <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
 ## Features
@@ -34,7 +34,7 @@ Click the tray icon for a detailed popover.
 - **Click a card** to open the relevant limits page in your browser.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover forces a fresh reading** right then.
-- **Refresh interval** — 1 / 5 / 15 minutes, your choice.
+- **Refresh interval** — 5 or 15 minutes, your choice (5 is the minimum: faster polling from several computers on one account gets rate‑limited).
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -42,19 +42,19 @@ Click the tray icon for a detailed popover.
 - **Launch at login** — a toggle right in Settings; no Dock icon, no dependencies beyond what macOS already ships.
 
 <p align="center">
-  <img src="docs/menubar-single.png?v=312" width="140" alt="Single product (menu bar)">
+  <img src="docs/menubar-single.png?v=314" width="140" alt="Single product (menu bar)">
   &nbsp;&nbsp;
-  <img src="docs/panel-single-en.png?v=312" width="300" alt="Single product (popover)">
+  <img src="docs/panel-single-en.png?v=314" width="300" alt="Single product (popover)">
 </p>
 <p align="center"><sub>With only one subscription set up, the tray and popover collapse to a single row / card.</sub></p>
 
-<p align="center"><img src="docs/advanced-en.png?v=312" width="320" alt="Advanced view"></p>
+<p align="center"><img src="docs/advanced-en.png?v=314" width="320" alt="Advanced view"></p>
 <p align="center"><sub>Advanced view: a pace line and a plain verdict per window, 7 days stacked by model, a 35‑day calendar, and what a day costs on the subscription vs at API prices.</sub></p>
 
-<p align="center"><img src="docs/settings-en.png?v=312" width="250" alt="Settings screen"></p>
+<p align="center"><img src="docs/settings-en.png?v=314" width="250" alt="Settings screen"></p>
 <p align="center"><sub>Settings (⚙): interface language · panel view · launch at login · which two numbers the menu bar shows · subscriptions and GitHub sync (Advanced) · sounds on their own screen · built‑in updates.</sub></p>
 
-<p align="center"><img src="docs/whatsnew-en.png?v=312" width="320" alt="What's new screen"></p>
+<p align="center"><img src="docs/whatsnew-en.png?v=314" width="320" alt="What's new screen"></p>
 <p align="center"><sub>“What’s new”: release notes for every version you skipped, then update straight from there.</sub></p>
 
 ## How it works
@@ -69,7 +69,7 @@ by `scope.model.display_name`). The older per‑model fields (`seven_day_opus` a
 now come back `null`, so `limits[]` is the only source for those.
 
 **Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
-uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 1/5/15‑min timer,
+uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 5/15‑min timer,
 and popover open), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
 via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
 = 7‑day. If a live call fails it falls back to the most recent local session log
@@ -151,7 +151,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
 - **Refresh button** (top‑right of the popover) → refresh now.
-- **Interval pills** (bottom) → 1 / 5 / 15 minutes.
+- **Interval pills** (bottom) → 5 / 15 minutes.
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
 

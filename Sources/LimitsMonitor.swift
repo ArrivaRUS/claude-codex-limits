@@ -2411,8 +2411,18 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.3"
+let APP_VERSION = "3.1.4"
 let APP_AUTHOR = "Alex Kovalev"
+/// How often the limits are polled. Five minutes is the floor (Alex, 2026-09-30): at one
+/// minute, two machines on one account made ~120 calls an hour to /api/oauth/usage and
+/// Anthropic answered 429 for hours. A stored 1-minute choice is lifted to 5 on launch.
+let POLL_MIN: TimeInterval = 300
+let POLL_CHOICES: [(ru: String, en: String, sec: TimeInterval)] = [("5м", "5m", 300), ("15м", "15m", 900)]
+func storedPollInterval() -> TimeInterval {
+    let d = UserDefaults.standard, v = d.double(forKey: "interval")
+    guard v >= POLL_MIN else { d.set(POLL_MIN, forKey: "interval"); return POLL_MIN }
+    return v
+}
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
 // The installer drops the binary in ~/.local/bin but doesn't always add it to PATH
@@ -2756,9 +2766,9 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
     // footer
     let footTop = cardsTop + cardH + 14
-    let segs: [(String, Double)] = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
+    let segs: [(String, Double)] = POLL_CHOICES.map { (tr($0.ru, $0.en), $0.sec) }
     let segW: CGFloat = 40, segH: CGFloat = 24
-    roundFill(rectTL(pad, footTop, segW * 3, segH), 8, gray(1, 0.06))
+    roundFill(rectTL(pad, footTop, segW * CGFloat(segs.count), segH), 8, gray(1, 0.06))
     for (i, seg) in segs.enumerated() {
         let segRect = rectTL(pad + CGFloat(i) * segW, footTop, segW, segH)
         let active = abs(interval - seg.1) < 1
@@ -3388,7 +3398,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
 
     // ---- footer ----
     let footTop = H - 35 - ADV_CREDIT_H
-    let segs: [(String, Double)] = [(tr("1м", "1m"), 60), (tr("5м", "5m"), 300), (tr("15м", "15m"), 900)]
+    let segs: [(String, Double)] = POLL_CHOICES.map { (tr($0.ru, $0.en), $0.sec) }
     let sw = segs.map { width(attr($0.0, 12, .semibold, textHi)) + 20 }
     let segTotal = sw.reduce(0, +) + 4
     roundFill(rectTL(ADV_CX, footTop + 1, segTotal, 22), 11, gray(1, 0.07))
@@ -4155,7 +4165,7 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?, expired: 
 
 final class LimitsPanelView: NSView {
     var claude = LimitData(); var codex = LimitData()
-    var interval: TimeInterval = 60
+    var interval: TimeInterval = POLL_MIN
     var updated: Date?
     var hits: [Hit] = []
     var onInterval: ((TimeInterval) -> Void)?
@@ -4610,8 +4620,7 @@ final class UpdateDownloader: NSObject, URLSessionDownloadDelegate {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var timer: Timer?
-    var interval: TimeInterval = UserDefaults.standard.double(forKey: "interval") > 0
-        ? UserDefaults.standard.double(forKey: "interval") : 60
+    var interval: TimeInterval = storedPollInterval()
     var last: (LimitData, LimitData)?
     var panelCtrl: PanelController!
     var resetSound: NSSound?
@@ -5002,6 +5011,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setInterval(_ sec: TimeInterval) {
+        let sec = max(POLL_MIN, sec)
         interval = sec
         UserDefaults.standard.set(sec, forKey: "interval")
         startTimer()
@@ -5073,7 +5083,7 @@ if CommandLine.arguments.contains("--panel-preview") {
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(ph * s)) else { return }
         ctx.scaleBy(x: s, y: s)
         _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph),
-                      claude: cl, codex: cx, interval: 60, updated: Date(), about: AboutState())
+                      claude: cl, codex: cx, interval: POLL_MIN, updated: Date(), about: AboutState())
         guard let img = ctx.makeImage() else { return }
         let data = NSMutableData()
         if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
@@ -6052,7 +6062,7 @@ if CommandLine.arguments.contains("--screenshots") {
         let ph = panelMainHeight(c, x)
         guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(ph * s2)) else { return }
         ctx.scaleBy(x: s2, y: s2)
-        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph), claude: c, codex: x, interval: 60, updated: Date(), about: about)
+        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph), claude: c, codex: x, interval: POLL_MIN, updated: Date(), about: about)
         savePNG(ctx, path)
     }
     func renderSettings(_ about: AboutState, _ path: String) {
