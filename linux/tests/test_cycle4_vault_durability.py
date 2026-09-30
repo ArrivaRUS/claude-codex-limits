@@ -8,6 +8,7 @@ else:
 import contextlib
 import io
 import os
+import tempfile
 import threading
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -20,6 +21,115 @@ class TestVaultDurability(env.SyncEnv):
         base = os.path.basename(common.TOKEN_FILE_PATH)
         return sorted(n for n in os.listdir(common.CONFIG_DIR)
                       if n.startswith(base) or n.startswith("." + base + "."))
+
+    def test_ctrl_c_inside_start_abandons_worker_and_cleans_late_write(self):
+        for stage in ("factory", "set"):
+            with self.subTest(stage=stage):
+                entered, release = threading.Event(), threading.Event()
+                workers, refs = [], []
+                original_start = threading.Thread.start
+                original = self.ss.factory if stage == "factory" else self.ss.set
+
+                def blocked(*args):
+                    entered.set()
+                    if not release.wait(3):
+                        raise AssertionError("worker was not released")
+                    return original(*args)
+
+                def start_then_interrupt(t):
+                    workers.append(t)
+                    original_start(t)
+                    self.assertTrue(entered.wait(2), "worker never reached " + stage)
+                    refs.extend(self.st().get("tokenDeletePending"))
+                    raise KeyboardInterrupt
+
+                target, name = (vault, "_ss") if stage == "factory" else (self.ss, "set")
+                with patch.object(target, name, side_effect=blocked), \
+                        patch.object(self.ss, "get", wraps=self.ss.get) as get:
+                    try:
+                        with patch.object(threading.Thread, "start", start_then_interrupt), \
+                                common.file_lock("sync"):
+                            with self.assertRaises(KeyboardInterrupt):
+                                vault.store(self.token)
+                        self.assertEqual(len(refs), 1)
+                        self.assertEqual(refs[0][1], "secret-service")
+                        # Before intent is published, abandonment suppresses set;
+                        # after intent, the reference must survive for retry.
+                        expected = refs if stage == "set" else []
+                        self.assertEqual(self.st().get("tokenDeletePending") or [], expected)
+                    finally:
+                        release.set()
+                        for t in workers:
+                            t.join(3)
+                            self.assertFalse(t.is_alive())
+                    get.assert_not_called()
+                self.assertEqual(self.st().get("tokenDeletePending") or [], expected)
+                self.assertEqual(self.ss.items, {})
+                self.assertTrue(sync.logout())
+                self.assertEqual(self.ss.items, {})
+                self.assertFalse(sync.delete_pending())
+
+    def test_ctrl_c_before_start_creates_no_token_or_pending_reference(self):
+        with patch.object(threading.Thread, "start", side_effect=KeyboardInterrupt), \
+                common.file_lock("sync"):
+            with self.assertRaises(KeyboardInterrupt):
+                vault.store(self.token)
+        self.assertFalse(sync.delete_pending())
+        self.assertEqual(self.ss.items, {})
+
+    def test_retire_removes_only_own_atomic_temps_without_following_symlinks(self):
+        generation = "deadbeef"
+        ref = [generation, "file"]
+        self.st().update(tokenDeletePending=[ref])
+        common.ensure_dirs()
+        prefix = "." + os.path.basename(vault._staged_path(generation)) + "."
+        fd, temp = tempfile.mkstemp(prefix=prefix, dir=common.CONFIG_DIR)
+        with os.fdopen(fd, "w") as f:
+            f.write(self.token + "\n" + generation + "\n")
+        target = os.path.join(self.tmp, "outside-token")
+        common.write_atomic(target, "untouched")
+        link = os.path.join(common.CONFIG_DIR, prefix + "link")
+        os.symlink(target, link)
+        unrelated = ["." + os.path.basename(vault._staged_path(generation + "0")) + ".tmp",
+                     prefix[:-1] + "x.tmp", "unrelated.txt"]
+        for name in unrelated:
+            common.write_atomic(os.path.join(common.CONFIG_DIR, name), "untouched")
+        with common.file_lock("sync"):
+            vault.retire([ref])
+        self.assertFalse(sync.delete_pending())
+        self.assertFalse(os.path.lexists(temp))
+        self.assertFalse(os.path.lexists(link))
+        self.assertEqual(sorted(os.listdir(common.CONFIG_DIR)), sorted(unrelated))
+        for path in [target] + [os.path.join(common.CONFIG_DIR, n) for n in unrelated]:
+            with open(path) as f:
+                self.assertEqual(f.read(), "untouched")
+
+    def test_atomic_temp_deletion_errors_keep_reference_for_retry(self):
+        generation = "deadbeef"
+        ref = [generation, "file"]
+        path = os.path.join(common.CONFIG_DIR,
+                            "." + os.path.basename(vault._staged_path(generation)) + ".tmp")
+        original_unlink, original_listdir = os.unlink, os.listdir
+        for operation in ("listdir", "unlink"):
+            with self.subTest(operation=operation):
+                self.st().update(tokenDeletePending=[ref])
+                common.write_atomic(path, self.token)
+                original = original_listdir if operation == "listdir" else original_unlink
+                denied_path = common.CONFIG_DIR if operation == "listdir" else path
+
+                def denied(name, *args, **kwargs):
+                    if name == denied_path:
+                        raise PermissionError("denied")
+                    return original(name, *args, **kwargs)
+
+                with patch.object(vault.os, operation, side_effect=denied), common.file_lock("sync"):
+                    vault.retire([ref])
+                self.assertEqual(self.st().get("tokenDeletePending"), [ref])
+                self.assertTrue(os.path.exists(path))
+                with common.file_lock("sync"):
+                    vault.retire([ref])
+                self.assertFalse(sync.delete_pending())
+                self.assertFalse(os.path.exists(path))
 
     def test_ctrl_c_then_process_loss_leaves_late_item_for_next_logout(self):
         entered, release = threading.Event(), threading.Event()

@@ -188,8 +188,8 @@ def _timed(fn):
             del _worker.abandoned
             del _worker.cleanup
     t = threading.Thread(target=run, name="ccl-vault", daemon=True)
-    t.start()
     try:
+        t.start()
         completed = done.wait(TIMEOUT)
     except BaseException:
         with guard:
@@ -246,6 +246,22 @@ def _file_delete(generation):
         pass
     except OSError:
         return False
+    # A hard kill before write_atomic's replace can leave this generation's temp.
+    prefix = "." + os.path.basename(_staged_path(generation)) + "."
+    try:
+        names = os.listdir(common.CONFIG_DIR)
+    except FileNotFoundError:
+        names = []
+    except OSError:
+        return False
+    for name in names:
+        if name.startswith(prefix):
+            try:
+                os.unlink(os.path.join(common.CONFIG_DIR, name))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                return False
     try:
         with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
             lines = f.read().splitlines()

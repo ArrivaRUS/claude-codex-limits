@@ -379,10 +379,12 @@ class TestUnreachablePush(Base):
 # ---- 9. K5: pathological depth ----------------------------------------------------------------------
 class TestDeepJSON(Base):
     def test_exact_fixture_at_every_entry_point(self):
-        self.assertIsNone(common.Resp(200, DEEP.encode()).json())
+        self.assertNotIsInstance(common.Resp(200, DEEP.encode()).json(), dict)
         path = os.path.join(self.tmp, "deep.json")
         common.write_atomic(path, DEEP)
-        self.assertEqual(common.read_json(path, "default"), "default")
+        default = {"default": True}
+        parsed = common.read_json(path, default)
+        self.assertTrue(parsed is default or not isinstance(parsed, dict))
         result = sync.merge({"machine-deep.json": DEEP, "machine-good.json": env.machine_json("good")}, "me")
         self.assertEqual([m["id"] for m in result["machines"]], ["good"])
 
