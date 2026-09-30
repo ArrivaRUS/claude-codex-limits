@@ -5089,6 +5089,46 @@ struct MemorySyncKeychain: SyncKeychain {
 }
 let OFFLINE_SYNC_HTTP: SyncHTTP = { _, _, _, _, _ in (0, nil, "selftest: network disabled", [:]) }
 
+/// Selftest only: a scripted GitHub that records every request (never touches the network).
+final class SelfTestHTTP {
+    struct Call { let url: String; let method: String; let headers: [String: String]; var body: Data? = nil }
+    private let lock = NSLock()
+    private var _calls: [Call] = []
+    var handler: (Call) -> SyncHTTPResult
+    init(_ handler: @escaping (Call) -> SyncHTTPResult) { self.handler = handler }
+    var calls: [Call] { lock.lock(); defer { lock.unlock() }; return _calls }
+    func reset() { lock.lock(); _calls = []; lock.unlock() }
+    var transport: SyncHTTP {
+        return { url, method, headers, body, _ in
+            let c = Call(url: url, method: method, headers: headers, body: body)
+            self.lock.lock(); self._calls.append(c); self.lock.unlock()
+            return self.handler(c)
+        }
+    }
+}
+/// Selftest only: an in-memory Keychain whose next reads can be scripted (e.g. `.timedOut`).
+final class SelfTestKeychainStore {
+    var token: String?
+    var reads: [SyncKeychainRead] = []
+    var readCount = 0, writes = 0, deletes = 0
+    init(_ token: String?) { self.token = token }
+}
+struct ScriptedSyncKeychain: SyncKeychain {
+    let store: SelfTestKeychainStore
+    func read() -> SyncKeychainRead {
+        store.readCount += 1
+        if !store.reads.isEmpty { return store.reads.removeFirst() }
+        return store.token.map { .token($0) } ?? .missing
+    }
+    func write(_ token: String) -> SyncKeychainStatus { store.writes += 1; store.token = token; return .success }
+    func delete() -> SyncKeychainStatus { store.deletes += 1; store.token = nil; return .success }
+}
+extension GitHubSync {
+    /// Selftest seam: the private URL gate of `gh` and the in-memory HTTP backoff.
+    func selfTestGHStatus(_ path: String, token: String) -> Int { gh(path, token: token).status }
+    var selfTestBackoffUntil: Date { backoffUntil }
+}
+
 if CommandLine.arguments.contains("--sync-selftest") {
     // Offline (lesson 006): no GitHub or real Keychain/defaults. Normal startup creates
     // ~/.claude-limits-monitor earlier, before CLI dispatch; that mkdir is skipped for this
@@ -5175,7 +5215,387 @@ if CommandLine.arguments.contains("--sync-selftest") {
     check(large.machines.count == 2 && (0...1_000_000_000_000_000).contains(sum),
           "A2 two Int.max fields: merge survived, sum=\(sum) <= 1e15")
     selfTestDefaults.removePersistentDomain(forName: suite)
-    exit(0)
+
+    // ---- Regression cases for the 401 / token-boundary / merge fix (tester, 2026-09-30).
+    // Each prints OK/FAIL and keeps going; the exit code is non-zero if any FAIL.
+    var failures = 0
+    func expect(_ ok: Bool, _ label: String) {
+        print("\(ok ? "OK" : "FAIL") \(label)")
+        if !ok { failures += 1 }
+    }
+    let api = "https://api.github.com"
+    let gistURL = api + "/gists/selftest-gist"
+    let rawURL = "https://gist.githubusercontent.com/u/selftest-gist/raw/abc/machine-aa.json"
+    let tokA = "st-tok-a", tokB = "st-tok-b", tokNew = "st-tok-new"
+    let remoteFile = NSTemporaryDirectory() + "ccl-selftest-remote-cases.json"
+    func json(_ obj: Any) -> Data { (try? JSONSerialization.data(withJSONObject: obj)) ?? Data() }
+    func reply(_ status: Int, _ obj: Any? = nil, _ headers: [String: String] = [:]) -> SyncHTTPResult {
+        (status, obj.map(json), nil, headers)
+    }
+    func freshDefaults(gist: String? = "selftest-gist") {
+        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.set("selftest-login", forKey: "syncLogin")
+        if let g = gist {
+            selfTestDefaults.set(g, forKey: "syncGistId"); selfTestDefaults.set(Date(), forKey: "syncDiscoveredAt")
+        }
+    }
+    func makeSync(_ http: SelfTestHTTP, _ store: SelfTestKeychainStore) -> GitHubSync {
+        GitHubSync(transport: http.transport, keychain: ScriptedSyncKeychain(store: store), defaults: selfTestDefaults,
+                   remotePath: remoteFile, machineId: "selftest-self", revokeRecheckDelay: 0)
+    }
+    func gistBody(_ id: String = "selftest-gist", pub: Any? = false, extra: [String: Any] = [:]) -> [String: Any] {
+        var files: [String: Any] = [SYNC_MANIFEST: ["content": "{}"], "machine-selftest-self.json": ["content": "{}"]]
+        for (k, v) in extra { files[k] = v }
+        var g: [String: Any] = ["id": id, "created_at": "2026-01-01T00:00:00Z", "files": files]
+        if let p = pub { g["public"] = p }
+        return g
+    }
+    func hasAuth(_ c: SelfTestHTTP.Call) -> Bool { c.headers.keys.contains { $0.lowercased() == "authorization" } }
+    func paths(_ http: SelfTestHTTP) -> [String] { http.calls.map { $0.method + " " + $0.url.replacingOccurrences(of: api, with: "") } }
+    func waitUntil(_ seconds: Double, _ cond: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end { if cond() { return true }; Thread.sleep(forTimeInterval: 0.02) }
+        return cond()
+    }
+
+    // 1. 401 -> 401 -> 403/429/5xx/0: token kept, lastError, backoff only on rate limits.
+    let now0 = Date().timeIntervalSince1970
+    let thirds: [(String, SyncHTTPResult, Bool)] = [
+        ("403", reply(403), false), ("403 x-ratelimit", reply(403, nil, ["X-RateLimit-Remaining": "0", "X-RateLimit-Reset": String(Int(now0 + 600))]), true),
+        ("429", reply(429, nil, ["Retry-After": "120"]), true), ("500", reply(500), false), ("503", reply(503), false),
+        ("0", (0, nil, "offline", [:]), false)]
+    for (label, third, limited) in thirds {
+        freshDefaults()
+        let store = SelfTestKeychainStore(tokA)
+        var users = [reply(401), third]
+        let http = SelfTestHTTP { c in
+            if c.url == gistURL { return reply(401) }
+            if c.url == api + "/user", !users.isEmpty { return users.removeFirst() }
+            return (599, nil, "unexpected \(c.url)", [:])
+        }
+        let s = makeSync(http, store)
+        s.syncSynchronously()
+        let err = s.ui.lastError ?? ""
+        expect(paths(http) == ["GET /gists/selftest-gist", "GET /user", "GET /user"] && store.token == tokA && store.deletes == 0
+               && !selfTestDefaults.bool(forKey: "syncRevoked") && s.ui.phase == .on && err.contains("проверка входа не прошла"),
+               "M1 401 -> 401 -> \(label): token kept, lastError «\(err)»")
+        if label == "403" { expect(err.contains("доступ запрещён (403)"), "M1 403 without limit headers = access error") }
+        let paused = s.selfTestBackoffUntil > Date().addingTimeInterval(60)
+        expect(paused == limited, "M1 \(label): backoff \(limited ? "applied" : "not applied")")
+        if limited {
+            http.reset(); s.syncSynchronously()
+            expect(http.calls.isEmpty, "M1 \(label): next cycle skipped during backoff")
+        }
+    }
+
+    // 2. 401 -> 401 -> 401 but the Keychain now holds another token: no revocation.
+    do {
+        freshDefaults()
+        let store = SelfTestKeychainStore(tokA)
+        var n = 0
+        let http = SelfTestHTTP { c in
+            n += 1
+            if n == 3 { store.token = tokB }       // a new sign-in landed during the recheck
+            return reply(401)
+        }
+        let s = makeSync(http, store)
+        s.syncSynchronously()
+        expect(http.calls.count == 3 && http.calls.allSatisfy { $0.headers["Authorization"] == "Bearer " + tokA },
+               "M2 three 401 with the captured token")
+        expect(!selfTestDefaults.bool(forKey: "syncRevoked") && s.ui.phase == .on && store.token == tokB && store.deletes == 0,
+               "M2 Keychain holds another token -> not revoked, new token kept")
+        expect((s.ui.lastError ?? "").contains("изменился"), "M2 lastError says the sign-in changed: \(s.ui.lastError ?? "nil")")
+    }
+
+    // 3. Keychain times out at revocation: flag set, token stays, background paused, sign-in/out work.
+    do {
+        freshDefaults()
+        let store = SelfTestKeychainStore(tokA)
+        store.reads = [.token(tokA), .timedOut]
+        var phase = "cycle"
+        let http = SelfTestHTTP { c in
+            if phase == "cycle" { return reply(401) }
+            switch c.url {
+            case "https://github.com/login/device/code":
+                return reply(200, ["device_code": "dc", "user_code": "UC-1", "interval": 0, "expires_in": 60])
+            case "https://github.com/login/oauth/access_token": return reply(200, ["access_token": tokNew])
+            case api + "/user": return reply(200, ["login": "selftest-login"])
+            default: return reply(403)
+            }
+        }
+        let s = makeSync(http, store)
+        s.syncSynchronously()
+        expect(selfTestDefaults.bool(forKey: "syncRevoked") && s.ui.phase == .revoked && store.token == tokA && store.deletes == 0,
+               "M3 Keychain .timedOut at revocation: flag set, token left in place")
+        expect((s.ui.lastError ?? "").contains("Связка ключей не ответила"), "M3 lastError names the Keychain timeout: \(s.ui.lastError ?? "nil")")
+        http.reset(); let reads = store.readCount
+        s.syncSynchronously()
+        expect(http.calls.isEmpty && store.readCount == reads, "M3 background cycle paused (no HTTP, no Keychain read)")
+        phase = "login"
+        s.startLogin()
+        let loggedIn = waitUntil(5) { s.ui.phase == .on && s.ui.login == "selftest-login" }
+        expect(loggedIn && store.token == tokNew && store.writes == 1 && !selfTestDefaults.bool(forKey: "syncRevoked"),
+               "M3 sign-in works despite the Keychain backoff")
+        _ = waitUntil(5) { http.calls.contains { $0.url.hasPrefix(api + "/gists") } }
+        Thread.sleep(forTimeInterval: 0.2)
+        s.logout()
+        let out = waitUntil(5) { selfTestDefaults.string(forKey: "syncLogin") == nil && s.ui.phase == .off }
+        expect(out && store.deletes == 1 && store.token == nil, "M3 sign-out works despite the Keychain backoff")
+    }
+
+    // 4. Token boundary: Bearer only to https://api.github.com; raw_url without Authorization.
+    do {
+        let rejected = ["https://evil.example/user", "https://api.github.com@evil.example/user",
+                        "https://evil.example@api.github.com/user", "https://user:pw@api.github.com/user",
+                        "https://api.github.com:8443/user", "https://api.github.com:80/user",
+                        "https://api.github.com%2eevil.example/user", "https://api%2egithub.com/user",
+                        "https://api.github.com./user", "https://api.github.com.evil.example/user",
+                        "https://\u{0430}pi.github.com/user", "https://xn--pi-7kc.github.com/user",
+                        "http://api.github.com/user", "//evil.example/user", "https://api.github.com /user",
+                        "ftp://api.github.com/user"]
+        let http = SelfTestHTTP { _ in reply(200, [String: Any]()) }
+        let s = makeSync(http, SelfTestKeychainStore(tokA))
+        for url in rejected {
+            let status = s.selfTestGHStatus(url, token: tokA)
+            expect(!syncAPIOrigin(url) && status == 0 && http.calls.isEmpty, "M4 rejected, not sent: \(url)")
+            http.reset()
+        }
+        for url in ["/user", api + "/user", api + ":443/user"] {
+            _ = s.selfTestGHStatus(url, token: tokA)
+            let sent = http.calls.last
+            expect(http.calls.count == 1 && sent?.headers["Authorization"] == "Bearer " + tokA
+                   && (sent?.url.hasPrefix(api) ?? false), "M4 allowed with Bearer: \(url)")
+            http.reset()
+        }
+        let guarded = syncHTTP("https://127.0.0.1:9/x", "GET", ["Authorization": "Bearer st"], nil, 2)
+        expect(guarded.status == 0 && guarded.err == "GitHub API origin required", "M4 syncHTTP refuses Authorization off the API origin")
+
+        freshDefaults()
+        let truncated: [String: Any] = ["machine-aa.json": ["truncated": true, "raw_url": rawURL, "content": ""]]
+        let file = "{\"schema\":1,\"machine\":{\"id\":\"aa\",\"name\":\"pc-aa\",\"os\":\"T\"},\"days\":{}}"
+        let rawHTTP = SelfTestHTTP { c in
+            if c.url == gistURL && c.method == "GET" { return reply(200, gistBody(extra: truncated)) }
+            if c.url == gistURL && c.method == "PATCH" { return reply(200, [String: Any]()) }
+            if c.url == rawURL { return (200, Data(file.utf8), nil, [:]) }
+            return reply(599)
+        }
+        let rs = makeSync(rawHTTP, SelfTestKeychainStore(tokA))
+        rs.syncSynchronously()
+        let raw = rawHTTP.calls.first { $0.url == rawURL }
+        expect(raw != nil && !hasAuth(raw!) && rs.ui.lastError == nil && rs.ui.machines.contains { $0.name == "pc-aa" },
+               "M4 raw_url fetched without Authorization, file merged")
+
+        freshDefaults()
+        let redirect = SelfTestHTTP { _ in reply(302, nil, ["Location": "https://evil.example/"]) }
+        let rd = makeSync(redirect, SelfTestKeychainStore(tokA))
+        rd.syncSynchronously()
+        expect(redirect.calls.count == 1 && (rd.ui.lastError ?? "").contains("302"), "M4 302 on an authorized request ends the cycle")
+    }
+
+    // 5. raw_url 200 with an empty / invalid UTF-8 body (and other raw errors): cycle fails, last success kept.
+    do {
+        let okAt = Date(timeIntervalSince1970: 1_790_000_000)
+        let sentinel = Data("{\"machines\":[],\"days\":{}}".utf8)
+        let truncated: [String: Any] = ["machine-aa.json": ["truncated": true, "raw_url": rawURL]]
+        let cases: [(String, SyncHTTPResult, String)] = [
+            ("200 empty", (200, Data(), nil, [:]), "Пустой или нечитаемый"),
+            ("200 nil body", (200, nil, nil, [:]), "Пустой или нечитаемый"),
+            ("200 invalid UTF-8", (200, Data([0xff, 0xfe, 0xc3, 0x28]), nil, [:]), "Пустой или нечитаемый"),
+            ("401", reply(401), "GET raw_url"), ("403", reply(403), "GET raw_url"), ("500", reply(500), "GET raw_url")]
+        for (label, rawReply, text) in cases {
+            freshDefaults()
+            selfTestDefaults.set(okAt, forKey: "syncLastOkAt")
+            try? sentinel.write(to: URL(fileURLWithPath: remoteFile))
+            let http = SelfTestHTTP { c in
+                if c.url == gistURL && c.method == "GET" { return reply(200, gistBody(extra: truncated)) }
+                if c.url == gistURL && c.method == "PATCH" { return reply(200, [String: Any]()) }
+                if c.url == rawURL { return rawReply }
+                return reply(599)
+            }
+            let s = makeSync(http, SelfTestKeychainStore(tokA))
+            s.syncSynchronously()
+            let kept = (selfTestDefaults.object(forKey: "syncLastOkAt") as? Date) == okAt
+            let remoteKept = (try? Data(contentsOf: URL(fileURLWithPath: remoteFile))) == sentinel
+            expect(kept && remoteKept && (s.ui.lastError ?? "").contains(text) && !http.calls.contains { $0.url == api + "/user" }
+                   && !selfTestDefaults.bool(forKey: "syncRevoked"),
+                   "M5 raw_url \(label): cycle failed, syncLastOkAt and cache kept, no /user check")
+        }
+    }
+
+    // 6. Merge of hostile files: bad records/files dropped, the rest merged, no trap.
+    do {
+        let now = Date(), day = dayKey(now), frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        func mf(_ id: String, _ models: String, updated: String? = nil) -> String {
+            let upd = updated.map { "\"updated\":\($0)," } ?? ""
+            return "{\"schema\":1,\(upd)\"machine\":{\"id\":\"\(id)\",\"name\":\"pc-\(id)\",\"os\":\"T\"},\"days\":{\"claude\":{\"\(day)\":\(models)}}}"
+        }
+        let ok7 = "\"m-ok\":{\"input\":7}"
+        let files: [String: String] = [
+            "machine-good.json": mf("good", "{\"m\":{\"input\":10}}"),
+            "machine-bool.json": mf("bool", "{\"m\":{\"turns\":true},\(ok7)}"),
+            "machine-neg.json": mf("neg", "{\"m\":{\"output\":-1},\(ok7)}"),
+            "machine-big.json": mf("big", "{\"m\":{\"input\":1000000000000001},\"m-max\":{\"input\":1000000000000000}}"),
+            "machine-intmax1.json": mf("intmax1", "{\"m\":{\"input\":9223372036854775807},\(ok7)}"),
+            "machine-intmax2.json": mf("intmax2", "{\"m\":{\"cacheRead\":9223372036854775807},\(ok7)}"),
+            "machine-twointmax.json": mf("twointmax", "{\"m\":{\"input\":18446744073709551614},\(ok7)}"),
+            "machine-float.json": mf("float", "{\"m\":{\"input\":1.5},\(ok7)}"),
+            "machine-frac.json": mf("frac", "{\(ok7)}", updated: "\"\(frac.string(from: now))\""),
+            "machine-aa.json": mf("bb", "{\"m\":{\"input\":1000}}"),
+            "machine-badupd.json": mf("badupd", "{\"m\":{\"input\":1000}}", updated: "\"2026-99-01T00:00:00Z\""),
+            "machine-nullupd.json": mf("nullupd", "{\"m\":{\"input\":1000}}", updated: "null"),
+            "machine-numupd.json": mf("numupd", "{\"m\":{\"input\":1000}}", updated: "12345"),
+            "machine-schemabool.json": mf("schemabool", "{\"m\":{\"input\":1000}}").replacingOccurrences(of: "\"schema\":1", with: "\"schema\":true"),
+            "machine-notdict.json": "{\"schema\":1,\"machine\":[\"notdict\"],\"days\":{}}",
+            "machine-huge.json": mf("huge", "{\"m\":{\"input\":1" + String(repeating: "0", count: 400) + "}}"),
+            "machine-list.json": "[1,2]",
+        ]
+        let r = GitHubSync.merge(files, excluding: "selftest-self", now: now)
+        let ids = Set(r.machines.map { $0.id }).subtracting(["huge"])
+        let d = r.days["claude"]?[day] ?? [:]
+        expect(ids == ["good", "bool", "neg", "big", "intmax1", "intmax2", "twointmax", "float", "frac"],
+               "M6 accepted machines: \(ids.sorted())")
+        expect(d["m"]?.input == 10 && d["m"]?.output == 0 && d["m"]?.turns == 0 && d["m"]?.cacheRead == 0,
+               "M6 bool / negative / >1e15 / Int.max / 2*Int.max / float records dropped (m.input=\(d["m"]?.input ?? -1))")
+        expect(d["m-ok"]?.input == 49 && d["m-max"]?.input == 1_000_000_000_000_000,
+               "M6 the valid records of those files merged (m-ok=\(d["m-ok"]?.input ?? -1))")
+        expect(r.machines.contains { $0.id == "frac" }, "M6 fractional seconds in updated accepted")
+        expect(!ids.contains("bb") && !ids.contains("badupd") && !ids.contains("nullupd") && !ids.contains("numupd")
+               && !ids.contains("schemabool") && !ids.contains("notdict"),
+               "M6 id != file name, broken/null/number updated, schema true, machine not object: file skipped")
+        let dup = GitHubSync.merge(["machine-good.json": mf("good", "{\"m\":{\"input\":10}}"),
+                                    "machine-GOOD.json": mf("good", "{\"m\":{\"input\":10}}")], excluding: "selftest-self", now: now)
+        expect(dup.machines.count == 1 && dup.days["claude"]?[day]?["m"]?.input == 10, "M6 same id under another name counted once")
+    }
+
+    // 7. Visibility: public true / missing / non-boolean → never written, gist id and push hash reset.
+    let visibilities: [(String, Any?)] = [("true", true), ("missing", nil), ("0", 0), ("\"false\"", "false")]
+    for (label, pub) in visibilities {
+        freshDefaults(gist: "pub-gist")
+        selfTestDefaults.set("stale-hash", forKey: "syncPushHash")
+        let http = SelfTestHTTP { c in
+            if c.url == api + "/gists/pub-gist" && c.method == "GET" { return reply(200, gistBody("pub-gist", pub: pub)) }
+            return reply(599)
+        }
+        let s = makeSync(http, SelfTestKeychainStore(tokA))
+        s.syncSynchronously()
+        expect(http.calls.count == 1 && !http.calls.contains { $0.method != "GET" }
+               && selfTestDefaults.string(forKey: "syncGistId") == nil && selfTestDefaults.string(forKey: "syncPushHash") == nil,
+               "M7 public=\(label): not written, gistId and pushHash cleared")
+    }
+    do {
+        freshDefaults(gist: nil)
+        let list: [[String: Any]] = [
+            ["id": "pub-gist", "public": true, "created_at": "2020-01-01T00:00:00Z", "files": [SYNC_MANIFEST: [String: Any]()]],
+            ["id": "nofield", "created_at": "2020-01-02T00:00:00Z", "files": [SYNC_MANIFEST: [String: Any]()]],
+            ["id": "sec", "public": false, "created_at": "2026-01-01T00:00:00Z", "files": [SYNC_MANIFEST: [String: Any]()]]]
+        let http = SelfTestHTTP { c in
+            if c.url.hasPrefix(api + "/gists?per_page=100&page=1") { return reply(200, list) }
+            if c.url == api + "/gists/sec" { return reply(200, gistBody("sec")) }
+            return reply(599)
+        }
+        let s = makeSync(http, SelfTestKeychainStore(tokA))
+        s.syncSynchronously()
+        expect(selfTestDefaults.string(forKey: "syncGistId") == "sec" && !http.calls.contains { $0.url.contains("pub-gist") || $0.url.contains("nofield") }
+               && http.calls.filter { $0.method == "PATCH" }.map { $0.url } == [api + "/gists/sec"],
+               "M7 discovery picks the secret gist, public/unknown never touched: \(paths(http))")
+    }
+
+    // 8. Backoff from Retry-After / x-ratelimit-reset, capped at 1 h; 403 without signals = no pause.
+    do {
+        let t = Date().timeIntervalSince1970
+        let cases: [(String, SyncHTTPResult, ClosedRange<Double>?)] = [
+            ("429 Retry-After 120", reply(429, nil, ["Retry-After": "120"]), 100...125),
+            ("429 Retry-After huge", reply(429, nil, ["Retry-After": "999999"]), 3500...3601),
+            ("403 reset +600", reply(403, nil, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Int(t + 600))]), 580...605),
+            ("403 reset +1 day", reply(403, nil, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Int(t + 86400))]), 3500...3601),
+            ("403 reset in the past", reply(403, nil, ["x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Int(t - 600))]), -5...2),
+            ("403 bad Retry-After + reset", reply(403, nil, ["Retry-After": "soon", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(Int(t + 300))]), 280...305),
+            ("429 no headers", reply(429), 890...901),
+            ("403 no limit signals", reply(403, nil, ["x-ratelimit-remaining": "12"]), nil)]
+        for (label, r, range) in cases {
+            freshDefaults()
+            let http = SelfTestHTTP { _ in r }
+            let s = makeSync(http, SelfTestKeychainStore(tokA))
+            s.syncSynchronously()
+            let delay = s.selfTestBackoffUntil.timeIntervalSinceNow
+            if let range = range {
+                expect(range.contains(delay), "M8 \(label): pause \(Int(delay)) s in \(Int(range.lowerBound))…\(Int(range.upperBound))")
+            } else {
+                http.reset(); s.syncSynchronously()
+                expect(delay <= 0 && http.calls.count == 1 && (s.ui.lastError ?? "").contains("доступ запрещён (403)"),
+                       "M8 \(label): access error, no pause")
+            }
+        }
+    }
+
+    // 9. syncWarning: nothing before this process's first attempt; the 30-minute threshold.
+    do {
+        let now = Date(), m: TimeInterval = 60
+        var st = SyncUIState(phase: .on, login: "selftest-login")
+        st.lastSync = now.addingTimeInterval(-120 * m); st.lastError = "ответ 500"; st.lastErrorAt = now.addingTimeInterval(-m)
+        expect(syncWarning(st, now: now) == nil, "M9 persisted error, no attempt in this process -> no warning")
+        st.firstAttemptAt = now.addingTimeInterval(-5 * m)
+        expect(syncWarning(st, now: now)?.hasPrefix("Синхронизация стоит с") == true, "M9 error after 2 h idle -> «стоит»")
+        var early = st
+        early.lastSync = now.addingTimeInterval(-40 * m); early.firstAttemptAt = now.addingTimeInterval(-39 * m)
+        early.lastErrorAt = now.addingTimeInterval(-30 * m)
+        expect(syncWarning(early, now: now) == nil, "M9 error 10 min after success (before the threshold) -> no warning")
+        early.lastErrorAt = now.addingTimeInterval(-8 * m)
+        expect(syncWarning(early, now: now) != nil, "M9 error 32 min after success (after the threshold) -> warning")
+        var before = st
+        before.lastErrorAt = now.addingTimeInterval(-10 * m)
+        expect(syncWarning(before, now: now) == nil, "M9 error older than this process's first attempt -> no warning")
+        var never = SyncUIState(phase: .on, login: "selftest-login")
+        never.firstAttemptAt = now.addingTimeInterval(-m); never.lastError = "нет связи с GitHub"; never.lastErrorAt = now
+        expect(syncWarning(never, now: now)?.hasPrefix("Синхронизация не работает") == true, "M9 never synced + error -> «не работает»")
+        expect(syncWarning(SyncUIState(phase: .revoked), now: now) != nil, "M9 revoked always warns")
+        // Live: a fresh instance restores the persisted error but not firstAttemptAt.
+        freshDefaults()
+        selfTestDefaults.set(now.addingTimeInterval(-120 * m), forKey: "syncLastOkAt")
+        selfTestDefaults.set("старая ошибка", forKey: "syncLastError"); selfTestDefaults.set(now.addingTimeInterval(-m), forKey: "syncLastErrorAt")
+        let http = SelfTestHTTP { _ in reply(500) }
+        let s = makeSync(http, SelfTestKeychainStore(tokA))
+        expect(syncWarning(s.ui) == nil, "M9 live: restored state before the first attempt -> no warning")
+        s.syncSynchronously()
+        expect(syncWarning(s.ui)?.contains("ответ 500") == true, "M9 live: after a failed attempt -> «\(syncWarning(s.ui) ?? "nil")»")
+    }
+
+    // 10. The token never leaves the Keychain except in Authorization: not in the gist file,
+    // URLs, other headers, defaults, lastError or the remote cache (built at run time, no literal).
+    do {
+        let secret = "gho" + "_" + "TESTTOKEN" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let others: [String: Any] = ["machine-aa.json": ["content": "{\"schema\":1,\"machine\":{\"id\":\"aa\",\"name\":\"pc-aa\"},\"days\":{}}"]]
+        var texts: [String] = []
+        for step in ["ok", "inconclusive", "revoked"] {
+            freshDefaults()
+            var users = step == "revoked" ? [reply(401), reply(401)] : [reply(401), reply(500)]
+            let http = SelfTestHTTP { c in
+                if step == "ok" { return c.method == "GET" ? reply(200, gistBody(extra: others)) : reply(200, [String: Any]()) }
+                if c.url == api + "/user", !users.isEmpty { return users.removeFirst() }
+                return reply(401)
+            }
+            let s = makeSync(http, SelfTestKeychainStore(secret))
+            s.syncSynchronously()
+            texts.append(s.ui.lastError ?? "")
+            texts.append(String(describing: selfTestDefaults.persistentDomain(forName: suite) ?? [:]))
+            texts.append((try? String(contentsOfFile: remoteFile, encoding: .utf8)) ?? "")
+            for c in http.calls {
+                texts.append(c.url)
+                texts.append(c.body.map { String(decoding: $0, as: UTF8.self) } ?? "")
+                texts.append(c.headers.filter { $0.key.lowercased() != "authorization" }.description)
+                if c.url.hasPrefix(api) && c.headers["Authorization"] != "Bearer " + secret { texts.append("missing bearer") }
+            }
+            if step == "ok" { expect(http.calls.contains { $0.method == "PATCH" && $0.body != nil }, "M10 ok cycle wrote the gist file") }
+        }
+        let leaked = texts.contains { $0.contains(secret) || $0.contains(String(secret.suffix(16))) || $0 == "missing bearer" }
+        expect(!leaked, "M10 token substring absent from gist body, URLs, other headers, defaults, lastError, remote cache")
+    }
+
+    selfTestDefaults.removePersistentDomain(forName: suite)
+    try? FileManager.default.removeItem(atPath: remoteFile)
+    print(failures == 0 ? "OK regression cases: all passed" : "FAIL regression cases: \(failures) failed")
+    exit(failures == 0 ? 0 : 1)
 }
 
 if CommandLine.arguments.contains("--advanced-dump") {

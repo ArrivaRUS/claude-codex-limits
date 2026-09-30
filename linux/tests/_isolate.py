@@ -6,6 +6,28 @@ import shutil
 import sys
 import tempfile
 
+_HOME = os.path.expanduser("~")
+# The user's real files (lesson 006). Tests compare presence + mtime only; contents are never read.
+REAL_FILES = tuple(os.path.join(_HOME, p) for p in (
+    ".config/claude-codex-limits/github-token",
+    ".config/claude-codex-limits/machine-id",
+    ".local/state/claude-codex-limits/sync-state.json",
+    ".local/state/claude-codex-limits/sync-remote.json",
+))
+
+
+def real_files_state():
+    out = {}
+    for p in REAL_FILES:
+        try:
+            out[p] = os.stat(p).st_mtime_ns
+        except FileNotFoundError:
+            out[p] = None
+    return out
+
+
+REAL_BEFORE = real_files_state()
+
 ROOT = tempfile.mkdtemp(prefix="ccl-tests-")
 atexit.register(shutil.rmtree, ROOT, ignore_errors=True)
 for kind in ("CONFIG", "STATE", "CACHE", "DATA"):
