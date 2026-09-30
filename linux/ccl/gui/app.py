@@ -366,7 +366,7 @@ class SettingsPage(QWidget):
             e.setFixedWidth(90)
             e.setPlaceholderText(tr("по плану", "from plan"))
             if st.has(key):
-                e.setText(fmt.fmt_num(float(st.get(key)), 2).replace(",", "."))
+                e.setText(fmt.fmt_num(usage.clamp_number(st.get(key)), 2).replace(",", "."))
             e.editingFinished.connect(lambda k=key, w=e: self.on_sub(k, w))
             self.subs[key] = e
             cl.addWidget(_row(name, e))
@@ -489,8 +489,8 @@ class SettingsPage(QWidget):
             st.remove(key)
         else:
             try:
-                st.set(key, max(0.0, float(t)))
-            except ValueError:
+                st.set(key, usage.clamp_number(float(t)))
+            except (ValueError, OverflowError):
                 w.setText("")
                 st.remove(key)
         self.win.view.update()
@@ -522,7 +522,7 @@ class SettingsPage(QWidget):
             lay.addWidget(w)
             lay.addWidget(_label(tr("Жду подтверждения в GitHub…", "Waiting for GitHub…"), "note"))
             return
-        token, backend = vault.read() if not st.get("revoked") else (None, None)
+        token, backend = vault.read() if st.get("login") and not st.get("revoked") else (None, None)
         if token:
             lay.addWidget(_row("GitHub: " + (st.get("login") or "?"), self._btn(tr("Выйти", "Sign out"), a.logout)))
             for mch in sync.machine_list():
@@ -559,6 +559,13 @@ class SettingsPage(QWidget):
             return
         if st.get("revoked"):
             lay.addWidget(_label(tr("Вход в GitHub отозван — войдите заново.", "GitHub sign-in was revoked — sign in again."), wrap=True))
+            upl, ok = st.get("pushedAt"), sync.last_ok_at(st)
+            lay.addWidget(_label(tr("Последняя отправка: ", "Last upload: ") + (fmt.fmt_moment(upl) if upl else "—")
+                                 + tr(" · чтение: ", " · read: ") + (fmt.fmt_moment(ok) if ok else "—"), "note", True))
+            if st.get("lastError"):
+                lay.addWidget(_label(str(st.get("lastError")), "note", True))
+            if st.get("tokenDeletePending"):
+                lay.addWidget(self._btn(tr("Выйти", "Sign out"), a.logout))
         lay.addWidget(_label(tr("Расход по дням и моделям (столбики, календарь, деньги) есть только в логах той машины, "
                                 "где работал CLI. Синхронизация складывает его с Mac и другими ПК через ваш секретный gist.",
                                 "Per-day usage (bars, calendar, money) lives only in the logs of the machine where the CLI ran. "
@@ -1046,7 +1053,7 @@ class TrayApp(QObject):
                 dev = sync.device_start()
                 self.bridge.login_code.emit(dev)
                 token = sync.device_poll(dev, cancelled=lambda: self.login_cancel)
-                login = sync.login_finish(token)
+                login = sync.login_finish(token, cancelled=lambda: self.login_cancel)
                 self.bridge.login_done.emit(login, None)
             except sync.LoginError as e:
                 self.bridge.login_done.emit(None, None if str(e) == "cancelled" else str(e))

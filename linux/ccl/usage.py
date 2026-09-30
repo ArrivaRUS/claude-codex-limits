@@ -15,6 +15,7 @@ Logs run to gigabytes, so a full re-parse on every pass is not an option.
 
 import hashlib
 import json
+import math
 import os
 import time
 
@@ -24,6 +25,20 @@ KEEP_DAYS = 45
 FIELDS = ("input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h", "turns")
 CHUNK = 32 * 1024 * 1024
 INDEX_VERSION = 1
+MAX_VALUE = 10 ** 15
+
+
+def clamp_number(value):
+    """Bound counts and display amounts before float arithmetic (including old caches)."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(0, min(MAX_VALUE, value))
+    try:
+        value = float(value)
+        return max(0, min(MAX_VALUE, value)) if not math.isnan(value) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def empty_usage():
@@ -31,19 +46,19 @@ def empty_usage():
 
 
 def total_tokens(u):
-    return u["input"] + u["output"] + u["cacheRead"] + u["cacheWrite5m"] + u["cacheWrite1h"]
+    return clamp_number(sum(clamp_number(u.get(k, 0)) for k in FIELDS if k != "turns"))
 
 
 def add_usage(days, product, day, model, u):
     cur = days.setdefault(product, {}).setdefault(day, {}).setdefault(model, empty_usage())
     for k in FIELDS:
-        cur[k] += int(u.get(k) or 0)
+        cur[k] = min(MAX_VALUE, int(clamp_number(cur[k])) + int(clamp_number(u.get(k, 0))))
 
 
 def _int(v):
     try:
         return int(v or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -345,6 +360,7 @@ def api_cost(model, u):
     p = model_price(model)
     if p is None:
         return None
+    u = {k: clamp_number(u.get(k, 0)) for k in FIELDS} if isinstance(u, dict) else empty_usage()
     pin, pout, pcr, pcw = p
     return (u["input"] * pin + u["output"] * pout + u["cacheRead"] * pcr
             + u["cacheWrite5m"] * pcw + u["cacheWrite1h"] * pin * 2) / 1e6
@@ -386,9 +402,9 @@ def daily_usage(days, product, n, now=None):
                 continue
             c = api_cost(m, u) or 0.0
             rows.append((m, total_tokens(u), c))
-            usd += c
-            tokens += total_tokens(u)
-            turns += u["turns"]
+            usd = clamp_number(usd + c)
+            tokens = clamp_number(tokens + total_tokens(u))
+            turns = clamp_number(turns + clamp_number(u.get("turns", 0)))
         rows.sort(key=lambda r: -r[2])
         out.append({"day": key, "byModel": rows, "usd": usd, "tokens": tokens, "turns": turns})
     return out
@@ -401,8 +417,9 @@ def subscription_usd(product, plan, tier=None):
     key = "subClaude" if product == "claude" else "subCodex"
     if st.has(key):
         try:
-            return float(st.get(key)), False
-        except (TypeError, ValueError):
+            value = st.get(key)
+            return clamp_number(value if isinstance(value, int) else float(value)), False
+        except (TypeError, ValueError, OverflowError):
             pass
     if product == "claude":
         tier = tier or common.state().get("claudeTier") or ""
@@ -420,12 +437,12 @@ def subscription_usd(product, plan, tier=None):
 def money_summary(days, product, plan, n=35, now=None):
     rows = daily_usage(days, product, n, now)
     active = [r for r in rows if r["turns"] > 0]
-    total = sum(r["usd"] for r in rows)
+    total = clamp_number(sum(r["usd"] for r in rows))
     sub, est = subscription_usd(product, plan)
     return {
         "days": n, "activeDays": len(active), "usdApi": total,
         "perCalendarDay": total / n, "perActiveDay": total / len(active) if active else 0.0,
         "subMonthly": sub, "subEstimated": est,
         "subPerDay": sub / 30, "subPerWeek": sub * 12 / 52,
-        "ratio": total / (sub * n / 30) if sub > 0 else 0.0,
+        "ratio": clamp_number(total / max(sub * n / 30, 1e-300)) if sub > 0 else 0.0,
     }

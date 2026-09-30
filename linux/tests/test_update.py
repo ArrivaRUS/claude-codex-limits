@@ -1,6 +1,12 @@
 """Update helpers: version compare, the tarball extraction filter, the .deb release pick and
 download. Nothing here reaches the network or the real state folder."""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import io
 import os
 import shutil
@@ -21,14 +27,21 @@ class Isolated(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
-        self.saved = (common.STATE_DIR, common.CONFIG_DIR, common.SYNC_STATE_PATH, common._state)
-        common.STATE_DIR = os.path.join(self.tmp, "state")
-        common.CONFIG_DIR = os.path.join(self.tmp, "config")
-        common.SYNC_STATE_PATH = os.path.join(common.STATE_DIR, "sync-state.json")
-        common._state = common.Store(os.path.join(common.STATE_DIR, "state.json"))
+        # Include every derived config/state path, including token and remote cache.
+        roots = (common.CONFIG_DIR, common.STATE_DIR)
+        paths = {name: value for name, value in vars(common).items()
+                 if isinstance(value, str) and
+                 any(value == root or value.startswith(root + os.sep) for root in roots)}
+        self.saved = dict(paths, _state=common._state, _settings=common._settings)
+        for name, value in paths.items():
+            root = next(root for root in roots if value == root or value.startswith(root + os.sep))
+            base = "config" if root == roots[0] else "state"
+            setattr(common, name, os.path.normpath(os.path.join(self.tmp, base, os.path.relpath(value, root))))
+        common._state = common._settings = None
 
     def tearDown(self):
-        common.STATE_DIR, common.CONFIG_DIR, common.SYNC_STATE_PATH, common._state = self.saved
+        for name, value in self.saved.items():
+            setattr(common, name, value)
         shutil.rmtree(self.tmp)
 
 

@@ -1,6 +1,12 @@
 """The .deb built by linux/packaging/build-deb.sh: control fields, file list, modes, and that the
 unpacked program starts. Skipped where dpkg-deb isn't installed."""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import os
 import shutil
 import subprocess

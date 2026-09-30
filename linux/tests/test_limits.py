@@ -1,5 +1,11 @@
 """Limits parsing and pace (ports of fetchClaude's parser, codexApplyWindow, windowPace)."""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import os
 import sys
 import unittest

@@ -55,9 +55,9 @@ def _end_progress(cb):
 # ---- commands -----------------------------------------------------------------------------
 
 def cmd_login(args):
-    token, _ = vault.read()
-    if token and not args.force:
-        login = sync.sync_state().get("login")
+    st = sync.sync_state()
+    login = st.get("login")
+    if login and not st.get("revoked") and not args.force:
         _say(common.tr("Уже выполнен вход в GitHub", "Already signed in to GitHub") + (": " + login if login else "")
              + common.tr(". Выйти: ccl-sync logout", ". Sign out: ccl-sync logout"))
         return 0
@@ -87,7 +87,7 @@ def cmd_login(args):
         return 130
     try:
         login = sync.login_finish(token)
-    except (OSError, ValueError) as e:
+    except (sync.LoginError, OSError, ValueError) as e:
         _say(common.tr("Не удалось сохранить вход: ", "Couldn't save the sign-in: ") + str(e))
         return 1
     backend = sync.sync_state().get("tokenBackend")
@@ -98,7 +98,14 @@ def cmd_login(args):
 
 
 def cmd_logout(_args):
-    sync.logout()
+    try:
+        deleted = sync.logout()
+    except sync.LoginError as e:
+        _say(str(e))
+        return 1
+    if not deleted:
+        _say(sync.sync_state().get("lastError"))
+        return 1
     _say(common.tr("Вход в GitHub удалён с этой машины. Gist остался в GitHub.",
                    "GitHub sign-in removed from this machine. The gist stays on GitHub."))
     return 0
@@ -182,7 +189,7 @@ def _timer_status():
 
 def cmd_status(_args):
     st = sync.sync_state()
-    token, backend = vault.read()
+    token, backend = vault.read() if st.get("login") and not st.get("revoked") else (None, None)
     _say("Claude Codex Limits (linux %s)" % APP_VERSION)
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
         common.machine_name(), common.os_name(), common.machine_id()))

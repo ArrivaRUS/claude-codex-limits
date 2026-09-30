@@ -2,6 +2,12 @@
 style (Breeze on KDE/Fly) once pushed its right edge under the scroll bar — and the About
 row's pills must not clip their text."""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import os
 import subprocess
 import sys

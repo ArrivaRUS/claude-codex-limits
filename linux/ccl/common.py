@@ -318,12 +318,22 @@ def parse_iso(s):
     if not m:
         return None
     y, mo, d, h, mi, se, frac, tz = m.groups()
-    t = calendar.timegm((int(y), int(mo), int(d), int(h), int(mi), int(se)))
-    if tz and tz != "Z":
-        sign = 1 if tz[0] == "+" else -1
-        tz = tz[1:].replace(":", "")
-        t -= sign * (int(tz[:2]) * 3600 + int(tz[2:4]) * 60)
-    return t + (float(frac) if frac else 0.0)
+    try:
+        parts = tuple(map(int, (y, mo, d, h, mi, se)))
+        if not (1 <= parts[2] <= calendar.monthrange(parts[0], parts[1])[1]
+                and 0 <= parts[3] < 24 and 0 <= parts[4] < 60 and 0 <= parts[5] < 60):
+            return None
+        t = calendar.timegm(parts)
+        if tz and tz != "Z":
+            sign = 1 if tz[0] == "+" else -1
+            tz = tz[1:].replace(":", "")
+            hours, minutes = int(tz[:2]), int(tz[2:4])
+            if hours >= 24 or minutes >= 60:
+                return None
+            t -= sign * (hours * 3600 + minutes * 60)
+        return t + (float(frac) if frac else 0.0)
+    except (ValueError, OverflowError):
+        return None
 
 
 def iso_utc(t=None):
@@ -356,14 +366,20 @@ class Resp(object):
             return None
 
 
-def http(url, method="GET", headers=None, body=None, timeout=15):
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True):
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     elif isinstance(body, str):
         body = body.encode("utf-8")
-    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+        opener = urllib.request.urlopen if follow_redirects else urllib.request.build_opener(_NoRedirect()).open
+        with opener(req, timeout=timeout) as r:
             return Resp(r.status, r.read(), {k.lower(): v for k, v in r.headers.items()})
     except urllib.error.HTTPError as e:
         try:

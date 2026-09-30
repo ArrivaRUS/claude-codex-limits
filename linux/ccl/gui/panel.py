@@ -742,7 +742,7 @@ def draw_history(c, m, cards, hp, by, hits):
     # 35-day calendar
     kx, ky = ADV_IX + 204, cy0
     cal = rows42[-35:]
-    total35 = sum(dd["usd"] for dd in cal)
+    total35 = usage.clamp_number(sum(dd["usd"] for dd in cal))
     c.text_c(caps(tr("35 дней · ", "35 days · ") + fmt.fmt_usd(total35), 8.5, TEXT_LO), kx, ky, 12)
     letters = ["п", "в", "с", "ч", "п", "с", "в"] if common.app_lang() == "ru" else ["M", "T", "W", "T", "F", "S", "S"]
     for i, l in enumerate(letters):

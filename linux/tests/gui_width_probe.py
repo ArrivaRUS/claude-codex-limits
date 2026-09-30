@@ -3,17 +3,20 @@ sync state (+ optionally "deb": installed from the package with an update waitin
 "OK" or "OVERFLOW …". Everything outside the process is stubbed — the
 keyring (NOT isolated by XDG dirs), the gist, the limits APIs and the log index."""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import os
 import shutil
 import sys
-import tempfile
 
 style, lang, signed = sys.argv[1], sys.argv[2], sys.argv[3] == "in"
 deb = "deb" in sys.argv[4:]
-tmp = tempfile.mkdtemp()
+tmp = _isolate.ROOT
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-os.environ["XDG_CONFIG_HOME"] = os.path.join(tmp, "config")
-os.environ["XDG_STATE_HOME"] = os.path.join(tmp, "state")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from PyQt5.QtCore import QPoint  # noqa: E402

@@ -50,21 +50,40 @@ func shell(_ path: String, _ args: [String]) -> (code: Int32, out: String, err: 
 // MARK: - HTTP (synchronous; call off the main thread)
 
 func http(_ url: String, method: String, headers: [String: String], body: Data?, timeout: Double = 15) -> (status: Int, data: Data?, err: String?) {
-    guard let u = URL(string: url) else { return (0, nil, "bad url") }
+    let r = requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout)
+    return (r.status, r.data, r.err)
+}
+
+private final class SyncNoRedirects: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+private func requestHTTP(_ url: String, method: String, headers: [String: String], body: Data?,
+                         timeout: Double, noRedirects: Bool = false) -> SyncHTTPResult {
+    guard let u = URL(string: url) else { return (0, nil, "bad url", [:]) }
     var r = URLRequest(url: u, timeoutInterval: timeout)
     r.httpMethod = method
     for (k, v) in headers { r.setValue(v, forHTTPHeaderField: k) }
     r.httpBody = body
     let sem = DispatchSemaphore(value: 0)
-    var st = 0; var dat: Data?; var er: String?
-    URLSession.shared.dataTask(with: r) { d, resp, e in
+    var st = 0; var dat: Data?; var er: String?; var responseHeaders: [String: String] = [:]
+    let session = noRedirects ? URLSession(configuration: .ephemeral, delegate: SyncNoRedirects(), delegateQueue: nil) : URLSession.shared
+    defer { if noRedirects { session.invalidateAndCancel() } }
+    let task = session.dataTask(with: r) { d, resp, e in
         if let e = e { er = e.localizedDescription }
-        if let h = resp as? HTTPURLResponse { st = h.statusCode }
+        if let h = resp as? HTTPURLResponse {
+            st = h.statusCode
+            for (key, value) in h.allHeaderFields { responseHeaders[String(describing: key).lowercased()] = String(describing: value) }
+        }
         dat = d
         sem.signal()
-    }.resume()
-    if sem.wait(timeout: .now() + timeout + 5) == .timedOut { return (0, nil, "timeout") }
-    return (st, dat, er)
+    }
+    task.resume()
+    if sem.wait(timeout: .now() + timeout + 5) == .timedOut { task.cancel(); return (0, nil, "timeout", [:]) }
+    return (st, dat, er, responseHeaders)
 }
 
 // MARK: - Model
@@ -604,13 +623,19 @@ final class UsageHistory {
 
 // ---- Local usage logs → per-day, per-model token counts ----------------------------------
 
+/// Ignore an overflowing contribution, including when combining a previously cached total.
+private func usageSum(_ a: Int, _ b: Int) -> Int {
+    let (sum, overflow) = a.addingReportingOverflow(b)
+    return overflow ? a : sum
+}
+
 struct DayModelUsage: Codable {
     var input = 0, output = 0, cacheRead = 0, cacheWrite5m = 0, cacheWrite1h = 0, turns = 0
     mutating func add(_ o: DayModelUsage) {
-        input += o.input; output += o.output; cacheRead += o.cacheRead
-        cacheWrite5m += o.cacheWrite5m; cacheWrite1h += o.cacheWrite1h; turns += o.turns
+        input = usageSum(input, o.input); output = usageSum(output, o.output); cacheRead = usageSum(cacheRead, o.cacheRead)
+        cacheWrite5m = usageSum(cacheWrite5m, o.cacheWrite5m); cacheWrite1h = usageSum(cacheWrite1h, o.cacheWrite1h); turns = usageSum(turns, o.turns)
     }
-    var totalTokens: Int { input + output + cacheRead + cacheWrite5m + cacheWrite1h }
+    var totalTokens: Int { [input, output, cacheRead, cacheWrite5m, cacheWrite1h].reduce(0, usageSum) }
 }
 
 struct FileMark: Codable { var size: Int; var lastId: String?; var model: String? }
@@ -877,7 +902,7 @@ func dailyUsage(_ product: String, days: Int, index: UsageIndex) -> [DayUsage] {
         var usd = 0.0, tokens = 0, turns = 0
         for (m, u) in models where m != "?" {
             let c = apiCost(m, u) ?? 0
-            rows.append((m, u.totalTokens, c)); usd += c; tokens += u.totalTokens; turns += u.turns
+            rows.append((m, u.totalTokens, c)); usd += c; tokens = usageSum(tokens, u.totalTokens); turns = usageSum(turns, u.turns)
         }
         rows.sort { $0.2 > $1.2 }
         return DayUsage(day: key, byModel: rows.map { (model: $0.0, tokens: $0.1, usd: $0.2) }, usd: usd, tokens: tokens, turns: turns)
@@ -907,14 +932,14 @@ func moneySummary(_ product: String, plan: String?, index: UsageIndex, days: Int
 /// "13,4" in Russian, "13.4" in English — one decimal, no trailing zero for whole numbers.
 func fmtNum(_ v: Double, decimals: Int = 1) -> String {
     let rounded = (v * pow(10, Double(decimals))).rounded() / pow(10, Double(decimals))
-    var str = rounded == rounded.rounded() && decimals <= 1 ? String(Int(rounded)) : String(format: "%.\(decimals)f", rounded)
+    var str = rounded == rounded.rounded() && decimals <= 1 ? String(format: "%.0f", rounded) : String(format: "%.\(decimals)f", rounded)
     if appLang() == "ru" { str = str.replacingOccurrences(of: ".", with: ",") }
     return str
 }
 func fmtPct(_ v: Double, decimals: Int = 1) -> String { fmtNum(v, decimals: decimals) + "%" }
 func fmtSignedPts(_ v: Double) -> String { (v >= 0 ? "+" : "−") + fmtNum(abs(v)) + tr(" п.", " pts") }
 func fmtUSD(_ v: Double) -> String {
-    if v >= 100 { return "$" + String(Int(v.rounded())) }
+    if v >= 100 { return "$" + String(format: "%.0f", v.rounded()) }
     return "$" + fmtNum(v, decimals: 2)
 }
 
@@ -1113,6 +1138,29 @@ let SYNC_REMOTE_PATH = DATA_DIR + "/sync-remote.json"
 let MACHINE_ID_PATH = DATA_DIR + "/machine-id"
 let SYNC_KEEP_DAYS: Double = 45
 let SYNC_MANIFEST = "ccl-sync.json"
+let SYNC_KEYCHAIN_BACKOFF: TimeInterval = 30 * 60
+
+private func syncAPIOrigin(_ url: String) -> Bool {
+    guard let c = URLComponents(string: url), c.scheme == "https",
+          let host = c.host, host.unicodeScalars.allSatisfy({ $0.isASCII }),
+          host.lowercased() == "api.github.com", !host.contains("%"),
+          let encodedHost = c.percentEncodedHost, !encodedHost.contains("%"),
+          c.port == nil || c.port == 443, c.user == nil, c.password == nil else { return false }
+    return true
+}
+
+/// JSONSerialization bridges 0/1 to Bool too; only CFBoolean is a JSON boolean.
+private func syncIsPrivate(_ value: Any?) -> Bool {
+    guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return false }
+    return n.boolValue == false
+}
+
+private func syncCount(_ value: Any?) -> Int? {
+    guard let value = value else { return 0 }
+    if let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { return nil }
+    guard let n = value as? Int, (0...1_000_000_000_000_000).contains(n) else { return nil }
+    return n
+}
 
 /// Keychain through /usr/bin/security (like the Claude credentials): an ad-hoc-signed app
 /// would get an access prompt after every update if it owned the item itself. The secret is
@@ -1131,7 +1179,7 @@ protocol SyncKeychain {
 
 /// One /usr/bin/security call with a hard 15 s deadline. A locked Keychain (or its unlock
 /// prompt) must not hang the serial ccl.sync queue forever: pipes are pumped on helper
-/// threads, and after terminate() nothing waits for the process again.
+/// threads. SIGTERM is followed by SIGKILL after 2 s if the process is still alive.
 private final class SyncSecurityOutput {
     private let lock = NSLock()
     private var data = Data()
@@ -1164,6 +1212,9 @@ private func syncSecurity(_ args: [String], input: String? = nil) -> (status: Sy
     guard ended.wait(timeout: deadline) == .success,
           drained.wait(timeout: deadline) == .success else {
         if p.isRunning { p.terminate() }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            if p.isRunning { _ = kill(p.processIdentifier, SIGKILL) }
+        }
         return (.timedOut, "")
     }
     let code = p.terminationStatus
@@ -1190,7 +1241,14 @@ struct SecuritySyncKeychain: SyncKeychain {
         syncSecurity(["delete-generic-password", "-s", SYNC_KC_SERVICE]).status
     }
 }
-typealias SyncHTTP = (String, String, [String: String], Data?, Double) -> (status: Int, data: Data?, err: String?)
+typealias SyncHTTPResult = (status: Int, data: Data?, err: String?, headers: [String: String])
+typealias SyncHTTP = (String, String, [String: String], Data?, Double) -> SyncHTTPResult
+
+private func syncHTTP(_ url: String, _ method: String, _ headers: [String: String], _ body: Data?, _ timeout: Double) -> SyncHTTPResult {
+    let authenticated = headers.keys.contains { $0.lowercased() == "authorization" }
+    guard !authenticated || syncAPIOrigin(url) else { return (0, nil, "GitHub API origin required", [:]) }
+    return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: authenticated)
+}
 
 func syncKeychainTimeout() -> String { tr("Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s") }
 func syncKeychainReadError(_ result: SyncKeychainRead) -> String {
@@ -1214,9 +1272,12 @@ final class GitHubSync {
     private let lock = NSLock()
     private var _ui = SyncUIState()
     private var _remote = SyncRemoteCache()
-    private var loginCancelled = false
+    private var loginID: UUID?
     private(set) var verifyURL = "https://github.com/login/device"
     private var backoffUntil = Date.distantPast
+    private var keychainBackoffUntil = Date.distantPast
+    private var retryWork: DispatchWorkItem?
+    private var transientFailure = false
     var onChange: (() -> Void)?
 
     private let transport: SyncHTTP
@@ -1224,13 +1285,15 @@ final class GitHubSync {
     private let defaults: UserDefaults
     private let remotePath: String
     private let suppliedMachineId: String?
+    private let revokeRecheckDelay: TimeInterval
     private var machineIdNeedsSave = false
 
-    init(transport: @escaping SyncHTTP = { http($0, method: $1, headers: $2, body: $3, timeout: $4) },
+    init(transport: @escaping SyncHTTP = syncHTTP,
          keychain: SyncKeychain = SecuritySyncKeychain(), defaults: UserDefaults = .standard,
-         remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil) {
+         remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil, revokeRecheckDelay: TimeInterval = 4) {
         self.transport = transport; self.keychain = keychain; self.defaults = defaults
         self.remotePath = remotePath; self.suppliedMachineId = machineId
+        self.revokeRecheckDelay = revokeRecheckDelay
         _ui.login = defaults.string(forKey: "syncLogin")
         _ui.phase = defaults.bool(forKey: "syncRevoked") ? .revoked : (_ui.login == nil ? .off : .on)
         _ui.lastSync = defaults.object(forKey: "syncLastOkAt") as? Date
@@ -1279,19 +1342,25 @@ final class GitHubSync {
         }
         // «Revoked» wins over a token still in the Keychain: a confirmed-dead token may stay
         // there when its deletion timed out. Only a new sign-in clears the flag.
-        // A missing/unreadable token with a known login stays «on» and is reported, never
-        // silently turned off — the next cycle retries.
+        // A missing token with a known login needs a new sign-in; transient Keychain
+        // failures stay «on» so the next cycle can retry.
         let phase: SyncPhase
         var keychainError: String? = nil
         if d.bool(forKey: "syncRevoked") { phase = .revoked }
         else {
-            let result = keychain.read()
+            let result = readKeychain()
             if case .token = result { phase = .on }
             else if d.string(forKey: "syncLogin") == nil { phase = .off }
-            else { phase = .on; keychainError = syncKeychainReadError(result) }
+            else {
+                if case .missing = result { phase = .revoked } else { phase = .on }
+                keychainError = syncKeychainReadError(result)
+            }
         }
         let ms = machineList()
-        setUI { $0.phase = phase; $0.login = d.string(forKey: "syncLogin"); $0.machines = ms }
+        setUI {
+            if $0.phase != .awaitingCode { $0.phase = phase }
+            $0.login = d.string(forKey: "syncLogin"); $0.machines = ms
+        }
         if let e = keychainError { recordError(e) }
     }
 
@@ -1303,26 +1372,39 @@ final class GitHubSync {
         return out
     }
 
-    private func gh(_ path: String, _ method: String = "GET", token: String, body: Any? = nil) -> (status: Int, json: Any?) {
+    private func gh(_ path: String, _ method: String = "GET", token: String, body: Any? = nil) -> (status: Int, json: Any?, headers: [String: String], err: String?) {
+        let c = URLComponents(string: path)
+        let url = c?.scheme == nil && c?.host == nil && path.first == "/" ? "https://api.github.com" + path : path
+        guard syncAPIOrigin(url) else { return (0, nil, [:], "GitHub API origin required") }
         var h = ["Authorization": "Bearer \(token)", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ClaudeCodexLimits"]
         var data: Data? = nil
         if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
-        let url = path.hasPrefix("https://") ? path : "https://api.github.com" + path
         let r = transport(url, method, h, data, 20)
-        return (r.status, r.data.flatMap { try? JSONSerialization.jsonObject(with: $0) })
+        return (r.status, r.data.flatMap { try? JSONSerialization.jsonObject(with: $0) }, r.headers, r.err)
     }
 
     // MARK: sign-in (OAuth Device Flow)
 
     func startLogin() {
-        loginCancelled = false
-        setUI { $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil }
-        q.async { self.runLogin() }
+        let id = UUID()
+        setUI { loginID = id; $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil }
+        q.async { self.runLogin(id) }
     }
+    private var cancelledLoginPhase: SyncPhase { defaults.bool(forKey: "syncRevoked") ? .revoked : .off }
     func cancelLogin() {
-        loginCancelled = true
-        setUI { $0.phase = .off; $0.userCode = nil }
+        let phase = cancelledLoginPhase
+        setUI { loginID = nil; $0.phase = phase; $0.userCode = nil }
+    }
+    private func loginIsCurrent(_ id: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }; return loginID == id
+    }
+    private func loginFailed(_ id: UUID, _ error: String) {
+        let phase = cancelledLoginPhase
+        setUI {
+            guard loginID == id else { return }
+            loginID = nil; $0.phase = phase; $0.userCode = nil; $0.error = error
+        }
     }
     private func form(_ url: String, _ fields: [String: String]) -> [String: Any]? {
         let body = fields.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }.joined(separator: "&")
@@ -1330,34 +1412,47 @@ final class GitHubSync {
                                                   "Content-Type": "application/x-www-form-urlencoded"], Data(body.utf8), 15)
         return r.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
     }
-    private func runLogin() {
+    private func runLogin(_ id: UUID) {
+        guard loginIsCurrent(id) else { return }
         guard let j = form("https://github.com/login/device/code", ["client_id": GITHUB_CLIENT_ID, "scope": "gist"]),
               let deviceCode = j["device_code"] as? String, let userCode = j["user_code"] as? String else {
-            setUI { $0.phase = .off; $0.error = tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again.") }
+            loginFailed(id, tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again."))
             return
         }
+        guard loginIsCurrent(id) else { return }
         verifyURL = (j["verification_uri"] as? String) ?? verifyURL
         var interval = (j["interval"] as? Double) ?? 5
         let deadline = Date().addingTimeInterval((j["expires_in"] as? Double) ?? 900)
-        setUI { $0.userCode = userCode }
-        while !loginCancelled, Date() < deadline {
+        setUI { if loginID == id { $0.userCode = userCode } }
+        while loginIsCurrent(id), Date() < deadline {
             Thread.sleep(forTimeInterval: interval)
-            if loginCancelled { return }
+            guard loginIsCurrent(id) else { return }
             guard let t = form("https://github.com/login/oauth/access_token",
                                ["client_id": GITHUB_CLIENT_ID, "device_code": deviceCode,
                                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code"]) else { continue }
+            guard loginIsCurrent(id) else { return }
             if let token = t["access_token"] as? String {
-                let saved = keychain.write(token)
-                guard saved == .success, case .token(let stored) = keychain.read(), stored == token else {
-                    setUI { $0.phase = .off; $0.error = saved == .timedOut ? syncKeychainTimeout() : tr("Не удалось сохранить вход в Связку ключей.", "Couldn't save the sign-in to the Keychain.") }
+                let me = gh("/user", token: token)
+                // Cancellation while /user was in flight must never save the issued token.
+                guard loginIsCurrent(id) else { return }
+                guard me.status == 200, let login = (me.json as? [String: Any])?["login"] as? String, !login.isEmpty else {
+                    loginFailed(id, tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again."))
                     return
                 }
-                let me = gh("/user", token: token)
-                let login = (me.json as? [String: Any])?["login"] as? String
+                guard loginIsCurrent(id) else { return }
+                let saved = writeKeychain(token, userInitiated: true)
+                guard saved == .success, case .token(let stored) = readKeychain(userInitiated: true), stored == token else {
+                    loginFailed(id, saved == .timedOut ? syncKeychainTimeout() : tr("Не удалось сохранить вход в Связку ключей.", "Couldn't save the sign-in to the Keychain."))
+                    return
+                }
+                guard loginIsCurrent(id) else { return }
                 let d = defaults
-                d.set(login, forKey: "syncLogin"); d.set(false, forKey: "syncRevoked")
                 let ms = machineList()
-                setUI { $0.phase = .on; $0.login = login; $0.userCode = nil; $0.error = nil; $0.machines = ms }
+                setUI {
+                    guard loginID == id else { return }
+                    d.set(login, forKey: "syncLogin"); d.set(false, forKey: "syncRevoked")
+                    loginID = nil; $0.phase = .on; $0.login = login; $0.userCode = nil; $0.error = nil; $0.machines = ms
+                }
                 syncBody(force: true)
                 return
             }
@@ -1365,20 +1460,20 @@ final class GitHubSync {
             case "authorization_pending": continue
             case "slow_down": interval += 5
             case "access_denied":
-                setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Вход отклонён в GitHub.", "Sign-in was declined on GitHub.") }
+                loginFailed(id, tr("Вход отклонён в GitHub.", "Sign-in was declined on GitHub."))
                 return
             default:
-                setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again.") }
+                loginFailed(id, tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again."))
                 return
             }
         }
-        if !loginCancelled { setUI { $0.phase = .off; $0.userCode = nil; $0.error = tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again.") } }
+        loginFailed(id, tr("Код устарел. Попробуйте ещё раз.", "The code expired. Try again."))
     }
 
     func logout() {
-        loginCancelled = true
+        setUI { _ in loginID = nil }
         q.async {
-            let result = self.keychain.delete()
+            let result = self.deleteKeychain(userInitiated: true)
             guard result == .success || result == .missing else {
                 self.recordError(result == .timedOut ? syncKeychainTimeout() : tr("Не удалось удалить вход из Связки ключей", "Couldn't delete the sign-in from Keychain"))
                 return
@@ -1398,17 +1493,58 @@ final class GitHubSync {
         setUI { $0.lastError = message; $0.lastErrorAt = now; $0.lastUploadAt = pushed }
     }
 
-    /// `GET /user` answered 401 with `token` — the token itself is dead. The Keychain item is
+    private func keychainTimedOut() {
+        keychainBackoffUntil = Date().addingTimeInterval(SYNC_KEYCHAIN_BACKOFF)
+        recordError(syncKeychainTimeout())
+    }
+
+    private func readKeychain(userInitiated: Bool = false) -> SyncKeychainRead {
+        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        let result = keychain.read()
+        if userInitiated {
+            switch result {
+            case .token, .missing: keychainBackoffUntil = .distantPast
+            default: break
+            }
+        }
+        if case .timedOut = result { keychainTimedOut() }
+        return result
+    }
+
+    private func writeKeychain(_ token: String, userInitiated: Bool = false) -> SyncKeychainStatus {
+        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        let result = keychain.write(token)
+        if userInitiated && result == .success { keychainBackoffUntil = .distantPast }
+        if result == .timedOut { keychainTimedOut() }
+        return result
+    }
+
+    private func deleteKeychain(userInitiated: Bool = false) -> SyncKeychainStatus {
+        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        let result = keychain.delete()
+        if userInitiated && (result == .success || result == .missing) { keychainBackoffUntil = .distantPast }
+        if result == .timedOut { keychainTimedOut() }
+        return result
+    }
+
+    /// Two `GET /user` calls answered 401 with `token`. The Keychain item is
     /// deleted only when it still holds exactly that token; a different token there means a
     /// newer sign-in, so nothing is revoked and the next cycle uses it.
     private func revoked(token: String) {
-        let current = keychain.read()
-        var note = tr("Вход в GitHub отозван", "GitHub sign-in revoked")
-        switch current {
-        case .token(let stored) where stored != token:
+        let current = readKeychain()
+        if case .token(let stored) = current, stored != token {
             recordError(syncKeychainReadError(current)); return
+        }
+        // Persist the revoked state and publish the phase before a potentially slow delete.
+        let d = defaults
+        d.set(true, forKey: "syncRevoked"); d.removeObject(forKey: "syncGistId"); d.removeObject(forKey: "syncPushHash")
+        d.removeObject(forKey: "syncDiscoveredAt")
+        setUI { $0.phase = .revoked }
+        var note = tr("Вход в GitHub отозван", "GitHub sign-in revoked")
+        recordError(note)
+        switch current {
         case .token:
-            let result = keychain.delete()
+            let result = deleteKeychain()
             if result != .success && result != .missing {
                 note += " · " + (result == .timedOut ? syncKeychainTimeout() : tr("не удалось удалить вход из Связки ключей", "couldn't delete the sign-in from Keychain"))
             }
@@ -1418,38 +1554,66 @@ final class GitHubSync {
             // Can't tell which token is stored, so it stays; syncRevoked keeps it unused.
             note += " · " + syncKeychainReadError(current)
         }
-        let d = defaults
-        d.set(true, forKey: "syncRevoked"); d.removeObject(forKey: "syncGistId"); d.removeObject(forKey: "syncPushHash")
-        d.removeObject(forKey: "syncDiscoveredAt")
         recordError(note)
-        setUI { $0.phase = .revoked }
     }
 
     /// true = stop this cycle. A gist 401 alone never proves token revocation.
-    private func handle(_ status: Int, request: String, token: String) -> Bool {
-        if status == 401 {
-            let me = gh("/user", token: token)
+    private func handle(_ status: Int, headers: [String: String] = [:], request: String, token: String?) -> Bool {
+        if status == 0 || (500...599).contains(status) { transientFailure = true }
+        if status == 401, let token = token {
+            var me = gh("/user", token: token)
+            if me.status == 401 {
+                Thread.sleep(forTimeInterval: revokeRecheckDelay)
+                me = gh("/user", token: token)
+            }
             switch me.status {
             case 200: recordError(tr("401 на \(request), вход подтверждён", "401 on \(request), sign-in confirmed"))
             case 401: revoked(token: token)
             default:
                 // Couldn't confirm either way (network, 5xx, rate limit): keep the token, retry.
-                if me.status == 403 || me.status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60) }
-                recordError(tr("401 на \(request), проверка входа не прошла (\(GitHubSync.statusText(me.status)))",
-                               "401 on \(request), sign-in check failed (\(GitHubSync.statusText(me.status)))"))
+                if me.status == 0 || (500...599).contains(me.status) { transientFailure = true }
+                applyBackoff(me.status, headers: me.headers)
+                recordError(tr("401 на \(request), проверка входа не прошла (\(GitHubSync.statusText(me.status, headers: me.headers)))",
+                               "401 on \(request), sign-in check failed (\(GitHubSync.statusText(me.status, headers: me.headers)))"))
             }
             return true
         }
-        if status == 403 || status == 429 { backoffUntil = Date().addingTimeInterval(15 * 60) }
+        applyBackoff(status, headers: headers)
         guard status == 200 || status == 201 else {
-            recordError(tr("\(request): \(GitHubSync.statusText(status))", "\(request): \(GitHubSync.statusText(status))")); return true
+            let detail = GitHubSync.statusText(status, headers: headers)
+            recordError("\(request): \(detail)"); return true
         }
         return false
     }
 
     /// Status for a human: 0 is a transport failure (no network, timeout), not an HTTP code.
-    static func statusText(_ status: Int) -> String {
-        status == 0 ? tr("нет связи с GitHub", "no connection to GitHub") : tr("ответ \(status)", "HTTP \(status)")
+    static func statusText(_ status: Int, headers: [String: String] = [:]) -> String {
+        if status == 403 && !rateLimited(status, headers: headers) { return tr("доступ запрещён (403)", "access denied (403)") }
+        return status == 0 ? tr("нет связи с GitHub", "no connection to GitHub") : tr("ответ \(status)", "HTTP \(status)")
+    }
+
+    private static func normalizedHeaders(_ headers: [String: String]) -> [String: String] {
+        var result: [String: String] = [:]
+        for (key, value) in headers { result[key.lowercased()] = value.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return result
+    }
+
+    private static func rateLimited(_ status: Int, headers: [String: String]) -> Bool {
+        let h = normalizedHeaders(headers)
+        return status == 429 || (status == 403 && (h["retry-after"] != nil || h["x-ratelimit-remaining"] == "0"))
+    }
+
+    private func applyBackoff(_ status: Int, headers: [String: String]) {
+        guard GitHubSync.rateLimited(status, headers: headers) else { return }
+        let h = GitHubSync.normalizedHeaders(headers), now = Date()
+        var delay: TimeInterval = 15 * 60
+        if let raw = h["retry-after"], let seconds = Double(raw), seconds.isFinite, seconds >= 0 {
+            delay = seconds
+        } else if h["x-ratelimit-remaining"] == "0", let raw = h["x-ratelimit-reset"],
+                  let reset = Double(raw), reset.isFinite, reset >= 0 {
+            delay = max(0, reset - now.timeIntervalSince1970)
+        }
+        backoffUntil = now.addingTimeInterval(min(delay, 60 * 60))
     }
 
     // MARK: push + pull
@@ -1457,7 +1621,7 @@ final class GitHubSync {
     func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
 
     /// Synchronous test seam; use injected dependencies and do not overlap with q work.
-    func syncSynchronously(force: Bool = false) { syncBody(force: force) }
+    func syncSynchronously(force: Bool = false) { syncBody(force: force, allowRetry: false) }
 
     private func snapshotJSON() -> (days: [String: Any], hash: String) {
         let ix = UsageLogs.shared.snapshot()
@@ -1496,12 +1660,12 @@ final class GitHubSync {
         var best: (id: String, created: String)?
         for page in 1...10 {
             let r = gh("/gists?per_page=100&page=\(page)", token: token)
-            if handle(r.status, request: "GET /gists?page=\(page)", token: token) { return (nil, true) }
+            if handle(r.status, headers: r.headers, request: "GET /gists?page=\(page)", token: token) { return (nil, true) }
             guard let arr = r.json as? [[String: Any]] else {
                 recordError(tr("Некорректный ответ GET /gists", "Invalid GET /gists response")); return (nil, true)
             }
             for g in arr {
-                guard let files = g["files"] as? [String: Any], files[SYNC_MANIFEST] != nil,
+                guard syncIsPrivate(g["public"]), let files = g["files"] as? [String: Any], files[SYNC_MANIFEST] != nil,
                       let id = g["id"] as? String else { continue }
                 let created = g["created_at"] as? String ?? ""
                 if best == nil || created < best!.created { best = (id, created) }
@@ -1511,19 +1675,33 @@ final class GitHubSync {
         return (best?.id, false)
     }
 
-    private func syncBody(force: Bool) {
-        guard ui.phase == .on, Date() >= backoffUntil else { return }
+    private func syncBody(force: Bool, allowRetry: Bool = true) {
+        guard ui.phase == .on, Date() >= backoffUntil, Date() >= keychainBackoffUntil else { return }
+        retryWork?.cancel(); retryWork = nil
+        transientFailure = false
+        defer {
+            if allowRetry && transientFailure {
+                let retry = DispatchWorkItem { [weak self] in self?.syncBody(force: force, allowRetry: false) }
+                retryWork = retry
+                q.asyncAfter(deadline: .now() + 60, execute: retry)
+            }
+        }
         let d = defaults, attempt = Date()
         d.set(attempt, forKey: "syncLastAttemptAt")
-        setUI { $0.lastAttemptAt = attempt }
-        let credential = keychain.read()
-        guard case .token(let token) = credential else { recordError(syncKeychainReadError(credential)); return }
+        setUI { $0.lastAttemptAt = attempt; if $0.firstAttemptAt == nil { $0.firstAttemptAt = attempt } }
+        let credential = readKeychain()
+        guard case .token(let token) = credential else {
+            if case .missing = credential, d.string(forKey: "syncLogin") != nil { setUI { $0.phase = .revoked } }
+            recordError(syncKeychainReadError(credential)); return
+        }
         let snap = snapshotJSON()
         let myFile = "machine-\(machineId).json"
         if machineIdNeedsSave {
-            try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
-            try? (machineId + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
-            machineIdNeedsSave = false
+            do {
+                try FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+                try (machineId + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
+                machineIdNeedsSave = false
+            } catch { /* Keep machineIdNeedsSave set for the next cycle. */ }
         }
 
         var gistId = d.string(forKey: "syncGistId")
@@ -1545,6 +1723,7 @@ final class GitHubSync {
             }
         }
         if gistId == nil {
+            d.removeObject(forKey: "syncPushHash")
             let f = findGist(token)
             if f.failed { return }
             if let id = f.id { gistId = id }
@@ -1553,7 +1732,7 @@ final class GitHubSync {
                 let c = gh("/gists", "POST", token: token, body: [
                     "description": "Claude Codex Limits — usage sync (do not edit)", "public": false,
                     "files": [SYNC_MANIFEST: ["content": manifest], myFile: ["content": machineFile(snap.days)]]])
-                if handle(c.status, request: "POST /gists", token: token) { return }
+                if handle(c.status, headers: c.headers, request: "POST /gists", token: token) { return }
                 guard let id = (c.json as? [String: Any])?["id"] as? String else {
                     recordError(tr("Некорректный ответ POST /gists", "Invalid POST /gists response")); return
                 }
@@ -1572,19 +1751,30 @@ final class GitHubSync {
         }
         guard let gid = gistId else { return }
 
+        let g = gh("/gists/\(gid)", token: token)
+        if g.status == 404 {
+            for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
+        }
+        if handle(g.status, headers: g.headers, request: "GET /gists/{id}", token: token) { return }
+        guard let gist = g.json as? [String: Any], syncIsPrivate(gist["public"]) else {
+            // Rediscover on the next cycle; never write into a public/unknown-visibility gist.
+            for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
+            recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response"))
+            return
+        }
+        guard let files = gist["files"] as? [String: [String: Any]] else {
+            recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
+        }
+
         if force || d.string(forKey: "syncPushHash") != snap.hash {
             let p = gh("/gists/\(gid)", "PATCH", token: token, body: ["files": [myFile: ["content": machineFile(snap.days)]]])
-            if p.status == 404 { d.removeObject(forKey: "syncGistId") }
-            if handle(p.status, request: "PATCH /gists/{id}", token: token) { return }
+            if p.status == 404 {
+                for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
+            }
+            if handle(p.status, headers: p.headers, request: "PATCH /gists/{id}", token: token) { return }
             d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
         }
 
-        let g = gh("/gists/\(gid)", token: token)
-        if g.status == 404 { d.removeObject(forKey: "syncGistId") }
-        if handle(g.status, request: "GET /gists/{id}", token: token) { return }
-        guard let files = (g.json as? [String: Any])?["files"] as? [String: [String: Any]] else {
-            recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
-        }
         var contents: [String: String] = [:]
         for (name, f) in files where name.hasPrefix("machine-") && name.hasSuffix(".json") && name != myFile {
             var content = f["content"] as? String
@@ -1592,9 +1782,13 @@ final class GitHubSync {
                 guard let raw = f["raw_url"] as? String else {
                     recordError(tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url")); return
                 }
-                let r = gh(raw, token: token)
-                if handle(r.status, request: "GET raw_url", token: token) { return }
-                content = r.json.flatMap { try? JSONSerialization.data(withJSONObject: $0) }.map { String(decoding: $0, as: UTF8.self) }
+                let r = transport(raw, "GET", ["User-Agent": "ClaudeCodexLimits"], nil, 20)
+                if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) { return }
+                guard r.status == 200, let data = r.data, !data.isEmpty,
+                      let text = String(data: data, encoding: .utf8) else {
+                    recordError(tr("Пустой или нечитаемый ответ GET raw_url", "Empty or unreadable GET raw_url response")); return
+                }
+                content = text
             }
             if let c = content { contents[name] = c }
         }
@@ -1611,23 +1805,30 @@ final class GitHubSync {
     /// Parse other machines' files (name → JSON text) into one summed cache. Pure — no network.
     static func merge(_ contents: [String: String], excluding myId: String, now: Date = Date()) -> SyncRemoteCache {
         var cache = SyncRemoteCache()
-        let iso = ISO8601DateFormatter()
+        var seen = Set<String>()
+        let iso = ISO8601DateFormatter(), fractionalISO = ISO8601DateFormatter()
+        fractionalISO.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let oldest = now.addingTimeInterval(-SYNC_KEEP_DAYS * 86400)
-        for (_, c) in contents {
+        for name in contents.keys.sorted() {
+            guard let c = contents[name] else { continue }
             guard let obj = (try? JSONSerialization.jsonObject(with: Data(c.utf8))) as? [String: Any],
-                  (obj["schema"] as? Int) == 1,
-                  let m = obj["machine"] as? [String: Any], let id = m["id"] as? String, id != myId else { continue }
-            let updated = (obj["updated"] as? String).flatMap { iso.date(from: $0) }
+                  syncCount(obj["schema"]) == 1,
+                  let m = obj["machine"] as? [String: Any], let id = m["id"] as? String, !id.isEmpty,
+                  id != myId, name == "machine-\(id).json", !seen.contains(id) else { continue }
+            let updated = (obj["updated"] as? String).flatMap { iso.date(from: $0) ?? fractionalISO.date(from: $0) }
+            if obj["updated"] != nil && updated == nil { continue }
             if let u = updated, u < oldest { continue }
+            seen.insert(id)
             cache.machines.append(SyncCachedMachine(id: id, name: m["name"] as? String ?? "?", os: m["os"] as? String ?? "", updated: updated))
             guard let days = obj["days"] as? [String: [String: [String: [String: Any]]]] else { continue }
             for (p, byDay) in days {
                 for (day, byModel) in byDay {
                     for (model, v) in byModel {
-                        var u = DayModelUsage()
-                        u.input = v["input"] as? Int ?? 0; u.output = v["output"] as? Int ?? 0
-                        u.cacheRead = v["cacheRead"] as? Int ?? 0; u.cacheWrite5m = v["cacheWrite5m"] as? Int ?? 0
-                        u.cacheWrite1h = v["cacheWrite1h"] as? Int ?? 0; u.turns = v["turns"] as? Int ?? 0
+                        guard let input = syncCount(v["input"]), let output = syncCount(v["output"]),
+                              let cacheRead = syncCount(v["cacheRead"]), let cacheWrite5m = syncCount(v["cacheWrite5m"]),
+                              let cacheWrite1h = syncCount(v["cacheWrite1h"]), let turns = syncCount(v["turns"]) else { continue }
+                        let u = DayModelUsage(input: input, output: output, cacheRead: cacheRead,
+                                              cacheWrite5m: cacheWrite5m, cacheWrite1h: cacheWrite1h, turns: turns)
                         var cur = cache.days[p, default: [:]][day, default: [:]][model, default: DayModelUsage()]
                         cur.add(u)
                         cache.days[p, default: [:]][day, default: [:]][model] = cur
@@ -1745,7 +1946,10 @@ func numText(_ v: Double?) -> String {
 
 // MARK: - Localization (RU default, EN optional)
 
-func appLang() -> String { UserDefaults.standard.string(forKey: "lang") == "en" ? "en" : "ru" }
+func appLang() -> String {
+    if CommandLine.arguments.contains("--sync-selftest") { return "ru" } // No real defaults in isolated tests.
+    return UserDefaults.standard.string(forKey: "lang") == "en" ? "en" : "ru"
+}
 /// Pick the string for the current UI language. Default is Russian.
 func tr(_ ru: String, _ en: String) -> String { appLang() == "en" ? en : ru }
 
@@ -2048,6 +2252,7 @@ struct SyncUIState {
     var lastSync: Date? = nil              // last full cycle that read the gist (syncLastOkAt)
     var error: String? = nil               // sign-in flow only
     var lastAttemptAt: Date? = nil         // syncLastAttemptAt
+    var firstAttemptAt: Date? = nil        // this process only; never restored from defaults
     var lastUploadAt: Date? = nil          // last PATCH of this machine's file (syncPushedAt)
     var lastError: String? = nil           // syncLastError — cleared by a good cycle
     var lastErrorAt: Date? = nil
@@ -2062,11 +2267,14 @@ func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String
     case .revoked:
         return tr("Войдите в GitHub заново — суммы без других компьютеров", "Sign in to GitHub again — totals exclude other computers")
     case .on:
+        guard let firstAttempt = s.firstAttemptAt, let errorAt = s.lastErrorAt,
+              errorAt >= firstAttempt else { return nil }
         let cause = s.lastError ?? tr("ждём ответа GitHub", "waiting for GitHub")
         guard let since = s.lastSync ?? s.lastUploadAt else {
             return s.lastError.map { tr("Синхронизация не работает: ", "Sync isn't working: ") + $0 }
         }
-        guard now.timeIntervalSince(since) > SYNC_STALE_AFTER else { return nil }
+        guard now.timeIntervalSince(since) > SYNC_STALE_AFTER,
+              errorAt > since.addingTimeInterval(SYNC_STALE_AFTER) else { return nil }
         return tr("Синхронизация стоит с \(fmtMoment(since)): \(cause)", "Sync stalled since \(fmtMoment(since)): \(cause)")
     case .off, .awaitingCode:
         return nil
@@ -2099,7 +2307,8 @@ let SET_SYNC_NOTE_H: CGFloat = 60
 func setSyncCardH() -> CGFloat {
     let s = syncUIState()
     switch s.phase {
-    case .off, .revoked: return SET_ROW_H + SET_SYNC_NOTE_H
+    case .off:          return SET_ROW_H + SET_SYNC_NOTE_H
+    case .revoked:      return SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H : 0)
     case .awaitingCode:  return SET_ROW_H + 44 + 26
     case .on:            return SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
                                 + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 : 0)
@@ -3455,6 +3664,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                       "Bars and money will include every computer signed in to the same GitHub. It combines statistics from several computers that use the same account."),
                  syTop + SET_ROW_H - 4)
             }
+            if revoked, let err = sy.lastError {
+                let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
+                text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
+                     x: cardX + 14, topY: syTop + SET_ROW_H + SET_SYNC_NOTE_H)
+            }
         case .awaitingCode:
             text(attr(tr("Введите код на github.com/login/device", "Enter the code at github.com/login/device"), 12, .regular, textHi), x: cardX + 14, topY: rowMid + 1)
             let codeTop = syTop + SET_ROW_H - 2
@@ -3503,7 +3717,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let st = syTop + SET_ROW_H + CGFloat(max(1, sy.machines.count)) * SET_SYNC_MROW_H
             hdiv(cardX + 14, cardX + cardW - 14, st)
             let upl = sy.lastUploadAt.map { fmtMoment($0) } ?? "—", rd = sy.lastSync.map { fmtMoment($0) } ?? "—"
-            text(attr(tr("Последняя отправка: \(upl) · чтение: \(rd)", "Last upload: \(upl) · read: \(rd)"), 10.5, .regular, textMid),
+            text(fitAttr(tr("Последняя отправка: \(upl) · чтение: \(rd)", "Last upload: \(upl) · read: \(rd)"), maxW: cardW - 28) { attr($0, 10.5, .regular, textMid) },
                  x: cardX + 14, topY: st + (SET_SYNC_STATUS_H - 10.5) / 2)
             if let err = sy.lastError {
                 let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
@@ -4381,6 +4595,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.applyTrayImage(l.0, l.1)
         }
 
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(workspaceDidWake), name: NSWorkspace.didWakeNotification, object: nil)
+
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(themeChanged),
             name: NSNotification.Name("AppleInterfaceThemeChangedNotification"), object: nil)
@@ -4413,8 +4630,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         trayAppearanceObs?.invalidate()
         trayAppearanceObs = nil
+    }
+
+    @objc func workspaceDidWake() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7) {
+            guard advancedEnabled() else { return }
+            GitHubSync.shared.syncNow()
+        }
     }
 
     var logsTimer: Timer?
@@ -4755,7 +4980,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // because the parent dir is missing → the app mistakes it for "another instance
 // already running" and silently exit(0)'s. A single mkdir up front fixes both
 // the silent-exit bug and the (previously failing) cache persistence.
-try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+if !CommandLine.arguments.contains("--sync-selftest") {
+    try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+}
 
 if CommandLine.arguments.contains("--preview") {
     var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)
@@ -4848,34 +5075,106 @@ struct OfflineSyncKeychain: SyncKeychain {
     func write(_ token: String) -> SyncKeychainStatus { .failure(-1) }
     func delete() -> SyncKeychainStatus { .failure(-1) }
 }
-let OFFLINE_SYNC_HTTP: SyncHTTP = { _, _, _, _, _ in (0, nil, "selftest: network disabled") }
+/// Reference storage lets a protocol value and the selftest observe the same in-memory token.
+struct MemorySyncKeychain: SyncKeychain {
+    private final class Storage {
+        var token: String?
+        init(_ token: String?) { self.token = token }
+    }
+    private let storage: Storage
+    init(token: String?) { storage = Storage(token) }
+    func read() -> SyncKeychainRead { storage.token.map { .token($0) } ?? .missing }
+    func write(_ token: String) -> SyncKeychainStatus { storage.token = token; return .success }
+    func delete() -> SyncKeychainStatus { storage.token = nil; return .success }
+}
+let OFFLINE_SYNC_HTTP: SyncHTTP = { _, _, _, _, _ in (0, nil, "selftest: network disabled", [:]) }
 
 if CommandLine.arguments.contains("--sync-selftest") {
-    // Read-only and offline (lesson 006): no GitHub, no Keychain item, nothing read or written
-    // under ~/.claude-limits-monitor or in the app's defaults — the index is rebuilt in memory
-    // from the CLIs' transcripts and never saved.
-    let selfTestDefaults = UserDefaults(suiteName: "com.arrivarus.claudecodexlimits.selftest") ?? UserDefaults()
+    // Offline (lesson 006): no GitHub or real Keychain/defaults. Normal startup creates
+    // ~/.claude-limits-monitor earlier, before CLI dispatch; that mkdir is skipped for this
+    // mode. The selftest reads/writes nothing there. CLI transcripts rebuild only RAM.
+    let suite = "com.arrivarus.claudecodexlimits.selftest"
+    guard let selfTestDefaults = UserDefaults(suiteName: suite) else {
+        print("FAIL selftest defaults suite unavailable"); exit(1)
+    }
+    selfTestDefaults.removePersistentDomain(forName: suite)
+    func check(_ ok: Bool, _ label: String) {
+        print("\(ok ? "OK" : "FAIL") \(label)")
+        if !ok { selfTestDefaults.removePersistentDomain(forName: suite); exit(1) }
+    }
     let sync = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: OfflineSyncKeychain(), defaults: selfTestDefaults,
                           remotePath: NSTemporaryDirectory() + "ccl-selftest-remote.json", machineId: "selftest-self")
     _ = UsageLogs.shared.scanSync(persist: false)
     let mine = sync.selfTestFile()
     // Pretend the same data came from another machine: swap the id, keep everything else.
     guard var obj = (try? JSONSerialization.jsonObject(with: Data(mine.utf8))) as? [String: Any],
-          var m = obj["machine"] as? [String: Any] else { print("FAIL: own file unparsable"); exit(1) }
+          var m = obj["machine"] as? [String: Any] else { check(false, "own file unparsable"); exit(1) }
     m["id"] = "00000000-test"; m["name"] = "astra-test"; m["os"] = "Astra Linux SE"; obj["machine"] = m
     let other = String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
     let stale = other.replacingOccurrences(of: "00000000-test", with: "11111111-old")
         .replacingOccurrences(of: "\"updated\":\"", with: "\"updated\":\"2020-01-01T00:00:00Z\",\"x\":\"")
-    let cache = GitHubSync.merge(["machine-a.json": other, "machine-self.json": mine, "machine-old.json": stale, "machine-bad.json": "{"],
+    let cache = GitHubSync.merge(["machine-00000000-test.json": other, "machine-\(sync.machineId).json": mine, "machine-11111111-old.json": stale, "machine-bad.json": "{"],
                                  excluding: sync.machineId)
-    print("machines merged:", cache.machines.map { $0.name })
+    check(cache.machines.count == 1 && cache.machines.first?.id == "00000000-test",
+          "machines merged: \(cache.machines.map { $0.name })")
     sync.setRemoteForPreview(cache)
     for p in ["claude", "codex"] {
         let local = dailyUsage(p, days: 7, index: UsageLogs.shared.snapshot()).reduce(0) { $0 + $1.turns }
         let merged = dailyUsage(p, days: 7, index: mergedUsageIndex(sync)).reduce(0) { $0 + $1.turns }
-        print("\(p): turns 7d local=\(local) merged=\(merged) \(merged == 2 * local ? "OK (doubled)" : "MISMATCH")")
+        check(merged == 2 * local, "\(p): turns 7d local=\(local) merged=\(merged) (doubled)")
     }
-    print("file bytes:", mine.utf8.count, "machine id:", sync.machineId.prefix(8) + "…")
+    print("OK file bytes:", mine.utf8.count, "machine id:", sync.machineId.prefix(8) + "…")
+
+    for (statuses, shouldRevoke) in [([401, 401, 200], false), ([401, 401, 401], true)] {
+        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.set("selftest-login", forKey: "syncLogin")
+        selfTestDefaults.set("selftest-gist", forKey: "syncGistId")
+        selfTestDefaults.set(Date(), forKey: "syncDiscoveredAt")
+        let token = "selftest-mem"
+        let keychain = MemorySyncKeychain(token: token)
+        var replies = Array(zip(["/gists/selftest-gist", "/user", "/user"], statuses))
+        let scripted: SyncHTTP = { url, method, headers, _, _ in
+            check(!replies.isEmpty, "scripted HTTP has a queued response")
+            let (path, status) = replies.removeFirst()
+            check(url == "https://api.github.com" + path && method == "GET" && headers["Authorization"] == "Bearer " + token,
+                  "scripted GET \(path) -> \(status)")
+            let data = status == 200 ? Data("{\"login\":\"selftest-login\"}".utf8) : nil
+            return (status, data, nil, [:])
+        }
+        let subject = GitHubSync(transport: scripted, keychain: keychain, defaults: selfTestDefaults,
+                                 remotePath: NSTemporaryDirectory() + "ccl-selftest-unused-remote.json",
+                                 machineId: "selftest-self", revokeRecheckDelay: 0)
+        subject.syncSynchronously()
+        let tokenMatches: Bool
+        switch keychain.read() {
+        case .token(let stored): tokenMatches = !shouldRevoke && stored == token
+        case .missing: tokenMatches = shouldRevoke
+        default: tokenMatches = false
+        }
+        check(replies.isEmpty && tokenMatches && selfTestDefaults.bool(forKey: "syncRevoked") == shouldRevoke
+              && subject.ui.phase == (shouldRevoke ? .revoked : .on),
+              "401 -> 401 -> \(statuses[2]): \(shouldRevoke ? "revoked, token deleted" : "not revoked, token retained")")
+        selfTestDefaults.removePersistentDomain(forName: suite)
+    }
+
+    selfTestDefaults.removePersistentDomain(forName: suite)
+    let now = Date(), day = dayKey(now), fractionalISO = ISO8601DateFormatter()
+    fractionalISO.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    var oversized: [String: String] = [:]
+    for id in ["selftest-large-1", "selftest-large-2"] {
+        let file: [String: Any] = ["schema": 1, "machine": ["id": id, "name": id, "os": "selftest"],
+                                   "updated": fractionalISO.string(from: now),
+                                   "days": ["claude": [day: ["selftest-model": ["input": Int.max]]]]]
+        guard let data = try? JSONSerialization.data(withJSONObject: file) else {
+            check(false, "A2 fixture serialization"); exit(1)
+        }
+        oversized["machine-\(id).json"] = String(decoding: data, as: UTF8.self)
+    }
+    let large = GitHubSync.merge(oversized, excluding: "selftest-self", now: now)
+    let sum = large.days["claude"]?[day]?["selftest-model"]?.input ?? 0
+    check(large.machines.count == 2 && (0...1_000_000_000_000_000).contains(sum),
+          "A2 two Int.max fields: merge survived, sum=\(sum) <= 1e15")
+    selfTestDefaults.removePersistentDomain(forName: suite)
     exit(0)
 }
 

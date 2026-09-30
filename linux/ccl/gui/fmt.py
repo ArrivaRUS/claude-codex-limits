@@ -90,7 +90,7 @@ def fmt_moment(t):
     """"09:37" today, "сб 15:33" within the week, else "26 сент, 15:33"."""
     if _is_today(t):
         return hhmm(t)
-    if t < time.time() + 6 * 86400:
+    if t > time.time() - 6 * 86400:
         return weekday(t) + " " + hhmm(t)
     lt = time.localtime(t)
     if app_lang() == "ru":

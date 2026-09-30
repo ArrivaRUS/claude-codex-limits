@@ -1,5 +1,11 @@
 """Unit tests for the log index and the sync protocol. Run: python3 -m unittest discover linux/tests"""
 
+if __package__:
+    from . import _isolate  # noqa: F401
+else:
+    import _isolate  # noqa: F401
+
+
 import json
 import os
 import shutil

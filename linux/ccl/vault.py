@@ -8,10 +8,14 @@ a dialog from a background timer.
 
 Every Secret Service operation runs under a deadline (`TIMEOUT`, docs/sync-protocol.md →
 Errors): a keyring that hangs on D-Bus must not hold the sync cycle (and its lock) forever.
-Test seams: `_ss` (the Secret Service factory) and `TIMEOUT`.
+Test seams (replace before exercising sync/vault): `_ss` (Secret Service factory),
+`TIMEOUT`, `_file_get` / `common.TOKEN_FILE_PATH` (file fallback), `sync.transport`
+(all GitHub requests), `sync.REVOKE_RECHECK_DELAY` (variant a's recheck pause), and
+`sync.LOGIN_LOCK_TIMEOUT` (sign-in/out lock deadline).
 """
 
 import os
+import secrets
 import threading
 
 from . import common
@@ -24,13 +28,16 @@ _SS_PATH = "/org/freedesktop/secrets"
 _I_SERVICE = "org.freedesktop.Secret.Service"
 _I_ITEM = "org.freedesktop.Secret.Item"
 _I_COLLECTION = "org.freedesktop.Secret.Collection"
+_worker = threading.local()
 
 
 class _SecretService(object):
     def __init__(self):
         import dbus  # python3-dbus from the OS repository
         self.dbus = dbus
-        self.bus = dbus.SessionBus()
+        self.bus = dbus.SessionBus(private=True)
+        # Register before the first D-Bus call, including a failing/hung constructor.
+        _worker.buses.append(self.bus)
         obj = self.bus.get_object(_SS, _SS_PATH)
         self.service = dbus.Interface(obj, _I_SERVICE)
         _, self.session = self.service.OpenSession("plain", dbus.String("", variant_level=1))
@@ -43,17 +50,30 @@ class _SecretService(object):
         unlocked, _prompt = self.service.Unlock(self.dbus.Array(paths, signature="o"))
         return list(unlocked)
 
-    def find(self):
-        unlocked, locked = self.service.SearchItems(ATTRS)
-        items = list(unlocked) + self._unlocked(list(locked))
+    def _paths(self, generation):
+        attrs = dict(ATTRS, generation=generation) if generation != "legacy" else ATTRS
+        unlocked, locked = self.service.SearchItems(attrs)
+        if generation == "legacy":
+            # SearchItems matches subsets: ATTRS alone also finds every new generation.
+            def legacy(path):
+                props = self.dbus.Interface(self.bus.get_object(_SS, path),
+                                            "org.freedesktop.DBus.Properties")
+                return props.Get(_I_ITEM, "Attributes").get("generation", "legacy") == "legacy"
+            unlocked = [p for p in unlocked if legacy(p)]
+            locked = [p for p in locked if legacy(p)]
+        return list(unlocked), list(locked)
+
+    def find(self, generation):
+        unlocked, locked = self._paths(generation)
+        items = unlocked + self._unlocked(locked)
         return items[0] if items else None
 
-    def has_locked(self):
-        _unlocked, locked = self.service.SearchItems(ATTRS)
-        return bool(locked) and not self._unlocked(list(locked))
+    def has_locked(self, generation):
+        _unlocked, locked = self._paths(generation)
+        return bool(locked) and not self._unlocked(locked)
 
-    def get(self):
-        path = self.find()
+    def get(self, generation):
+        path = self.find(generation)
         if not path:
             return None
         item = self.dbus.Interface(self.bus.get_object(_SS, path), _I_ITEM)
@@ -61,7 +81,7 @@ class _SecretService(object):
         value = bytes(bytearray(secret[2])).decode("utf-8").strip()
         return value or None
 
-    def set(self, token):
+    def set(self, token, generation):
         dbus = self.dbus
         coll = self.service.ReadAlias("default")
         if coll == "/":
@@ -71,7 +91,7 @@ class _SecretService(object):
         c = dbus.Interface(self.bus.get_object(_SS, coll), _I_COLLECTION)
         props = {
             "org.freedesktop.Secret.Item.Label": dbus.String(LABEL),
-            "org.freedesktop.Secret.Item.Attributes": dbus.Dictionary(ATTRS, signature="ss"),
+            "org.freedesktop.Secret.Item.Attributes": dbus.Dictionary(dict(ATTRS, generation=generation), signature="ss"),
         }
         secret = dbus.Struct((self.session, dbus.ByteArray(b""), dbus.ByteArray(token.encode("utf-8")),
                               dbus.String("text/plain")), signature="oayays")
@@ -79,11 +99,15 @@ class _SecretService(object):
         if item == "/" or prompt != "/":
             raise RuntimeError("keyring asked for a prompt")
 
-    def delete(self):
-        unlocked, locked = self.service.SearchItems(ATTRS)
-        for path in list(unlocked) + self._unlocked(list(locked)):
+    def delete(self, generation):
+        unlocked, locked = self._paths(generation)
+        newly_unlocked = self._unlocked(locked)
+        ok = set(locked).issubset(newly_unlocked)
+        for path in unlocked + newly_unlocked:
             item = self.dbus.Interface(self.bus.get_object(_SS, path), _I_ITEM)
-            item.Delete()
+            if item.Delete() != "/":
+                ok = False                    # a prompt is not a completed deletion
+        return ok
 
 
 def _ss():
@@ -111,10 +135,18 @@ def _timed(fn):
     box = {}
 
     def run():
+        _worker.buses = []
         try:
             box["v"] = fn()
         except BaseException as e:      # handed to the caller below
             box["e"] = e
+        finally:
+            for bus in _worker.buses:
+                try:
+                    bus.close()
+                except Exception:
+                    pass
+            del _worker.buses
     t = threading.Thread(target=run, name="ccl-vault", daemon=True)
     t.start()
     t.join(TIMEOUT)
@@ -125,59 +157,88 @@ def _timed(fn):
     return box.get("v")
 
 
-def _ss_read():
-    """(token or None, locked) from the Secret Service; (None, False) when it isn't there."""
+def _ss_read(generation):
+    """(token or None, locked), restricted to the captured generation."""
     ss = _ss()
     if ss is None:
         return None, False
-    t = ss.get()
+    t = ss.get(generation)
     if t:
         return t, False
-    return None, ss.has_locked()
+    return None, ss.has_locked(generation)
 
 
-def _file_get():
+def _file_get(generation="legacy"):
     try:
         with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
-            t = f.read().strip()
-            return t or None
+            lines = f.read().splitlines()
+        stored_generation = lines[1] if len(lines) > 1 else "legacy"
+        return (lines[0].strip() or None) if lines and stored_generation == generation else None
     except OSError:
         return None
 
 
-def _file_set(token):
+def _file_set(token, generation):
     common.ensure_dirs()
-    common.write_atomic(common.TOKEN_FILE_PATH, token + "\n", 0o600)
+    common.write_atomic(common.TOKEN_FILE_PATH, token + "\n" + generation + "\n", 0o600)
 
 
-def _file_delete():
+def _file_delete(generation):
+    # Mutating callers hold the sync lock, including this compare + unlink.
     try:
-        os.unlink(common.TOKEN_FILE_PATH)
+        with open(common.TOKEN_FILE_PATH, "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        stored_generation = lines[1] if len(lines) > 1 else "legacy"
+        if stored_generation == generation:
+            os.unlink(common.TOKEN_FILE_PATH)
+        return True
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+
+
+def _active(st):
+    # An explicit empty generation is a tombstone, never an invitation to migrate again.
+    generation = st.get("tokenGeneration") if st.has("tokenGeneration") else "legacy"
+    return generation, st.get("tokenBackend")
+
+
+def _read(generation, backend):
+    if not generation:
+        return None, None
+    # Only pre-generation installations with an unknown backend may discover a legacy copy.
+    legacy_discovery = generation == "legacy" and backend is None
+    if backend == "file":
+        token = _file_get(generation)
+        return (token, "file") if token else (None, None)
+    if backend == "secret-service" or legacy_discovery:
+        try:
+            token, locked = _timed(lambda: _ss_read(generation))
+            if token:
+                return token, "secret-service"
+            if locked:
+                return None, "locked"
+        except Timeout:
+            return None, "timeout"
+        except Exception:
+            return None, "unreachable"
+    if legacy_discovery:
+        token = _file_get("legacy")
+        if token:
+            return token, "file"
+    return None, None
 
 
 def read():
-    """(token, backend) or (None, None). The Secret Service wins when it holds one.
-    (None, "locked") means the keyring holds our token but is locked right now — the caller
-    should wait, not treat it as a sign-out. (None, "timeout") means the Secret Service didn't
-    answer in time and there is no file token either — the caller can't tell, so it must not
-    treat it as a sign-out."""
-    locked = timed_out = False
-    try:
-        t, locked = _timed(_ss_read)
-        if t:
-            return t, "secret-service"
-    except Timeout:
-        timed_out = True
-    except Exception:
-        pass
-    t = _file_get()
-    if t:
-        return t, "file"
-    if timed_out:
-        return None, "timeout"
-    return (None, "locked") if locked else (None, None)
+    """Read only the active generation/backend; a timeout never falls through to a file.
+    Installations without tokenGeneration still read their existing legacy token.
+    """
+    st = common.Store(common.SYNC_STATE_PATH)
+    active = _active(st)
+    result = _read(*active)
+    st.reload()
+    return result if _active(st) == active else (None, None)
 
 
 def reachable():
@@ -187,57 +248,80 @@ def reachable():
         return False
 
 
+def _delete(generation, backend):
+    """Delete a captured reference, never whatever happens to be active later."""
+    if not generation:
+        return True
+    legacy_discovery = generation == "legacy" and backend is None
+    ok = True
+    if backend == "secret-service" or legacy_discovery:
+        def ss_delete():
+            ss = _ss()
+            return ss is not None and ss.delete(generation)
+        try:
+            ok = bool(_timed(ss_delete))
+        except Exception:
+            ok = False
+    if backend == "file" or legacy_discovery:
+        ok = _file_delete(generation) and ok
+    return ok
+
+
 def delete_if(token):
-    """Delete the stored token only if it is still `token` — a sync cycle that got a 401 with
-    an old token must not wipe a new one saved by a fresh sign-in meanwhile.
-    Returns "deleted", "missing" (nothing stored), "other" (a different token is stored — keep
-    it), or "timeout" (the store didn't answer — the token may still be there)."""
-    cur, backend = read()
-    if backend == "timeout":
+    """Compare and delete only the captured generation. Call with the sync lock held.
+    Returns deleted/missing/other/timeout; unreadable copies are left alone.
+    """
+    generation, backend = _active(common.Store(common.SYNC_STATE_PATH))
+    cur, found_backend = _read(generation, backend)
+    if found_backend in ("timeout", "locked", "unreachable"):
         return "timeout"
     if cur is None:
         return "missing"
     if cur != token:
         return "other"
-    return "deleted" if delete() else "timeout"
+    return "deleted" if _delete(generation, found_backend) else "timeout"
 
 
 def write(token):
-    """Store the token; returns the backend used. Verifies by reading it back."""
+    """Store a new generation, then publish it. Caller must hold the sync lock.
+    A timed-out D-Bus write can only leave an orphan, never replace a later generation.
+    """
     if not token or not all(c.isalnum() or c in "_-" for c in token):
         raise ValueError("unexpected token format")
+    generation = secrets.token_hex(8)
 
-    def ss_write():
+    def ss_write(generation=generation):
         ss = _ss()
         if ss is None:
             return False
-        ss.set(token)
-        return ss.get() == token
+        ss.set(token, generation)
+        return ss.get(generation) == token
+    backend = "file"
     try:
         if _timed(ss_write):
-            _file_delete()              # one copy only
-            return "secret-service"
-    except Exception:                   # incl. Timeout → the file below
+            backend = "secret-service"
+    except Exception:                   # incl. Timeout → a distinct file generation
         pass
-    _file_set(token)
-    if _file_get() != token:
-        raise OSError("could not save the token")
-    return "file"
+    if backend == "file":
+        generation = secrets.token_hex(8)
+        _file_set(token, generation)
+        if _file_get(generation) != token:
+            raise OSError("could not save the token")
+    common.Store(common.SYNC_STATE_PATH).update(tokenGeneration=generation, tokenBackend=backend)
+    return backend
 
 
 def delete():
-    """Remove the token from both places. False when the Secret Service didn't answer in time
-    (its copy may still be there); other Secret Service errors are ignored, as before."""
-    def ss_delete():
-        ss = _ss()
-        if ss is not None:
-            ss.delete()
-    ok = True
-    try:
-        _timed(ss_delete)
-    except Timeout:
-        ok = False
-    except Exception:
-        pass
-    _file_delete()
-    return ok
+    """Invalidate before deletion; retain failed references for a repeated sign-out.
+    Caller must hold the sync lock. No delayed operation can address a newer generation.
+    """
+    st = common.Store(common.SYNC_STATE_PATH)
+    generation, backend = _active(st)
+    pending = list(st.get("tokenDeletePending") or [])
+    ref = [generation, backend]
+    if generation and ref not in pending:
+        pending.append(ref)
+    st.update(tokenGeneration="", tokenBackend=None, tokenDeletePending=pending)
+    failed = [ref for ref in pending if not _delete(*ref)]
+    st.update(tokenDeletePending=failed or None)
+    return not failed
