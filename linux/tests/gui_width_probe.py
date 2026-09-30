@@ -32,6 +32,7 @@ limits.fetch_claude = lambda: limits.LimitData()
 limits.fetch_codex = lambda live=True: limits.LimitData()
 usage.refresh = lambda blocking=True, progress=None: (usage.new_index(), False, True)
 common.settings().set("lang", lang)
+common.settings().set("interval", 60)      # the removed 1-minute choice, saved by 0.3.2 and older
 if signed:
     sync.sync_state().update(login="someone")
 if deb:
@@ -43,6 +44,9 @@ import ccl.gui.app as A  # noqa: E402
 qapp = QApplication(sys.argv)
 qapp.setStyle(style)
 app = A.TrayApp(qapp)
+iv = (app.model.interval, common.settings().get("interval"), app.timer.interval())
+if iv != (300, 300, 300000):
+    print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 5 for good
 w = app.win
 w.anchor = QPoint(900, 900)
 w.show_page(1)

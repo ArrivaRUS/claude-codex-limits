@@ -123,7 +123,7 @@ def file_lock(name, blocking=True, timeout=None):
 
 SETTINGS_DEFAULTS = {
     "lang": "ru",
-    "interval": 60,
+    "interval": 300,
     "advanced": False,
     "trayMetrics": "session,weekly",
     "codexTray": False,
