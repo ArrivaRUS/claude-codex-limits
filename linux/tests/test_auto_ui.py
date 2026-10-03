@@ -91,7 +91,7 @@ class TestAutoUI(unittest.TestCase):
         texts, fills = [], []
         original_text, original_fill = Canvas.text_c, Canvas.round_fill
         def text(canvas, attr, x, top, height, align=0):
-            texts.append((attr.s, x, top, height, align))
+            texts.append(("".join(run.s for run in canvas._runs(attr)), x, top, height, align))
             return original_text(canvas, attr, x, top, height, align)
         def fill(canvas, rect, *args):
             fills.append(rect)

@@ -29,8 +29,15 @@ M1 закрыт отдельным повторным ревью. После у�
 всей панели тест сравнивает пиксели фактического drawPollFooter отдельно от
 текущих отсчётов карточек. Финальный безопасный selftest: exit 0, **288 OK**,
 40 PNG; Source SHA-256 `5d277016d5a3d2f590519bbef642f31d40a92bc399dbd214f5e35808f7652910`.
-Первый DMG собран успешно; финальный будет пересобран из этого Source.
-Полная Linux suite и DEB ожидают Ubuntu CI. In progress: **M5 QA** и упаковка.
+Финальный DMG 3.2.1: build exit 0, hdiutil verify VALID, read-only mount,
+codesign --verify --deep --strict exit 0, bundled selftest **288 OK**, plist 3.2.1.
+QA macOS просмотрел все 40 Auto PNG RU/EN × Simple/Advanced: PASS. Реальные
+hover/click/аккаунты не запускались; ручной экран ALSE остаётся отдельным долгом.
+Linux CI [37106329175](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37106329175)
+на `fe3a3c4`: 212 tests, errors=1 — новый collector ожидал Attr вместо допустимого
+list[Attr] при Advanced history. Tester исправил одну строку через Canvas._runs;
+production не менялся. Три AST-fixture single/list/tuple прошли, реальный Qt
+ожидает повторного CI. In progress: **M5 Linux QA/CI** и упаковка.
 M4–M6 ещё не закрыты. Неисполненные Swift callbacks
 scanActivity/save/refresh с реальными logs/defaults проверены чтением Reviewer,
 не динамическим selftest.
