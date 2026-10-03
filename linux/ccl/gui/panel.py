@@ -40,6 +40,23 @@ def poll_segments():
     return [(tr("1ч", "1h") if sec == 3600 else tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES] + [(tr("А", "A"), 0)]
 
 
+def auto_poll_label_parts(auto, enabled, intervals, lang):
+    """Display-only snapshot: never normalize Auto through the manual choices."""
+    if not auto:
+        return []
+    products = [p for p in ("claude", "codex") if enabled.get(p, False)]
+    if not products:
+        return ["no subscriptions" if lang == "en" else "нет подписок"]
+    values = [intervals.get(p, POLL_DEFAULT) for p in products]
+    labels = {900: "15", 1800: "30", 3600: "1", 14400: "4"}
+    def label(sec):
+        unit = ("h" if lang == "en" else "ч") if sec >= 3600 else ("m" if lang == "en" else "м")
+        return labels[sec] + unit
+    if len(values) == 1 or values[0] == values[1]:
+        return [label(values[0])]
+    return [title + " " + label(sec) for title, sec in zip(("Claude", "Codex"), values)]
+
+
 class Model(object):
     """Everything the panel draws from."""
 
@@ -49,6 +66,7 @@ class Model(object):
         self.claude.present = self.codex.present = False
         self.loaded = False
         self.interval = POLL_DEFAULT
+        self.auto_intervals = {}
         self.updated = None
         self.history = limits.History()
         self.days = {}            # merged usage days (local + other machines)
@@ -275,23 +293,55 @@ def draw_simple(c, W, H, m):
     return hits
 
 
-def footer_simple(c, W, foot, m, hits):
+def footer_simple(c, W, foot, m, hits, advanced=False):
     pad = 16
-    segs = poll_segments()
+    auto = common.settings().get("autoPoll")
+    segs = poll_segments()[:3]
     sw, sh = 40, 24
     c.round_fill(rect_tl(pad, foot, sw * len(segs), sh), 8, gray(1, 0.06))
     for i, (label, sec) in enumerate(segs):
         r = rect_tl(pad + i * sw, foot, sw, sh)
-        on = (sec == 0) if common.settings().get("autoPoll") else (sec != 0 and abs(m.interval - sec) < 1)
+        on = not auto and abs(m.interval - sec) < 1
         if on:
-            c.round_fill(r.adjusted(2, 2, -2, -2), 6, gray(1, 0.13))
-        c.text_c(Attr(label, 11, "semibold" if on else "regular", TEXT_HI if on else TEXT_MID), r.center().x(), foot, sh, align=1)
+            c.round_fill(r.adjusted(2, 2, -2, -2), 6, gray(1, 0.18 if advanced else 0.13))
+        c.text_c(Attr(label, 12 if advanced else 11, "semibold" if on else "medium" if advanced else "regular",
+                      TEXT_HI if on else TEXT_MID), r.center().x(), foot, sh, align=1)
         hits.append(("iv%d" % sec, r))
+    auto_hit = rect_tl(136, foot, 40, 24)
+    capsule = rect_tl(141, foot + 2, 30, 20)
+    if auto:
+        gradient = QLinearGradient(capsule.topLeft(), capsule.bottomRight())
+        gradient.setColorAt(0, rgb(52 / 255, 121 / 255, 239 / 255))
+        gradient.setColorAt(1, rgb(121 / 255, 104 / 255, 232 / 255))
+        c.p.setPen(Qt.NoPen)
+        c.p.setBrush(QBrush(gradient))
+        c.p.drawRoundedRect(capsule, 10, 10)
+    else:
+        c.round_fill(capsule, 10, rgb(38 / 255, 50 / 255, 74 / 255))
+    outline = rgb(184 / 255, 207 / 255, 1, 0.35) if auto else rgb(130 / 255, 154 / 255, 213 / 255)
+    c.round_stroke(capsule.adjusted(0.5, 0.5, -0.5, -0.5), 9.5, outline)
+    label_color = rgb(217 / 255, 229 / 255, 1)
+    c.text_c(Attr(tr("А", "A"), 12, "semibold", gray(1, 1) if auto else label_color),
+             auto_hit.center().x(), foot, sh, align=1)
+    hits.append(("iv0", auto_hit))
+    enabled = {p: common.product_enabled(p) for p in ("claude", "codex")}
+    parts = auto_poll_label_parts(auto, enabled, m.auto_intervals, common.settings().get("lang"))
+    if parts:
+        color = label_color if any(enabled.values()) else rgb(168 / 255, 179 / 255, 201 / 255)
+        joined = Attr(" · ".join(parts), 10, "medium", color)
+        if len(parts) == 2 and joined.width() > 128:
+            for i, part in enumerate(parts):
+                c.text_c(Attr(part, 10, "medium", color), 184, foot + i * 12, 12)
+        else:
+            c.text_c(joined, 184, foot, sh)
     pwr = rect_tl(W - pad - 24, foot, 24, 24)
-    c.icon("power", pwr.adjusted(5, 5, -5, -5), gray(1, 0.6), 1.7)
+    c.icon("power", pwr.adjusted(5, 5, -5, -5), gray(1, 0.5 if advanced else 0.6), 1.6 if advanced else 1.7)
     hits.append(("quit", pwr))
-    if m.updated:
-        c.text_c(Attr(tr("обновлено ", "updated ") + fmt.clock(m.updated), 10, "regular", TEXT_LO), W - pad - 32, foot, sh, align=2)
+    if m.updated and not auto:
+        c.text_c(Attr(tr("обновлено ", "updated ") + fmt.clock(m.updated), 11 if advanced else 10,
+                      "regular", TEXT_MID if advanced else TEXT_LO),
+                 315 if advanced else W - pad - 32, foot + 3 if advanced else foot,
+                 18 if advanced else sh, align=2)
 
 
 # ---- advanced view («Темп») ------------------------------------------------------------------
@@ -663,23 +713,7 @@ def draw_advanced(c, W, H, m):
 
     # footer
     foot = H - 35 - CREDIT_H
-    segs = poll_segments()
-    sw = [Attr(s, 12, "semibold", TEXT_HI).width() + 20 for s, _ in segs]
-    c.round_fill(rect_tl(ADV_CX, foot + 1, sum(sw) + 4, 22), 11, gray(1, 0.07))
-    sx = ADV_CX + 2
-    for i, (label, sec) in enumerate(segs):
-        r = rect_tl(sx, foot + 3, sw[i], 18)
-        on = (sec == 0) if common.settings().get("autoPoll") else (sec != 0 and abs(m.interval - sec) < 1)
-        if on:
-            c.round_fill(r, 9, gray(1, 0.18))
-        c.text_c(Attr(label, 12, "semibold" if on else "medium", TEXT_HI if on else TEXT_MID), r.center().x(), foot + 3, 18, align=1)
-        hits.append(("iv%d" % sec, r))
-        sx += sw[i]
-    pwr = rect_tl(327, foot + 3, 18, 18)
-    c.icon("power", pwr.adjusted(2, 2, -2, -2), gray(1, 0.5), 1.6)
-    hits.append(("quit", pwr.adjusted(-6, -6, 6, 6)))
-    if m.updated:
-        c.text_c(Attr(tr("обновлено ", "updated ") + fmt.clock(m.updated), 11, "regular", TEXT_MID), 315, foot + 3, 18, align=2)
+    footer_simple(c, W, foot, m, hits, advanced=True)
     div = foot + 22 + 8
     c.hline(ADV_CX, ADV_CX + ADV_CW, div, gray(1, 0.06))
     credit_line(c, W, div + 7, hits)

@@ -795,6 +795,7 @@ class TrayApp(QObject):
         if not isinstance(saved, dict):
             saved = {}
         self.poll_states = {p: polling.PollState(saved.get(p)) for p in ("claude", "codex")}
+        self.publish_auto_intervals()
         self.activity_busy = False
         self.model.history.load()
         self.bridge = Bridge()
@@ -1022,7 +1023,14 @@ class TrayApp(QObject):
     def start_poll_timer(self):
         self.timer.start((60 if common.settings().get("autoPoll") else self.model.interval) * 1000)
 
+    def publish_auto_intervals(self):
+        self.model.auto_intervals = {p: state.interval for p, state in self.poll_states.items()}
+        win = getattr(self, "win", None)
+        if win is not None:
+            win.view.update()
+
     def save_poll_states(self):
+        self.publish_auto_intervals()
         common.state().set("autoPollState", {p: state.saved() for p, state in self.poll_states.items()})
 
     def auto_summary(self):
@@ -1036,6 +1044,8 @@ class TrayApp(QObject):
                 state = self.poll_states[p]
                 lines.append("%s: %s%s" % (title, fmt.fmt_span(state.interval / 3600),
                              tr(" · пауза после ошибки", " · backing off after an error") if state.failed else ""))
+        if self.model.updated:
+            lines.append(tr("обновлено ", "updated ") + fmt.clock(self.model.updated))
         return "\n".join(lines)
 
     def scan_activity(self):

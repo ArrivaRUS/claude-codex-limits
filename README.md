@@ -36,7 +36,7 @@ Click the tray icon for a detailed popover.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover requests a fresh reading** with a fixed interval; Auto respects its schedule.
 - **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
-- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. Hover over A for the current intervals. Auto is off by default; the fixed default remains 30 minutes.
+- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. When Auto is on, the blue-to-violet A button shows the current interval beside it in both Simple and Advanced views. One enabled subscription or equal intervals shows one value; different intervals show each product, for example `Claude 15m · Codex 4h`. With both subscriptions off, the label reads `no subscriptions`. The last-update time is available in the A tooltip while Auto is on. Auto is off by default; the fixed default remains 30 minutes.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -107,7 +107,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.2.0.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.2.1.dmg` from the [macOS 3.2.1 release](../../releases/tag/v3.2.1).
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -133,14 +133,14 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 
 ### Linux (Astra Linux)
 
-The Linux port is tested on Astra Linux SE 1.8 (KDE / Fly). It gives a tray icon with the same
+Earlier Linux versions were tested on Astra Linux SE 1.8 (KDE / Fly). The 0.4.1 UI change has not yet been tested on a live ALSE system; Linux CI uses Ubuntu 22.04. The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.4.0_all.deb` from the [Linux 0.4.0](../../releases/tag/linux-v0.4.0) release.
+1. Download `claude-codex-limits_0.4.1_all.deb` from the [Linux 0.4.1](../../releases/tag/linux-v0.4.1) release.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.4.0_all.deb
+   sudo apt install ./claude-codex-limits_0.4.1_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -166,7 +166,7 @@ In Auto, opening the panel keeps the schedule; manual refresh waits at least 15 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.2.0.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.2.1.dmg
 ```
 
 ## Project layout

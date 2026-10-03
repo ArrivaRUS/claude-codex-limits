@@ -2440,7 +2440,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.0"
+let APP_VERSION = "3.2.1"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -2515,6 +2515,24 @@ func loadAutoPollStates() -> [String: AutoPollState] {
 func pollSegments() -> [(ru: String, en: String, sec: TimeInterval)] { POLL_CHOICES + [("А", "A", 0)] }
 func pollSelected(_ sec: TimeInterval, manual: TimeInterval) -> Bool {
     autoPollEnabled() ? sec == 0 : sec != 0 && abs(manual - sec) < 1
+}
+
+/// Display-only values from the owner's snapshot, independent of the saved manual choice.
+func autoPollLabelParts(auto: Bool, enabled: [String: Bool], intervals: [String: TimeInterval], lang: String) -> [String] {
+    guard auto else { return [] }
+    let products = ["claude", "codex"].filter { enabled[$0] == true }
+    guard !products.isEmpty else { return [lang == "en" ? "no subscriptions" : "нет подписок"] }
+    let values = products.map { intervals[$0] ?? POLL_DEFAULT }
+    func label(_ sec: TimeInterval) -> String {
+        switch sec {
+        case 900: return lang == "en" ? "15m" : "15м"
+        case 3600: return lang == "en" ? "1h" : "1ч"
+        case 14400: return lang == "en" ? "4h" : "4ч"
+        default: return lang == "en" ? "30m" : "30м"
+        }
+    }
+    if values.count == 1 || values[0] == values[1] { return [label(values[0])] }
+    return ["Claude " + label(values[0]), "Codex " + label(values[1])]
 }
 
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
@@ -2617,9 +2635,83 @@ func drawPower(_ ctx: CGContext, _ r: CGRect, _ color: NSColor) {
     ctx.restoreGState()
 }
 
+/// Shared 360-point footer; Auto paint only consumes an interval snapshot.
+func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: TimeInterval,
+                    updated: Date?, autoIntervals: [String: TimeInterval], advanced: Bool = false) -> [Hit] {
+    let H = size.height, auto = autoPollEnabled()
+    var hits: [Hit] = []
+    func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
+        CGRect(x: x, y: H - y - h, width: w, height: h)
+    }
+    func color(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ alpha: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: r / 255, green: g / 255, blue: b / 255, alpha: alpha)
+    }
+    func attr(_ s: String, _ sz: CGFloat, _ weight: NSFont.Weight, _ color: NSColor) -> NSAttributedString {
+        ctAttr(s, ctFont(sz, weight), cg(color))
+    }
+    func textC(_ a: NSAttributedString, x: CGFloat, y: CGFloat, h: CGFloat, align: Int = 0) {
+        let line = CTLineCreateWithAttributedString(a)
+        var asc: CGFloat = 0, desc: CGFloat = 0
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
+        let dx = align == 1 ? x - w / 2 : align == 2 ? x - w : x
+        ctx.textMatrix = .identity
+        ctx.textPosition = CGPoint(x: dx, y: H - y - (h - asc - desc) / 2 - desc * 0.15 - asc)
+        CTLineDraw(line, ctx)
+    }
+    func fill(_ r: CGRect, radius: CGFloat, color: NSColor) {
+        ctx.addPath(CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil))
+        ctx.setFillColor(cg(color)); ctx.fillPath()
+    }
+    fill(rect(16, top, 120, 24), radius: 8, color: gray(1, 0.06))
+    for (i, seg) in POLL_CHOICES.enumerated() {
+        let r = rect(16 + CGFloat(i) * 40, top, 40, 24)
+        let selected = !auto && abs(interval - seg.sec) < 1
+        if selected { fill(r.insetBy(dx: 2, dy: 2), radius: 6, color: gray(1, advanced ? 0.18 : 0.13)) }
+        textC(attr(tr(seg.ru, seg.en), advanced ? 12 : 11, selected ? .semibold : advanced ? .medium : .regular,
+                   gray(1, selected ? 0.95 : 0.5)), x: r.midX, y: top, h: 24, align: 1)
+        hits.append(Hit(id: "iv\(Int(seg.sec))", rect: r))
+    }
+    let autoHit = rect(136, top, 40, 24), capsule = rect(141, top + 2, 30, 20)
+    let path = CGPath(roundedRect: capsule, cornerWidth: 10, cornerHeight: 10, transform: nil)
+    if auto {
+        ctx.saveGState(); ctx.addPath(path); ctx.clip()
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                    colors: [cg(color(52, 121, 239)), cg(color(121, 104, 232))] as CFArray, locations: [0, 1]) {
+            ctx.drawLinearGradient(gradient, start: CGPoint(x: capsule.minX, y: capsule.maxY),
+                                   end: CGPoint(x: capsule.maxX, y: capsule.minY), options: [])
+        }
+        ctx.restoreGState()
+    } else { fill(capsule, radius: 10, color: color(38, 50, 74)) }
+    ctx.addPath(CGPath(roundedRect: capsule.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 9.5, cornerHeight: 9.5, transform: nil))
+    ctx.setStrokeColor(cg(auto ? color(184, 207, 255, 0.35) : color(130, 154, 213)))
+    ctx.setLineWidth(1); ctx.strokePath()
+    let labelColor = color(217, 229, 255)
+    textC(attr(tr("А", "A"), 12, .semibold, auto ? gray(1, 1) : labelColor), x: autoHit.midX, y: top, h: 24, align: 1)
+    hits.append(Hit(id: "iv0", rect: autoHit))
+    let enabled = ["claude": productEnabled("claude"), "codex": productEnabled("codex")]
+    let parts = autoPollLabelParts(auto: auto, enabled: enabled, intervals: autoIntervals, lang: appLang())
+    if !parts.isEmpty {
+        let ink = enabled.values.contains(true) ? labelColor : color(168, 179, 201)
+        let joined = attr(parts.joined(separator: " · "), 10, .medium, ink)
+        if parts.count == 2 && lineWidth(CTLineCreateWithAttributedString(joined)) > 128 {
+            for (i, part) in parts.enumerated() {
+                textC(attr(part, 10, .medium, ink), x: 184, y: top + CGFloat(i) * 12, h: 12)
+            }
+        } else { textC(joined, x: 184, y: top, h: 24) }
+    }
+    let power = rect(320, top, 24, 24)
+    drawPower(ctx, power.insetBy(dx: 4, dy: 4), gray(1, advanced ? 0.5 : 0.6))
+    hits.append(Hit(id: "quit", rect: power))
+    if !auto, let u = updated {
+        textC(attr(tr("обновлено ", "updated ") + clockText(u), advanced ? 11 : 10, .regular, gray(1, advanced ? 0.5 : 0.34)),
+              x: advanced ? 315 : 312, y: advanced ? top + 3 : top, h: advanced ? 18 : 24, align: 2)
+    }
+    return hits
+}
+
 @discardableResult
 func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
-               interval: TimeInterval, updated: Date?, about: AboutState) -> [Hit] {
+               interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -2865,29 +2957,13 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
     // footer
     let footTop = cardsTop + cardH + 14
-    let segs: [(String, Double)] = pollSegments().map { (tr($0.ru, $0.en), $0.sec) }
-    let segW: CGFloat = 40, segH: CGFloat = 24
-    roundFill(rectTL(pad, footTop, segW * CGFloat(segs.count), segH), 8, gray(1, 0.06))
-    for (i, seg) in segs.enumerated() {
-        let segRect = rectTL(pad + CGFloat(i) * segW, footTop, segW, segH)
-        let active = pollSelected(seg.1, manual: interval)
-        if active { roundFill(segRect.insetBy(dx: 2, dy: 2), 6, gray(1, 0.13)) }
-        text(attr(seg.0, 11, active ? .semibold : .regular, active ? textHi : textMid),
-             x: segRect.midX, topY: footTop + 6, align: 1)
-        hits.append(Hit(id: "iv\(Int(seg.1))", rect: segRect))
-    }
-    let pwrRect = rectTL(W - pad - 24, footTop, 24, 24)
-    drawPower(ctx, pwrRect.insetBy(dx: 4, dy: 4), gray(1, 0.6))
-    hits.append(Hit(id: "quit", rect: pwrRect))
-    if let u = updated {
-        text(attr(tr("обновлено ", "updated ") + clockText(u), 10, .regular, textLo), x: W - pad - 32, topY: footTop + 7, align: 2)
-    }
+    hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated, autoIntervals: autoIntervals)
 
     // credit line (authorship + version + clickable GitHub), like the reference app.
     // Anchored BELOW the interval row rather than at a fixed offset from the top: the cards
     // can grow (a per-model limit adds a row), and a hardcoded position would slide up into
     // the pills and strike through them.
-    let divTopY = footTop + segH + 8
+    let divTopY = footTop + 24 + 8
     let divY = H - divTopY
     ctx.setStrokeColor(cg(gray(1, 0.06))); ctx.setLineWidth(1)
     ctx.beginPath(); ctx.move(to: CGPoint(x: pad, y: divY)); ctx.addLine(to: CGPoint(x: W - pad, y: divY)); ctx.strokePath()
@@ -3072,10 +3148,10 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 
 @discardableResult
 func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
-                  interval: TimeInterval, updated: Date?, about: AboutState) -> [Hit] {
+                  interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
     if advCards(claude, codex).isEmpty {
         return drawPanel(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
-                         interval: interval, updated: updated, about: about)
+                         interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
     }
     let W = size.width, H = size.height
     var hits: [Hit] = []
@@ -3506,25 +3582,8 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
 
     // ---- footer ----
     let footTop = H - 35 - ADV_CREDIT_H
-    let segs: [(String, Double)] = pollSegments().map { (tr($0.ru, $0.en), $0.sec) }
-    let sw = segs.map { width(attr($0.0, 12, .semibold, textHi)) + 20 }
-    let segTotal = sw.reduce(0, +) + 4
-    roundFill(rectTL(ADV_CX, footTop + 1, segTotal, 22), 11, gray(1, 0.07))
-    var sx = ADV_CX + 2
-    for (i, seg) in segs.enumerated() {
-        let r = rectTL(sx, footTop + 3, sw[i], 18)
-        let active = pollSelected(seg.1, manual: interval)
-        if active { roundFill(r, 9, gray(1, 0.18)) }
-        textC(attr(seg.0, 12, active ? .semibold : .medium, active ? textHi : textMid), x: r.midX, topY: footTop + 3, h: 18, align: 1)
-        hits.append(Hit(id: "iv\(Int(seg.1))", rect: r))
-        sx += sw[i]
-    }
-    let pwr = rectTL(327, footTop + 3, 18, 18)
-    drawPower(ctx, pwr.insetBy(dx: 1, dy: 1), gray(1, 0.5))
-    hits.append(Hit(id: "quit", rect: pwr.insetBy(dx: -6, dy: -6)))
-    if let u = updated {
-        textC(attr(tr("обновлено ", "updated ") + clockText(u), 11, .regular, textMid), x: 315, topY: footTop + 3, h: 18, align: 2)
-    }
+    hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated,
+                           autoIntervals: autoIntervals, advanced: true)
     // credit line: author · version · GitHub
     do {
         let divTop = footTop + 22 + 8
@@ -4285,6 +4344,7 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?, expired: 
 final class LimitsPanelView: NSView {
     var claude = LimitData(); var codex = LimitData()
     var interval: TimeInterval = POLL_DEFAULT
+    var autoIntervals: [String: TimeInterval] = [:]
     var updated: Date?
     var hits: [Hit] = []
     var onInterval: ((TimeInterval) -> Void)?
@@ -4359,8 +4419,8 @@ final class LimitsPanelView: NSView {
                                  expired: claude.auth == .expired)
         } else {
             hits = advancedEnabled()
-                ? drawAdvanced(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
-                : drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
+                ? drawAdvanced(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+                : drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
         }
         removeAllToolTips()
         for h in hits where h.id == "iv0" { addToolTip(h.rect, owner: self, userData: nil) }
@@ -4778,6 +4838,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
 
         panelCtrl = PanelController()
+        publishAutoIntervals()
         panelCtrl.onInterval = { [weak self] sec in self?.setInterval(sec) }
         panelCtrl.onRefresh = { [weak self] in self?.doRefresh(live: true) }
         panelCtrl.onQuit = { NSApp.terminate(nil) }
@@ -4906,7 +4967,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func publishAutoIntervals() {
+        guard let panelCtrl = panelCtrl else { return }
+        panelCtrl.view.autoIntervals = autoStates.mapValues { $0.interval }
+        panelCtrl.view.needsDisplay = true
+    }
+
     func saveAutoStates() {
+        publishAutoIntervals()
         if let data = try? JSONEncoder().encode(autoStates) { UserDefaults.standard.set(data, forKey: "autoPollState") }
     }
 
@@ -4918,6 +4986,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let state = autoStates[p] ?? AutoPollState()
                 lines.append(name + ": " + fmtSpan(state.interval / 3600)
                              + (state.failed ? tr(" · пауза после ошибки", " · backing off after an error") : ""))
+            }
+            if let updated = panelCtrl?.view.updated {
+                lines.append(tr("обновлено ", "updated ") + clockText(updated))
             }
         }
         return lines.joined(separator: "\n")
@@ -5258,6 +5329,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(interval, forKey: "interval")
         }
         startTimer()
+        panelCtrl.view.interval = interval
+        publishAutoIntervals()
         if sec == 0 { scanActivity(); doRefresh(live: true, scheduled: true) }
         if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: panelCtrl.view.updated) }
     }
@@ -5461,7 +5534,8 @@ extension GitHubSync {
 if CommandLine.arguments.contains("--subscriptions-selftest") {
     let defaults = UserDefaults.standard
     var prefs: [String: Any] = ["advanced": true, "advHistExpanded": true, "lang": "ru",
-                               "monitor_claude": true, "monitor_codex": true, "autoPoll": false]
+                               "monitor_claude": true, "monitor_codex": true, "autoPoll": false,
+                               "interval": 1800, "autoPollState": try! JSONEncoder().encode([String: AutoPollState]())]
     func select(_ claude: Bool, _ codex: Bool) {
         prefs["monitor_claude"] = claude; prefs["monitor_codex"] = codex
         defaults.setVolatileDomain(prefs, forName: UserDefaults.argumentDomain)
@@ -5477,6 +5551,31 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     func observe(_ state: inout AutoPollState, _ value: Double, _ at: Double, reset: Double = 1000000) {
         state.begin(at); state.observe(reading(value, at, reset: reset), now: at)
     }
+    var labelCases = 0
+    for (lang, labels) in [("ru", ["15м", "30м", "1ч", "4ч"]), ("en", ["15m", "30m", "1h", "4h"])] {
+        let enabled = ["claude": true, "codex": true]
+        for (i, ci) in AUTO_STEPS.enumerated() {
+            for (j, xi) in AUTO_STEPS.enumerated() {
+                let expected = ci == xi ? [labels[i]] : ["Claude " + labels[i], "Codex " + labels[j]]
+                check(autoPollLabelParts(auto: true, enabled: enabled, intervals: ["claude": ci, "codex": xi], lang: lang) == expected,
+                      "Auto label \(lang): Claude=\(Int(ci)), Codex=\(Int(xi))")
+                labelCases += 1
+            }
+            for product in ["claude", "codex"] {
+                check(autoPollLabelParts(auto: true, enabled: [product: true], intervals: [product: ci], lang: lang) == [labels[i]],
+                      "Auto label \(lang): \(product)-only \(Int(ci))")
+                labelCases += 1
+            }
+        }
+        check(autoPollLabelParts(auto: true, enabled: [:], intervals: [:], lang: lang) == [lang == "en" ? "no subscriptions" : "нет подписок"],
+              "Auto label \(lang): both subscriptions off")
+        check(autoPollLabelParts(auto: false, enabled: enabled, intervals: ["claude": 900, "codex": 14400], lang: lang).isEmpty,
+              "Auto label \(lang): manual hides snapshot")
+        check(autoPollLabelParts(auto: true, enabled: enabled, intervals: [:], lang: lang) == [labels[1]],
+              "Auto label \(lang): missing states use 30 minutes")
+        labelCases += 3
+    }
+    check(labelCases == 54, "54 independent RU/EN label fixtures")
     var auto = AutoPollState()
     observe(&auto, 10, 100000)
     check(auto.interval == 1800, "Auto first reading establishes a baseline at 30 minutes")
@@ -5606,6 +5705,127 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             }
         }
     }
+    // AppDelegate init reads only synthetic volatile interval/state. Never launch it,
+    // call saveAutoStates (persistent defaults), scanActivity (real logs), or start timers.
+    var startupClaude = AutoPollState(), startupCodex = AutoPollState()
+    let runtimeNow = Date().timeIntervalSince1970
+    startupClaude.interval = 14400; startupClaude.lastAttempt = runtimeNow - 400
+    startupCodex.interval = 900; startupCodex.lastAttempt = runtimeNow - 400
+    prefs["interval"] = 1800
+    prefs["autoPollState"] = try! JSONEncoder().encode(["claude": startupClaude, "codex": startupCodex])
+    prefs["autoPoll"] = true; prefs["lang"] = "ru"; select(true, true)
+    let delegate = AppDelegate()
+    _ = NSApplication.shared  // AppKit-only fixture panel; applicationDidFinishLaunching is never called.
+    delegate.panelCtrl = PanelController()
+    delegate.publishAutoIntervals()
+    check(delegate.panelCtrl.view.autoIntervals == ["claude": 14400, "codex": 900]
+          && delegate.panelCtrl.view.needsDisplay && delegate.interval == 1800,
+          "startup restored states publish a repaint independently of manual interval")
+    let oldCodex = delegate.autoStates["codex"]!
+    delegate.panelCtrl.view.needsDisplay = false
+    var activeClaude = delegate.autoStates["claude"]!
+    check(activeClaude.localActivity([runtimeNow - 300, runtimeNow - 200, runtimeNow - 100], now: runtimeNow),
+          "local fixture activity changes sleeping Claude")
+    delegate.autoStates["claude"] = activeClaude
+    delegate.publishAutoIntervals()
+    var dueClaude = delegate.autoStates["claude"]!, dueCodex = delegate.autoStates["codex"]!
+    check(!dueClaude.due(runtimeNow) && !dueCodex.due(runtimeNow),
+          "synthetic local activity remains not-due at the fixed fixture clock")
+    check(delegate.panelCtrl.view.autoIntervals == ["claude": 900, "codex": 900]
+          && delegate.panelCtrl.view.needsDisplay && !delegate.fetchingLimits
+          && delegate.autoStates["codex"]!.interval == oldCodex.interval,
+          "local activity publishes a repaint without invoking any refresh path")
+    // Swift not-due wiring is reviewed statically only: doRefresh uses the real clock
+    // and could fetch after a long pause/clock jump. The observe->save and scanActivity
+    // callbacks use persistent defaults/real logs. Linux tests mock the real runtime paths.
+    var failedClaude = delegate.autoStates["claude"]!
+    failedClaude.begin(runtimeNow)
+    var badReading = reading(50, runtimeNow); badReading.apiFresh = false
+    failedClaude.observe(badReading, now: runtimeNow)
+    delegate.autoStates["claude"] = failedClaude
+    delegate.publishAutoIntervals()
+    check(delegate.panelCtrl.view.autoIntervals == ["claude": 1800, "codex": 900],
+          "observed backoff publishes its own interval while Codex stays unchanged")
+    let fixtureUpdated = Date(timeIntervalSince1970: 100000)
+    for lang in ["ru", "en"] {
+        prefs["lang"] = lang; select(true, true)
+        let prefix = lang == "en" ? "updated " : "обновлено "
+        let error = lang == "en" ? "backing off after an error" : "пауза после ошибки"
+        delegate.panelCtrl.view.updated = fixtureUpdated
+        let summary = delegate.autoSummary()
+        check(summary.contains(prefix + clockText(fixtureUpdated))
+              && summary.components(separatedBy: "\n").contains { $0.hasPrefix("Claude Code:") && $0.contains(error) }
+              && !summary.components(separatedBy: "\n").contains { $0.hasPrefix("Codex:") && $0.contains(error) },
+              "\(lang) tooltip keeps timestamp and product-specific error")
+        delegate.panelCtrl.view.updated = nil
+        check(!delegate.autoSummary().contains(prefix), "\(lang) tooltip omits missing timestamp")
+        select(false, true)
+        check(!delegate.autoSummary().contains("Claude Code:"), "\(lang) tooltip filters disabled subscription")
+        select(true, true)
+        for advanced in [false, true] {
+            func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400]) -> (Data, [Hit]) {
+                let ctx = bitmapContext(360, 40)!
+                ctx.clear(CGRect(x: 0, y: 0, width: 360, height: 40))
+                let hits = drawPollFooter(ctx, size: CGSize(width: 360, height: 40), top: 8,
+                                          interval: 3600, updated: updated,
+                                          autoIntervals: intervals, advanced: advanced)
+                return (Data(bytes: ctx.data!, count: ctx.bytesPerRow * ctx.height), hits)
+            }
+            let (withTime, hits) = footer(fixtureUpdated)
+            let (withoutTime, _) = footer(nil)
+            check(withTime == withoutTime, "\(lang) advanced=\(advanced): actual Auto footer has no timestamp ink")
+            for (id, x, w) in [("iv900", 16.0, 40.0), ("iv1800", 56, 40), ("iv3600", 96, 40), ("iv0", 136, 40), ("quit", 320, 24)] {
+                check(hits.contains { $0.id == id && $0.rect == CGRect(x: x, y: 8, width: w, height: 24) },
+                      "\(lang) advanced=\(advanced): \(id) footer hit geometry")
+            }
+            check(!hits.first { $0.id == "iv0" }!.rect.intersects(hits.first { $0.id == "quit" }!.rect),
+                  "\(lang) advanced=\(advanced): Auto and power never overlap")
+            prefs["autoPoll"] = false; select(true, true)
+            let (manualTime, _) = footer(fixtureUpdated)
+            let (manualNoTime, _) = footer(nil)
+            check(manualTime != manualNoTime && pollSelected(3600, manual: 3600) && !pollSelected(0, manual: 3600),
+                  "\(lang) advanced=\(advanced): manual keeps timestamp and selected fixed interval")
+            check(!delegate.autoSummary().contains(prefix), "\(lang) manual tooltip retains prior timestamp behavior")
+            prefs["autoPoll"] = true; select(true, true)
+            for (fixture, ci, xi, claudeOn, codexOn, autoOn) in [
+                ("different", 900.0, 14400.0, true, true, true), ("equal", 1800, 1800, true, true, true),
+                ("backoff", 3600, 900, true, true, true), ("paused", 900, 14400, false, false, true),
+                ("single-codex-15", 1800, 900, false, true, true), ("single-codex-30", 1800, 1800, false, true, true),
+                ("single-codex-60", 1800, 3600, false, true, true), ("single-codex-240", 1800, 14400, false, true, true),
+                ("manual-60", 900, 14400, true, true, false), ("long", 1800, 900, true, true, true)
+            ] {
+                prefs["advanced"] = advanced; prefs["autoPoll"] = autoOn; select(claudeOn, codexOn)
+                let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
+                let height = mainPanelHeight(cl, cx)
+                func panelImage(_ intervals: [String: TimeInterval]) -> (CGContext, [Hit]) {
+                    let ctx = bitmapContext(720, Int(height * 2))!; ctx.scaleBy(x: 2, y: 2)
+                    let size = CGSize(width: PANEL_W, height: height)
+                    let hits = advanced
+                        ? drawAdvanced(ctx, size: size, claude: cl, codex: cx, interval: 3600,
+                                       updated: fixtureUpdated, about: AboutState(), autoIntervals: intervals)
+                        : drawPanel(ctx, size: size, claude: cl, codex: cx, interval: 3600,
+                                    updated: fixtureUpdated, about: AboutState(), autoIntervals: intervals)
+                    return (ctx, hits)
+                }
+                let (image, panelHits) = panelImage(["claude": ci, "codex": xi])
+                // Full cards include live countdown/pace calculations. Compare the actual
+                // shared footer in isolation; keep the full-panel image for visual QA.
+                let (bytes, _) = footer(fixtureUpdated, intervals: ["claude": ci, "codex": xi])
+                let (changedBytes, _) = footer(fixtureUpdated, intervals: ["claude": ci == 14400 ? 900 : 14400,
+                                                                         "codex": xi == 14400 ? 900 : 14400])
+                check(autoOn && (claudeOn || codexOn) ? bytes != changedBytes : bytes == changedBytes,
+                      "\(lang) advanced=\(advanced) \(fixture): shared footer consumes only enabled Auto snapshot")
+                let autoHit = panelHits.first { $0.id == "iv0" }!.rect
+                let powerHit = panelHits.first { $0.id == "quit" }!.rect
+                check(autoHit.minX == 136 && autoHit.width == 40 && powerHit.minX == 320
+                      && !autoHit.intersects(powerHit) && autoHit.minY >= 0 && autoHit.maxY <= height,
+                      "\(lang) advanced=\(advanced) \(fixture): full-panel footer bounds and fallback")
+                save(image, "/tmp/ccl-auto-ui-\(fixture)-\(lang)-advanced-\(advanced).png")
+            }
+            prefs["autoPoll"] = true; select(true, true)
+        }
+    }
+    delegate.panelCtrl.panel.close()
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800), "Auto button selected independently of saved fixed interval")
     print("Subscription selection and adaptive polling selftest passed")

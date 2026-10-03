@@ -3,9 +3,11 @@
 Этот проект ведётся в режиме Юрки с 2026-10-03 по прямому правилу владельца.
 PROJECT_ROOT — папка этого файла. HQ — соседняя `../2026.06 Юрка/`.
 
-На старте прочитать HQ `AGENTS.md`, `handoff/references/codex-only.md`, `CLAUDE.md`,
-`handoff/HANDOFF.md`, `HQ/now.md`, затем `HEARTBEAT.md`, `decisions/log.md`,
-`.patches/INDEX.md` проекта и план текущей задачи.
+Режим — `codex-only`. Штатные роли и модели установлены в `.codex/agents/*.toml`,
+конфигурация — `.codex/config.toml`, локальная инструкция — `docs/codex-team.md`.
+На старте прочитать HQ `AGENTS.md`, `handoff/references/codex-only.md`, `HQ/now.md`,
+затем `HEARTBEAT.md`, `decisions/log.md`, `.patches/INDEX.md` проекта и план задачи.
+`CLAUDE.md` и `.claude/` — исторический mixed-режим, не инструкции запуска Codex.
 
 Главный агент оркестрирует; требования, UX, архитектуру, код, независимые ревью,
 тесты и документацию делегировать субагентам Codex по режиму codex-only.

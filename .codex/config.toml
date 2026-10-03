@@ -1,0 +1,8 @@
+# Режим «Юрка — только Codex»: основная сессия — координатор.
+# Специалисты в agents/*.toml запускаются координатором по необходимости.
+model = "gpt-6-astra"
+model_reasoning_effort = "medium"
+
+[agents]
+enabled = true
+max_concurrent_threads_per_session = 3
