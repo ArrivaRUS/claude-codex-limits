@@ -6,9 +6,30 @@
 
 - По переданному оркестратором факту macOS 3.2.0 и Linux 0.4.0 уже опубликованы; перед выпуском прошло 205 Linux-тестов и Swift selftest. Это результат предыдущего одиночного исполнения, без независимого ревью Auto. Командные гейты задним числом не закрыты.
 - В проекте до этого инкремента уже были `HEARTBEAT.md`, `decisions/log.md`, `.patches/INDEX.md`, README и тесты Auto. На 2026-10-03 заведены `PROJECT.md`, `PRD.md`, `stories.md`, `backlog.md` и этот план/статус как управление будущими шагами.
-- Текущий прямой запрос владельца: стилизованная «А», видимые рядом текущие частоты, без рамки фиксированного слота в Auto. Выбор направления уже дан; UX уточняет исполнение.
+- Прямой запрос владельца выполнен: стилизованная «А», видимые рядом текущие частоты, без рамки фиксированного слота в Auto.
 
-## Сейчас
+## Выпущено · 2026-10-03
+
+Релизная ревизия `5b722a17e9683033ae269fc788708a7bcd5feeb7` принята fast-forward
+в main и выгружена. Опубликованы [macOS 3.2.1](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.1)
+и [Linux 0.4.1](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.1).
+Linux не Latest; releases/latest подтверждён как v3.2.1. Оба assets uploaded,
+скачаны после публикации и побайтно совпадают с проверенными файлами.
+
+- [CI 37106534056](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37106534056): exact SHA, Ubuntu 22.04, `/usr/bin/python3 -m unittest discover -s linux/tests -v` — **212 tests, OK, 0 skip**; DEB build успешен.
+- Swift compile и `--subscriptions-selftest` — exit 0, **288 OK**; те же проверки прошёл executable внутри финального read-only mounted DMG. hdiutil checksum VALID, strict codesign PASS, версия 3.2.1.
+- Независимые CodeReviewer GPT-6 Astra/high и QA GPT-6.1 Sol/high: PASS после исправления тестовых находок; blocker/major=0. [Полный QA-отчёт](qa-auto-ui.md): 40 macOS + 48 Linux PNG, RU/EN × Simple/Advanced и все предусмотренные состояния.
+- DEB: 0.4.1/all/xz; все 15 Python-модулей, entry scripts и assets совпадают с checkout. SHA-256 `fdd77530c796aad7f72a433cc3356ff4bec627bbba53d35b99187027c3e33801`.
+- DMG SHA-256 `85d7cdcf0c20151f755f4f9608fdda9a5cba8c192f8efbf5457c67fcdc0f6c8d`.
+
+Живые ALSE/KDE/Fly, hover/click и пользовательские шрифты не проверены.
+Forced two-row имеет actual draw/text/bounds CI assertions, отдельного raster нет;
+на проверенных macOS/Ubuntu шрифтах длинные подписи помещаются в один ряд.
+Swift scanActivity/save/refresh wiring проверен статически; опасные callbacks
+не вызывались selftest. Аудит старого Auto и долги синхронизации остаются в backlog.
+План закрыт для этого UI-релиза; live ALSE — самостоятельная незакрытая задача.
+
+## История проверок до финальной приёмки
 
 Фаза: M4. Done: требования и бэклог; UX `design/auto-poll-ui.md`; test-plan;
 узкий план `auto-ui-implementation.md`, PASS Architect/challenge. Спецификация и
@@ -48,6 +69,6 @@ scanActivity/save/refresh с реальными logs/defaults проверены
 `--check`: 23 файла проверены, 0 установлено. Незакрытые долги — аудит старого
 Auto и реальный ALSE-прогон; прежние хвосты синхронизации остаются в бэклоге.
 
-## Ограничения проверки
+## Область первоначального PM-прохода
 
 Этот PM-проход проверяет только документы и локальный репозиторий чтением. Новые UI-тесты, сборки, QA и живой ALSE-прогон не запускались; релиз текущей правки не производился. По завершении каждой вехи сюда добавляются ревизия, сырой результат команды и следующий незакрытый шаг.
