@@ -32,8 +32,10 @@ Debugger подтвердил: Swift Advanced использует общий pa
 - [x] Независимые Tester/Reviewer: fixtures и изоляция, новых I/O нет; фактический прогон остаётся отдельным гейтом.
 - [x] Фактический Swift selftest: 1063 OK; Linux CI `a1f885f`: 219 tests OK, 0 skip.
 - [x] QA: 88 macOS + 92 Ubuntu CI stale/auth PNG и пакеты, RU/EN; [отчёт](qa-auth-hints.md).
-- [ ] Интеграция и выпуск по сохраняющемуся разрешению владельца; Linux не Latest.
+- [x] Интеграция и выпуск: macOS 3.2.2 / Linux 0.4.2 на `a1f885f`; публичные assets совпадают, Latest=v3.2.2.
 
 Критерии проверки: [test-plan-auth-hints.md](test-plan-auth-hints.md).
 Живая ALSE остаётся отдельным долгом; причина реального статуса пользователя
 не установлена этим UI-исправлением. Предыдущий Auto-инкремент завершён.
+
+Результаты и checksums: [status.md](status.md); независимый QA: [qa-auth-hints.md](qa-auth-hints.md).

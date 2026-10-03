@@ -38,7 +38,14 @@ DEB `bbadec59e34a0797f87620f8b2cb60f395f57b3eb60748d692f082a7e7f45f19`.
 Независимое QA AUTH-1 PASS: 88 macOS + 92 Ubuntu CI PNG, metadata/checksums
 пакетов и подпись DMG. [Отчёт](qa-auth-hints.md). Live ALSE/установка/
 реальные клики не проверены. Унаследованный P3 Simple readError subtitle
-вынесен в Could backlog. Все гейты этой правки закрыты; публикация — следующий шаг.
+вынесен в Could backlog. AUTH-1 завершён: опубликованы [macOS 3.2.2](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.2)
+и [Linux 0.4.2](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.2),
+обе версии на exact CI/source SHA `a1f885f1138c327121fb7baf794e000edfea5695`.
+`main` fast-forward выгружен с приёмкой `8329312`. Assets uploaded, API digests
+совпадают с SHA выше; оба публичных файла скачаны и побайтно сверены.
+Latest=v3.2.2; Linux `--latest=false`. Прямое разрешение публикации сохранено,
+повторных вопросов не было. 11 делегирований AUTH-1, производящая работа root=0;
+native duration_ms недоступен, агент-минуты не выдуманы.
 
 ## Факты
 

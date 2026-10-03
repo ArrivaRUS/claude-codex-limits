@@ -1,6 +1,6 @@
 # Истории — видимый Auto
 
-> Этот документ описывает выпущенный UI Auto 3.2.1/0.4.1. Текущая AUTH-1: [docs/auth-hints-fix.md](docs/auth-hints-fix.md), [docs/test-plan-auth-hints.md](docs/test-plan-auth-hints.md).
+> Этот документ описывает выпущенный UI Auto 3.2.1/0.4.1. AUTH-1 выпущен в 3.2.2/0.4.2: [docs/auth-hints-fix.md](docs/auth-hints-fix.md), [docs/test-plan-auth-hints.md](docs/test-plan-auth-hints.md).
 
 Обновлено: 2026-10-03. Epic: «Понимать режим и реальную частоту опроса с первого взгляда». Все истории относятся к текущему UI-инкременту [PRD.md](PRD.md); они малы, проверяемы и не требуют изменения алгоритма.
 

@@ -1,6 +1,6 @@
 # PRD — видимый режим Auto и частота опроса
 
-> Этот документ описывает выпущенный UI Auto 3.2.1/0.4.1. Текущая AUTH-1: [docs/auth-hints-fix.md](docs/auth-hints-fix.md), [docs/test-plan-auth-hints.md](docs/test-plan-auth-hints.md).
+> Этот документ описывает выпущенный UI Auto 3.2.1/0.4.1. AUTH-1 выпущен в 3.2.2/0.4.2: [docs/auth-hints-fix.md](docs/auth-hints-fix.md), [docs/test-plan-auth-hints.md](docs/test-plan-auth-hints.md).
 
 Обновлено: 2026-10-03. Тип: пользовательская desktop-утилита. Статус требований: прямой запрос владельца принят для текущей UI-правки; точное визуальное оформление задаёт UX. База: `main` `e6e2f2e`, опубликованные macOS 3.2.0 / Linux 0.4.0. Предыдущая реализация Auto описывается ретроспективно и не считается прошедшей независимое ревью.
 
