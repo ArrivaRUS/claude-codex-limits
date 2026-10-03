@@ -124,6 +124,15 @@ struct LimitData {
     var auth: AuthState = .ok  // Claude Code sign-in state (drives the "how to fix" card)
 }
 
+// A missing preference keeps existing installations monitoring both products.
+func productEnabled(_ product: String, defaults: UserDefaults = .standard) -> Bool {
+    defaults.object(forKey: "monitor_" + product) as? Bool ?? true
+}
+func selectedLimits(_ data: LimitData, product: String) -> LimitData {
+    productEnabled(product) ? data : LimitData(present: false)
+}
+func monitoringPaused() -> Bool { !productEnabled("claude") && !productEnabled("codex") }
+
 // MARK: - Date helpers
 
 func parseISOmicroOffset(_ s: String) -> Date? {
@@ -157,6 +166,7 @@ func fnv64(_ s: String) -> UInt64 {
 func tokenFingerprint(_ s: String) -> String { String(fnv64(s), radix: 16) }
 
 func fetchClaude() -> LimitData {
+    guard productEnabled("claude") else { return LimitData(present: false) }
     var d = LimitData()
     let kc = shell("/usr/bin/security", ["find-generic-password", "-s", KC_SERVICE, "-w"])
     // State (1) "not signed in", half A: the keychain item is absent (errSec 44 =
@@ -442,6 +452,7 @@ func loadCodexCache() -> LimitData? {
 /// Codex limits. `live` (panel-open / manual refresh) hits the ChatGPT backend;
 /// otherwise uses the freshest of the local rollout files and the last cached reading.
 func fetchCodex(live: Bool) -> LimitData {
+    guard productEnabled("codex") else { return LimitData(present: false) }
     let rollout = codexFromRollout()
     if !rollout.present { return rollout }              // Codex not set up
     if live, let liveD = codexUsageLive() { return liveD }
@@ -586,11 +597,12 @@ final class UsageHistory {
     /// Record one live reading. Cached/errored/expired readings are skipped — a sample must
     /// be a real observation of the backend, or the pace math would see a flat line.
     func record(_ d: LimitData, product: String) {
-        guard d.present, d.error == nil, d.auth == .ok, !d.fromCache, d.session != nil || d.weekly != nil else { return }
+        guard productEnabled(product), d.present, d.error == nil, d.auth == .ok, !d.fromCache, d.session != nil || d.weekly != nil else { return }
         let s = UsageSample(t: Date().timeIntervalSince1970, product: product, session: d.session, weekly: d.weekly,
                             scoped: d.scoped?.percent, scopedName: d.scoped?.name,
                             sessionReset: d.sessionReset?.timeIntervalSince1970, weeklyReset: d.weeklyReset?.timeIntervalSince1970)
         q.async {
+            guard productEnabled(product) else { return }
             self.all.append(s)
             let str = UsageHistory.line(s)
             if let fh = FileHandle(forWritingAtPath: HISTORY_PATH) {
@@ -605,6 +617,7 @@ final class UsageHistory {
     func useForPreview(_ s: [UsageSample]) { q.sync { all = s } }
 
     func samples(_ product: String, since: Date) -> [UsageSample] {
+        guard productEnabled(product) else { return [] }
         let c = since.timeIntervalSince1970
         return q.sync { all.filter { $0.product == product && $0.t >= c } }
     }
@@ -702,7 +715,8 @@ final class UsageLogs {
         }
     }
 
-    private static func scan(_ ix: inout UsageIndex) -> Bool {
+    static func scan(_ ix: inout UsageIndex, home: String = HOME,
+                     isEnabled: (String) -> Bool = { productEnabled($0) }) -> Bool {
         var changed = false
         var seen: [String: Set<UInt64>] = ix.seen.mapValues { Set($0) }
         defer { ix.seen = seen.mapValues { Array($0) } }
@@ -715,18 +729,20 @@ final class UsageLogs {
         // transcripts under <project>/<session>/subagents/agent-*.jsonl. Subagents are where
         // a different model often runs (an Opus reviewer under a Fable session), and they
         // burn the same quota; skipping them hid a whole model from the per-model bars.
-        let cRoot = HOME + "/.claude/projects"
-        if let e = fm.enumerator(atPath: cRoot) {
+        let cRoot = home + "/.claude/projects"
+        if isEnabled("claude"), let e = fm.enumerator(atPath: cRoot) {
             while let rel = e.nextObject() as? String {
+                guard isEnabled("claude") else { break }
                 guard rel.hasSuffix(".jsonl") else { continue }
                 let path = cRoot + "/" + rel
                 if recent(path), scanFile(path, product: "claude", &ix, &seen) { changed = true }
             }
         }
         // Codex: ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
-        let xRoot = HOME + "/.codex/sessions"
-        if let e = fm.enumerator(atPath: xRoot) {
+        let xRoot = home + "/.codex/sessions"
+        if isEnabled("codex"), let e = fm.enumerator(atPath: xRoot) {
             while let rel = e.nextObject() as? String {
+                guard isEnabled("codex") else { break }
                 guard rel.hasSuffix(".jsonl"), rel.contains("rollout-") else { continue }
                 let path = xRoot + "/" + rel
                 if recent(path), scanFile(path, product: "codex", &ix, &seen) { changed = true }
@@ -1667,7 +1683,7 @@ final class GitHubSync {
         let ix = UsageLogs.shared.snapshot()
         let cutoff = dayKey(Date().addingTimeInterval(-SYNC_KEEP_DAYS * 86400))
         var days: [String: Any] = [:]
-        for (p, byDay) in ix.days {
+        for (p, byDay) in ix.days where productEnabled(p, defaults: defaults) {
             var pd: [String: Any] = [:]
             for (day, byModel) in byDay where day >= cutoff {
                 var md: [String: Any] = [:]
@@ -1886,7 +1902,8 @@ final class GitHubSync {
 /// Local index plus every other machine's days from the gist — what the history draws from.
 func mergedUsageIndex(_ sync: GitHubSync = .shared) -> UsageIndex {
     var ix = UsageLogs.shared.snapshot()
-    for (p, byDay) in sync.remoteDays() {
+    ix.days = ix.days.filter { productEnabled($0.key) }
+    for (p, byDay) in sync.remoteDays() where productEnabled(p) {
         for (day, byModel) in byDay { for (m, u) in byModel { ix.add(p, day, m, u) } }
     }
     return ix
@@ -2271,7 +2288,10 @@ let SET_GAP: CGFloat = 14                // card bottom → next section caption
 let SET_CAP_H: CGFloat = 16              // caption → its card
 let SET_GEN_TOP: CGFloat = 66
 let SET_GEN_H = SET_ROW_H * 3            // language · launch at login · panel view
-let SET_TRAY_CAP = SET_GEN_TOP + SET_GEN_H + SET_GAP
+let SET_PRODUCTS_CAP = SET_GEN_TOP + SET_GEN_H + SET_GAP
+let SET_PRODUCTS_TOP = SET_PRODUCTS_CAP + SET_CAP_H
+let SET_PRODUCTS_H = SET_ROW_H
+let SET_TRAY_CAP = SET_PRODUCTS_TOP + SET_PRODUCTS_H + SET_GAP
 let SET_TRAY_TOP = SET_TRAY_CAP + SET_CAP_H
 let SET_TRAY_H: CGFloat = 44             // the menu-bar picker card
 let SET_SUB_CAP = SET_TRAY_TOP + SET_TRAY_H + SET_GAP     // «ПОДПИСКИ» caption (Advanced only)
@@ -2411,17 +2431,21 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.4"
+let APP_VERSION = "3.1.5"
 let APP_AUTHOR = "Alex Kovalev"
-/// How often the limits are polled. Five minutes is the floor (Alex, 2026-09-30): at one
-/// minute, two machines on one account made ~120 calls an hour to /api/oauth/usage and
-/// Anthropic answered 429 for hours. A stored 1-minute choice is lifted to 5 on launch.
-let POLL_MIN: TimeInterval = 300
-let POLL_CHOICES: [(ru: String, en: String, sec: TimeInterval)] = [("5м", "5m", 300), ("15м", "15m", 900)]
+/// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 15 minutes.
+let POLL_MIN: TimeInterval = 900
+let POLL_CHOICES: [(ru: String, en: String, sec: TimeInterval)] = [
+    ("15м", "15m", 900), ("30м", "30m", 1800), ("1ч", "1h", 3600)
+]
+func normalizedPollInterval(_ value: TimeInterval) -> TimeInterval {
+    POLL_CHOICES.contains { $0.sec == value } ? value : POLL_MIN
+}
 func storedPollInterval() -> TimeInterval {
-    let d = UserDefaults.standard, v = d.double(forKey: "interval")
-    guard v >= POLL_MIN else { d.set(POLL_MIN, forKey: "interval"); return POLL_MIN }
-    return v
+    let d = UserDefaults.standard, old = d.double(forKey: "interval")
+    let value = normalizedPollInterval(old)
+    if old != value { d.set(value, forKey: "interval") }
+    return value
 }
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
@@ -2607,15 +2631,15 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
     // which products are present
     var prods: [(LimitData, String, String, String)] = []   // (data, name, icon, url)
-    if claude.present {
+    if productEnabled("claude"), claude.present {
         prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage"))
     }
-    if codex.present {
+    if productEnabled("codex"), codex.present {
         prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage"))
     }
 
     // header — the app's OWN icon + subtitle of present products
-    let subtitle = prods.isEmpty ? tr("не найдено", "not found") : prods.map { $0.1 }.joined(separator: " · ")
+    let subtitle = prods.isEmpty ? (monitoringPaused() ? tr("сбор выключен", "monitoring paused") : tr("не найдено", "not found")) : prods.map { $0.1 }.joined(separator: " · ")
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
@@ -2761,7 +2785,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     } else if prods.count == 1 {
         drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
     } else {
-        text(attr(tr("Claude Code и Codex не найдены", "Claude Code and Codex not found"), 12, .regular, textMid), x: W / 2, topY: cardsTop + 70, align: 1)
+        let empty = monitoringPaused() ? tr("Сбор статистики выключен", "Statistics collection is off")
+            : tr("Выбранные подписки не найдены", "Selected subscriptions not found")
+        text(attr(empty, 12, .regular, textMid), x: W / 2, topY: cardsTop + 62, align: 1)
+        let r = rectTL(pad, cardsTop + 90, W - pad * 2, 26)
+        text(attr(tr("Выбрать подписки в настройках ›", "Choose subscriptions in Settings ›"), 11, .medium, ADV_LINK), x: W / 2, topY: cardsTop + 95, align: 1)
+        hits.append(Hit(id: "settings", rect: r))
     }
 
     // footer
@@ -2904,8 +2933,8 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
                        expired: expired, rows: rows)
     }
     var out: [AdvCard] = []
-    if claude.present { out.append(card(claude, "claude")) }
-    if codex.present { out.append(card(codex, "codex")) }
+    if productEnabled("claude"), claude.present { out.append(card(claude, "claude")) }
+    if productEnabled("codex"), codex.present { out.append(card(codex, "codex")) }
     return out
 }
 
@@ -2918,11 +2947,16 @@ func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
     return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
 }
 
+func showMissingProduct(_ cards: [AdvCard]) -> Bool {
+    cards.count == 1 && productEnabled(cards[0].product == "claude" ? "codex" : "claude")
+}
+
 func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     let cards = advCards(claude, codex)
+    if cards.isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
     var h: CGFloat = 94
     for c in cards { h += 5 + c.height }
-    if cards.count == 1 { h += 5 + ADV_PLACEHOLDER }
+    if showMissingProduct(cards) { h += 5 + ADV_PLACEHOLDER }
     h += 5 + advHistoryHeight(cards)
     return h + ADV_CREDIT_H
 }
@@ -2969,6 +3003,10 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 @discardableResult
 func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState) -> [Hit] {
+    if advCards(claude, codex).isEmpty {
+        return drawPanel(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
+                         interval: interval, updated: updated, about: about)
+    }
     let W = size.width, H = size.height
     var hits: [Hit] = []
     let cs = CGColorSpaceCreateDeviceRGB()
@@ -3199,7 +3237,7 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         }
         y += ch + 5
     }
-    if cards.count == 1 {
+    if showMissingProduct(cards) {
         // the other product isn't set up — a dashed invitation instead of an empty card
         let r = rectTL(ADV_CX, y, ADV_CW, ADV_PLACEHOLDER)
         ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
@@ -3621,6 +3659,17 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         let tw: CGFloat = 34, th: CGFloat = 16
         drawToggle(rectTL(cardX + cardW - 14 - tw, genTop + genRowH * 2 + (genRowH - th) / 2, tw, th), loginEnabled())
         hits.append(Hit(id: "togglelogin", rect: rectTL(cardX, genTop + genRowH * 2, cardW, genRowH)))
+    }
+
+    // Subscription selection is available in both panel modes.
+    text(attr(tr("СОБИРАТЬ И ПОКАЗЫВАТЬ", "COLLECT AND SHOW"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_PRODUCTS_CAP)
+    roundFill(rectTL(cardX, SET_PRODUCTS_TOP, cardW, SET_PRODUCTS_H), 12, gray(1, 0.04))
+    roundStroke(rectTL(cardX, SET_PRODUCTS_TOP, cardW, SET_PRODUCTS_H), 12, gray(1, 0.06), 1)
+    for (i, item) in [("claude", "Claude Code"), ("codex", "Codex")].enumerated() {
+        let x = cardX + CGFloat(i) * cardW / 2
+        text(attr(item.1, 12, .regular, textHi), x: x + 14, topY: SET_PRODUCTS_TOP + 11)
+        drawToggle(rectTL(x + cardW / 2 - 46, SET_PRODUCTS_TOP + 10, 34, 16), productEnabled(item.0))
+        hits.append(Hit(id: "monitor:" + item.0, rect: rectTL(x, SET_PRODUCTS_TOP, cardW / 2, SET_PRODUCTS_H)))
     }
 
     // section 1 — which percentages go into the menu-bar strip
@@ -4179,6 +4228,7 @@ final class LimitsPanelView: NSView {
     var onInstall: (() -> Void)?
     var onWhatsNew: (() -> Void)?
     var onTrayChanged: (() -> Void)?     // the menu-bar picker changed → redraw the strip now
+    var onProductsChanged: (() -> Void)?
     var onViewChanged: (() -> Void)?     // Simple ↔ Advanced switched
     var mode: PanelMode = .main
     // "Connect Claude Code" walkthrough: which command was just copied (transient tick)
@@ -4272,6 +4322,11 @@ final class LimitsPanelView: NSView {
                 } else if h.id.hasPrefix("lang:") {
                     UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "lang")
                     resizeToContent()        // relayout + redraw in the chosen language
+                } else if h.id.hasPrefix("monitor:") {
+                    let product = String(h.id.dropFirst(8))
+                    UserDefaults.standard.set(!productEnabled(product), forKey: "monitor_" + product)
+                    onProductsChanged?()
+                    resizeToContent()
                 } else if h.id.hasPrefix("toggle:") {
                     let key = String(h.id.dropFirst(7))
                     let d = UserDefaults.standard; d.set(!d.bool(forKey: key), forKey: key)
@@ -4625,6 +4680,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panelCtrl: PanelController!
     var resetSound: NSSound?
     var soundBaseline = false
+    var selectionGeneration = 0
     var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
     var updateTimer: Timer?
     var downloader: UpdateDownloader?
@@ -4660,6 +4716,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 UsageLogs.shared.scanAsync { changed in
                     if changed { self?.panelCtrl.view.needsDisplay = true }
                     GitHubSync.shared.syncNow()
+                }
+            }
+        }
+        panelCtrl.view.onProductsChanged = { [weak self] in
+            guard let self = self else { return }
+            self.selectionGeneration += 1
+            self.soundBaseline = false
+            let c = selectedLimits(self.last?.0 ?? LimitData(present: false), product: "claude")
+            let x = selectedLimits(self.last?.1 ?? LimitData(present: false), product: "codex")
+            self.last = (c, x)
+            self.applyTrayImage(c, x)
+            self.panelCtrl.update(claude: c, codex: x, interval: self.interval, updated: self.panelCtrl.view.updated)
+            self.doRefresh(live: true)
+            if advancedEnabled() {
+                UsageLogs.shared.scanAsync { _ in
+                    self.panelCtrl.view.needsDisplay = true
+                    GitHubSync.shared.syncNow(force: true)
                 }
             }
         }
@@ -4744,11 +4817,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// `live` = hit the ChatGPT backend for Codex (panel-open / manual refresh only).
     func doRefresh(live: Bool) {
+        let generation = selectionGeneration
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var claude = fetchClaude()
             var codex = fetchCodex(live: live)
+            claude = selectedLimits(claude, product: "claude")
+            codex = selectedLimits(codex, product: "codex")
             applyCache(&claude, &codex)
-            DispatchQueue.main.async { self?.render(claude, codex) }
+            DispatchQueue.main.async {
+                guard let self = self, self.selectionGeneration == generation else { return }
+                self.render(claude, codex)
+            }
         }
     }
 
@@ -4768,6 +4847,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func render(_ claude: LimitData, _ codex: LimitData) {
+        let claude = selectedLimits(claude, product: "claude")
+        let codex = selectedLimits(codex, product: "codex")
         last = (claude, codex)
         applyTrayImage(claude, codex)
         UsageHistory.shared.record(claude, product: "claude")
@@ -4779,8 +4860,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (Re)build just the menu-bar image — used by render() and by the update badge refresh.
     func applyTrayImage(_ claude: LimitData, _ codex: LimitData) {
         var products: [(LimitData, String)] = []
-        if claude.present { products.append((claude, "claude_128.png")) }
-        if codex.present { products.append((codex, "codex_128.png")) }
+        if productEnabled("claude"), claude.present { products.append((claude, "claude_128.png")) }
+        if productEnabled("codex"), codex.present { products.append((codex, "codex_128.png")) }
         if let cgImg = renderStrip(products, dark: isTrayDark(), s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
             let img = NSImage(cgImage: cgImg, size: NSSize(width: CGFloat(cgImg.width) / 2,
                                                            height: CGFloat(cgImg.height) / 2))
@@ -5011,7 +5092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setInterval(_ sec: TimeInterval) {
-        let sec = max(POLL_MIN, sec)
+        let sec = normalizedPollInterval(sec)
         interval = sec
         UserDefaults.standard.set(sec, forKey: "interval")
         startTimer()
@@ -5054,7 +5135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // because the parent dir is missing → the app mistakes it for "another instance
 // already running" and silently exit(0)'s. A single mkdir up front fixes both
 // the silent-exit bug and the (previously failing) cache persistence.
-if !CommandLine.arguments.contains("--sync-selftest") {
+if !CommandLine.arguments.contains("--sync-selftest") && !CommandLine.arguments.contains("--subscriptions-selftest") {
     try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
 }
 
@@ -5211,6 +5292,120 @@ extension GitHubSync {
         q.async { done.signal() }
         return done.wait(timeout: .now() + 5) == .success
     }
+}
+
+// Offline regression tests and fixture previews: no real credentials, logs, or settings writes.
+if CommandLine.arguments.contains("--subscriptions-selftest") {
+    let defaults = UserDefaults.standard
+    var prefs: [String: Any] = ["advanced": true, "advHistExpanded": true, "lang": "ru",
+                               "monitor_claude": true, "monitor_codex": true]
+    func select(_ claude: Bool, _ codex: Bool) {
+        prefs["monitor_claude"] = claude; prefs["monitor_codex"] = codex
+        defaults.setVolatileDomain(prefs, forName: UserDefaults.argumentDomain)
+    }
+    func check(_ ok: Bool, _ message: String) {
+        if !ok { print("FAIL " + message); exit(1) }
+        print("OK " + message)
+    }
+    check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600], "refresh choices: 15 minutes, 30 minutes, 1 hour")
+    check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 900 },
+          "legacy and invalid intervals migrate to 15 minutes")
+    check([900.0, 1800, 3600].allSatisfy { normalizedPollInterval($0) == $0 }, "valid intervals survive restart")
+    let isolated = UserDefaults(suiteName: "ccl-subscriptions-test-" + UUID().uuidString)!
+    check(productEnabled("claude", defaults: isolated) && productEnabled("codex", defaults: isolated),
+          "missing preferences keep both products enabled")
+    let root = NSTemporaryDirectory() + "ccl-subscriptions-" + UUID().uuidString
+    let fm = FileManager.default
+    let cp = root + "/.claude/projects/test/session.jsonl"
+    let xp = root + "/.codex/sessions/test/rollout-test.jsonl"
+    for path in [cp, xp] { try! fm.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true) }
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    let cl = "{\"timestamp\":\"\(stamp)\",\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-opus-4-6\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}}\n"
+    let cx = "{\"timestamp\":\"\(stamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":50,\"output_tokens\":10}}}}\n"
+    try! cl.write(toFile: cp, atomically: true, encoding: .utf8)
+    try! cx.write(toFile: xp, atomically: true, encoding: .utf8)
+    var ix = UsageIndex()
+    select(false, true)
+    check(UsageLogs.scan(&ix, home: root) && ix.files[cp] == nil && ix.files[xp] != nil && ix.days["claude"] == nil,
+          "Codex-only scan never indexes Claude logs")
+    select(true, true)
+    check(UsageLogs.scan(&ix, home: root) && ix.files[cp] != nil && ix.days["claude"] != nil,
+          "re-enabling Claude resumes indexing")
+    let oldOffset = ix.files[cp]!.size
+    try! (cl + cl.replacingOccurrences(of: "m1", with: "m2")).write(toFile: cp, atomically: true, encoding: .utf8)
+    select(false, true)
+    check(!UsageLogs.scan(&ix, home: root) && ix.files[cp]!.size == oldOffset && ix.days["claude"] != nil,
+          "disabled logs stop advancing; existing history is retained")
+    select(true, false)
+    check(UsageLogs.scan(&ix, home: root) && ix.files[cp]!.size > oldOffset,
+          "re-enabled logs catch up from the retained offset")
+    let c = LimitData(session: 25, weekly: 40, sessionReset: Date().addingTimeInterval(7200), weeklyReset: Date().addingTimeInterval(86400), asOf: Date())
+    let x = LimitData(session: 15, weekly: 30, sessionReset: Date().addingTimeInterval(7200), weeklyReset: Date().addingTimeInterval(86400), asOf: Date())
+    UsageLogs.shared.useForPreview(ix)
+    let sync = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: OfflineSyncKeychain(), defaults: defaults,
+                          remotePath: root + "/remote.json", machineId: "subscription-test")
+    select(true, true)
+    var remote = (try! JSONSerialization.jsonObject(with: Data(sync.selfTestFile().utf8))) as! [String: Any]
+    var machine = remote["machine"] as! [String: Any]
+    machine["id"] = "another-machine"; remote["machine"] = machine
+    let remoteFile = String(decoding: try! JSONSerialization.data(withJSONObject: remote), as: UTF8.self)
+    sync.setRemoteForPreview(GitHubSync.merge(["machine-another-machine.json": remoteFile], excluding: sync.machineId))
+    select(false, true)
+    let payload = (try! JSONSerialization.jsonObject(with: Data(sync.selfTestFile().utf8))) as! [String: Any]
+    let days = payload["days"] as! [String: Any]
+    check(days["claude"] == nil && days["codex"] != nil, "sync upload excludes disabled subscription")
+    let merged = mergedUsageIndex(sync)
+    check(merged.days["claude"] == nil && merged.days["codex"] != nil, "remote history cannot restore disabled subscription")
+    check(!selectedLimits(c, product: "claude").present && advCards(c, x).map { $0.product } == ["codex"],
+          "cached readings cannot restore disabled cards")
+    check(!showMissingProduct(advCards(c, x)), "disabled Claude has no setup invitation")
+    check(!fetchClaude().present, "disabled Claude returns before reading Keychain or API")
+    select(true, false)
+    check(!fetchCodex(live: true).present, "disabled Codex returns before reading credentials, logs or API")
+    select(false, false)
+    check(!UsageLogs.scan(&ix, home: root) && monitoringPaused() && advCards(c, x).isEmpty,
+          "both subscriptions can be disabled")
+    select(true, true)
+    let enabledHeight = advancedHeight(c, x)
+    select(false, true)
+    check(advancedHeight(c, x) < enabledHeight, "single-subscription panel shrinks")
+    SYNC_PREVIEW = SyncUIState()
+    func save(_ context: CGContext, _ path: String) {
+        let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dst, context.makeImage()!, nil)
+        check(CGImageDestinationFinalize(dst), "preview " + path)
+    }
+    for lang in ["ru", "en"] {
+        prefs["lang"] = lang
+        for advanced in [false, true] {
+            prefs["advanced"] = advanced; select(false, true)
+            let h = settingsTotalHeight(AboutState())
+            let ctx = bitmapContext(Int(PANEL_W * 2), Int(h * 2))!; ctx.scaleBy(x: 2, y: 2)
+            let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: h), about: AboutState())
+            let toggles = hits.filter { $0.id.hasPrefix("monitor:") }
+            check(toggles.count == 2 && !toggles[0].rect.intersects(toggles[1].rect)
+                  && hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= h },
+                  "\(lang) advanced=\(advanced): both toggles and all controls fit")
+            save(ctx, "/tmp/ccl-subscriptions-settings-\(lang)-\(advanced).png")
+            for bothOff in [false, true] {
+                select(false, !bothOff)
+                let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
+                let ph = mainPanelHeight(cl, cx)
+                let pc = bitmapContext(Int(PANEL_W * 2), Int(ph * 2))!; pc.scaleBy(x: 2, y: 2)
+                let phits = advanced
+                    ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_MIN, updated: nil, about: AboutState())
+                    : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_MIN, updated: nil, about: AboutState())
+                check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600"],
+                      "\(lang) advanced=\(advanced): all three refresh intervals are clickable")
+                check(phits.contains { $0.id == "settings" } && !phits.contains { $0.id == "claudefix" || $0.id.contains("claude.ai") },
+                      "\(lang) advanced=\(advanced) paused=\(bothOff): Settings reachable; no Claude links")
+                save(pc, "/tmp/ccl-subscriptions-panel-\(lang)-\(advanced)-paused-\(bothOff).png")
+            }
+        }
+    }
+    try! fm.removeItem(atPath: root)
+    print("Subscription selection selftest passed")
+    exit(0)
 }
 
 if CommandLine.arguments.contains("--sync-selftest") {
@@ -5962,7 +6157,7 @@ if CommandLine.arguments.contains("--advanced-preview") {
         let h = advancedHeight(cl, cx)
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(h * s)) else { return }
         ctx.scaleBy(x: s, y: s)
-        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: cl, codex: cx, interval: 300, updated: Date(), about: AboutState())
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: cl, codex: cx, interval: POLL_MIN, updated: Date(), about: AboutState())
         save(ctx, path); print(path, Int(h), "pt")
     }
     let out = CommandLine.arguments.last ?? "/tmp"
@@ -6109,7 +6304,7 @@ if CommandLine.arguments.contains("--screenshots") {
         let h = advancedHeight(c, x)
         guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(h * s2)) else { return }
         ctx.scaleBy(x: s2, y: s2)
-        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: c, codex: x, interval: 300, updated: Date(), about: AboutState())
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: c, codex: x, interval: POLL_MIN, updated: Date(), about: AboutState())
         savePNG(ctx, path)
     }
     for lang in ["ru", "en"] {

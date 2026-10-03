@@ -32,9 +32,10 @@ Click the tray icon for a detailed popover.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
 - **Detailed popover** — click the tray icon for ring gauges, exact percentages, and reset times.
 - **Click a card** to open the relevant limits page in your browser.
+- **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover forces a fresh reading** right then.
-- **Refresh interval** — 5 or 15 minutes, your choice (5 is the minimum: faster polling from several computers on one account gets rate‑limited).
+- **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. Older 1/5-minute settings automatically switch to 15 minutes.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -69,7 +70,7 @@ by `scope.model.display_name`). The older per‑model fields (`seven_day_opus` a
 now come back `null`, so `limits[]` is the only source for those.
 
 **Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
-uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 5/15‑min timer,
+uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 15/30/60‑min timer,
 and popover open), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
 via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
 = 7‑day. If a live call fails it falls back to the most recent local session log
@@ -105,7 +106,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.1.4.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.1.5.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -151,14 +152,14 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
 - **Refresh button** (top‑right of the popover) → refresh now.
-- **Interval pills** (bottom) → 5 / 15 minutes.
+- **Interval pills** (bottom) → 15 min / 30 min / 1 hour.
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.4.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.5.dmg
 ```
 
 ## Project layout
