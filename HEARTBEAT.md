@@ -4,6 +4,8 @@
 
 ## Актуальный статус · 2026-10-03
 
+- В работе AUTH-1: пользователь увидел «вход истёк / claude login» в Codex. Причина — Swift UI смешивает stale с auth expiry; источник Codex не классифицирует его auth. Диагноз подтверждён без аккаунтов, контракт и предварительный test-plan — `docs/auth-hints-fix.md`, `docs/test-plan-auth-hints.md`. Следующий шаг: Developer → независимые Tester/Reviewer → QA → 3.2.2/0.4.2.
+
 - Прямое правило владельца: при подключённой папке Юрки проект автоматически ведётся через роли и проектное управление; исполнение **только Codex**. Вход: `AGENTS.md` проекта и HQ `handoff/references/codex-only.md`.
 - Опубликованы macOS **3.2.1** и Linux **0.4.1** на `5b722a1`: стилизованная «А» и актуальная частота рядом, общая при совпадении/одной подписке либо с именами продуктов при разных интервалах. Выбор подписок, 15/30/60 минут (30 по умолчанию), опциональный Auto 15→30→60→240 минут сохранены.
 - Новый UI прошёл разделённые роли: PM/UX/Architect → Developer → независимые Tester/CodeReviewer → QA → TechWriter/интеграция. Linux Ubuntu CI: **212 tests OK, 0 skip**; Swift/bundled DMG selftest **288 OK**; strict codesign и checksum DMG PASS; QA 40 macOS + 48 Linux PNG PASS. Скачанные публичные assets совпадают с проверенными файлами; Latest=v3.2.1, Linux не Latest.
