@@ -28,8 +28,17 @@ Reviewer повторно проверил конечный test-delta: isolatio
 blocker/major=0, новых callbacks/I/O нет. Проверяет stale Codex + Claude auth
 по областям обеих карточек и no-cache/readError. Найденный selftest-state leak
 Auto исправлен до запуска. Финальный compile и `--subscriptions-selftest` exit 0: **1063 OK**
-(687 новых auth assertions и 88 новых PNG). Linux CI, визуальное QA и пакеты
-пока не приняты.
+(687 новых auth assertions и 88 новых PNG). Linux CI [37133915949](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37133915949)
+на `a1f885f1138c327121fb7baf794e000edfea5695`: **219 tests OK, 0 skip**, DEB build PASS.
+Root проверил финальный DMG: checksum VALID, strict codesign PASS, версия 3.2.2,
+packaged selftest **1063 OK**, read-only mount отключён. DEB: 0.4.2/all/xz,
+15 Python-модулей, entry scripts и PNG/WAV совпадают с checkout, права PASS.
+DMG SHA-256 `81cb356ea762787cb08caca44e8fa1617d383a7d29ef3a606da840c5c121376c`;
+DEB `bbadec59e34a0797f87620f8b2cb60f395f57b3eb60748d692f082a7e7f45f19`.
+Независимое QA AUTH-1 PASS: 88 macOS + 92 Ubuntu CI PNG, metadata/checksums
+пакетов и подпись DMG. [Отчёт](qa-auth-hints.md). Live ALSE/установка/
+реальные клики не проверены. Унаследованный P3 Simple readError subtitle
+вынесен в Could backlog. Все гейты этой правки закрыты; публикация — следующий шаг.
 
 ## Факты
 
