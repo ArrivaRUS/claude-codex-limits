@@ -1,6 +1,35 @@
 # Статус командного внедрения
 
-Обновлено: 2026-10-03. База для текущей задачи: `main` `e6e2f2e`.
+Обновлено: 2026-10-03. База текущей AUTH-1: `main` `5da1143`; старый Auto — `e6e2f2e`.
+
+## Текущая правка AUTH-1
+
+База `5da1143`; предварительный план/контракт зафиксирован `d77e215` до кода.
+Пользовательский screenshot показывает Codex + «вход истёк / claude login».
+Debugger GPT-6.1 Sol/high подтвердил смешение stale/auth в Swift Advanced;
+source Codex не классифицирует AuthState, screenshot не доказывает expiry.
+Developer завершил минимальный UI-дифф, Tester подготовил матрицу заранее,
+TechWriter обновил инструкции/релизы. Следующий шаг: независимые тесты/ревью,
+bitmap QA, пакеты macOS 3.2.2 / Linux 0.4.2. Полный маршрут:
+[auth-hints-fix.md](auth-hints-fix.md), [test-plan-auth-hints.md](test-plan-auth-hints.md).
+Предыдущие 212/288 проверок не принимаются за проверку этой новой ревизии.
+
+Developer production frozen: Swift compile/Python AST/bash syntax/diff check
+exit 0. CodeReviewer GPT-6 Astra/high: static production PASS, blocker/major=0,
+новой security-поверхности нет. Source до новых tests
+`e9f44b3bad62e3e2db0d9e4cf527916ac07c1428e1baf9161056b6875be99c26`,
+panel `0fb8a8442a6d1a42ba2eba2172ccb4aa01a4022a898a13ae7b6c7e031750acaf`.
+Tester frozen: только selftest-блок Swift и новый `linux/tests/test_auth_hints.py`.
+Локальный Linux target — 7 tests, 3 PASS / 4 Qt SKIP (PyQt5 отсутствует).
+Final Source `3fca4e7578c93bd6865a932ad2911d5aad745a607fd61401dae0219e0ad63f19`,
+test `83e8ab6aeb3a2cc1915d9c93d92d278c485b3ad8880e021b3aadec6e03793068`.
+Production без нового selftest-блока точно совпадает с freeze выше.
+Reviewer повторно проверил конечный test-delta: isolation/core coverage PASS,
+blocker/major=0, новых callbacks/I/O нет. Проверяет stale Codex + Claude auth
+по областям обеих карточек и no-cache/readError. Найденный selftest-state leak
+Auto исправлен до запуска. Финальный compile и `--subscriptions-selftest` exit 0: **1063 OK**
+(687 новых auth assertions и 88 новых PNG). Linux CI, визуальное QA и пакеты
+пока не приняты.
 
 ## Факты
 

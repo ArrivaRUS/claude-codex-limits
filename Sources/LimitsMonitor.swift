@@ -2440,7 +2440,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.1"
+let APP_VERSION = "3.2.2"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -2792,12 +2792,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let pad: CGFloat = 16
 
     // which products are present
-    var prods: [(LimitData, String, String, String)] = []   // (data, name, icon, url)
+    var prods: [(LimitData, String, String, String, String)] = []   // (data, name, icon, url, product)
     if productEnabled("claude"), claude.present {
-        prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage"))
+        prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage", "claude"))
     }
     if productEnabled("codex"), codex.present {
-        prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage"))
+        prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage", "codex"))
     }
 
     // header — the app's OWN icon + subtitle of present products
@@ -2822,12 +2822,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + scopedRowExtra(claude, codex), gap: CGFloat = 12
     let cardW = (W - pad * 2 - gap) / 2
 
-    func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String) {
+    func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String, product: String) {
         let r = rectTL(x, cardsTop, w, cardH)
         roundFill(r, 14, gray(1, 0.04)); roundStroke(r, 14, gray(1, 0.06), 1)
         // Claude sign-in problems (states 1 & 2) make the whole card tap-to-fix; everything
         // else opens the product's usage page in the browser.
-        let canFix = (d.auth == .loggedOut || d.auth == .expired)
+        let canFix = limitCanFix(product: product, auth: d.auth)
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
@@ -2854,7 +2854,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         switch d.auth {
         case .loggedOut:
             problemBody(tr("Вход не выполнен", "Not signed in"),
-                        tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI"), showFix: true)
+                        canFix ? tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI") : nil, showFix: canFix)
             return
         case .keychainError:
             drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
@@ -2863,7 +2863,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             return
         case .expired where d.session == nil && d.weekly == nil:
             problemBody(tr("Вход устарел", "Sign-in expired"),
-                        d.asOf.map { tr("данные от ", "as of ") + fmtReset($0) }, showFix: true)
+                        d.asOf.map { tr("данные от ", "as of ") + fmtReset($0) }, showFix: canFix)
             return
         default: break
         }
@@ -2911,18 +2911,15 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
         if stale {
-            // "As of <last good read>" + a gentle nudge to restore access — no misleading times.
-            let msg1 = tr("данные от ", "as of ") + fmtReset(d.asOf)
+            // Keep the last good read distinct from the CLI's sign-in state.
+            let copy = limitSimpleStaleCopy(d, product: product)
+            let msg1 = copy.snapshot
             let icoW: CGFloat = 9, g: CGFloat = 4
             let tw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(msg1, ctFont(9.5, .regular), cg(amber)))))
             let bx = cx - (icoW + g + tw) / 2
             drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(bx, l1 + 1, icoW, icoW), amber)
             text(attr(msg1, 9.5, .regular, amber), x: bx + icoW + g, topY: l1)
-            if d.auth == .expired {
-                text(attr(tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?"), 9.5, .semibold, blue), x: cx, topY: l2, align: 1)
-            } else {
-                text(attr(tr("обновите вход в \(name)", "re-open \(name) to refresh"), 9.5, .regular, textLo), x: cx, topY: l2, align: 1)
-            }
+            text(attr(copy.action, 9.5, canFix ? .semibold : .regular, canFix ? blue : textLo), x: cx, topY: l2, align: 1)
         } else {
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
@@ -2942,10 +2939,10 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     }
 
     if prods.count >= 2 {
-        drawCard(pad, cardW, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
-        drawCard(pad + cardW + gap, cardW, prods[1].0, name: prods[1].1, icon: prods[1].2, url: prods[1].3)
+        drawCard(pad, cardW, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3, product: prods[0].4)
+        drawCard(pad + cardW + gap, cardW, prods[1].0, name: prods[1].1, icon: prods[1].2, url: prods[1].3, product: prods[1].4)
     } else if prods.count == 1 {
-        drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3)
+        drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3, product: prods[0].4)
     } else {
         let empty = monitoringPaused() ? tr("Сбор статистики выключен", "Statistics collection is off")
             : tr("Выбранные подписки не найдены", "Selected subscriptions not found")
@@ -3052,21 +3049,53 @@ struct AdvRow {
         }
     }
 }
+/// Auth recovery belongs to the CLI whose confirmed sign-in state we can classify.
+func limitCanFix(product: String, auth: AuthState) -> Bool {
+    product == "claude" && (auth == .loggedOut || auth == .expired)
+}
+
+/// A paused snapshot alone says nothing about whether a CLI sign-in has expired.
+func limitAuthBadge(_ auth: AuthState) -> String {
+    switch auth {
+    case .ok: return tr("данные устарели", "stale data")
+    case .loggedOut: return tr("нет входа", "signed out")
+    case .expired: return tr("вход истёк", "sign-in expired")
+    case .keychainError: return tr("нет доступа", "read failed")
+    }
+}
+
+func limitPausedNotice(asOf: Date?) -> String {
+    guard let asOf = asOf else { return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    return tr("Данные от ", "Data as of ") + advMomentLower(asOf) + tr(" · темп не считаем", " · pace paused")
+}
+
+func limitSimpleStaleCopy(_ d: LimitData, product: String) -> (snapshot: String, action: String) {
+    let snapshot = d.asOf.map { tr("данные от ", "as of ") + fmtReset($0) } ?? tr("Нет свежих данных", "No fresh data")
+    let action: String
+    if limitCanFix(product: product, auth: d.auth) {
+        action = tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?")
+    } else {
+        action = d.asOf == nil ? tr("темп не считаем", "pace paused") : tr("обновите данные", "refresh data")
+    }
+    return (snapshot, action)
+}
+
 struct AdvCard {
     let product: String, data: LimitData, name: String, icon: String, url: String
-    let expired: Bool
+    let paused: Bool
     let rows: [AdvRow]
-    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + (expired ? ADV_NOTICE : 0) }
+    var noticeHeight: CGFloat { paused ? ADV_NOTICE * (limitCanFix(product: product, auth: data.auth) ? 2 : 1) : 0 }
+    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight }
 }
 
 func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
     func card(_ d: LimitData, _ product: String) -> AdvCard {
-        let expired = d.auth == .expired || isStale(d)
+        let paused = d.auth != .ok || isStale(d)
         var limits = pacedLimits(d, product: product)
         if product == "codex" { limits.sort { a, _ in a.id == "weekly" } }        // Codex: week first
         var rows: [AdvRow] = limits.map { l in
             guard let p = l.pace else { return AdvRow(limit: l, kind: .inactive, credits: nil) }
-            if expired { return AdvRow(limit: l, kind: .stale, credits: nil) }
+            if paused { return AdvRow(limit: l, kind: .stale, credits: nil) }
             if p.used >= 100 { return AdvRow(limit: l, kind: .exhausted, credits: nil) }
             if p.elapsedH < 10.0 / 60 || p.used < 2 { return AdvRow(limit: l, kind: .tooEarly, credits: nil) }
             return AdvRow(limit: l, kind: .full, credits: nil)
@@ -3076,7 +3105,7 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
                        name: product == "claude" ? "Claude Code" : "Codex",
                        icon: product == "claude" ? "claude_128.png" : "codex_128.png",
                        url: product == "claude" ? "https://claude.ai/settings/usage" : "https://chatgpt.com/codex/cloud/settings/analytics#usage",
-                       expired: expired, rows: rows)
+                       paused: paused, rows: rows)
     }
     var out: [AdvCard] = []
     if productEnabled("claude"), claude.present { out.append(card(claude, "claude")) }
@@ -3128,9 +3157,11 @@ func advMomentLower(_ d: Date) -> String {
     return appLang() == "ru" ? s.prefix(1).lowercased() + s.dropFirst() : s
 }
 func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
+    if row.kind == .stale {
+        return asOf.map { tr("по данным на ", "as of ") + advMomentLower($0) } ?? limitPausedNotice(asOf: nil)
+    }
     guard let p = row.limit?.pace else { return tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request") }
     switch row.kind {
-    case .stale: return tr("по данным на ", "as of ") + advMomentLower(asOf ?? Date())
     case .exhausted: return tr("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + advMomentLower(p.reset)
     case .tooEarly: return tr("Мало данных для темпа · сброс в ", "Not enough data for pace · resets at ") + advMomentLower(p.reset)
     default: break
@@ -3346,15 +3377,15 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         let ch = c.height
         let card = rectTL(ADV_CX, y, ADV_CW, ch)
         roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
-        let canFix = c.product == "claude" && (c.data.auth == .loggedOut || c.data.auth == .expired)
+        let canFix = limitCanFix(product: c.product, auth: c.data.auth)
         // header
         let y0 = y + 9
         if let img = loadCGImage(assetPath(c.icon)) { ctx.draw(img, in: rectTL(ADV_IX, y0 + 1, 16, 16)) }
         let name = attr(c.name, 13, .semibold, textHi)
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
-        if c.expired {
-            let r = pill(attr(tr("вход истёк", "signed out"), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
+        if c.paused {
+            let r = pill(attr(limitAuthBadge(c.data.auth), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
         if let plan = c.data.plan {
@@ -3365,19 +3396,18 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix ? card : arrow.insetBy(dx: -8, dy: -8)))
         var ry = y + 29
-        if c.expired {
-            let m = NSMutableAttributedString()
-            m.append(attr(tr("Данные от ", "Data as of ") + advMomentLower(c.data.asOf ?? Date()) + tr(" · темп не считаем · ", " · pace paused · "), 10.5, .regular, ADV_WARN))
-            let code = attr("claude login", 10, .regular, gray(1, 0.8))
-            let pre = width(m)
-            let codeR = rectTL(ADV_IX + pre + 4, ry + 0.5, width(code) + 8, 14)
-            roundFill(codeR, 4, gray(1, 0.08))
-            textC(m, x: ADV_IX, topY: ry, h: 14)
-            textC(ctAttr("claude login", ctMono(10, .regular), cg(gray(1, 0.8))), x: codeR.minX + 4, topY: ry, h: 14)
-            ry += ADV_NOTICE
+        if c.paused {
+            textC(attr(limitPausedNotice(asOf: c.data.asOf), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14)
+            if canFix {
+                let code = ctAttr("claude → /login", ctMono(10, .regular), cg(gray(1, 0.8)))
+                let codeR = rectTL(ADV_IX, ry + ADV_NOTICE + 0.5, width(code) + 8, 14)
+                roundFill(codeR, 4, gray(1, 0.08))
+                textC(code, x: codeR.minX + 4, topY: ry + ADV_NOTICE, h: 14)
+            }
+            ry += c.noticeHeight
         }
         for (i, row) in c.rows.enumerated() {
-            drawRow(row, topY: ry, dimmed: c.expired && row.kind != .credits, rowAsOf: c.data.asOf)
+            drawRow(row, topY: ry, dimmed: c.paused && row.kind != .credits, rowAsOf: c.data.asOf)
             ry += row.height
             if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
         }
@@ -5825,6 +5855,140 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             prefs["autoPoll"] = true; select(true, true)
         }
     }
+    // Auth-copy regressions (tester): synthetic LimitData and pure bitmap draw only.
+    // Never call AppDelegate refresh/scan/timers or infer I/O safety from not-due.
+    let authNow = Date()
+    var authChecks = 0, authImages = 0
+    func authCheck(_ ok: Bool, _ message: String) {
+        authChecks += 1; check(ok, "Auth hints: " + message)
+    }
+    func authReading(_ fixture: String) -> LimitData {
+        var d = LimitData(session: 31, weekly: 47, sessionReset: authNow.addingTimeInterval(7200),
+                          weeklyReset: authNow.addingTimeInterval(86400), asOf: authNow.addingTimeInterval(-60))
+        switch fixture {
+        case "age": d.asOf = authNow.addingTimeInterval(-7200)
+        case "network": d.asOf = authNow.addingTimeInterval(-1800); d.error = "offline fixture"
+        case "reset": d.sessionReset = authNow.addingTimeInterval(-3600)
+        case "no-asof": d.asOf = nil
+        case "empty": d.session = nil; d.weekly = nil; d.asOf = nil
+        case "expired": d.auth = .expired; d.asOf = authNow.addingTimeInterval(-7200)
+        case "logout": d.auth = .loggedOut; d.asOf = authNow.addingTimeInterval(-7200)
+        case "read-error": d.auth = .keychainError; d.asOf = authNow.addingTimeInterval(-7200)
+        case "read-error-empty": d.auth = .keychainError; d.session = nil; d.weekly = nil; d.asOf = nil
+        default: break
+        }
+        return d
+    }
+    let codexTarget = "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
+    let claudeTarget = "open:https://claude.ai/settings/usage"
+    for lang in ["ru", "en"] {
+        prefs["lang"] = lang; select(true, true)
+        let authStates: [AuthState] = [.ok, .loggedOut, .expired, .keychainError]
+        let badges = lang == "ru" ? ["данные устарели", "нет входа", "вход истёк", "нет доступа"]
+                                  : ["stale data", "signed out", "sign-in expired", "read failed"]
+        for (i, auth) in authStates.enumerated() {
+            authCheck(limitAuthBadge(auth) == badges[i], "\(lang) classified badge \(i)")
+            for product in ["claude", "codex"] {
+                authCheck(limitCanFix(product: product, auth: auth) ==
+                          (product == "claude" && (auth == .loggedOut || auth == .expired)),
+                          "\(lang) \(product) recovery guard \(i)")
+            }
+        }
+        let missingNotice = lang == "ru" ? "Нет свежих данных · темп не считаем" : "No fresh data · pace paused"
+        authCheck(limitPausedNotice(asOf: nil) == missingNotice, "\(lang) missing timestamp is explicit")
+        let missingRow = AdvRow(limit: nil, kind: .stale, credits: nil)
+        authCheck(advVerdict(missingRow, asOf: nil) == missingNotice, "\(lang) stale row never invents Date()")
+        for advanced in [false, true] {
+            for both in [false, true] {
+                let fixtures = [("codex", "age"), ("codex", "network"), ("codex", "reset"),
+                                ("codex", "no-asof"), ("codex", "empty"), ("claude", "expired"),
+                                ("claude", "logout"), ("claude", "read-error"), ("claude", "age"),
+                                ("claude", "read-error-empty"), ("codex", "both-expired"), ("codex", "both-logout")]
+                for (product, fixture) in fixtures {
+                    let combined = fixture.hasPrefix("both-")
+                    if combined && !both { continue }
+                    prefs["advanced"] = advanced; prefs["autoPoll"] = false
+                    select(both || product == "claude", both || product == "codex")
+                    let sample = authReading(combined ? "age" : fixture)
+                    let companion = authReading(combined ? String(fixture.dropFirst(5)) : "fresh")
+                    let cl = selectedLimits(product == "claude" ? sample : companion, product: "claude")
+                    let cx = selectedLimits(product == "codex" ? sample : authReading("fresh"), product: "codex")
+                    let cachedBeforeDraw = [String(reflecting: cl), String(reflecting: cx)]
+                    let cards = advCards(cl, cx)
+                    let card = cards.first { $0.product == product }!
+                    let recover = product == "claude" && (fixture == "expired" || fixture == "logout")
+                    let label = "\(lang) advanced=\(advanced) both=\(both) \(product)/\(fixture)"
+                    authCheck(card.paused && card.noticeHeight == (recover ? 38 : 19), label + " notice height")
+                    let copy = limitSimpleStaleCopy(sample, product: product)
+                    let expectedAction = recover ? (lang == "ru" ? "Вход устарел · Как починить?" : "Sign-in expired · How to fix?")
+                        : (sample.asOf == nil ? (lang == "ru" ? "темп не считаем" : "pace paused")
+                                             : (lang == "ru" ? "обновите данные" : "refresh data"))
+                    authCheck(copy.action == expectedAction, label + " recovery versus refresh copy")
+                    if sample.asOf == nil {
+                        authCheck(copy.snapshot == (lang == "ru" ? "Нет свежих данных" : "No fresh data")
+                                  && limitPausedNotice(asOf: sample.asOf) == missingNotice,
+                                  label + " nil date stays nil")
+                    }
+                    if sample.session == nil && sample.weekly == nil {
+                        authCheck(pctText(sample.session) == "—" && pctText(sample.weekly) == "—",
+                                  label + " missing percentages are dashes, never invented 0%")
+                    }
+                    if product == "codex" {
+                        authCheck(sample.auth == .ok && isStale(sample, authNow)
+                                  && limitAuthBadge(sample.auth) == (lang == "ru" ? "данные устарели" : "stale data"),
+                                  label + " paused Codex is not expired auth")
+                    }
+                    let height = mainPanelHeight(cl, cx)
+                    let image = bitmapContext(720, Int(height * 2))!; image.scaleBy(x: 2, y: 2)
+                    let size = CGSize(width: PANEL_W, height: height)
+                    let hits = advanced
+                        ? drawAdvanced(image, size: size, claude: cl, codex: cx, interval: 1800, updated: nil, about: AboutState())
+                        : drawPanel(image, size: size, claude: cl, codex: cx, interval: 1800, updated: nil, about: AboutState())
+                    let afterDraw = advCards(cl, cx).first { $0.product == product }!
+                    authCheck([String(reflecting: cl), String(reflecting: cx)] == cachedBeforeDraw
+                              && afterDraw.data.session == sample.session && afterDraw.data.weekly == sample.weekly
+                              && afterDraw.data.asOf == sample.asOf && afterDraw.data.auth == sample.auth,
+                              label + " cached model values retained after actual draw")
+                    authCheck(hits.contains { $0.id == "claudefix" } == (recover || combined),
+                              label + " actual draw recovery target")
+                    if product == "codex" || both {
+                        authCheck(hits.contains { $0.id == codexTarget }, label + " actual Codex URL retained")
+                    }
+                    if product == "claude" && !recover || product == "codex" && both && !combined {
+                        authCheck(hits.contains { $0.id == claudeTarget }, label + " ordinary Claude URL retained")
+                    }
+                    if combined {
+                        let fixRect = hits.first { $0.id == "claudefix" }!.rect
+                        let codexRect = hits.first { $0.id == codexTarget }!.rect
+                        if advanced {
+                            let claudeCard = cards.first { $0.product == "claude" }!
+                            let boundary = height - (58 + claudeCard.height + 5)
+                            authCheck(fixRect.minY > boundary && codexRect.midY <= boundary
+                                      && claudeCard.noticeHeight == 38,
+                                      label + " recovery hit belongs only to Claude card")
+                        } else {
+                            authCheck(fixRect.maxX <= PANEL_W / 2 && codexRect.minX >= PANEL_W / 2,
+                                      label + " recovery hit belongs only to Claude card")
+                        }
+                        authCheck(limitSimpleStaleCopy(companion, product: "claude").action ==
+                                  (lang == "ru" ? "Вход устарел · Как починить?" : "Sign-in expired · How to fix?"),
+                                  label + " both paused cards keep separate product copy")
+                    }
+                    authCheck(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height },
+                              label + " actual hit bounds")
+                    // Keep full panels as PNG for QA; do not compare time-dependent card bitmaps.
+                    save(image, "/tmp/ccl-auth-hints-\(product)-\(fixture)-\(lang)-advanced-\(advanced)-both-\(both).png")
+                    authImages += 1
+                }
+            }
+        }
+        select(true, true)
+        authCheck(advCards(authReading("fresh"), authReading("fresh")).allSatisfy { !$0.paused && $0.noticeHeight == 0 },
+                  "\(lang) fresh cards have no paused notice")
+    }
+    authCheck(authImages == 88, "88 RU/EN Simple/Advanced actual bitmap fixtures")
+    print("Auth hint fixtures: \(authChecks) checks, \(authImages) PNG")
+    prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800), "Auto button selected independently of saved fixed interval")

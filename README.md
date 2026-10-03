@@ -22,8 +22,8 @@ Click the tray icon for a detailed popover.
 ## Features
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
-- **Live data** — both are pulled from the same backends their CLIs use, so Codex matches its web page (not a stale local cache).
-- **Honest when a login lapses** — if Claude Code's saved credentials expire for good, the card says so (“Sign-in expired · How to fix?”) and tapping it walks you through `claude` → `/login`; meanwhile the app stops hammering the API with a token it already knows is dead. One fresh sign-in and it heals on its own.
+- **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
+- **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. Stale cards keep cached percentages, pause the pace calculation and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
 - **Advanced view** — a second panel layout for people who want to *manage* their limits, not just glance at them. Every window gets a pace line: where a linear plan says you should be by now, how many points you're ahead of it, your average burn rate, and a plain verdict — “Lasts until reset (forecast 53%)” or “Runs out at 09:37, 2 h 13 min before reset”. Below: 7 days of consumption as bars stacked by model, a 35‑day calendar heatmap, and money — what a day costs you out of the subscription versus what the same tokens would cost at API prices. Separately for Claude Code and Codex. Settings → *Panel view*.
 - **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Only daily token totals per model travel — no prompts, paths or project names. There is a Linux port for Astra Linux — see [Linux](#linux-astra-linux) ([protocol](docs/sync-protocol.md)).
@@ -107,7 +107,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.2.1.dmg` from the [macOS 3.2.1 release](../../releases/tag/v3.2.1).
+1. Download `ClaudeCodexLimits-3.2.2.dmg` from the [macOS 3.2.2 release](../../releases/tag/v3.2.2).
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -133,14 +133,14 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 
 ### Linux (Astra Linux)
 
-Earlier Linux versions were tested on Astra Linux SE 1.8 (KDE / Fly). The 0.4.1 UI change has not yet been tested on a live ALSE system; Linux CI uses Ubuntu 22.04. The port gives a tray icon with the same
+Earlier Linux versions were tested on Astra Linux SE 1.8 (KDE / Fly). The 0.4.2 UI change has not yet been tested on a live ALSE system; Linux CI uses Ubuntu 22.04. The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.4.1_all.deb` from the [Linux 0.4.1](../../releases/tag/linux-v0.4.1) release.
+1. Download `claude-codex-limits_0.4.2_all.deb` from the [Linux 0.4.2](../../releases/tag/linux-v0.4.2) release.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.4.1_all.deb
+   sudo apt install ./claude-codex-limits_0.4.2_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -166,7 +166,7 @@ In Auto, opening the panel keeps the schedule; manual refresh waits at least 15 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.2.1.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.2.2.dmg
 ```
 
 ## Project layout

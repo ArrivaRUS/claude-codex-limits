@@ -28,8 +28,9 @@ Debugger подтвердил: Swift Advanced использует общий pa
 ## План
 
 - [x] Debugger: причины и границы; Tester: test-plan до кода.
-- [ ] Developer: минимальный UI-дифф macOS/Linux, версии 3.2.2 / 0.4.2.
-- [ ] Независимые Tester/Reviewer: регрессии, изоляция и отсутствие новых I/O.
+- [x] Developer: минимальный UI-дифф macOS/Linux, версии 3.2.2 / 0.4.2.
+- [x] Независимые Tester/Reviewer: fixtures и изоляция, новых I/O нет; фактический прогон остаётся отдельным гейтом.
+- [ ] Фактический Swift selftest и полный Linux CI на точной ревизии.
 - [ ] QA: безопасные stale/auth fixture PNG и пакеты, RU/EN.
 - [ ] Интеграция и выпуск по сохраняющемуся разрешению владельца; Linux не Latest.
 

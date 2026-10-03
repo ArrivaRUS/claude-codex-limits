@@ -170,11 +170,11 @@ def draw_simple(c, W, H, m):
     gap = 12
     card_w = (W - pad * 2 - gap) / 2
 
-    def draw_card(x, w, d, name, icon, url):
+    def draw_card(x, w, d, name, icon, url, product):
         r = rect_tl(x, cards_top, w, card_h)
         c.round_fill(r, 14, gray(1, 0.04))
         c.round_stroke(r, 14, gray(1, 0.06), 1)
-        can_fix = d.auth in (limits.LOGGED_OUT, limits.EXPIRED)
+        can_fix = limit_can_fix(product, d.auth)
         hits.append(("claudefix" if can_fix else "open:" + url, r))
         c.image(icon, rect_tl(x + 14, cards_top + 13, 18, 18))
         c.text(Attr(name, 12.5, "semibold", gray(1, 0.9)), x + 39, cards_top + 15)
@@ -194,15 +194,17 @@ def draw_simple(c, W, H, m):
                 c.text_c(label, cx, ptop, ph, align=1)
 
         if d.auth == limits.LOGGED_OUT:
-            problem(tr("Вход не выполнен", "Not signed in"), tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI"), True)
+            problem(tr("Вход не выполнен", "Not signed in"),
+                    tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI") if can_fix else None, can_fix)
             return
         if d.auth == limits.READ_ERROR:
-            problem(tr("Нет доступа к входу", "Can't read sign-in"), tr("проверьте ~/.claude/.credentials.json",
-                                                                         "check ~/.claude/.credentials.json"), False)
+            sub = (tr("проверьте ~/.claude/.credentials.json", "check ~/.claude/.credentials.json")
+                   if product == "claude" else tr("проверьте доступ к данным", "check data access"))
+            problem(tr("Нет доступа к входу", "Can't read sign-in"), sub, False)
             return
         if d.auth == limits.EXPIRED and d.session is None and d.weekly is None:
             problem(tr("Вход устарел", "Sign-in expired"),
-                    (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)) if d.as_of else None, True)
+                    (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)) if d.as_of is not None else None, can_fix)
             return
         if d.auth == limits.OK:
             c.icon("arrow_ne", rect_tl(x + w - 21, cards_top + 11, 11, 11), gray(1, 0.22), 1.5)
@@ -246,15 +248,13 @@ def draw_simple(c, W, H, m):
             pill(None, fmt.num_text(d.scoped.percent) + "%", sc_col, tinted=True)
         l1, l2 = cards_top + 124, cards_top + 139
         if stale:
-            msg = Attr(tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of), 9.5, "regular", AMBER)
+            snapshot, action = limit_simple_stale_copy(d, product)
+            msg = Attr(snapshot, 9.5, "regular", AMBER)
             ico, g = 9, 4
             bx = cx - (ico + g + msg.width()) / 2
             c.icon("warning", rect_tl(bx, l1 + 1, ico, ico), AMBER)
             c.text(msg, bx + ico + g, l1)
-            if d.auth == limits.EXPIRED:
-                c.text(Attr(tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?"), 9.5, "semibold", BLUE), cx, l2, align=1)
-            else:
-                c.text(Attr(tr("обновите вход в %s" % name, "re-open %s to refresh" % name), 9.5, "regular", TEXT_LO), cx, l2, align=1)
+            c.text(Attr(action, 9.5, "semibold" if can_fix else "regular", BLUE if can_fix else TEXT_LO), cx, l2, align=1)
         else:
             lx = x + 16
             if single:
@@ -275,10 +275,10 @@ def draw_simple(c, W, H, m):
     if not m.loaded:
         c.text(Attr(tr("Загрузка…", "Loading…"), 12, "regular", TEXT_MID), W / 2, cards_top + 70, align=1)
     elif len(prods) >= 2:
-        draw_card(pad, card_w, *prods[0][:4])
-        draw_card(pad + card_w + gap, card_w, *prods[1][:4])
+        draw_card(pad, card_w, *prods[0])
+        draw_card(pad + card_w + gap, card_w, *prods[1])
     elif len(prods) == 1:
-        draw_card(pad, W - pad * 2, *prods[0][:4])
+        draw_card(pad, W - pad * 2, *prods[0])
     else:
         paused = not any(common.product_enabled(p) for p in ("claude", "codex"))
         message = tr("Сбор статистики выключен", "Statistics collection is off") if paused else tr("Выбранные подписки не найдены", "Selected subscriptions not found")
@@ -384,12 +384,42 @@ def adv_model_family(mid, product):
     return tr("прочие", "other"), gray(1, 0.28)
 
 
+def limit_can_fix(product, auth):
+    return product == "claude" and auth in (limits.LOGGED_OUT, limits.EXPIRED)
+
+
+def limit_auth_badge(auth):
+    if auth == limits.LOGGED_OUT:
+        return tr("нет входа", "signed out")
+    if auth == limits.EXPIRED:
+        return tr("вход истёк", "sign-in expired")
+    if auth == limits.READ_ERROR:
+        return tr("нет доступа", "read failed")
+    return tr("данные устарели", "stale data")
+
+
+def limit_paused_notice(as_of):
+    if as_of is None:
+        return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
+    return tr("Данные от ", "Data as of ") + fmt.moment_lower(as_of) + tr(" · темп не считаем", " · pace paused")
+
+
+def limit_simple_stale_copy(d, product):
+    snapshot = (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)
+                if d.as_of is not None else tr("Нет свежих данных", "No fresh data"))
+    if limit_can_fix(product, d.auth):
+        action = tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?")
+    else:
+        action = tr("темп не считаем", "pace paused") if d.as_of is None else tr("обновите данные", "refresh data")
+    return snapshot, action
+
+
 def adv_cards(m):
     out = []
     for d, product in ((m.claude, "claude"), (m.codex, "codex")):
         if not common.product_enabled(product) or not d.present:
             continue
-        expired = d.auth in (limits.EXPIRED, limits.LOGGED_OUT, limits.READ_ERROR) or limits.is_stale(d)
+        paused = d.auth != limits.OK or limits.is_stale(d)
         lims = limits.paced_limits(d, product, m.history)
         if product == "codex":
             lims.sort(key=lambda l: 0 if l["id"] == "weekly" else 1)
@@ -398,7 +428,7 @@ def adv_cards(m):
             p = l["pace"]
             if p is None:
                 kind = "inactive"
-            elif expired:
+            elif paused:
                 kind = "stale"
             elif p.used >= 100:
                 kind = "exhausted"
@@ -409,7 +439,7 @@ def adv_cards(m):
             rows.append({"limit": l, "kind": kind})
         if product == "codex":
             rows.append({"limit": None, "kind": "credits", "credits": d.reset_credits or 0})
-        out.append({"product": product, "data": d, "expired": expired, "rows": rows,
+        out.append({"product": product, "data": d, "paused": paused, "rows": rows,
                     "name": "Claude Code" if product == "claude" else "Codex",
                     "icon": "claude_128.png" if product == "claude" else "codex_128.png",
                     "url": CLAUDE_URL if product == "claude" else CODEX_URL})
@@ -421,9 +451,13 @@ def row_h(row):
     return ROW_FULL if k in ("full", "tooEarly", "exhausted") else ROW_SHORT if k in ("inactive", "stale") else ROW_CREDITS
 
 
+def notice_h(card):
+    return NOTICE * (2 if limit_can_fix(card["product"], card["data"].auth) else 1) if card["paused"] else 0
+
+
 def card_h(card):
     rows = card["rows"]
-    return 38 + sum(row_h(r) for r in rows) + max(0, len(rows) - 1) + (NOTICE if card["expired"] else 0)
+    return 38 + sum(row_h(r) for r in rows) + max(0, len(rows) - 1) + notice_h(card)
 
 
 def hist_product(m, present):
@@ -461,13 +495,13 @@ def advanced_height(m):
 
 
 def adv_verdict(row, as_of):
+    if row["kind"] == "stale":
+        return tr("по данным на ", "as of ") + fmt.moment_lower(as_of) if as_of is not None else limit_paused_notice(None)
     lim = row["limit"]
     p = lim["pace"] if lim else None
     if p is None:
         return tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
     k = row["kind"]
-    if k == "stale":
-        return tr("по данным на ", "as of ") + fmt.moment_lower(as_of or time.time())
     if k == "exhausted":
         return tr("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + fmt.moment_lower(p.reset)
     if k == "tooEarly":
@@ -606,16 +640,14 @@ def draw_advanced(c, W, H, m):
         rect = rect_tl(ADV_CX, y, ADV_CW, ch)
         c.round_fill(rect, 14, gray(1, 0.04))
         c.round_stroke(rect.adjusted(0.5, 0.5, -0.5, -0.5), 14, gray(1, 0.06), 1)
-        can_fix = cd["product"] == "claude" and d.auth in (limits.LOGGED_OUT, limits.EXPIRED)
+        can_fix = limit_can_fix(cd["product"], d.auth)
         y0 = y + 9
         c.image(cd["icon"], rect_tl(ADV_IX, y0 + 1, 16, 16))
         name = Attr(cd["name"], 13, "semibold", TEXT_HI)
         c.text_c(name, ADV_IX + 23, y0, 18)
         px = ADV_IX + 23 + name.width() + 7
-        if cd["expired"]:
-            label = tr("нет входа", "signed out") if d.auth == limits.LOGGED_OUT else tr("вход истёк", "signed out")
-            if d.auth == limits.OK:
-                label = tr("данные устарели", "stale data")
+        if cd["paused"]:
+            label = limit_auth_badge(d.auth)
             r = pill(Attr(label, 9.5, "semibold", WARN, kern=0.19), px, y0 + 1, 16, 7,
                      with_alpha(WARN, 0.16), with_alpha(WARN, 0.42))
             px = r.right() + 5
@@ -630,21 +662,17 @@ def draw_advanced(c, W, H, m):
         c.icon("arrow_ne", arrow, gray(1, 0.34), 1.5)
         hits.append(("claudefix" if can_fix else "open:" + cd["url"], rect if can_fix else arrow.adjusted(-8, -8, 8, 8)))
         ry = y + 29
-        if cd["expired"]:
-            if d.as_of:
-                pre = Attr(tr("Данные от ", "Data as of ") + fmt.moment_lower(d.as_of) + tr(" · темп не считаем", " · pace paused"),
-                           10.5, "regular", WARN)
-            else:
-                pre = Attr(tr("Нет данных · нужен вход ", "No data · sign in with "), 10.5, "regular", WARN)
+        if cd["paused"]:
+            pre = Attr(limit_paused_notice(d.as_of), 10.5, "regular", WARN)
             c.text_c(pre, ADV_IX, ry, 14)
-            if cd["product"] == "claude" and d.auth != limits.OK:
-                code = Attr("claude /login", 10, "regular", gray(1, 0.8), mono=True)
-                cr = rect_tl(ADV_IX + pre.width() + 4, ry + 0.5, code.width() + 8, 14)
+            if can_fix:
+                code = Attr("claude → /login", 10, "regular", gray(1, 0.8), mono=True)
+                cr = rect_tl(ADV_IX, ry + NOTICE + 0.5, code.width() + 8, 14)
                 c.round_fill(cr, 4, gray(1, 0.08))
-                c.text_c(code, cr.left() + 4, ry, 14)
-            ry += NOTICE
+                c.text_c(code, cr.left() + 4, ry + NOTICE, 14)
+            ry += notice_h(cd)
         for i, row in enumerate(cd["rows"]):
-            draw_row(row, ry, cd["expired"] and row["kind"] != "credits", d.as_of)
+            draw_row(row, ry, cd["paused"] and row["kind"] != "credits", d.as_of)
             ry += row_h(row)
             if i < len(cd["rows"]) - 1:
                 c.hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06))
