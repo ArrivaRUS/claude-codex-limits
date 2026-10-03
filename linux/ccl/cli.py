@@ -300,7 +300,8 @@ def cmd_dump(args):
     days = ix["days"]
     if args.merged:
         days = usage.merge_days(days, sync.load_remote().get("days", {}))
-    products = [args.product] if args.product else ["claude", "codex"]
+    days = common.selected_days(days)
+    products = [p for p in ([args.product] if args.product else ["claude", "codex"]) if common.product_enabled(p)]
     keys = usage.last_days(args.days)
     if args.json:
         import json

@@ -1,0 +1,35 @@
+name: Linux tests and DEB
+on:
+  push:
+    paths:
+      - 'linux/**'
+      - 'Resources/**'
+      - '.github/workflows/linux.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      CCL_PREVIEW_DIR: /tmp/ccl-previews
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install distribution dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-pyqt5 python3-dbus kde-style-breeze
+      - name: Test core, GUI and package
+        run: /usr/bin/python3 -m unittest discover -s linux/tests -v
+      - name: Build DEB
+        run: sh linux/packaging/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: dist/*.deb
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-previews
+          path: /tmp/ccl-previews/*.png

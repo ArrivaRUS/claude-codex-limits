@@ -118,6 +118,7 @@ def _walk(root, want):
 
 def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
     """Incremental rescan of both CLIs' logs into `ix`. Returns True when anything changed."""
+    common.settings().reload()
     now = now or time.time()
     claude_root = claude_root or common.CLAUDE_PROJECTS
     codex_root = codex_root or common.CODEX_SESSIONS
@@ -132,11 +133,17 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
         except OSError:
             return False
 
-    jobs = [(p, "claude") for p in _walk(claude_root, lambda f: f.endswith(".jsonl"))]
-    jobs += [(p, "codex") for p in _walk(codex_root, lambda f: f.endswith(".jsonl") and f.startswith("rollout-"))]
+    roots = []
+    jobs = []
+    for product, root in (("claude", claude_root), ("codex", codex_root)):
+        if not common.product_enabled(product):
+            continue
+        roots.append(root)
+        jobs += [(p, product) for p in _walk(root, lambda f: f.endswith(".jsonl")
+                                          and (product == "claude" or f.startswith("rollout-")))]
     for n, (path, product) in enumerate(jobs):
         alive.add(path)
-        if not recent(path):
+        if not common.product_enabled(product) or not recent(path):
             continue
         if progress:
             progress(n, len(jobs), path)
@@ -144,7 +151,7 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
             changed = True
     # marks of files that are gone (a pruned project, a deleted session) are dead weight
     for path in list(ix["files"].keys()):
-        if path not in alive and (path.startswith(claude_root) or path.startswith(codex_root)):
+        if path not in alive and any(path.startswith(os.path.join(root, "")) for root in roots):
             del ix["files"][path]
             changed = True
     ix["seen"] = {d: sorted(s) for d, s in seen.items()}
@@ -314,7 +321,7 @@ def snapshot_days(ix, now=None):
     """What goes into this machine's gist file: product → day → model, last 45 days."""
     cut = cutoff_day(now)
     out = {}
-    for p, by_day in ix.get("days", {}).items():
+    for p, by_day in common.selected_days(ix.get("days", {})).items():
         out[p] = {d: {m: dict(u) for m, u in by_model.items()} for d, by_model in by_day.items() if d >= cut}
     return out
 

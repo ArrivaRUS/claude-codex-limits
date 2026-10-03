@@ -136,10 +136,10 @@ The Linux port is tested on Astra Linux SE 1.8 (KDE / Fly). It gives a tray icon
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.3.0_all.deb` from the [Linux 0.3.0](../../releases/tag/linux-v0.3.0) release.
+1. Download `claude-codex-limits_0.3.4_all.deb` from the [Linux 0.3.4](../../releases/tag/linux-v0.3.4) release.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.3.0_all.deb
+   sudo apt install ./claude-codex-limits_0.3.4_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.

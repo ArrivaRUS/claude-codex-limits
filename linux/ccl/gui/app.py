@@ -85,7 +85,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
 
 class Bridge(QObject):
-    limits_done = pyqtSignal(object, object)
+    limits_done = pyqtSignal(object, object, int)
     logs_done = pyqtSignal(object, object)
     login_code = pyqtSignal(object, object)
     login_done = pyqtSignal(object, object, object)
@@ -329,6 +329,17 @@ class SettingsPage(QWidget):
         self.view.setCurrentIndex(1 if st.get("advanced") else 0)
         self.view.currentIndexChanged.connect(self.on_view)
         cl.addWidget(_row(tr("Вид панели", "Panel view"), self.view))
+        lay.addWidget(card)
+
+        lay.addWidget(_label(tr("СОБИРАТЬ И ПОКАЗЫВАТЬ", "COLLECT AND SHOW"), "cap"))
+        card, cl = _card()
+        self.products = {}
+        for product, name in (("claude", "Claude Code"), ("codex", "Codex")):
+            checkbox = WrapCheck(name)
+            checkbox.setChecked(common.product_enabled(product))
+            checkbox.toggled.connect(lambda on, p=product: self.app.set_product_enabled(p, on))
+            self.products[product] = checkbox
+            cl.addWidget(checkbox)
         lay.addWidget(card)
 
         lay.addWidget(_label(tr("В ТРЕЕ", "IN THE TRAY"), "cap"))
@@ -775,7 +786,7 @@ class TrayApp(QObject):
         self.model = panel.Model()
         st = common.settings()
         self.model.interval = panel.poll_interval(st.get("interval"))
-        if st.get("interval") != self.model.interval:        # the removed 1 minute → 5 minutes, for good
+        if st.get("interval") != self.model.interval:        # old 1/5-minute choices → 15 minutes, for good
             st.set("interval", self.model.interval)
         self.model.history.load()
         self.bridge = Bridge()
@@ -791,6 +802,7 @@ class TrayApp(QObject):
         self.update_msg_hot = False
         self.model.update_available = update.available()
         self.busy_limits = False
+        self.selection_generation = 0
         self.busy_logs = False
         self.force_pending = False
         self.login_state = None
@@ -875,11 +887,11 @@ class TrayApp(QObject):
 
     def update_tray(self):
         m = self.model
-        claude, codex = m.claude, m.codex
+        claude, codex = limits.selected_limits(m.claude, "claude"), limits.selected_limits(m.codex, "codex")
         st = common.settings()
         rows = trayicon.values(claude) if claude.present else []
         mark = trayicon.CLAUDE_MARK
-        separate = bool(st.get("codexTray")) and codex.present
+        separate = bool(st.get("codexTray")) and claude.present and codex.present
         if not rows and codex.present and not separate:
             rows, mark = trayicon.values(codex, ["session", "weekly"]), trayicon.CODEX_MARK
         if not m.loaded:
@@ -906,6 +918,18 @@ class TrayApp(QObject):
             self.codex_tray.hide()
             self.codex_tray.deleteLater()
             self.codex_tray = None
+
+    def set_product_enabled(self, product, enabled):
+        common.settings().set("monitor_" + product, enabled)
+        self.selection_generation += 1
+        self.sound_baseline = False
+        self.model.claude = limits.selected_limits(self.model.claude, "claude")
+        self.model.codex = limits.selected_limits(self.model.codex, "codex")
+        self.load_local()
+        self.update_tray()
+        self.win.page0_changed()
+        self.refresh_limits()
+        self.refresh_logs(force_push=True)
 
     def rebuild_ui(self):
         """Language switch: rebuild the widgets that hold translated text."""
@@ -974,6 +998,7 @@ class TrayApp(QObject):
         if self.busy_limits:
             return
         self.busy_limits = True
+        generation = self.selection_generation
 
         def one(fetch):
             try:
@@ -990,11 +1015,15 @@ class TrayApp(QObject):
                 claude, codex = limits.apply_cache(claude, codex)
             except Exception:
                 pass
-            self.bridge.limits_done.emit(claude, codex)
+            self.bridge.limits_done.emit(claude, codex, generation)
         threading.Thread(target=work, daemon=True).start()
 
-    def on_limits(self, claude, codex):
+    def on_limits(self, claude, codex, generation=None):
         self.busy_limits = False
+        if generation is not None and generation != self.selection_generation:
+            self.refresh_limits()
+            return
+        claude, codex = limits.selected_limits(claude, "claude"), limits.selected_limits(codex, "codex")
         m = self.model
         m.claude, m.codex = claude, codex
         m.loaded = True
@@ -1023,6 +1052,7 @@ class TrayApp(QObject):
         else:
             m.days = local_days
             m.other_machines = 0
+        m.days = common.selected_days(m.days)
         self.update_sync_warning(st)
 
     def update_sync_warning(self, st=None):

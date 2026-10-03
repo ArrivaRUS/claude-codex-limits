@@ -136,10 +136,10 @@ cd claude-codex-limits
 Порт для Linux проверен на Astra Linux SE 1.8 (KDE / Fly). Он даёт значок в трее с теми же
 процентами, панель с простым и расширенным видом и синхронизацию расхода с Mac через тот же gist.
 
-1. Скачайте `claude-codex-limits_0.3.0_all.deb` из релиза [Linux 0.3.0](../../releases/tag/linux-v0.3.0).
+1. Скачайте `claude-codex-limits_0.3.4_all.deb` из релиза [Linux 0.3.4](../../releases/tag/linux-v0.3.4).
 2. Откройте файл двойным щелчком и нажмите «Установить» или поставьте из терминала:
    ```bash
-   sudo apt install ./claude-codex-limits_0.3.0_all.deb
+   sudo apt install ./claude-codex-limits_0.3.4_all.deb
    ```
    Зависимости (`python3-pyqt5`, `python3-dbus`) apt возьмёт из репозитория ОС.
 3. Запустите **Claude Codex Limits** из меню приложений. Дальше значок будет запускаться сам.

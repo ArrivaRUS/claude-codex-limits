@@ -82,6 +82,18 @@ class LimitData(object):
         return d
 
 
+def selected_limits(data, product):
+    if common.product_enabled(product):
+        return data
+    return absent_limits()
+
+
+def absent_limits():
+    data = LimitData()
+    data.present = False
+    return data
+
+
 def _num(v):
     if isinstance(v, bool):
         return None
@@ -107,6 +119,8 @@ def _rewrite_json(path, obj):
 # ---- Claude Code ---------------------------------------------------------------------------
 
 def fetch_claude():
+    if not common.product_enabled("claude"):
+        return absent_limits()
     d = LimitData()
     st = common.state()
     path = common.CLAUDE_CREDENTIALS
@@ -466,6 +480,8 @@ def codex_usage_live():
 
 
 def fetch_codex(live=True):
+    if not common.product_enabled("codex"):
+        return absent_limits()
     if not os.path.isdir(common.CODEX_SESSIONS) and not os.path.exists(common.CODEX_AUTH):
         d = LimitData()
         d.present = False                  # Codex isn't set up on this machine
@@ -492,6 +508,7 @@ def fetch_codex(live=True):
 
 def apply_cache(claude, codex):
     """Restore last-known numbers behind an error flag; persist only genuinely good readings."""
+    claude, codex = selected_limits(claude, "claude"), selected_limits(codex, "codex")
     cache = common.read_json(common.CACHE_PATH, {})
     if not isinstance(cache, dict):
         cache = {}
@@ -567,7 +584,7 @@ class History(object):
             pass
 
     def record(self, d, product):
-        if not d.present or d.error is not None or d.auth != OK or d.from_cache:
+        if not common.product_enabled(product) or not d.present or d.error is not None or d.auth != OK or d.from_cache:
             return
         if d.session is None and d.weekly is None:
             return
@@ -586,12 +603,16 @@ class History(object):
             pass
 
     def first(self, product):
+        if not common.product_enabled(product):
+            return None
         for s in self.samples:
             if s["p"] == product:
                 return s["t"]
         return None
 
     def recent_rate(self, product, key, minutes):
+        if not common.product_enabled(product):
+            return None
         since = time.time() - minutes * 60
         pts = [(s["t"], s[key]) for s in self.samples if s["p"] == product and s["t"] >= since and key in s]
         if len(pts) < 2 or pts[-1][0] - pts[0][0] < 600:

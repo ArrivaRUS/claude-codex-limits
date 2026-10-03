@@ -22,23 +22,22 @@ CLAUDE_URL = "https://claude.ai/settings/usage"
 CODEX_URL = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
 CREDIT = "Claude Codex Limits %s · by %s · " % (APP_VERSION, APP_AUTHOR)
 
-# Refresh interval choices, seconds. No 1 minute (issue #6): the Mac and this machine polled one
-# account every minute and GET /api/oauth/usage answered 429 for hours.
-POLL_CHOICES = (300, 900)
+# Refresh intervals match macOS; old 1/5-minute choices migrate to 15 minutes.
+POLL_CHOICES = (900, 1800, 3600)
 POLL_MIN = POLL_CHOICES[0]
 
 
 def poll_interval(value):
-    """A stored or clicked interval, clamped to the choices: anything else (the old 60, junk) → 5 min."""
+    """A stored or clicked interval, clamped to the choices: anything else (the old 60/300, junk) → 15 min."""
     try:
         sec = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return POLL_MIN
     return sec if sec in POLL_CHOICES else POLL_MIN
 
 
 def poll_segments():
-    return [(tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES]
+    return [(tr("1ч", "1h") if sec == 3600 else tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES]
 
 
 class Model(object):
@@ -104,15 +103,16 @@ def shows_scoped_row(d):
 
 
 def simple_height(m):
-    extra = SCOPED_ROW_H if (shows_scoped_row(m.claude) or shows_scoped_row(m.codex)) else 0
+    extra = SCOPED_ROW_H if (shows_scoped_row(limits.selected_limits(m.claude, "claude"))
+                              or shows_scoped_row(limits.selected_limits(m.codex, "codex"))) else 0
     return PANEL_H + extra
 
 
 def products(m):
     out = []
-    if m.claude.present:
+    if common.product_enabled("claude") and m.claude.present:
         out.append((m.claude, "Claude Code", "claude_128.png", CLAUDE_URL, "claude"))
-    if m.codex.present:
+    if common.product_enabled("codex") and m.codex.present:
         out.append((m.codex, "Codex", "codex_128.png", CODEX_URL, "codex"))
     return out
 
@@ -134,7 +134,7 @@ def draw_simple(c, W, H, m):
     background(c, W, H, (54, 26))
     pad = 16
     prods = products(m)
-    subtitle = " · ".join(x[1] for x in prods) if prods else tr("не найдено", "not found")
+    subtitle = " · ".join(x[1] for x in prods) if prods else tr("выберите подписки в настройках", "choose subscriptions in Settings")
     c.image("appicon.png", rect_tl(pad, pad - 1, 30, 30))
     c.text(Attr(tr("Лимиты", "Limits"), 15, "semibold", TEXT_HI), pad + 40, pad - 1)
     c.text(Attr(subtitle, 11, "regular", TEXT_LO), pad + 40, pad + 17)
@@ -262,7 +262,9 @@ def draw_simple(c, W, H, m):
     elif len(prods) == 1:
         draw_card(pad, W - pad * 2, *prods[0][:4])
     else:
-        c.text(Attr(tr("Claude Code и Codex не найдены", "Claude Code and Codex not found"), 12, "regular", TEXT_MID),
+        paused = not any(common.product_enabled(p) for p in ("claude", "codex"))
+        message = tr("Сбор статистики выключен", "Statistics collection is off") if paused else tr("Выбранные подписки не найдены", "Selected subscriptions not found")
+        c.text(Attr(message, 12, "regular", TEXT_MID),
                W / 2, cards_top + 70, align=1)
 
     foot = cards_top + card_h + 14
@@ -335,7 +337,7 @@ def adv_model_family(mid, product):
 def adv_cards(m):
     out = []
     for d, product in ((m.claude, "claude"), (m.codex, "codex")):
-        if not d.present:
+        if not common.product_enabled(product) or not d.present:
             continue
         expired = d.auth in (limits.EXPIRED, limits.LOGGED_OUT, limits.READ_ERROR) or limits.is_stale(d)
         lims = limits.paced_limits(d, product, m.history)
@@ -391,12 +393,18 @@ def hist_height(m, cards):
     return HIST_EXPANDED + (HIST_EMPTY_EXTRA if hist_empty(m, p) else 0) + warn
 
 
+def show_missing_product(cards):
+    return len(cards) == 1 and common.product_enabled("codex" if cards[0]["product"] == "claude" else "claude")
+
+
 def advanced_height(m):
     cards = adv_cards(m)
+    if not cards:
+        return simple_height(m)
     h = 94
     for cd in cards:
         h += 5 + card_h(cd)
-    if len(cards) == 1:
+    if show_missing_product(cards):
         h += 5 + PLACEHOLDER
     h += 5 + hist_height(m, cards)
     return h + CREDIT_H
@@ -426,6 +434,8 @@ def adv_verdict(row, as_of):
 
 
 def draw_advanced(c, W, H, m):
+    if not adv_cards(m):
+        return draw_simple(c, W, H, m)
     hits = []
     p = c.p
     background(c, W, H, (30, 20))
@@ -591,7 +601,7 @@ def draw_advanced(c, W, H, m):
                 ry += 1
         y += ch + 5
 
-    if len(cards) == 1:
+    if show_missing_product(cards):
         r = rect_tl(ADV_CX, y, ADV_CW, PLACEHOLDER)
         p.save()
         pen = QPen(gray(1, 0.14), 1)

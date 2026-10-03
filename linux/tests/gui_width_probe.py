@@ -45,8 +45,23 @@ qapp = QApplication(sys.argv)
 qapp.setStyle(style)
 app = A.TrayApp(qapp)
 iv = (app.model.interval, common.settings().get("interval"), app.timer.interval())
-if iv != (300, 300, 300000):
-    print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 5 for good
+if iv != (900, 900, 900000):
+    print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 15 for good
+# Check real Settings controls and timer wiring without network or real transcripts.
+page = app.win.settings_page
+page.products["claude"].setChecked(False)
+if common.product_enabled("claude") or app.model.claude.present:
+    print("SUBSCRIPTION Claude did not turn off")
+page.products["codex"].setChecked(False)
+if common.product_enabled("codex") or app.model.codex.present:
+    print("SUBSCRIPTION Codex did not turn off")
+page.products["codex"].setChecked(True)
+if not common.product_enabled("codex"):
+    print("SUBSCRIPTION Codex did not turn on")
+for sec in (900, 1800, 3600):
+    app.action("iv%d" % sec)
+    if (app.model.interval, common.settings().get("interval"), app.timer.interval()) != (sec, sec, sec * 1000):
+        print("INTERVAL click failed", sec)
 w = app.win
 w.anchor = QPoint(900, 900)
 w.show_page(1)

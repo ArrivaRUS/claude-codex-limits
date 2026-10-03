@@ -123,7 +123,9 @@ def file_lock(name, blocking=True, timeout=None):
 
 SETTINGS_DEFAULTS = {
     "lang": "ru",
-    "interval": 300,
+    "interval": 900,
+    "monitor_claude": True,
+    "monitor_codex": True,
     "advanced": False,
     "trayMetrics": "session,weekly",
     "codexTray": False,
@@ -139,6 +141,15 @@ SETTINGS_DEFAULTS = {
 }
 
 
+def product_enabled(product):
+    # Missing keys preserve monitoring on upgrades from earlier versions.
+    return settings().get("monitor_" + product, True) is not False
+
+
+def selected_days(days):
+    return {p: data for p, data in days.items() if product_enabled(p)}
+
+
 class Store:
     """A small JSON key/value file — the UserDefaults of this port. Re-read on every `get`
     is avoided; `reload()` picks up writes from other processes when it matters."""
@@ -151,8 +162,9 @@ class Store:
         self.reload()
 
     def reload(self):
-        d = read_json(self.path, {})
-        self.data = d if isinstance(d, dict) else {}
+        with self.lock:
+            d = read_json(self.path, {})
+            self.data = d if isinstance(d, dict) else {}
 
     def get(self, key, default=None):
         if key in self.data:
