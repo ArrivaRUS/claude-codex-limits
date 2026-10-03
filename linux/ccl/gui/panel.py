@@ -22,18 +22,18 @@ CLAUDE_URL = "https://claude.ai/settings/usage"
 CODEX_URL = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
 CREDIT = "Claude Codex Limits %s · by %s · " % (APP_VERSION, APP_AUTHOR)
 
-# Refresh intervals match macOS; old 1/5-minute choices migrate to 15 minutes.
+# Refresh intervals match macOS; old 1/5-minute choices migrate to 30 minutes.
 POLL_CHOICES = (900, 1800, 3600)
-POLL_MIN = POLL_CHOICES[0]
+POLL_DEFAULT = 1800
 
 
 def poll_interval(value):
-    """A stored or clicked interval, clamped to the choices: anything else (the old 60/300, junk) → 15 min."""
+    """A stored or clicked interval, clamped to the choices: anything else (the old 60/300, junk) → 30 min."""
     try:
         sec = int(value)
     except (TypeError, ValueError, OverflowError):
-        return POLL_MIN
-    return sec if sec in POLL_CHOICES else POLL_MIN
+        return POLL_DEFAULT
+    return sec if sec in POLL_CHOICES else POLL_DEFAULT
 
 
 def poll_segments():
@@ -48,7 +48,7 @@ class Model(object):
         self.codex = limits.LimitData()
         self.claude.present = self.codex.present = False
         self.loaded = False
-        self.interval = POLL_MIN
+        self.interval = POLL_DEFAULT
         self.updated = None
         self.history = limits.History()
         self.days = {}            # merged usage days (local + other machines)

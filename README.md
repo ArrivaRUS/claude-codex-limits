@@ -35,7 +35,7 @@ Click the tray icon for a detailed popover.
 - **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover forces a fresh reading** right then.
-- **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. Older 1/5-minute settings automatically switch to 15 minutes.
+- **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -106,7 +106,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.1.5.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.1.6.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -136,10 +136,10 @@ The Linux port is tested on Astra Linux SE 1.8 (KDE / Fly). It gives a tray icon
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.3.4_all.deb` from the [Linux 0.3.4](../../releases/tag/linux-v0.3.4) release.
+1. Download `claude-codex-limits_0.3.5_all.deb` from the [Linux 0.3.5](../../releases/tag/linux-v0.3.5) release.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.3.4_all.deb
+   sudo apt install ./claude-codex-limits_0.3.5_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -159,7 +159,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.5.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.6.dmg
 ```
 
 ## Project layout

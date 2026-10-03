@@ -1,7 +1,7 @@
 """Claude Codex Limits — tray app for Astra Linux (Fly / KDE Plasma), PyQt5 from the OS repo.
 
 Click the tray icon → the panel (simple or Advanced view, as on the Mac). Right click → menu.
-Limits are polled every 1/5/15 minutes; local logs are indexed and synced through the GitHub
+Limits are polled every 15/30/60 minutes (30 by default); local logs are indexed and synced through the GitHub
 gist every 10 minutes (the same code `ccl-sync push --auto` runs from the systemd timer).
 """
 
@@ -786,7 +786,7 @@ class TrayApp(QObject):
         self.model = panel.Model()
         st = common.settings()
         self.model.interval = panel.poll_interval(st.get("interval"))
-        if st.get("interval") != self.model.interval:        # old 1/5-minute choices → 15 minutes, for good
+        if st.get("interval") != self.model.interval:        # old 1/5-minute choices → 30 minutes, for good
             st.set("interval", self.model.interval)
         self.model.history.load()
         self.bridge = Bridge()

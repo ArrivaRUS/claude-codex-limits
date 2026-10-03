@@ -2431,15 +2431,15 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.5"
+let APP_VERSION = "3.1.6"
 let APP_AUTHOR = "Alex Kovalev"
-/// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 15 minutes.
-let POLL_MIN: TimeInterval = 900
+/// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
+let POLL_DEFAULT: TimeInterval = 1800
 let POLL_CHOICES: [(ru: String, en: String, sec: TimeInterval)] = [
     ("15м", "15m", 900), ("30м", "30m", 1800), ("1ч", "1h", 3600)
 ]
 func normalizedPollInterval(_ value: TimeInterval) -> TimeInterval {
-    POLL_CHOICES.contains { $0.sec == value } ? value : POLL_MIN
+    POLL_CHOICES.contains { $0.sec == value } ? value : POLL_DEFAULT
 }
 func storedPollInterval() -> TimeInterval {
     let d = UserDefaults.standard, old = d.double(forKey: "interval")
@@ -4214,7 +4214,7 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?, expired: 
 
 final class LimitsPanelView: NSView {
     var claude = LimitData(); var codex = LimitData()
-    var interval: TimeInterval = POLL_MIN
+    var interval: TimeInterval = POLL_DEFAULT
     var updated: Date?
     var hits: [Hit] = []
     var onInterval: ((TimeInterval) -> Void)?
@@ -5164,7 +5164,7 @@ if CommandLine.arguments.contains("--panel-preview") {
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(ph * s)) else { return }
         ctx.scaleBy(x: s, y: s)
         _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph),
-                      claude: cl, codex: cx, interval: POLL_MIN, updated: Date(), about: AboutState())
+                      claude: cl, codex: cx, interval: POLL_DEFAULT, updated: Date(), about: AboutState())
         guard let img = ctx.makeImage() else { return }
         let data = NSMutableData()
         if let dest = CGImageDestinationCreateWithData(data as CFMutableData, "public.png" as CFString, 1, nil) {
@@ -5308,8 +5308,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         print("OK " + message)
     }
     check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600], "refresh choices: 15 minutes, 30 minutes, 1 hour")
-    check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 900 },
-          "legacy and invalid intervals migrate to 15 minutes")
+    check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 1800 },
+          "legacy and invalid intervals migrate to 30 minutes")
     check([900.0, 1800, 3600].allSatisfy { normalizedPollInterval($0) == $0 }, "valid intervals survive restart")
     let isolated = UserDefaults(suiteName: "ccl-subscriptions-test-" + UUID().uuidString)!
     check(productEnabled("claude", defaults: isolated) && productEnabled("codex", defaults: isolated),
@@ -5393,8 +5393,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let ph = mainPanelHeight(cl, cx)
                 let pc = bitmapContext(Int(PANEL_W * 2), Int(ph * 2))!; pc.scaleBy(x: 2, y: 2)
                 let phits = advanced
-                    ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_MIN, updated: nil, about: AboutState())
-                    : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_MIN, updated: nil, about: AboutState())
+                    ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
+                    : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
                 check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600"],
                       "\(lang) advanced=\(advanced): all three refresh intervals are clickable")
                 check(phits.contains { $0.id == "settings" } && !phits.contains { $0.id == "claudefix" || $0.id.contains("claude.ai") },
@@ -6157,7 +6157,7 @@ if CommandLine.arguments.contains("--advanced-preview") {
         let h = advancedHeight(cl, cx)
         guard let ctx = bitmapContext(Int(PANEL_W * s), Int(h * s)) else { return }
         ctx.scaleBy(x: s, y: s)
-        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: cl, codex: cx, interval: POLL_MIN, updated: Date(), about: AboutState())
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: Date(), about: AboutState())
         save(ctx, path); print(path, Int(h), "pt")
     }
     let out = CommandLine.arguments.last ?? "/tmp"
@@ -6257,7 +6257,7 @@ if CommandLine.arguments.contains("--screenshots") {
         let ph = panelMainHeight(c, x)
         guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(ph * s2)) else { return }
         ctx.scaleBy(x: s2, y: s2)
-        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph), claude: c, codex: x, interval: POLL_MIN, updated: Date(), about: about)
+        _ = drawPanel(ctx, size: CGSize(width: PANEL_W, height: ph), claude: c, codex: x, interval: POLL_DEFAULT, updated: Date(), about: about)
         savePNG(ctx, path)
     }
     func renderSettings(_ about: AboutState, _ path: String) {
@@ -6304,7 +6304,7 @@ if CommandLine.arguments.contains("--screenshots") {
         let h = advancedHeight(c, x)
         guard let ctx = bitmapContext(Int(PANEL_W * s2), Int(h * s2)) else { return }
         ctx.scaleBy(x: s2, y: s2)
-        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: c, codex: x, interval: POLL_MIN, updated: Date(), about: AboutState())
+        _ = drawAdvanced(ctx, size: CGSize(width: PANEL_W, height: h), claude: c, codex: x, interval: POLL_DEFAULT, updated: Date(), about: AboutState())
         savePNG(ctx, path)
     }
     for lang in ["ru", "en"] {

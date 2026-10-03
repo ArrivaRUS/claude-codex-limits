@@ -45,8 +45,8 @@ qapp = QApplication(sys.argv)
 qapp.setStyle(style)
 app = A.TrayApp(qapp)
 iv = (app.model.interval, common.settings().get("interval"), app.timer.interval())
-if iv != (900, 900, 900000):
-    print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 15 for good
+if iv != (1800, 1800, 1800000):
+    print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 30 for good
 # Check real Settings controls and timer wiring without network or real transcripts.
 page = app.win.settings_page
 page.products["claude"].setChecked(False)
