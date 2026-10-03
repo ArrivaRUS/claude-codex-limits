@@ -49,6 +49,7 @@ class LimitData(object):
         self.error = None
         self.stale = False
         self.from_cache = False
+        self.api_fresh = False       # only successful live usage responses
         self.present = True          # False → product not set up on this machine
         self.auth = OK
 
@@ -203,6 +204,7 @@ def fetch_claude():
         return d
     _apply_claude_usage(d, j)
     d.as_of = time.time()
+    d.api_fresh = True
     return d
 
 
@@ -476,6 +478,7 @@ def codex_usage_live():
     if isinstance(rc, dict) and isinstance(rc.get("available_count"), int):
         d.reset_credits = rc["available_count"]
     d.as_of = time.time()
+    d.api_fresh = True
     return d
 
 

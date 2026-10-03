@@ -216,6 +216,16 @@ def _lines_with(data, end, needles):
                 nxt[k] = data.find(n, le + 1, end)
 
 
+def mark_activity(ix, product, timestamp, tokens, now=None):
+    now = time.time() if now is None else now
+    if tokens <= 0 or not now - 900 <= timestamp <= now:
+        return
+    activity = ix.setdefault("activity", {})
+    recent = {t for t in activity.get(product, []) if now - 900 <= t <= now}
+    recent.add(timestamp)
+    activity[product] = sorted(recent)[-128:]
+
+
 def _claude_lines(data, end, ix, seen, st):
     days = ix["days"]
     for line in _lines_with(data, end, (b'"usage"',)):
@@ -263,6 +273,7 @@ def _claude_lines(data, end, ix, seen, st):
             u["cacheWrite5m"] = _int(usage.get("cache_creation_input_tokens"))
         u["turns"] = 1
         add_usage(days, "claude", day, model, u)
+        mark_activity(ix, "claude", t, total_tokens(u))
 
 
 def _codex_lines(data, end, ix, st):
@@ -299,6 +310,7 @@ def _codex_lines(data, end, ix, st):
         u["output"] = _int(lu.get("output_tokens"))      # reasoning tokens are inside output
         u["turns"] = 1
         add_usage(days, "codex", common.day_key(t), st["model"] or "?", u)
+        mark_activity(ix, "codex", t, total_tokens(u))
 
 
 def refresh(blocking=True, progress=None):

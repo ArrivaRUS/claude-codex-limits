@@ -34,8 +34,9 @@ Click the tray icon for a detailed popover.
 - **Click a card** to open the relevant limits page in your browser.
 - **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
-- **Opening the popover forces a fresh reading** right then.
+- **Opening the popover requests a fresh reading** with a fixed interval; Auto respects its schedule.
 - **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
+- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. Hover over A for the current intervals. Auto is off by default; the fixed default remains 30 minutes.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -106,7 +107,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.1.6.dmg` from the [Releases](../../releases) page.
+1. Download `ClaudeCodexLimits-3.2.0.dmg` from the [Releases](../../releases) page.
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -136,10 +137,10 @@ The Linux port is tested on Astra Linux SE 1.8 (KDE / Fly). It gives a tray icon
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.3.5_all.deb` from the [Linux 0.3.5](../../releases/tag/linux-v0.3.5) release.
+1. Download `claude-codex-limits_0.4.0_all.deb` from the [Linux 0.4.0](../../releases/tag/linux-v0.4.0) release.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.3.5_all.deb
+   sudo apt install ./claude-codex-limits_0.4.0_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -152,14 +153,20 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
 - **Refresh button** (top‑right of the popover) → refresh now.
-- **Interval pills** (bottom) → 15 min / 30 min / 1 hour.
+- **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto).
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
+
+### How Auto polling works
+
+Activity means an increase of at least 1 percentage point per 15 minutes in any comparable limit, measured over the time between readings. The first response establishes a baseline; limit window resets are not consumption. Local token logs are checked every 2 minutes without an API request: three distinct events with positive token usage in the past 15 minutes also restore 15-minute polling.
+
+In Auto, opening the panel keeps the schedule; manual refresh waits at least 15 minutes after the previous response. Errors and cached responses extend the pause, and local activity or manual refresh cannot shorten that error backoff. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
 
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.1.6.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.2.0.dmg
 ```
 
 ## Project layout

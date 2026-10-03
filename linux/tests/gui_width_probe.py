@@ -62,6 +62,12 @@ for sec in (900, 1800, 3600):
     app.action("iv%d" % sec)
     if (app.model.interval, common.settings().get("interval"), app.timer.interval()) != (sec, sec, sec * 1000):
         print("INTERVAL click failed", sec)
+app.action("iv0")
+if not common.settings().get("autoPoll") or app.timer.interval() != 60000 or common.settings().get("interval") != 3600:
+    print("AUTO enabling changed the saved fixed interval")
+app.action("iv1800")
+if common.settings().get("autoPoll") or app.timer.interval() != 1800000:
+    print("AUTO fixed choice did not disable Auto")
 w = app.win
 w.anchor = QPoint(900, 900)
 w.show_page(1)

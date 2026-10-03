@@ -27,7 +27,7 @@ class TestDefault(unittest.TestCase):
 class TestChoices(unittest.TestCase):
     def test_choices(self):
         self.assertEqual(panel.POLL_CHOICES, (900, 1800, 3600))
-        self.assertEqual([sec for _, sec in panel.poll_segments()], [900, 1800, 3600])
+        self.assertEqual([sec for _, sec in panel.poll_segments()], [900, 1800, 3600, 0])
         self.assertEqual(panel.Model().interval, 1800)
 
     def test_labels_follow_language(self):
@@ -35,9 +35,9 @@ class TestChoices(unittest.TestCase):
         saved = st.get("lang")
         try:
             st.set("lang", "ru")
-            self.assertEqual([t for t, _ in panel.poll_segments()], ["15м", "30м", "1ч"])
+            self.assertEqual([t for t, _ in panel.poll_segments()], ["15м", "30м", "1ч", "А"])
             st.set("lang", "en")
-            self.assertEqual([t for t, _ in panel.poll_segments()], ["15m", "30m", "1h"])
+            self.assertEqual([t for t, _ in panel.poll_segments()], ["15m", "30m", "1h", "A"])
         finally:
             st.set("lang", saved)
 

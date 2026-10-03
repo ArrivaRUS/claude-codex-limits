@@ -127,6 +127,7 @@ SETTINGS_DEFAULTS = {
     "monitor_claude": True,
     "monitor_codex": True,
     "advanced": False,
+    "autoPoll": False,
     "trayMetrics": "session,weekly",
     "codexTray": False,
     "sound5h": False,

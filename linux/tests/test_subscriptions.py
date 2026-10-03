@@ -131,7 +131,7 @@ class TestSubscriptions(unittest.TestCase):
         fake = SimpleNamespace(busy_limits=True, selection_generation=2, refresh_limits=Mock())
         app.TrayApp.on_limits(fake, limits.LimitData(), limits.LimitData(), 1)
         self.assertFalse(fake.busy_limits)
-        fake.refresh_limits.assert_called_once_with()
+        fake.refresh_limits.assert_called_once_with(scheduled=True)
 
     @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
     def test_remote_history_filtered_in_gui(self):
@@ -163,6 +163,7 @@ class TestSubscriptions(unittest.TestCase):
                     h = panel.advanced_height(m) if advanced else panel.simple_height(m)
                     for interval in panel.POLL_CHOICES:
                         m.interval = interval
+                        self.st.set("autoPoll", interval == 900)
                         image = QImage(panel.PANEL_W, int(h), QImage.Format_ARGB32)
                         painter = QPainter(image)
                         try:
@@ -172,7 +173,7 @@ class TestSubscriptions(unittest.TestCase):
                             painter.end()
                         self.assertTrue(qapp)
                         self.assertIn("settings", [hid for hid, _ in hits])
-                        self.assertEqual([hid for hid, _ in hits if hid.startswith("iv")], ["iv900", "iv1800", "iv3600"])
+                        self.assertEqual([hid for hid, _ in hits if hid.startswith("iv")], ["iv900", "iv1800", "iv3600", "iv0"])
                         if not c:
                             self.assertFalse(any("claude.ai" in hid or hid == "claudefix" for hid, _ in hits))
                         output = os.environ.get("CCL_PREVIEW_DIR")

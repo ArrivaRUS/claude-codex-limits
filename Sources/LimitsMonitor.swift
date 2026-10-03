@@ -120,6 +120,7 @@ struct LimitData {
     var error: String?
     var stale = false
     var fromCache = false
+    var apiFresh = false      // true only for a successful live usage response
     var present = true         // false → product not set up on this Mac (hide its row/card)
     var auth: AuthState = .ok  // Claude Code sign-in state (drives the "how to fix" card)
 }
@@ -306,7 +307,7 @@ func fetchClaude() -> LimitData {
             UserDefaults.standard.set(name, forKey: "scopedName")
         }
     }
-    d.asOf = Date()
+    d.asOf = Date(); d.apiFresh = true
     return d
 }
 
@@ -438,7 +439,7 @@ func codexUsageLive() -> LimitData? {
     d.plan = obj["plan_type"] as? String
     if let pl = d.plan { UserDefaults.standard.set(pl, forKey: "codexPlan") }
     if let rc = (obj["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int { d.resetCredits = rc }
-    d.asOf = Date()
+    d.asOf = Date(); d.apiFresh = true
     return d
 }
 
@@ -654,6 +655,7 @@ struct DayModelUsage: Codable {
 struct FileMark: Codable { var size: Int; var lastId: String?; var model: String? }
 
 struct UsageIndex: Codable {
+    var activity: [String: [Double]]? = nil  // optional for compatibility with existing indexes
     var files: [String: FileMark] = [:]
     /// product → day → model → usage
     var days: [String: [String: [String: DayModelUsage]]] = [:]
@@ -829,6 +831,13 @@ final class UsageLogs {
             }
             u.turns = 1
             ix.add(product, dayKey(when), m, u)
+            let timestamp = when.timeIntervalSince1970, now = Date().timeIntervalSince1970
+            if u.totalTokens > 0, timestamp >= now - 900, timestamp <= now {
+                var recent = Set((ix.activity?[product] ?? []).filter { $0 >= now - 900 && $0 <= now })
+                recent.insert(timestamp)
+                if ix.activity == nil { ix.activity = [:] }
+                ix.activity?[product] = Array(recent.sorted().suffix(128))
+            }
         }
         ix.files[path] = FileMark(size: mark.size + end, lastId: lastId, model: model)
         return true
@@ -2431,7 +2440,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.1.6"
+let APP_VERSION = "3.2.0"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -2447,6 +2456,67 @@ func storedPollInterval() -> TimeInterval {
     if old != value { d.set(value, forKey: "interval") }
     return value
 }
+// Adaptive schedules are per product and persist across launches. Local log activity never
+// performs networking; it only shortens the next eligible API poll (15-minute minimum).
+func autoPollEnabled() -> Bool { UserDefaults.standard.bool(forKey: "autoPoll") }
+let AUTO_STEPS: [TimeInterval] = [900, 1800, 3600, 14400]
+struct AutoReading: Codable { var used: Double; var reset: Double? }
+struct AutoPollState: Codable {
+    var interval: TimeInterval = 1800
+    var lastAttempt: Double = 0
+    var observedAt: Double = 0
+    var readings: [String: AutoReading] = [:]
+    var failed = false
+
+    mutating func due(_ now: Double, manual: Bool = false) -> Bool {
+        if lastAttempt > now { lastAttempt = now } // clock moved backwards: restart the minimum wait
+        return lastAttempt == 0 || now - lastAttempt >= (manual && !failed ? 900 : interval)
+    }
+    mutating func begin(_ now: Double) { lastAttempt = now }
+    mutating func slowDown() {
+        let i = AUTO_STEPS.firstIndex(of: interval) ?? 1
+        interval = AUTO_STEPS[min(i + 1, AUTO_STEPS.count - 1)]
+    }
+    mutating func observe(_ data: LimitData, now: Double) {
+        let fresh = data.apiFresh && data.present && data.error == nil && data.auth == .ok && !data.fromCache && !data.stale
+            && (data.asOf?.timeIntervalSince1970 ?? 0) >= lastAttempt - 60
+        var current: [String: AutoReading] = [:]
+        if let v = data.session, v.isFinite { current["session"] = AutoReading(used: v, reset: data.sessionReset?.timeIntervalSince1970) }
+        if let v = data.weekly, v.isFinite { current["weekly"] = AutoReading(used: v, reset: data.weeklyReset?.timeIntervalSince1970) }
+        if let s = data.scoped, s.percent.isFinite { current["model:" + s.name] = AutoReading(used: s.percent, reset: s.reset?.timeIntervalSince1970) }
+        lastAttempt = max(lastAttempt, now)  // the floor also covers time spent waiting for the response
+        guard fresh, !current.isEmpty else { failed = true; slowDown(); return }
+        failed = false
+        let elapsed = now - observedAt
+        var comparable = false, active = false
+        if observedAt > 0, elapsed > 0 {
+            for (key, value) in current {
+                guard let old = readings[key], old.reset == value.reset else { continue }
+                comparable = true
+                if (value.used - old.used) * 900 >= elapsed { active = true }
+            }
+        }
+        if active { interval = 900 } else if comparable { slowDown() }
+        readings = current; observedAt = now
+    }
+    @discardableResult
+    mutating func localActivity(_ timestamps: [Double], now: Double) -> Bool {
+        guard !failed else { return false }
+        let recent = Set(timestamps.filter { $0.isFinite && $0 >= now - 900 && $0 <= now })
+        guard recent.count >= 3, (recent.max() ?? 0) > lastAttempt, interval != 900 else { return false }
+        interval = 900; return true
+    }
+}
+func loadAutoPollStates() -> [String: AutoPollState] {
+    guard let data = UserDefaults.standard.data(forKey: "autoPollState"),
+          let states = try? JSONDecoder().decode([String: AutoPollState].self, from: data) else { return [:] }
+    return states.filter { AUTO_STEPS.contains($0.value.interval) && $0.value.lastAttempt >= 0 }
+}
+func pollSegments() -> [(ru: String, en: String, sec: TimeInterval)] { POLL_CHOICES + [("А", "A", 0)] }
+func pollSelected(_ sec: TimeInterval, manual: TimeInterval) -> Bool {
+    autoPollEnabled() ? sec == 0 : sec != 0 && abs(manual - sec) < 1
+}
+
 let REPO_URL = "https://github.com/ArrivaRUS/claude-codex-limits"
 let CLAUDE_INSTALL_CMD = "curl -fsSL https://claude.ai/install.sh | bash"
 // The installer drops the binary in ~/.local/bin but doesn't always add it to PATH
@@ -2795,12 +2865,12 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
 
     // footer
     let footTop = cardsTop + cardH + 14
-    let segs: [(String, Double)] = POLL_CHOICES.map { (tr($0.ru, $0.en), $0.sec) }
+    let segs: [(String, Double)] = pollSegments().map { (tr($0.ru, $0.en), $0.sec) }
     let segW: CGFloat = 40, segH: CGFloat = 24
     roundFill(rectTL(pad, footTop, segW * CGFloat(segs.count), segH), 8, gray(1, 0.06))
     for (i, seg) in segs.enumerated() {
         let segRect = rectTL(pad + CGFloat(i) * segW, footTop, segW, segH)
-        let active = abs(interval - seg.1) < 1
+        let active = pollSelected(seg.1, manual: interval)
         if active { roundFill(segRect.insetBy(dx: 2, dy: 2), 6, gray(1, 0.13)) }
         text(attr(seg.0, 11, active ? .semibold : .regular, active ? textHi : textMid),
              x: segRect.midX, topY: footTop + 6, align: 1)
@@ -3436,14 +3506,14 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
 
     // ---- footer ----
     let footTop = H - 35 - ADV_CREDIT_H
-    let segs: [(String, Double)] = POLL_CHOICES.map { (tr($0.ru, $0.en), $0.sec) }
+    let segs: [(String, Double)] = pollSegments().map { (tr($0.ru, $0.en), $0.sec) }
     let sw = segs.map { width(attr($0.0, 12, .semibold, textHi)) + 20 }
     let segTotal = sw.reduce(0, +) + 4
     roundFill(rectTL(ADV_CX, footTop + 1, segTotal, 22), 11, gray(1, 0.07))
     var sx = ADV_CX + 2
     for (i, seg) in segs.enumerated() {
         let r = rectTL(sx, footTop + 3, sw[i], 18)
-        let active = abs(interval - seg.1) < 1
+        let active = pollSelected(seg.1, manual: interval)
         if active { roundFill(r, 9, gray(1, 0.18)) }
         textC(attr(seg.0, 12, active ? .semibold : .medium, active ? textHi : textMid), x: r.midX, topY: footTop + 3, h: 18, align: 1)
         hits.append(Hit(id: "iv\(Int(seg.1))", rect: r))
@@ -4228,6 +4298,7 @@ final class LimitsPanelView: NSView {
     var onInstall: (() -> Void)?
     var onWhatsNew: (() -> Void)?
     var onTrayChanged: (() -> Void)?     // the menu-bar picker changed → redraw the strip now
+    var onAutoSummary: (() -> String)?
     var onProductsChanged: (() -> Void)?
     var onViewChanged: (() -> Void)?     // Simple ↔ Advanced switched
     var mode: PanelMode = .main
@@ -4291,6 +4362,13 @@ final class LimitsPanelView: NSView {
                 ? drawAdvanced(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
                 : drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about)
         }
+        removeAllToolTips()
+        for h in hits where h.id == "iv0" { addToolTip(h.rect, owner: self, userData: nil) }
+    }
+
+    @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
+                       userData data: UnsafeMutableRawPointer?) -> String {
+        onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -4681,6 +4759,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var resetSound: NSSound?
     var soundBaseline = false
     var selectionGeneration = 0
+    var fetchingLimits = false
+    var autoStates = loadAutoPollStates()
+    var activityTimer: Timer?
     var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
     var updateTimer: Timer?
     var downloader: UpdateDownloader?
@@ -4719,6 +4800,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        panelCtrl.view.onAutoSummary = { [weak self] in self?.autoSummary() ?? "" }
         panelCtrl.view.onProductsChanged = { [weak self] in
             guard let self = self else { return }
             self.selectionGeneration += 1
@@ -4728,7 +4810,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.last = (c, x)
             self.applyTrayImage(c, x)
             self.panelCtrl.update(claude: c, codex: x, interval: self.interval, updated: self.panelCtrl.view.updated)
-            self.doRefresh(live: true)
+            self.doRefresh(live: true, scheduled: true)
             if advancedEnabled() {
                 UsageLogs.shared.scanAsync { _ in
                     self.panelCtrl.view.needsDisplay = true
@@ -4757,6 +4839,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         UsageHistory.shared.load()
         UsageLogs.shared.load()
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
+           let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let c = (cache["claude"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
+            let x = (cache["codex"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
+            render(c, x)
+        }
         GitHubSync.shared.onChange = { [weak self] in
             // Main and Settings heights both depend on sync state (orange line, status rows).
             guard let v = self?.panelCtrl.view else { return }
@@ -4771,7 +4859,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         startTimer()
         startLogsTimer()
-        doRefresh(live: true)   // live Codex from launch, then on every timer tick
+        startActivityTimer()
+        doRefresh(live: true, scheduled: true)
         startUpdateChecks()     // background update check shortly after launch + every 6h
     }
 
@@ -4782,9 +4871,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func workspaceDidWake() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 7) {
-            guard advancedEnabled() else { return }
-            GitHubSync.shared.syncNow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
+            if autoPollEnabled() { self?.scanActivity(); self?.doRefresh(live: true, scheduled: true) }
+            if advancedEnabled() { GitHubSync.shared.syncNow() }
         }
     }
 
@@ -4804,7 +4893,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func startTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.doRefresh(live: true) }
+        let t = Timer(timeInterval: autoPollEnabled() ? 60 : interval, repeats: true) { [weak self] _ in
+            self?.doRefresh(live: true, scheduled: true)
+        }
         RunLoop.main.add(t, forMode: .common)
         timer = t
     }
@@ -4815,18 +4906,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// `live` = hit the ChatGPT backend for Codex (panel-open / manual refresh only).
-    func doRefresh(live: Bool) {
+    func saveAutoStates() {
+        if let data = try? JSONEncoder().encode(autoStates) { UserDefaults.standard.set(data, forKey: "autoPollState") }
+    }
+
+    func autoSummary() -> String {
+        var lines = [tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч. Частота зависит от расхода.",
+                        "Auto: 15 min → 30 min → 1 h → 4 h, depending on usage.")]
+        if autoPollEnabled() {
+            for (p, name) in [("claude", "Claude Code"), ("codex", "Codex")] where productEnabled(p) {
+                let state = autoStates[p] ?? AutoPollState()
+                lines.append(name + ": " + fmtSpan(state.interval / 3600)
+                             + (state.failed ? tr(" · пауза после ошибки", " · backing off after an error") : ""))
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    func scanActivity() {
+        guard autoPollEnabled(), productEnabled("claude") || productEnabled("codex") else { return }
+        UsageLogs.shared.scanAsync { [weak self] _ in
+            guard let self = self, autoPollEnabled() else { return }
+            let activity = UsageLogs.shared.snapshot().activity ?? [:]
+            for p in ["claude", "codex"] where productEnabled(p) {
+                var state = self.autoStates[p] ?? AutoPollState()
+                state.localActivity(activity[p] ?? [], now: Date().timeIntervalSince1970)
+                self.autoStates[p] = state
+            }
+            self.saveAutoStates()
+            self.doRefresh(live: true, scheduled: true)
+            self.panelCtrl.view.needsDisplay = true
+        }
+    }
+
+    func startActivityTimer() {
+        let t = Timer(timeInterval: 120, repeats: true) { [weak self] _ in self?.scanActivity() }
+        RunLoop.main.add(t, forMode: .common); activityTimer = t
+        scanActivity()
+    }
+
+    /// Auto polls are independent per product. Explicit refresh also respects the 15-minute
+    /// floor; opening the panel respects the full schedule. Fixed intervals retain manual refresh.
+    func doRefresh(live: Bool, scheduled: Bool = false) {
+        guard !fetchingLimits else { return }
+        let now = Date().timeIntervalSince1970
+        var products = Set<String>()
+        for p in ["claude", "codex"] where productEnabled(p) {
+            var state = autoStates[p] ?? AutoPollState()
+            if !autoPollEnabled() || state.due(now, manual: !scheduled) {
+                products.insert(p); state.begin(now)
+            }
+            autoStates[p] = state
+        }
+        guard !products.isEmpty else {
+            if last == nil { render(LimitData(present: false), LimitData(present: false)) }
+            return
+        }
+        fetchingLimits = true; saveAutoStates()
         let generation = selectionGeneration
+        let previous = last ?? (LimitData(present: false), LimitData(present: false))
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            var claude = fetchClaude()
-            var codex = fetchCodex(live: live)
+            var claude = products.contains("claude") ? fetchClaude() : previous.0
+            var codex = products.contains("codex") ? fetchCodex(live: live) : previous.1
             claude = selectedLimits(claude, product: "claude")
             codex = selectedLimits(codex, product: "codex")
             applyCache(&claude, &codex)
             DispatchQueue.main.async {
-                guard let self = self, self.selectionGeneration == generation else { return }
-                self.render(claude, codex)
+                guard let self = self else { return }
+                self.fetchingLimits = false
+                guard self.selectionGeneration == generation else {
+                    for p in products { self.autoStates[p]?.begin(Date().timeIntervalSince1970) }
+                    self.saveAutoStates()
+                    self.doRefresh(live: true, scheduled: true); return
+                }
+                for (p, data) in [("claude", claude), ("codex", codex)] where products.contains(p) {
+                    var state = self.autoStates[p] ?? AutoPollState()
+                    state.observe(data, now: Date().timeIntervalSince1970)
+                    self.autoStates[p] = state
+                }
+                self.saveAutoStates()
+                self.render(claude, codex, sampleProducts: products)
             }
         }
     }
@@ -4846,15 +5005,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
-    func render(_ claude: LimitData, _ codex: LimitData) {
+    func render(_ claude: LimitData, _ codex: LimitData, sampleProducts: Set<String> = []) {
         let claude = selectedLimits(claude, product: "claude")
         let codex = selectedLimits(codex, product: "codex")
         last = (claude, codex)
         applyTrayImage(claude, codex)
-        UsageHistory.shared.record(claude, product: "claude")
-        UsageHistory.shared.record(codex, product: "codex")
-        panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: Date())
-        checkAlarms(claude, codex)
+        if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude") }
+        if sampleProducts.contains("codex") { UsageHistory.shared.record(codex, product: "codex") }
+        let updated = sampleProducts.isEmpty ? (panelCtrl.view.updated ?? [claude.asOf, codex.asOf].compactMap { $0 }.max()) : Date()
+        panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: updated)
+        if !sampleProducts.isEmpty { checkAlarms(claude, codex) }
     }
 
     /// (Re)build just the menu-bar image — used by render() and by the update badge refresh.
@@ -5092,11 +5252,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func setInterval(_ sec: TimeInterval) {
-        let sec = normalizedPollInterval(sec)
-        interval = sec
-        UserDefaults.standard.set(sec, forKey: "interval")
+        UserDefaults.standard.set(sec == 0, forKey: "autoPoll")
+        if sec != 0 {
+            interval = normalizedPollInterval(sec)
+            UserDefaults.standard.set(interval, forKey: "interval")
+        }
         startTimer()
-        if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: Date()) }
+        if sec == 0 { scanActivity(); doRefresh(live: true, scheduled: true) }
+        if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: panelCtrl.view.updated) }
     }
 
     @objc func statusClicked() {
@@ -5104,9 +5267,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let btn = statusItem.button else { return }
         if panelCtrl.isVisible { panelCtrl.hide() }
         else {
-            if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: Date()) }
+            if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: panelCtrl.view.updated) }
             panelCtrl.show(below: btn)
-            doRefresh(live: true)   // panel open: pull live Codex from the ChatGPT backend
+            doRefresh(live: true, scheduled: autoPollEnabled())   // Auto: opening the panel respects its schedule
         }
     }
 
@@ -5298,7 +5461,7 @@ extension GitHubSync {
 if CommandLine.arguments.contains("--subscriptions-selftest") {
     let defaults = UserDefaults.standard
     var prefs: [String: Any] = ["advanced": true, "advHistExpanded": true, "lang": "ru",
-                               "monitor_claude": true, "monitor_codex": true]
+                               "monitor_claude": true, "monitor_codex": true, "autoPoll": false]
     func select(_ claude: Bool, _ codex: Bool) {
         prefs["monitor_claude"] = claude; prefs["monitor_codex"] = codex
         defaults.setVolatileDomain(prefs, forName: UserDefaults.argumentDomain)
@@ -5307,6 +5470,45 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         if !ok { print("FAIL " + message); exit(1) }
         print("OK " + message)
     }
+    func reading(_ value: Double, _ at: Double, reset: Double = 1000000) -> LimitData {
+        var d = LimitData(session: value, sessionReset: Date(timeIntervalSince1970: reset), asOf: Date(timeIntervalSince1970: at))
+        d.apiFresh = true; return d
+    }
+    func observe(_ state: inout AutoPollState, _ value: Double, _ at: Double, reset: Double = 1000000) {
+        state.begin(at); state.observe(reading(value, at, reset: reset), now: at)
+    }
+    var auto = AutoPollState()
+    observe(&auto, 10, 100000)
+    check(auto.interval == 1800, "Auto first reading establishes a baseline at 30 minutes")
+    observe(&auto, 12, 101800)
+    check(auto.interval == 900, "Auto: ≥1 percentage point per 15 minutes switches to 15 minutes")
+    observe(&auto, 12, 102700)
+    check(auto.interval == 1800, "Auto first quiet window: 30 minutes")
+    observe(&auto, 12.5, 104500)
+    check(auto.interval == 3600, "Auto continued low usage: 1 hour")
+    observe(&auto, 12.5, 108100)
+    check(auto.interval == 14400, "Auto quiet for another hour: 4 hours")
+    observe(&auto, 12.5, 122500)
+    check(auto.interval == 14400, "Auto does not exceed 4 hours")
+    var asleep = auto
+    check(!asleep.localActivity([122501, 122501, 122501], now: 122600), "duplicate local events cannot wake Auto")
+    check(!asleep.localActivity([120000, 120010, 120020], now: 122600), "old log history cannot wake Auto")
+    check(asleep.localActivity([122510, 122520, 122530], now: 122600), "fresh local token events wake Auto")
+    check(!asleep.due(123399) && asleep.due(123400), "local activity still respects the 15-minute floor")
+    check(!auto.due(123400) && asleep.due(123400), "Claude and Codex schedules are independent")
+    var restored = try! JSONDecoder().decode(AutoPollState.self, from: JSONEncoder().encode(auto))
+    check(!restored.due(123399, manual: true) && !restored.due(123500) && restored.due(123400, manual: true),
+          "restart, panel open and repeated refresh preserve persisted schedule")
+    observe(&auto, 30, 136900)
+    check(auto.interval == 900, "active consumption restores 15-minute polling")
+    observe(&auto, 2, 137800, reset: 1100000)
+    check(auto.interval == 900, "limit reset establishes a new baseline without false activity")
+    var cached = reading(50, 138700); cached.apiFresh = false
+    auto.begin(138700); auto.observe(cached, now: 138730)
+    check(auto.failed && auto.interval == 1800, "cached/rollout fallback backs off instead of posing as fresh API data")
+    check(!auto.localActivity([138740, 138750, 138760], now: 138800) && !auto.due(139630, manual: true),
+          "local activity and manual refresh cannot override error backoff")
+    check(!restored.due(120000) && restored.due(120900, manual: true), "clock rollback restarts a bounded minimum wait")
     check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600], "refresh choices: 15 minutes, 30 minutes, 1 hour")
     check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 1800 },
           "legacy and invalid intervals migrate to 30 minutes")
@@ -5388,6 +5590,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                   "\(lang) advanced=\(advanced): both toggles and all controls fit")
             save(ctx, "/tmp/ccl-subscriptions-settings-\(lang)-\(advanced).png")
             for bothOff in [false, true] {
+                prefs["autoPoll"] = true
                 select(false, !bothOff)
                 let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
                 let ph = mainPanelHeight(cl, cx)
@@ -5395,8 +5598,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let phits = advanced
                     ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
                     : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
-                check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600"],
-                      "\(lang) advanced=\(advanced): all three refresh intervals are clickable")
+                check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600", "iv0"],
+                      "\(lang) advanced=\(advanced): all fixed intervals and Auto are clickable")
                 check(phits.contains { $0.id == "settings" } && !phits.contains { $0.id == "claudefix" || $0.id.contains("claude.ai") },
                       "\(lang) advanced=\(advanced) paused=\(bothOff): Settings reachable; no Claude links")
                 save(pc, "/tmp/ccl-subscriptions-panel-\(lang)-\(advanced)-paused-\(bothOff).png")
@@ -5404,7 +5607,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
     }
     try! fm.removeItem(atPath: root)
-    print("Subscription selection selftest passed")
+    check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800), "Auto button selected independently of saved fixed interval")
+    print("Subscription selection and adaptive polling selftest passed")
     exit(0)
 }
 

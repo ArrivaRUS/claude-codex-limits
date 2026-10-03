@@ -19,7 +19,7 @@ from PyQt5.QtGui import QCursor, QDesktopServices, QFont, QFontDatabase, QFontMe
 from PyQt5.QtWidgets import (QAction, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                              QMenu, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import APP_VERSION, common, limits, sync, update, vault, usage
+from .. import APP_VERSION, common, limits, sync, update, vault, usage, polling
 from ..common import tr
 from . import fmt, paint, panel, trayicon
 
@@ -87,6 +87,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 class Bridge(QObject):
     limits_done = pyqtSignal(object, object, int)
     logs_done = pyqtSignal(object, object)
+    activity_done = pyqtSignal(object)
     login_code = pyqtSignal(object, object)
     login_done = pyqtSignal(object, object, object)
     logout_done = pyqtSignal(bool, object)
@@ -144,7 +145,9 @@ class PanelView(QWidget):
         return None
 
     def mouseMoveEvent(self, e):
-        self.setCursor(Qt.PointingHandCursor if self.hit(e.localPos()) else Qt.ArrowCursor)
+        hid = self.hit(e.localPos())
+        self.setCursor(Qt.PointingHandCursor if hid else Qt.ArrowCursor)
+        self.setToolTip(self.win.app.auto_summary() if hid == "iv0" else "")
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -788,10 +791,16 @@ class TrayApp(QObject):
         self.model.interval = panel.poll_interval(st.get("interval"))
         if st.get("interval") != self.model.interval:        # old 1/5-minute choices → 30 minutes, for good
             st.set("interval", self.model.interval)
+        saved = common.state().get("autoPollState") or {}
+        if not isinstance(saved, dict):
+            saved = {}
+        self.poll_states = {p: polling.PollState(saved.get(p)) for p in ("claude", "codex")}
+        self.activity_busy = False
         self.model.history.load()
         self.bridge = Bridge()
         self.bridge.limits_done.connect(self.on_limits)
         self.bridge.logs_done.connect(self.on_logs)
+        self.bridge.activity_done.connect(self.on_activity)
         self.bridge.login_code.connect(self.on_login_code)
         self.bridge.login_done.connect(self.on_login_done)
         self.bridge.logout_done.connect(self.on_logout_done)
@@ -823,14 +832,27 @@ class TrayApp(QObject):
         self.tray.show()
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_limits)
-        self.timer.start(self.model.interval * 1000)
+        self.timer.timeout.connect(lambda: self.refresh_limits(scheduled=True))
+        self.start_poll_timer()
+        self.activity_timer = QTimer(self)
+        self.activity_timer.timeout.connect(self.scan_activity)
+        self.activity_timer.start(120000)
         self.logs_timer = QTimer(self)
         self.logs_timer.timeout.connect(self.refresh_logs)
         self.logs_timer.start(LOGS_EVERY * 1000)
         self.load_local()
-        self.refresh_limits()
+        cache = common.read_json(common.CACHE_PATH, {})
+        if isinstance(cache, dict):
+            for product in ("claude", "codex"):
+                if isinstance(cache.get(product), dict):
+                    setattr(self.model, product, limits.selected_limits(limits.LimitData.from_dict(cache[product]), product))
+            self.model.loaded = True
+            times = [d.as_of for d in (self.model.claude, self.model.codex) if polling.number(d.as_of)]
+            self.model.updated = max(times) if times else None
+            self.update_tray()
+        self.refresh_limits(scheduled=True)
         QTimer.singleShot(1500, self.refresh_logs)
+        QTimer.singleShot(2000, self.scan_activity)
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(lambda: self.check_update(manual=False))
         self.update_timer.start(3600 * 1000)             # hourly tick; the check itself runs every 6 h
@@ -928,7 +950,7 @@ class TrayApp(QObject):
         self.load_local()
         self.update_tray()
         self.win.page0_changed()
-        self.refresh_limits()
+        self.refresh_limits(scheduled=True)
         self.refresh_logs(force_push=True)
 
     def rebuild_ui(self):
@@ -959,11 +981,15 @@ class TrayApp(QObject):
             QDesktopServices.openUrl(QUrl(hid[5:]))
             self.win.hide()
         elif hid.startswith("iv"):
-            sec = panel.poll_interval(hid[2:])
-            self.model.interval = sec
-            st.set("interval", sec)
-            self.timer.start(sec * 1000)
+            st.set("autoPoll", hid == "iv0")
+            if hid != "iv0":
+                self.model.interval = panel.poll_interval(hid[2:])
+                st.set("interval", self.model.interval)
+            self.start_poll_timer()
             self.win.view.update()
+            if hid == "iv0":
+                self.scan_activity()
+                self.refresh_limits(scheduled=True)
         elif hid == "quit":
             self.qapp.quit()
         elif hid == "hist:toggle":
@@ -993,11 +1019,65 @@ class TrayApp(QObject):
             except OSError:
                 pass
 
+    def start_poll_timer(self):
+        self.timer.start((60 if common.settings().get("autoPoll") else self.model.interval) * 1000)
+
+    def save_poll_states(self):
+        common.state().set("autoPollState", {p: state.saved() for p, state in self.poll_states.items()})
+
+    def auto_summary(self):
+        intro = tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч. Частота зависит от расхода.",
+                   "Auto: 15 min → 30 min → 1 h → 4 h, depending on usage.")
+        if not common.settings().get("autoPoll"):
+            return intro
+        lines = [intro]
+        for p, title in (("claude", "Claude Code"), ("codex", "Codex")):
+            if common.product_enabled(p):
+                state = self.poll_states[p]
+                lines.append("%s: %s%s" % (title, fmt.fmt_span(state.interval / 3600),
+                             tr(" · пауза после ошибки", " · backing off after an error") if state.failed else ""))
+        return "\n".join(lines)
+
+    def scan_activity(self):
+        if not common.settings().get("autoPoll") or self.activity_busy:
+            return
+        self.activity_busy = True
+        def work():
+            try:
+                ix, _, _ = usage.refresh(blocking=False)
+                activity = ix.get("activity", {})
+            except Exception:
+                activity = {}
+            self.bridge.activity_done.emit(activity)
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_activity(self, activity):
+        self.activity_busy = False
+        if not common.settings().get("autoPoll"):
+            return
+        changed = False
+        for p, state in self.poll_states.items():
+            if common.product_enabled(p) and state.local_activity(activity.get(p, []), time.time()):
+                changed = True
+        if changed:
+            self.save_poll_states()
+        self.refresh_limits(scheduled=True)
+
     # -- workers --
-    def refresh_limits(self):
+    def refresh_limits(self, scheduled=False):
         if self.busy_limits:
             return
+        now = time.time()
+        products = [p for p in ("claude", "codex") if common.product_enabled(p)
+                    and (not common.settings().get("autoPoll") or self.poll_states[p].due(now, manual=not scheduled))]
+        if not products:
+            return
         self.busy_limits = True
+        self.refresh_products = products
+        for p in products:
+            self.poll_states[p].begin(now)
+        self.save_poll_states()
+        previous = (self.model.claude, self.model.codex)
         generation = self.selection_generation
 
         def one(fetch):
@@ -1009,8 +1089,8 @@ class TrayApp(QObject):
                 return d
 
         def work():
-            claude = one(limits.fetch_claude)
-            codex = one(lambda: limits.fetch_codex(live=True))
+            claude = one(limits.fetch_claude) if "claude" in products else previous[0]
+            codex = one(lambda: limits.fetch_codex(live=True)) if "codex" in products else previous[1]
             try:
                 claude, codex = limits.apply_cache(claude, codex)
             except Exception:
@@ -1021,15 +1101,22 @@ class TrayApp(QObject):
     def on_limits(self, claude, codex, generation=None):
         self.busy_limits = False
         if generation is not None and generation != self.selection_generation:
-            self.refresh_limits()
+            for p in getattr(self, "refresh_products", []):
+                self.poll_states[p].begin(time.time())
+            if getattr(self, "poll_states", None):
+                self.save_poll_states()
+            self.refresh_limits(scheduled=True)
             return
         claude, codex = limits.selected_limits(claude, "claude"), limits.selected_limits(codex, "codex")
         m = self.model
         m.claude, m.codex = claude, codex
         m.loaded = True
         m.updated = time.time()
-        m.history.record(claude, "claude")
-        m.history.record(codex, "codex")
+        for product, data in (("claude", claude), ("codex", codex)):
+            if product in self.refresh_products:
+                self.poll_states[product].observe(data, time.time())
+                m.history.record(data, product)
+        self.save_poll_states()
         self.update_sync_warning()           # «стоит с HH:mm» ages with the clock, not only with syncs
         self.check_alarms(claude, codex)
         self.update_tray()

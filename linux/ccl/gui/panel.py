@@ -37,7 +37,7 @@ def poll_interval(value):
 
 
 def poll_segments():
-    return [(tr("1ч", "1h") if sec == 3600 else tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES]
+    return [(tr("1ч", "1h") if sec == 3600 else tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES] + [(tr("А", "A"), 0)]
 
 
 class Model(object):
@@ -282,7 +282,7 @@ def footer_simple(c, W, foot, m, hits):
     c.round_fill(rect_tl(pad, foot, sw * len(segs), sh), 8, gray(1, 0.06))
     for i, (label, sec) in enumerate(segs):
         r = rect_tl(pad + i * sw, foot, sw, sh)
-        on = abs(m.interval - sec) < 1
+        on = (sec == 0) if common.settings().get("autoPoll") else (sec != 0 and abs(m.interval - sec) < 1)
         if on:
             c.round_fill(r.adjusted(2, 2, -2, -2), 6, gray(1, 0.13))
         c.text_c(Attr(label, 11, "semibold" if on else "regular", TEXT_HI if on else TEXT_MID), r.center().x(), foot, sh, align=1)
@@ -669,7 +669,7 @@ def draw_advanced(c, W, H, m):
     sx = ADV_CX + 2
     for i, (label, sec) in enumerate(segs):
         r = rect_tl(sx, foot + 3, sw[i], 18)
-        on = abs(m.interval - sec) < 1
+        on = (sec == 0) if common.settings().get("autoPoll") else (sec != 0 and abs(m.interval - sec) < 1)
         if on:
             c.round_fill(r, 9, gray(1, 0.18))
         c.text_c(Attr(label, 12, "semibold" if on else "medium", TEXT_HI if on else TEXT_MID), r.center().x(), foot + 3, 18, align=1)
