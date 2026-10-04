@@ -208,6 +208,11 @@ to the shared file format require bumping `schema` and updating both sides.
   the returned candidate before identity validation/publication. Restart inspects the durable
   candidate in every transition phase before sending another refresh. Cancellation, sign-out
   or a new account prevents late publication into the newer epoch.
+- **Identity revalidation.** A mismatched identity never publishes another account's
+  credential or totals. Automatic revalidation of a saved candidate is allowed only after
+  a new successful `/user` returns the known stable ID of the current epoch. Persistent
+  mismatch remains blocked. A subsequent verified match is not an account change or a new
+  OAuth grant; temporary mismatch does not mandate permanent quarantine until manual login.
 - **Unknown issuer result.** A timeout may mean the one-use refresh was accepted. Consult the
   saved candidate first; an unknown outcome permits at most one further issuer recovery POST.
   A proven unsent attempt does not spend that budget. If the only replacement pair was lost

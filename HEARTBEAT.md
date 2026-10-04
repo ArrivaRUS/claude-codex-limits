@@ -4,7 +4,7 @@
 
 ## Актуальный статус · 2026-10-04
 
-- GH-AUTH-STABLE в работе, ветка `codex/stable-github-auth`: Linux rev5b + sync cancelled fix и Swift C5 приняты независимыми CodeReviewer/SecurityAnalyst static delta. Auth final RUN 30862/0; sync selftest all passed. Linux full 284 / 1 obsolete oracle FAIL / 26 Qt/package SKIP, последний oracle исправлен и target 1 PASS; Ubuntu CI ещё pending. Swift subscriptions fixture SIGTRAP разобран Debugger, memory-domain исправлен; final main3f873ef4/coredfa533/SelfTestsee6c1db4 isolation PASS, полный UI повтор pending. Подготовлен source commit, затем CI/QA/DMG/DEB и выпуск 3.2.3/0.4.3 по прежнему разрешению. Root production actions=0; реальные stores/API не использованы.
+- GH-AUTH-STABLE принят к выпуску 3.2.3/0.4.3 на `40cfdf58980acef0668bdb4915c6001322ba9e11`: независимые CodeReviewer/SecurityAnalyst production/isolation PASS; Linux CI 284 OK/0 skip; Swift/bundled auth30862/0, sync PASS, subscriptions1218 OK; независимый QA374 PNG и DMG/DEB PASS. Следующий шаг — main и публикация обеих версий по прежнему разрешению, проверка публичных assets. Подробности/hashes/границы: `docs/status.md`, `docs/qa-github-auth-stability.md`. Root production actions=0; реальные credentials/stores/API и live ALSE не использованы.
 
 - GH-AUTH-UI архивирован до production после уточнения владельца. План `docs/github-auth-ui-fix.md` и предварительный `docs/test-plan-github-auth-ui.md` — история; storage/UI ошибки входят в GH-AUTH-STABLE. Отдельного косметического выпуска не будет.
 

@@ -104,3 +104,7 @@ per-ref lock до no-send settlement. PID/free flock не доказывают r
 Swift initial readable probe ждёт trusted settlement до OAuth. Детали добавлены
 в architecture; Tester отдельно готовит regression/изоляцию. Root C3 auth RUN
 30767/0 не закрывает эти новые окна; release остаётся pending.
+
+## 2026-10-04 — финальная приёмка GH-AUTH-STABLE
+
+Принята кодовая ревизия `40cfdf58980acef0668bdb4915c6001322ba9e11`: независимые CodeReviewer/SecurityAnalyst production и isolation PASS; Linux CI284 OK/0skip; Swift и bundled DMG auth30862/0, sync PASS, subscriptions1218 OK; QA374 PNG и offline пакеты PASS. Публикация macOS3.2.3/Linux0.4.3 разрешена ранее. Теги должны ссылаться на эту исходную ревизию; metadata-коммиты не подменяют CI/package source. Latest остаётся macOS, Linux --latest=false. Реальный ALSE/native backends/OAuth не проверялись; календарные полгода не обещаются. Root выполняет память, интеграцию и выпуск, production edits=0. Длительности native agents недоступны, агент-минуты не выдуманы.
