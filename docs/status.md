@@ -1,5 +1,9 @@
 # Статус командного внедрения
 
+## GH-AUTH — диагностика 2026-10-04
+
+Read-only исследование на `af4d17d`: Debugger воспроизвёл Linux GUI login-кнопку при недоступном Secret Service; macOS missing Keychain также маркирует revoked без 401. SecurityAnalyst подтвердил возможные 8-hour OAuth tokens и отсутствие refresh в обоих портах. Режим приложения и реальная причина нового случая не проверены. Подробности/источники: [github-auth-diagnosis.md](github-auth-diagnosis.md). Production, аккаунты и token policy не менялись; release-suite не повторялась. В backlog отдельные UI/refresh задачи, реализация не начата. Следующий шаг — платформа/версия и точный видимый текст последней ошибки.
+
 Обновлено: 2026-10-03. База текущей AUTH-1: `main` `5da1143`; старый Auto — `e6e2f2e`.
 
 ## Текущая правка AUTH-1

@@ -4,6 +4,8 @@
 
 | Приоритет | Задача | Основание и статус |
 |---|---|---|
+| Should | GH-AUTH-UI: различать недоступное хранилище, отсутствующую запись и подтверждённый server revoke; Linux GUI и честный macOS заголовок. | 2026-10-04: Debugger воспроизвёл ложную Linux login-кнопку при unavailable SS, macOS missing тоже называется revoked. Причина случая пользователя пока неизвестна; диагностика в docs/github-auth-diagnosis.md. Исправление ещё не выполнялось. |
+| Should, условно | GH-AUTH-REFRESH: поддержать expiring OAuth tokens, если приложение их выдаёт. | Оба порта игнорируют refresh_token/expires_in. GitHub поддерживает optional 8-hour OAuth tokens; настройка реального OAuth App не проверена. Сначала подтвердить режим, затем контракт хранения/refresh и отдельное security-review. |
 | Done | AUTH-1: убрать Claude login из Codex, различать stale данные и подтверждённую проблему входа, не придумывать asOf. | Выпущено 2026-10-03: macOS 3.2.2 / Linux 0.4.2, `a1f885f`; 219 Linux tests, 1063 Swift checks, Reviewer/QA PASS. Контракт/план: docs/auth-hints-fix.md. |
 | Done | UI-1…UI-4: стилизованная «А», текущая частота рядом (разные частоты — с именами продуктов, одинаковые — общим временем), одна/ноль подписок, backoff-интервал с существующей подсказкой, RU/EN, обычная/расширенная панель. | Выпущено 2026-10-03: macOS 3.2.1 / Linux 0.4.1, `5b722a1`; Reviewer/Tester/bitmap QA PASS. Реальные ALSE, hover/click и пользовательские шрифты остаются отдельной проверкой ниже. |
 | Could | Simple: длинный subtitle Claude readError выходит за карточку при двух подписках (macOS RU, Linux RU/EN). | QA AUTH-1: унаследованный P3, текст не изменён текущей правкой; отдельная правка fit/truncation и узкий bitmap check. |

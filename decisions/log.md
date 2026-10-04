@@ -70,3 +70,7 @@
 ## 2026-10-03 — выпуск AUTH-1
 
 Принята exact ревизия `a1f885f1138c327121fb7baf794e000edfea5695`: независимые production/test isolation review, Swift 1063 OK, Linux CI 219 OK/0 skip, QA 88+92 PNG и пакеты PASS. macOS 3.2.2 / Linux 0.4.2 опубликованы по сохранённому разрешению; публичные assets совпадают с проверенными, Latest=v3.2.2. Унаследованный P3 Simple readError subtitle отделён в Could; live ALSE и реальные clicks/fonts остаются долгами. Реальную причину входа пользователя эта UI-правка не устанавливает.
+
+## 2026-10-04 — диагностика GH-AUTH
+
+Readonly Debugger и независимый SecurityAnalyst подтвердили неоднозначность storage/UI и условную несовместимость с OAuth refresh на `af4d17d`. Выводы: `docs/github-auth-diagnosis.md`; причина случая пользователя не установлена. Нового решения о token policy, входа/выхода, изменения production или выпуска не было. Выбранные ранее локальный выход и подтверждение трёх 401 остаются в силе.
