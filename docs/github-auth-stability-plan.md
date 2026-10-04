@@ -35,3 +35,9 @@ PM выполняется последовательным поручением 
 новых контрактных blockers не найдено. Это не production/test-isolation PASS.
 После освобождения завершённых заданий новые native agent threads доступны:
 DeveloperComplex и Reviewer созданы отдельно; снижения модели/gates нет.
+
+Ownership разделён после подтверждения первого автора, что Swift ещё не писался:
+Linux DeveloperComplex `github_auth_developer_complex`; Swift DeveloperComplex
+`github_auth_swift_developer` (оба Astra/high). Области не пересекаются. Tester
+Sol/high пишет stdlib-only fake infrastructure отдельно. Второй автор читает
+общий контракт; паритет не доказывается слепым копированием первого draft.
