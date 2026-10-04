@@ -2,9 +2,22 @@
 
 ## GH-AUTH-STABLE — текущая работа 2026-10-04
 
+Финальный static source/isolation freeze принят отдельными ревьюерами:
+Linux auth48ee/vault96ae/sync63a867 и Swift coredfa533, main3f873ef4,
+SelfTestsee6c1db4. Root auth RUN 30862/0; sync all passed. Последний Linux
+legacy target 1 PASS после full 284/1FAIL/26SKIP; нужен Ubuntu CI 0 skip.
+Swift UI stand-in crash подтверждён отдельным Debugger и исправлен; новый
+subscriptions RUN и package/QA/release pending. Предыдущие записи ниже — история.
+
 После возобновления Linux rev4 и Swift C3 (3.2.3/0.4.3) прошли свежие
 независимые review: НЕ PASS. Авторы исправляют staged candidate expiry,
 reservation-before-writer recovery и initial probe settlement.
+
+Актуальный следующий gate: Linux rev5b production delta принят двумя ревьюерами,
+но full RUN 283 tests / 19 failures / 4 errors / 26 skips (sandbox loopback +
+oracle/legacy fixtures, разбор отдельного Tester). Swift C4 НЕ PASS: successor
+теряет cancellation fence; автор готовит C5, другой Tester исправляет полную
+изоляцию старых Swift selftests и добавляет safe auth UI fixtures.
 Предыдущий Linux RUN: 52 tests, 48 PASS / 1 fixture FAIL / 3 Qt SKIP;
 Swift C3 root auth-selftest: 30767 checks / 0 FAIL. Linux rev4 новый RUN прерван
 на deadlock SIGKILL fixture, полный результат неизвестен. Release notes draft

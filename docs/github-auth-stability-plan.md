@@ -22,7 +22,7 @@
 - [x] ProductManager: `prd-github-auth-stability.md`, A1–A12 и границы обещания.
 - [x] Два независимых Architect: первичные планы до взаимного чтения; сведение root, challenge и принятый `architecture-github-auth.md`.
 - [x] Tester: полный `test-plan-github-auth-stability.md` до кода, SHA256 `2d72dffd325a2e26c4de909e579bb17fe39182c1ead5a0c9a292fc9fc31d4e4e`; изоляция уроков 006/011. Numeric contract: lead=min(900s,TTL/4), persisted unknown recovery budget=1.
-- [ ] Два DeveloperComplex GPT-6 Astra/high выполняют исправления финальных findings: Linux rev5 и Swift C4. Области production не пересекаются; Tester отдельно linux/tests и GitHubAuthSelfTests.swift. Foundation/schema → lifecycle → integration уже реализованы после pre-code `7f83dee`; acceptance pending.
+- [x] Два DeveloperComplex GPT-6 Astra/high завершили source: Linux rev5b + cancelled sentinel, Swift C5. Области production не пересекаются; два Tester отдельно core/new integration/Swift и legacy fixtures. Foundation/schema → lifecycle → integration реализованы после pre-code `7f83dee`; static review/security принято, runtime/package acceptance ниже.
 - [ ] Независимые CodeReviewer + security, тесты с fake clock/transport/stores, 30/180 дней моделируемого обновления, sleep/wake и faults.
 - [ ] QA пакетов/безопасных fixture UI, документация; main и macOS 3.2.3 / Linux 0.4.3 по сохраняющемуся разрешению на публикацию.
 

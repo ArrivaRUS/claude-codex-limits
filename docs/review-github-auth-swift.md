@@ -1,5 +1,21 @@
 # GH-AUTH-STABLE: независимое Swift review
 
+## C5: финальная авторизация PASS, UI fixture исправляется
+
+Core `dfa533bb056fa4f27c8e472467ed8acd94d6fdc3b8e91bdb920a606a4ce55cfa`
+принят независимыми CodeReviewer/SecurityAnalyst static delta; обязательный
+callback отмены сохраняется до каждой publication. Финальные SelfTests
+`ee6c1db4432be8958ba3a4ae6e339eaa60c82d60e16dc9147ac540606e909730`
+после отдельного isolation/coverage PASS root RUN: **30862 checks / 0 FAIL**,
+exit0, `/tmp/ccl-auth-swift-final3-run.log`. Исправлены три неверные предпосылки
+предыдущего RUN 30846/3; sync selftest отдельно all passed на C5/S5.
+
+Main5072 subscriptions был isolation PASS, но runtime SIGTRAP. Независимый
+Debugger exact binary/LLDB выявил test-only preconditionFailure в
+MemorySelfTestDefaults.persistentDomain, вызванный AppKit при NSApplication.init.
+Нужна memory-only реализация чтения domain без super/реальных preferences;
+Tester исправляет. UI/PNG/DMG acceptance пока pending, native helper не RUN.
+
 ## C3: фактический auth RUN и новый finding
 
 Root после отдельного isolation PASS выполнил frozen `--auth-selftest`:

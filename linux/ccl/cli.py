@@ -57,23 +57,31 @@ def _end_progress(cb):
 def cmd_login(args):
     st = sync.sync_state()
     login = st.get("login")
-    if login and not st.get("revoked") and not args.force:
+    presentation = sync.auth_snapshot(st)
+    needs_login = (presentation.get("kind") in ("actionRequired", "signedOut") or
+                   presentation.get("reason") in ("lost_result", "refresh_expired", "refresh_invalid",
+                                                   "missing", "incomplete_response", "identity_changed"))
+    if login and not st.get("revoked") and not needs_login and not args.force:
         _say(common.tr("Уже выполнен вход в GitHub", "Already signed in to GitHub") + (": " + login if login else "")
              + common.tr(". Выйти: ccl-sync logout", ". Sign out: ccl-sync logout"))
         return 0
-    attempt = sync.begin_login()
+    try:
+        attempt = sync.begin_login()
+    except sync.LoginError as e:
+        _say(str(e))
+        return 1
     cancelled = lambda: not sync.is_current(attempt)
     try:
         try:
-            dev = sync.device_start()
+            dev = sync.device_start(attempt=attempt)
         except sync.LoginError as e:
             _say(str(e))
             return 1
         url = dev["verification_uri"]
         _say(common.tr("Откройте в браузере:  ", "Open in a browser:  ") + url)
         _say(common.tr("и введите код:        ", "and enter the code:  ") + dev["user_code"])
-        _say(common.tr("(доступ нужен только к gist — секретный gist для синхронизации расхода)",
-                       "(only gist access is requested — one secret gist for the usage sync)"))
+        _say(common.tr("(доступ к gist и автоматическое продление входа для синхронизации расхода)",
+                       "(gist access and automatic sign-in renewal are requested)"))
         if not args.no_browser and os.environ.get("DISPLAY"):
             try:
                 subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -90,7 +98,7 @@ def cmd_login(args):
         except (sync.LoginError, OSError, ValueError) as e:
             _say(common.tr("Не удалось сохранить вход: ", "Couldn't save the sign-in: ") + str(e))
             return 1
-        backend = sync.sync_state().get("tokenBackend")
+        backend = sync.auth_snapshot().get("backend") or sync.sync_state().get("tokenBackend")
         _say(common.tr("Готово. GitHub: ", "Done. GitHub: ") + (login or "?") + "  ("
              + (common.tr("токен в хранилище секретов", "token in the Secret Service") if backend == "secret-service"
                 else common.tr("токен в файле ", "token in file ") + common.TOKEN_FILE_PATH) + ")")
@@ -204,7 +212,10 @@ def cmd_status(_args):
         if held:
             st.reload()
             if st.get("login") and not st.get("revoked"):
-                token, backend = vault.read()
+                access = sync.ensure_access(reason="status", lock_held=True)
+                token = access.access if access.kind == "ready" else None
+                backend = (access.ref or {}).get("backend") if token else access.reason
+                st.reload()
                 if token and st.get("gistId"):
                     g = sync.gh("/gists/" + st.get("gistId"), token)
                     if g.status == 200:
@@ -229,6 +240,8 @@ def cmd_status(_args):
         _say("GitHub: " + (vault.timeout_text() if backend == "timeout" else common.tr(
             "Хранилище секретов недоступно", "The Secret Service is unreachable"))
              + common.tr(" — синхронизация повторит попытку сама", " — sync will try again by itself"))
+    elif sync.auth_snapshot(st).get("kind") in ("temporary", "actionRequired"):
+        _say("GitHub: " + sync.auth_reason(sync.auth_snapshot(st).get("reason")))
     elif not held and st.get("login"):
         _say("GitHub: " + st.get("login"))
     else:

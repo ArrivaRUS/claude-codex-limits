@@ -183,3 +183,11 @@ RPC-started без completion остаётся неизвестным. Auth→wr
 helper не берёт auth lock. Initial probe uncertainty разрешается до OAuth,
 даже если probe payload уже читается. Новые протоколы требуют отдельных
 regressions/independent review, это принятие design, а не production PASS.
+
+Identity mismatch блокирует publication чужого userID. Повторная проверка
+сохранённого candidate допускается: автоматическое восстановление разрешено
+только после нового успешного `/user` с ID, совпадающим с известным аккаунтом
+этой epoch. Постоянный mismatch никогда не публикуется; отдельная verified
+revalidation не означает смену аккаунта и не требует нового OAuth grant.
+Нет обязательного постоянного quarantine до ручного login после временного
+несоответствия ответа, account/cache fences сохраняются на каждой publication.

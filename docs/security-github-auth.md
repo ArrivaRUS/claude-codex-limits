@@ -6,6 +6,23 @@
 
 ## Linux rev4 / Swift C3 — финальный проход НЕ PASS
 
+Последующий Linux rev5b auth `48ee84cac854b7174eebd78446cb346199ffb2ff09f76801eb537838daef9d60`
+с прежним vault96ae: Security delta PASS, pure grants_per_ensure=[1,1,1].
+Swift C4 core `3f3457d7cf6e37c791a1b170dbc9b2de7a09c75e11a8d7902dfe22819595388f`
+НЕ PASS: completeLogin cancellation callback теряется через candidate successor
+renewCandidate→recover→validate(default true), durable publish после Cancel;
+crash до наружной cleanup оставляет отменённую session. CodeReviewer независимо
+подтвердил. Остальные permit/probe/cache delta механизмы статически приняты.
+Автор исправляет callback по всей цепочке; native stores/runtime не проверены.
+
+Последующий Linux rev5 delta на auth `086d4cec38185ffb76968871b91855269971e6263c48319e6667124b54cecc6c`
+и vault `96ae997f72d384a10c51d2667930ad9f6da2ac864b174b7120584a7c822e0fcc`:
+reservation no-writer P1 исправлен (pure in-memory restart → ready, grant=1).
+Write-ahead/receipt/schema/candidate fences статически приняты. Новый P2:
+успешный refresh + identity401 вызывает второй successor grant в том же ensure
+(auth539→370→447); pure reproduction grants=2. Автор исправляет общий лимит
+и terminal late-candidate ветку. Это НЕ PASS; Swift C4 ещё pending.
+
 Новый SecurityAnalyst Astra/high независимо проверил base `eef4b77` и frozen
 auth.py `299617e52621475369282f7ee92ee7b52fafa7290aed57b28d7ca2444cf42b23`,
 vault.py `3efa99ed1ebec2a196a816df59a72525dd09f777b86b3d52d232c69e685797f2`,

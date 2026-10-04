@@ -549,8 +549,16 @@ class SettingsPage(QWidget):
             lay.addWidget(w)
             lay.addWidget(_label(tr("Жду подтверждения в GitHub…", "Waiting for GitHub…"), "note"))
             return
-        token, backend = vault.read() if st.get("login") and not st.get("revoked") and not pending else (None, None)
-        if token:
+        presentation = sync.auth_snapshot(st)
+        backend = presentation.get("backend") or st.get("tokenBackend")
+        if presentation.get("kind") == "temporary":
+            lay.addWidget(_label(sync.auth_reason(presentation.get("reason")), wrap=True))
+            if st.get("login"):
+                lay.addWidget(self._btn(tr("Выйти", "Sign out"), a.logout))
+            return
+        if presentation.get("kind") == "actionRequired":
+            lay.addWidget(_label(sync.auth_reason(presentation.get("reason")), wrap=True))
+        if presentation.get("kind") == "ready" and st.get("login") and not pending:
             lay.addWidget(_row("GitHub: " + (st.get("login") or "?"), self._btn(tr("Выйти", "Sign out"), a.logout)))
             lay.addWidget(_label(self._logout_note(), "note", True))
             for mch in sync.machine_list():
@@ -567,7 +575,7 @@ class SettingsPage(QWidget):
                 lay.addWidget(_label(tr("Ошибка ", "Error ") + (fmt.fmt_moment(at) + ": " if at else ": ")
                                      + str(st.get("lastError")), "note", True))
             lay.addWidget(_label(tr("Токен: ", "Token: ") + (tr("хранилище секретов (KWallet)", "Secret Service (KWallet)")
-                                                             if backend == "secret-service" else common.TOKEN_FILE_PATH.replace(common.HOME, "~")),
+                                                             if backend == "secret-service" else tr("локальный файл (0600)", "local file (0600)")),
                                  "note", True))
             name = QLineEdit(common.machine_name())
             name.setFixedWidth(150)
@@ -1143,7 +1151,8 @@ class TrayApp(QObject):
         # from a keyring read: this runs on the GUI thread, and a revoked sign-in is not hidden
         # here — update_sync_warning says it on the main screen.
         st = sync.sync_state()
-        if remote.get("machines") and st.get("login") and not st.get("revoked"):
+        if (remote.get("machines") and st.get("login") and not st.get("revoked")
+                and sync.remote_matches_session(remote, st)):
             m.days = usage.merge_days(local_days, remote.get("days", {}))
             m.other_machines = len(remote.get("machines", []))
         else:
@@ -1173,7 +1182,7 @@ class TrayApp(QObject):
                 ix, _changed, fresh = usage.refresh(blocking=False)
                 # another process (the timer) is scanning right now and will sync the fresh
                 # index itself — pushing our older copy would only hold its write back 10 min
-                res = sync.sync_cycle(ix["days"], force=force_push, auto=not force_push) if fresh else None
+                res = sync.sync_cycle(ix["days"], force=force_push, auto=not force_push, allow_push=fresh)
                 remote = sync.load_remote()
                 days = ix["days"]
             except Exception as e:
@@ -1199,7 +1208,12 @@ class TrayApp(QObject):
     def start_login(self):
         if self.logout_busy:
             return
-        attempt = self.login_attempt = sync.begin_login()
+        try:
+            attempt = self.login_attempt = sync.begin_login()
+        except sync.LoginError as e:
+            self.login_error = str(e)
+            self.win.settings_page.render_sync()
+            return
         self.login_state, self.login_code, self.login_error = "awaiting", None, None
         self.logout_error = None
         self.win.settings_page.render_sync()
@@ -1207,7 +1221,7 @@ class TrayApp(QObject):
         def work():
             cancelled = lambda: not sync.is_current(attempt)
             try:
-                dev = sync.device_start()
+                dev = sync.device_start(attempt=attempt)
                 self.bridge.login_code.emit(attempt, dev)
                 token = sync.device_poll(dev, cancelled=cancelled)
                 login = sync.login_finish(token, cancelled=cancelled, attempt=attempt)

@@ -4,7 +4,7 @@
 
 ## Актуальный статус · 2026-10-04
 
-- GH-AUTH-STABLE в работе, ветка `codex/stable-github-auth`, pre-code `7f83dee`, pushed docs `eef4b77`. Свежие review Linux rev4/Swift C3: НЕ PASS (staged candidate expiry, reservation-before-writer liveness, initial probe settlement); два автора исправляют. Swift C3 auth-selftest: 30767/0. Linux rev4 RUN прерван на deadlock SIGKILL fixture; предыдущий полный target 52 tests / 48 PASS / 1 fixture FAIL / 3 Qt SKIP. Tester исправит fixture и изоляцию старых Swift selftests; Qt нужен Ubuntu CI. Документационный draft готов, пакеты/QA/релиз 3.2.3/0.4.3 pending. Root production actions=0; реальные stores/API не использованы.
+- GH-AUTH-STABLE в работе, ветка `codex/stable-github-auth`: Linux rev5b + sync cancelled fix и Swift C5 приняты независимыми CodeReviewer/SecurityAnalyst static delta. Auth final RUN 30862/0; sync selftest all passed. Linux full 284 / 1 obsolete oracle FAIL / 26 Qt/package SKIP, последний oracle исправлен и target 1 PASS; Ubuntu CI ещё pending. Swift subscriptions fixture SIGTRAP разобран Debugger, memory-domain исправлен; final main3f873ef4/coredfa533/SelfTestsee6c1db4 isolation PASS, полный UI повтор pending. Подготовлен source commit, затем CI/QA/DMG/DEB и выпуск 3.2.3/0.4.3 по прежнему разрешению. Root production actions=0; реальные stores/API не использованы.
 
 - GH-AUTH-UI архивирован до production после уточнения владельца. План `docs/github-auth-ui-fix.md` и предварительный `docs/test-plan-github-auth-ui.md` — история; storage/UI ошибки входят в GH-AUTH-STABLE. Отдельного косметического выпуска не будет.
 

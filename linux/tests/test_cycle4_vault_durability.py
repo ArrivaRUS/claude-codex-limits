@@ -22,52 +22,79 @@ class TestVaultDurability(env.SyncEnv):
         return sorted(n for n in os.listdir(common.CONFIG_DIR)
                       if n.startswith(base) or n.startswith("." + base + "."))
 
-    def test_ctrl_c_inside_start_abandons_worker_and_cleans_late_write(self):
+    def test_ctrl_c_after_transfer_abandons_worker_and_cleans_late_write(self):
         for stage in ("factory", "set"):
             with self.subTest(stage=stage):
                 entered, release = threading.Event(), threading.Event()
                 workers, refs = [], []
-                original_start = threading.Thread.start
                 original = self.ss.factory if stage == "factory" else self.ss.set
 
                 def blocked(*args):
+                    refs.extend(self.st().get("tokenDeletePending"))
                     entered.set()
                     if not release.wait(3):
                         raise AssertionError("worker was not released")
                     return original(*args)
 
-                def start_then_interrupt(t):
-                    workers.append(t)
-                    original_start(t)
-                    self.assertTrue(entered.wait(2), "worker never reached " + stage)
-                    refs.extend(self.st().get("tokenDeletePending"))
-                    raise KeyboardInterrupt
+                class InterruptingEvent(threading.Event):
+                    def wait(event, timeout=None):
+                        if timeout is not None and threading.current_thread() is threading.main_thread():
+                            if not entered.wait(2):
+                                raise AssertionError("worker never reached " + stage)
+                            raise KeyboardInterrupt
+                        return super().wait(timeout)
 
+                def thread(*args, **kwargs):
+                    worker = threading.Thread(*args, **kwargs)
+                    workers.append(worker)
+                    return worker
+
+                proxy = SimpleNamespace(Event=InterruptingEvent, Lock=threading.Lock, Thread=thread)
                 target, name = (vault, "_ss") if stage == "factory" else (self.ss, "set")
                 with patch.object(target, name, side_effect=blocked), \
                         patch.object(self.ss, "get", wraps=self.ss.get) as get:
                     try:
-                        with patch.object(threading.Thread, "start", start_then_interrupt), \
-                                common.file_lock("sync"):
+                        with patch.object(vault, "threading", proxy), common.file_lock("sync"):
                             with self.assertRaises(KeyboardInterrupt):
                                 vault.store(self.token)
                         self.assertEqual(len(refs), 1)
                         self.assertEqual(refs[0][1], "secret-service")
-                        # Before intent is published, abandonment suppresses set;
-                        # after intent, the reference must survive for retry.
                         expected = refs if stage == "set" else []
                         self.assertEqual(self.st().get("tokenDeletePending") or [], expected)
                     finally:
                         release.set()
-                        for t in workers:
-                            t.join(3)
-                            self.assertFalse(t.is_alive())
+                        for worker in workers:
+                            worker.join(3)
+                            self.assertFalse(worker.is_alive())
                     get.assert_not_called()
                 self.assertEqual(self.st().get("tokenDeletePending") or [], expected)
                 self.assertEqual(self.ss.items, {})
                 self.assertTrue(sync.logout())
-                self.assertEqual(self.ss.items, {})
                 self.assertFalse(sync.delete_pending())
+
+    def test_ctrl_c_inside_start_prevents_resource_transfer(self):
+        workers = []
+        original_start = threading.Thread.start
+
+        def start_then_interrupt(worker):
+            workers.append(worker)
+            original_start(worker)
+            # The created worker is still gated. It cannot call the factory,
+            # even if start raises after the underlying thread was created.
+            raise KeyboardInterrupt
+
+        with patch.object(vault, "_ss", side_effect=AssertionError("resource was not transferred")) as factory:
+            try:
+                with patch.object(threading.Thread, "start", start_then_interrupt), common.file_lock("sync"):
+                    with self.assertRaises(KeyboardInterrupt):
+                        vault.store(self.token)
+            finally:
+                for worker in workers:
+                    worker.join(3)
+                    self.assertFalse(worker.is_alive())
+            factory.assert_not_called()
+        self.assertEqual(self.ss.items, {})
+        self.assertFalse(sync.delete_pending())
 
     def test_ctrl_c_before_start_creates_no_token_or_pending_reference(self):
         with patch.object(threading.Thread, "start", side_effect=KeyboardInterrupt), \

@@ -78,41 +78,51 @@ class TestSigintDeferral(env.SyncEnv):
 
             class ExplodingLock(object):
                 armed = True
+                caller_entries = 0
 
                 def __init__(self):
                     self.real = threading.Lock()
 
                 def __enter__(self):
-                    if (ExplodingLock.armed and
-                            threading.current_thread() is threading.main_thread()):
-                        ExplodingLock.armed = False
-                        raise KeyboardInterrupt
+                    if threading.current_thread() is threading.main_thread():
+                        ExplodingLock.caller_entries += 1
+                        # Ownership transfer is now the first guard acquisition.
+                        # Timeout abandonment is second; an exception from start
+                        # enters its exception guard before any transfer occurs.
+                        target = 1 if interrupt_in_start else 2
+                        if ExplodingLock.armed and ExplodingLock.caller_entries == target:
+                            ExplodingLock.armed = False
+                            raise KeyboardInterrupt
                     return self.real.__enter__()
 
                 def __exit__(self, *args):
                     return self.real.__exit__(*args)
 
             original_start = threading.Thread.start
-
             def start_then_interrupt(worker):
                 original_start(worker)
-                self.assertTrue(entered.wait(2), "factory never entered")
                 raise KeyboardInterrupt
 
             start = (patch.object(threading.Thread, "start", start_then_interrupt)
                      if interrupt_in_start else contextlib.nullcontext())
             with patch.object(proxy, "Lock", ExplodingLock), \
-                    patch.object(vault, "_ss", side_effect=blocked_factory), \
+                    patch.object(vault, "_ss", side_effect=blocked_factory) as factory, \
                     patch.object(self.ss, "set", wraps=self.ss.set) as set_token:
                 with start, common.file_lock("sync"):
                     with self.assertRaises(KeyboardInterrupt):
                         vault.store(self.token)
-                self.assertTrue(entered.is_set())
                 self.assertFalse(ExplodingLock.armed)
-                self.assertTrue(refs)
-                pending = self.st().get("tokenDeletePending") or []
-                self.assertTrue(refs[0] in pending or abandoned[0].is_set())
+                if interrupt_in_start:
+                    self.assertFalse(entered.is_set(), "untransferred worker must remain gated")
+                    self.assertFalse(sync.delete_pending())
+                else:
+                    self.assertTrue(entered.is_set())
+                    self.assertTrue(refs)
+                    pending = self.st().get("tokenDeletePending") or []
+                    self.assertTrue(refs[0] in pending or abandoned[0].is_set())
                 self.finish_workers()
+                if interrupt_in_start:
+                    factory.assert_not_called()
                 set_token.assert_not_called()
             self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
             self.assert_logged_out()

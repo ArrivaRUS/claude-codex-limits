@@ -62,7 +62,7 @@ class TestWarning(env.SyncEnv):
 
     def test_revoked_always_warns(self):
         self.st().update(revoked=True)
-        self.assertEqual(sync.warning(), "Войдите в GitHub заново — суммы без других компьютеров")
+        self.assertEqual(sync.warning(), "GitHub отклонил вход — войдите заново")
 
     def test_signed_out_never_warns(self):
         self.gh.on("GET", "/gists/g1", T(500))

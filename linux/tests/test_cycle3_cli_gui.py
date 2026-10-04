@@ -43,12 +43,16 @@ class TestPublicationResponsiveness(env.SyncEnv):
                 errors.append(e)
 
         def controls():
-            start = time.monotonic()
-            sync.cancel_login(attempt + 100)
-            elapsed.append(time.monotonic() - start)
-            start = time.monotonic()
-            sync.begin_login()
-            elapsed.append(time.monotonic() - start)
+            try:
+                start = time.monotonic()
+                sync.cancel_login("different-attempt")
+                elapsed.append(time.monotonic() - start)
+                start = time.monotonic()
+                with self.assertRaisesRegex(sync.LoginError, "повторим автоматически"):
+                    sync.begin_login()
+                elapsed.append(time.monotonic() - start)
+            except BaseException as error:
+                errors.append(error)
 
         with patch.object(vault, "TIMEOUT", 5), patch.object(self.ss, "delete", side_effect=delete):
             worker = threading.Thread(target=finish, daemon=True)
@@ -357,10 +361,14 @@ class TestGUIControllers(env.SyncEnv):
         a.logout = Mock()
         a.start_login = Mock()
         page = SimpleNamespace(app=a, sync_lay=Mock(), _btn=button, _logout_note=methods._logout_note)
-        with patch.object(vault, "read", wraps=vault.read) as read, \
+        with patch.object(vault, "read", side_effect=AssertionError("render must not read secrets")) as read, \
+                patch.object(vault, "_ss", side_effect=AssertionError("render must not use SS")), \
+                patch.object(vault, "_ss_v2", side_effect=AssertionError("render must not use V2 SS")), \
+                patch.object(sync, "auth_owner", side_effect=AssertionError("render must not construct owner")), \
+                patch.object(sync, "transport", side_effect=AssertionError("render must not request")), \
                 patch.object(sync, "machine_list", return_value=[{"name": "other-pc"}]) as machines:
             methods.render_sync(page)
-        read.assert_called_once_with()
+        read.assert_not_called()
         button.assert_called_once_with("Выйти", a.logout)
         row.assert_any_call("GitHub: me", button.return_value)
         page.sync_lay.addWidget.assert_any_call(row.return_value)
@@ -377,7 +385,7 @@ class TestGUIControllers(env.SyncEnv):
             labels.append((text, role, wrap))
             return Mock()
         methods = gui_methods("SettingsPage", ("render_sync", "_logout_note"),
-                              _clear=lambda lay: None, _label=label)
+                              _clear=lambda lay: None, _label=label, _row=Mock(), QLineEdit=Mock())
         a = self.receiver()
         a.logout = Mock()
         a.start_login = Mock()
@@ -400,6 +408,8 @@ class TestGUIControllers(env.SyncEnv):
         a.logout_busy = False
         self.st().update(login="me", revoked=False, tokenDeletePending=None)
         labels.clear()
-        with patch.object(vault, "read", return_value=(None, "unreachable")):
+        self.st().update(authStatus=dict(kind="temporary", reason="unreachable", backend="secret-service"))
+        with patch.object(vault, "read", side_effect=AssertionError("render must not read secrets")), \
+                patch.object(sync, "transport", side_effect=AssertionError("render must not request")):
             methods.render_sync(page)
-        self.assertIn("Хранилище секретов недоступно — синхронизация повторит попытку сама", labels[0][0])
+        self.assertIn("Хранилище секретов недоступно", labels[0][0])

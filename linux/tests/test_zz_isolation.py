@@ -22,10 +22,17 @@ class TestRealFilesUntouched(unittest.TestCase):
     def test_module_paths_point_into_the_sandbox(self):
         home = os.path.expanduser("~")
         for name in ("CONFIG_DIR", "STATE_DIR", "TOKEN_FILE_PATH", "MACHINE_ID_PATH", "SYNC_STATE_PATH",
-                     "SYNC_REMOTE_PATH", "CLAUDE_CREDENTIALS", "CODEX_AUTH"):
+                     "SYNC_REMOTE_PATH", "CLAUDE_PROJECTS", "CLAUDE_CREDENTIALS", "CODEX_SESSIONS", "CODEX_AUTH"):
             path = getattr(common, name)
             self.assertTrue(path.startswith(_isolate.ROOT), (name, path))
             self.assertFalse(path.startswith(os.path.join(home, ".config")), name)
+
+    def test_v2_credential_and_writer_dirs_are_temporary(self):
+        for root, leaf in ((common.CONFIG_DIR, "github-credentials"),
+                           (common.STATE_DIR, "github-credential-writers")):
+            path = os.path.realpath(os.path.join(root, leaf))
+            self.assertTrue(path.startswith(os.path.realpath(_isolate.ROOT) + os.sep), path)
+            self.assertTrue(path.startswith("/tmp/") or path.startswith("/private/tmp/"), path)
 
 
 if __name__ == "__main__":

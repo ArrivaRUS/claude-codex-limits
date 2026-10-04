@@ -72,6 +72,12 @@ def write_atomic(path, data, mode=0o600):
             os.fsync(f.fileno())
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+        # Persist the directory entry as well as the file contents.
+        directory_fd = os.open(d, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -84,6 +90,13 @@ def write_json(path, obj, mode=0o600, compact=True):
     else:
         s = json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True)
     write_atomic(path, s, mode)
+
+
+_held_locks = threading.local()
+
+
+def lock_held_by_thread(name):
+    return bool(getattr(_held_locks, "names", {}).get(name))
 
 
 @contextlib.contextmanager
@@ -111,7 +124,15 @@ def file_lock(name, blocking=True, timeout=None):
                     if not blocking or time.time() >= deadline:
                         break
                     time.sleep(0.2)
-        yield held
+        if held:
+            names = getattr(_held_locks, "names", {})
+            names[name] = names.get(name, 0) + 1
+            _held_locks.names = names
+        try:
+            yield held
+        finally:
+            if held:
+                _held_locks.names[name] -= 1
     finally:
         if held:
             with contextlib.suppress(OSError):
@@ -185,6 +206,7 @@ class Store:
         the timer both write sync-state.json, and writing back a whole stale copy would undo
         the other process's changes (e.g. resurrect a login right after a sign-out)."""
         with self.lock, file_lock("store-" + os.path.basename(self.path)):
+            self._validate_sync_state()
             self.reload()
             for k, v in kw.items():
                 if v is None:
@@ -200,7 +222,16 @@ class Store:
         with self.lock, file_lock("store-" + os.path.basename(self.path)):
             self._write()
 
+    def _validate_sync_state(self):
+        if self.path == SYNC_STATE_PATH:
+            from .auth import LinuxManifest
+            LinuxManifest()._read_file()  # strict; never turn corrupt auth into {}
+
     def _write(self):
+        self._validate_sync_state()
+        if self.path == SYNC_STATE_PATH and "authV2" in self.data:
+            from .auth import validate_manifest
+            validate_manifest(self.data["authV2"])
         ensure_dirs()
         write_json(self.path, self.data, compact=False)
 
@@ -367,10 +398,11 @@ def today_key():
 # ---- HTTP (urllib, synchronous; call off the GUI thread) -----------------------------------
 
 class Resp(object):
-    __slots__ = ("status", "data", "headers", "error")
+    __slots__ = ("status", "data", "headers", "error", "definitely_not_sent")
 
-    def __init__(self, status, data=None, headers=None, error=None):
+    def __init__(self, status, data=None, headers=None, error=None, definitely_not_sent=False):
         self.status, self.data, self.headers, self.error = status, data, headers or {}, error
+        self.definitely_not_sent = definitely_not_sent
 
     def json(self):
         try:
@@ -401,4 +433,10 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             data = None
         return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()})
     except Exception as e:  # network down, DNS, TLS, timeout
-        return Resp(0, None, None, str(e) or e.__class__.__name__)
+        import socket
+        cause = e.reason if isinstance(e, urllib.error.URLError) else e
+        # Only connection establishment failures prove no OAuth body reached the
+        # issuer. Read/write timeouts and resets remain ambiguous.
+        not_sent = isinstance(cause, socket.gaierror) or (isinstance(cause, OSError) and
+            cause.errno in (errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH))
+        return Resp(0, None, None, str(e) or e.__class__.__name__, definitely_not_sent=not_sent)

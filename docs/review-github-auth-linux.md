@@ -1,5 +1,26 @@
 # GH-AUTH-STABLE: независимое Linux review
 
+## Rev5b: source delta PASS, полный RUN НЕ PASS
+
+Последующий full RUN с accepted legacy fixtures и разрешённым loopback:
+**284 tests / 1 FAIL / 26 SKIP**, exit1, 20.117s,
+`/tmp/ccl-auth-linux-final2-full.log`. Последний legacy oracle terminal rc1
+обновлён на rc2+обязательный login hint; независимый delta PASS,
+targeted TestNoTokenSubstring **1 PASS**, exit0. Итоговый Ubuntu CI 0 skip
+и package/QA ещё pending. Final sync `63a8674557df6c1da06385c1d2e5c214a821deb5719b3b192c1a3d609a60772f`
+сохраняет cancelled sentinel до auth status publication; delta Code+Security PASS.
+
+Независимые CodeReviewer/SecurityAnalyst приняли production delta auth
+`48ee84cac854b7174eebd78446cb346199ffb2ff09f76801eb537838daef9d60`,
+vault `96ae997f72d384a10c51d2667930ad9f6da2ac864b174b7120584a7c822e0fcc`.
+Root после отдельного full isolation PASS выполнил frozen copy full discover:
+**283 tests / 19 failures / 4 errors / 26 skipped**, exit1, 38.104s,
+`/tmp/ccl-auth-linux-v5b-full.log`. Две failures — подтверждённый неверный
+grant-count oracle (Tester исправил); две errors — sandbox запрещает loopback
+bind, следующий разрешённый RUN с эскалацией/Ubuntu CI. Остальные legacy
+fixtures/контрактные assertions разбирает отдельный Tester; не объявлять
+production/пакет полностью принятым до исправлений и повторного full RUN.
+
 ## Rev4: прерванный RUN и новые findings
 
 Root после narrow isolation PASS запустил core/integration/concurrency/UI
@@ -11,6 +32,13 @@ Traceback `/tmp/ccl-auth-final-linux.log` подтверждает fixture deadl
 Свежий CodeReviewer также нашёл P1 candidate access expiry до identity:
 auth345–352 бесконечно `/user` старым access вместо valid candidate refresh.
 Security P1 reservation-before-writer описан в security-github-auth.md.
+
+После narrow isolation approval root повторил frozen rev4 набор без
+TestActualFileCrash: **60 tests / 57 PASS / 3 Qt SKIP**, exit0, log
+`/tmp/ccl-auth-final-linux-nonkill.log`. Core, actual sync/CLI pipeline,
+durable device attempt и isolation guards прошли; PyQt отсутствует локально.
+Это не acceptance rev5 и не full-suite/ALSE PASS; новый writer/candidate
+протокол ещё исправляется. SIGKILL regression повтор pending.
 
 2026-10-04, CodeReviewer GPT-6 Astra/high, отдельный контекст от автора.
 Ревизия `eef4b77ae357b4923e0427c73135beb83a37d1fd` + frozen Linux source diff.

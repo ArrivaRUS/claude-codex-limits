@@ -165,12 +165,13 @@ class TestLoginAttempts(env.SyncEnv):
     # 4: A may finish its keyring operation after B has superseded it.
     def test_cancel_a_begin_b_late_a_cannot_publish(self):
         self.sign_in()
-        before = self.state_text()
         old_items = dict(self.ss.items)
         a = sync.begin_login()
         sync.cancel_login(a)
         b = sync.begin_login()
-        self.assertGreater(b, a)
+        self.assertNotEqual(b, a)
+        self.assertIsInstance(b, str)
+        before = self.state_text()
         sync.cancel_login(a)
         self.assertFalse(sync.is_current(a))
         self.assertTrue(sync.is_current(b))
@@ -187,12 +188,15 @@ class TestLoginAttempts(env.SyncEnv):
 
     def test_cancel_during_store_cleans_token(self):
         attempt = sync.begin_login()
-        original_set = self.ss.set
-        def cancel_in_set(token, generation):
-            original_set(token, generation)
+        original_store = vault.store
+        def cancel_after_store(token):
+            ref = original_store(token)
+            # Cancel on the calling thread, which owns the durable sync flock.
+            # A fake SS worker cannot acquire the caller's interprocess lock.
             sync.cancel_login(attempt)
+            return ref
         self.gh.on("GET", "/user", env.resp(200, {"login": "me"}))
-        with patch.object(self.ss, "set", side_effect=cancel_in_set):
+        with patch.object(vault, "store", side_effect=cancel_after_store):
             with self.assertRaisesRegex(sync.LoginError, "^cancelled$"):
                 sync.login_finish(self.token, attempt=attempt)
         self.assertEqual(self.ss.items, {})

@@ -13,6 +13,8 @@ REAL_FILES = tuple(os.path.join(_HOME, p) for p in (
     ".config/claude-codex-limits/machine-id",
     ".local/state/claude-codex-limits/sync-state.json",
     ".local/state/claude-codex-limits/sync-remote.json",
+    ".config/claude-codex-limits/github-credentials",
+    ".local/state/claude-codex-limits/github-credential-writers",
 ))
 
 
@@ -28,7 +30,7 @@ def real_files_state():
 
 REAL_BEFORE = real_files_state()
 
-ROOT = tempfile.mkdtemp(prefix="ccl-tests-")
+ROOT = tempfile.mkdtemp(prefix="ccl-tests-", dir="/tmp")
 atexit.register(shutil.rmtree, ROOT, ignore_errors=True)
 for kind in ("CONFIG", "STATE", "CACHE", "DATA"):
     os.environ["XDG_" + kind + "_HOME"] = os.path.join(ROOT, kind.lower())
@@ -37,15 +39,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from ccl import common, vault  # noqa: E402
 
-vault._ss = lambda: None
-
-from ccl import sync  # noqa: E402
-
 
 def no_network(*args, **kwargs):
     raise AssertionError("сеть в тестах запрещена")
 
 
+vault._ss = no_network
+if hasattr(vault, "_ss_v2"):
+    vault._ss_v2 = no_network
+# Default construction is never a test dependency: explicit fake adapters only.
+if hasattr(vault, "CredentialStore"):
+    vault.CredentialStore.__init__ = no_network
+
+from ccl import sync  # noqa: E402
+
+if hasattr(sync, "auth_owner"):
+    sync.auth_owner = no_network
 sync.transport = no_network
 # Also protect helpers outside sync (updates, limits); tests may install their own fakes.
 common.http = no_network

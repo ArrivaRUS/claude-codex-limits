@@ -8,6 +8,16 @@ import AppKit
 import CoreText
 import ImageIO
 import Darwin
+import Security
+
+// Dispatch before defaults, data-directory creation or production auth construction.
+if CommandLine.arguments.contains("--auth-selftest") {
+    runGitHubAuthSelfTests()
+    exit(0)
+}
+if CommandLine.arguments.contains("--github-auth-store-helper") {
+    exit(githubAuthNativeStoreHelper())
+}
 
 // MARK: - Constants
 
@@ -21,11 +31,15 @@ let KC_SERVICE = "Claude Code-credentials"
 let BUNDLE_ID  = "com.arrivarus.claudecodexlimits"
 let AGENT_PLIST = HOME + "/Library/LaunchAgents/\(BUNDLE_ID).plist"
 
+// Set only by an isolated selftest before drawing; nil preserves production I/O.
+private var isolatedSelfTestAssets: String? = nil
+
 func assetPath(_ name: String) -> String {
     if let res = Bundle.main.resourcePath {
         let p = res + "/" + name
         if FileManager.default.fileExists(atPath: p) { return p }
     }
+    if let fixtures = isolatedSelfTestAssets { return fixtures + "/" + name }
     return DATA_DIR + "/assets/" + name
 }
 
@@ -1272,7 +1286,9 @@ typealias SyncHTTP = (String, String, [String: String], Data?, Double) -> SyncHT
 private func syncHTTP(_ url: String, _ method: String, _ headers: [String: String], _ body: Data?, _ timeout: Double) -> SyncHTTPResult {
     let authenticated = headers.keys.contains { $0.lowercased() == "authorization" }
     guard !authenticated || syncAPIOrigin(url) else { return (0, nil, "GitHub API origin required", [:]) }
-    return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: authenticated)
+    let oauth = method == "POST" && syncOAuthEndpoint(url)
+    if method == "POST", body != nil, !authenticated, !oauth { return (0, nil, "OAuth endpoint required", [:]) }
+    return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: authenticated || oauth)
 }
 
 func syncKeychainTimeout() -> String { tr("Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s") }
@@ -1287,17 +1303,444 @@ func syncKeychainReadError(_ result: SyncKeychainRead) -> String {
 
 struct SyncCachedMachine: Codable { var id: String; var name: String; var os: String; var updated: Date? }
 struct SyncRemoteCache: Codable {
+    var authEpoch: String?
+    var authUserID: String?
     var machines: [SyncCachedMachine] = []
     var days: [String: [String: [String: DayModelUsage]]] = [:]
 }
 
+/// Pure account-binding check shared by loading, cached render reads and fixtures.
+func syncCacheMatches(_ cache: SyncRemoteCache, snapshot: GitHubAuthSnapshot?) -> Bool {
+    guard let snapshot = snapshot else { return true } // Explicit ownerless legacy test adapter.
+    guard let epoch = snapshot.epoch, cache.authEpoch == epoch,
+          cache.authUserID == snapshot.userID else { return false }
+    // Legacy sessions have no stable user ID. Their per-process nonce is never restored
+    // after restart; only a captured-token-fenced in-memory cache may match it.
+    return epoch.hasPrefix("legacy-cache-") || snapshot.userID?.isEmpty == false
+}
+
+// Exact OAuth endpoints; redirects are disabled for all secret-bearing POSTs.
+func syncOAuthEndpoint(_ url: String) -> Bool {
+    guard let c = URLComponents(string: url), c.scheme == "https", c.host == "github.com",
+          c.percentEncodedHost == "github.com", c.user == nil, c.password == nil,
+          c.port == nil || c.port == 443, c.query == nil, c.fragment == nil else { return false }
+    return ["/login/device/code", "/login/oauth/access_token"].contains(c.percentEncodedPath)
+}
+private enum GitHubAuthPersistenceError: Error { case unavailable, corrupt }
+private let GITHUB_AUTH_SERVICE = "Claude Codex Limits GitHub Credential V2"
+
+private func githubAuthRefSafe(_ ref: GitHubAuthRef) -> Bool {
+    ref.backend == "keychain" && !ref.generation.isEmpty && ref.generation.utf8.count <= 128
+        && ref.generation.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") }
+}
+private func githubAuthRead(_ ref: GitHubAuthRef) -> GitHubAuthRead {
+    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") {
+        switch SecuritySyncKeychain().read() {
+        case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token, refreshToken: nil, obtainedAt: 0))
+        case .missing: return .missing
+        case .timedOut: return .timeout
+        case .failure: return .unreachable
+        }
+    }
+    guard githubAuthRefSafe(ref) else { return .corrupt }
+    let result = syncSecurity(["find-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation, "-w"])
+    switch result.status {
+    case .missing: return .missing
+    case .timedOut: return .timeout
+    case .failure(let code): return code == 36 ? .locked : .unreachable
+    case .success:
+        var encoded = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+        guard let data = Data(base64Encoded: encoded),
+              let c = try? JSONDecoder().decode(GitHubCredentialV2.self, from: data), c.schema == 2,
+              c.generation == ref.generation else { return .corrupt }
+        return .ready(c)
+    }
+}
+private func githubAuthStatus(_ status: SyncKeychainStatus) -> GitHubAuthStoreStatus {
+    switch status {
+    case .success, .missing: return .success
+    case .timedOut: return .timeout
+    case .failure(let code): return code == 36 ? .locked : .unreachable
+    }
+}
+/// Pure validation shared by the private native writer and offline fixtures.
+func githubAuthHelperEnvelope(_ input: Data, generation: String) -> GitHubCredentialV2? {
+    guard UUID(uuidString: generation)?.uuidString.lowercased() == generation,
+          input.count <= 128 * 1024, let encoded = String(data: input, encoding: .ascii),
+          !encoded.isEmpty, encoded.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_" }) else { return nil }
+    var base64 = encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+    base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+    guard let data = Data(base64Encoded: base64), let credential = try? JSONDecoder().decode(GitHubCredentialV2.self, from: data),
+          credential.schema == 2, credential.generation == generation,
+          UUID(uuidString: credential.epoch) != nil,
+          ["probe", "credential", "incomplete"].contains(credential.kind) else { return nil }
+    for token in [credential.accessToken, credential.refreshToken].compactMap({ $0 }) {
+        guard !token.isEmpty, token.utf8.count <= 16384,
+              token.unicodeScalars.allSatisfy({ $0.isASCII && $0.value > 32 && $0.value < 127 }) else { return nil }
+    }
+    return credential
+}
+enum GitHubAuthWriterPhase: String, Codable { case prepared, rpcStarted, completed, notStarted }
+struct GitHubAuthWriterRecord: Codable {
+    var schema: Int = 1
+    var generation: String
+    var operation: String
+    var phase: GitHubAuthWriterPhase
+    var epoch: String?
+    var status: Int32?
+}
+/// Strict pure protocol parser for offline fixtures. Unknown/old records never prove no RPC.
+func githubAuthWriterRecord(_ data: Data, generation: String) -> GitHubAuthWriterRecord? {
+    guard let record = try? JSONDecoder().decode(GitHubAuthWriterRecord.self, from: data),
+          record.schema == 1, record.generation == generation,
+          UUID(uuidString: record.operation)?.uuidString.lowercased() == record.operation else { return nil }
+    switch record.phase {
+    case .prepared, .rpcStarted:
+        guard record.status == nil, record.epoch.flatMap({ UUID(uuidString: $0) }) != nil else { return nil }
+    case .completed:
+        guard record.status != nil, record.epoch.flatMap({ UUID(uuidString: $0) }) != nil else { return nil }
+    case .notStarted:
+        guard record.status == nil, record.epoch == nil || record.epoch.flatMap({ UUID(uuidString: $0) }) != nil else { return nil }
+    }
+    return record
+}
+func githubAuthWriterPermitAllows(_ record: GitHubAuthWriterRecord, generation: String, operation: String, epoch: String) -> Bool {
+    record.schema == 1 && record.generation == generation && record.operation == operation
+        && record.epoch == epoch && record.phase == .prepared && record.status == nil
+}
+private func githubAuthWriterDirectory() -> String { NSHomeDirectory() + "/.claude-limits-monitor/github-auth-writers" }
+private func githubAuthWriterLock(_ generation: String) -> Int32? {
+    guard UUID(uuidString: generation)?.uuidString.lowercased() == generation else { return nil }
+    let directory = githubAuthWriterDirectory()
+    do { try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+    catch { return nil }
+    let fd = open(directory + "/" + generation + ".lock", O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { return nil }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); return nil }
+    return fd
+}
+private func githubAuthWriterLoad(_ generation: String) throws -> GitHubAuthWriterRecord? {
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: githubAuthWriterDirectory() + "/" + generation + ".json"))
+        guard let record = githubAuthWriterRecord(data, generation: generation) else { throw GitHubAuthPersistenceError.corrupt }
+        return record
+    } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+}
+private func githubAuthWriterSave(_ record: GitHubAuthWriterRecord) throws {
+    // This helper is also reachable before main globals initialize. Every path is
+    // derived from the fixed private directory and a validated generation UUID.
+    guard UUID(uuidString: record.generation)?.uuidString.lowercased() == record.generation else { throw GitHubAuthPersistenceError.corrupt }
+    let directory = githubAuthWriterDirectory()
+    let path = directory + "/" + record.generation + ".json"
+    let temporary = directory + "/." + UUID().uuidString.lowercased() + ".tmp"
+    let data = try JSONEncoder().encode(record)
+    let fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw GitHubAuthPersistenceError.unavailable }
+    defer { close(fd); unlink(temporary) }
+    try data.withUnsafeBytes { bytes in
+        var offset = 0
+        while offset < bytes.count {
+            let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { throw GitHubAuthPersistenceError.unavailable }; offset += count
+        }
+    }
+    guard fsync(fd) == 0, rename(temporary, path) == 0 else { throw GitHubAuthPersistenceError.unavailable }
+    let dirFD = open(directory, O_RDONLY)
+    guard dirFD >= 0 else { throw GitHubAuthPersistenceError.unavailable }
+    defer { close(dirFD) }
+    guard fsync(dirFD) == 0 else { throw GitHubAuthPersistenceError.unavailable }
+}
+
+private func githubAuthNativeStoreHelper() -> Int32 {
+    // This private entry point cannot choose a service, account other than a UUID,
+    // marker path or credential file. It runs before all ordinary application globals.
+    guard CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--github-auth-store-helper" else { return 64 }
+    let generation = CommandLine.arguments[2], operation = CommandLine.arguments[3]
+    guard UUID(uuidString: operation)?.uuidString.lowercased() == operation else { return 64 }
+    var input = Data()
+    do {
+        while let chunk = try FileHandle.standardInput.read(upToCount: min(8192, 128 * 1024 + 1 - input.count)), !chunk.isEmpty {
+            input.append(chunk)
+            guard input.count <= 128 * 1024 else { return 65 }
+        }
+    } catch { return 65 }
+    guard let credential = githubAuthHelperEnvelope(input, generation: generation) else { return 65 }
+    let service = "Claude Codex Limits GitHub Credential V2"
+    var trusted: SecTrustedApplication?
+    guard SecTrustedApplicationCreateFromPath("/usr/bin/security", &trusted) == errSecSuccess, let trusted = trusted else { return 70 }
+    var access: SecAccess?
+    // Preserve the stable system security tool's access across ad-hoc app updates.
+    // This is an explicit trusted-app ACL, never an allow-all (-A) ACL.
+    guard SecAccessCreate(service as CFString, [trusted] as CFArray, &access) == errSecSuccess,
+          let access = access else { return 70 }
+    let attributes: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: generation,
+        kSecAttrAccess as String: access,
+        kSecValueData as String: input,
+    ]
+    // The permit lock is held across the native RPC. Recovery can close an absent or
+    // prepared permit before any delayed helper gets here; operation UUIDs prevent ABA.
+    guard let writerFD = githubAuthWriterLock(generation) else { return 69 }
+    defer { flock(writerFD, LOCK_UN); close(writerFD) }
+    var record: GitHubAuthWriterRecord
+    do {
+        guard let value = try githubAuthWriterLoad(generation),
+              githubAuthWriterPermitAllows(value, generation: generation, operation: operation, epoch: credential.epoch) else { return 78 }
+        record = value; record.phase = .rpcStarted
+        try githubAuthWriterSave(record)
+    } catch { return 75 }
+    // Add only. A retry cannot overwrite any previously stored immutable generation.
+    let status = SecItemAdd(attributes as CFDictionary, nil)
+    record.phase = .completed; record.status = status
+    do { try githubAuthWriterSave(record) } catch { return 75 }
+
+    if status == errSecSuccess || status == errSecDuplicateItem { return 0 }
+    return status == errSecInteractionNotAllowed ? 36 : 1
+}
+
+private final class GitHubAuthWriters: @unchecked Sendable {
+    static let shared = GitHubAuthWriters()
+    private let lock = NSLock()
+    private var running: [String: Process] = [:]
+    private var completed: [String: Int32] = [:]
+    func completion(operation: String) -> Int32? { lock.lock(); defer { lock.unlock() }; return completed[operation] }
+    func completed(operation: String, status: Int32) { lock.lock(); completed[operation] = status; lock.unlock() }
+    func retain(_ process: Process, generation: String) { lock.lock(); running[generation] = process; lock.unlock() }
+    func release(generation: String) { lock.lock(); running.removeValue(forKey: generation); lock.unlock() }
+}
+private func githubAuthWriterMarker(_ ref: GitHubAuthRef) -> String {
+    DATA_DIR + "/github-auth-writers/" + ref.generation + ".done"
+}
+private func githubAuthSettled(_ ref: GitHubAuthRef) -> Bool {
+    guard githubAuthRefSafe(ref) else { return false }
+    // Only the journal flag written BEFORE stage opts a ref into the permit protocol.
+    // Older helpers without a permit must still supply their original completion proof.
+    guard let data = try? Data(contentsOf: URL(fileURLWithPath: DATA_DIR + "/github-auth-state.json")),
+          let manifest = try? JSONDecoder().decode(GitHubAuthManifest.self, from: data) else { return false }
+    if !(manifest.permitWriterRefs ?? []).contains(ref) {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: githubAuthWriterMarker(ref))),
+              let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let complete = value["completed"] as? NSNumber, CFGetTypeID(complete) == CFBooleanGetTypeID(), complete.boolValue,
+              let status = value["status"] as? NSNumber, CFGetTypeID(status) != CFBooleanGetTypeID() else { return false }
+        return Int32(exactly: status.int64Value) != nil
+    }
+    guard let fd = githubAuthWriterLock(ref.generation) else { return false }
+    defer { flock(fd, LOCK_UN); close(fd) }
+    do {
+        if var record = try githubAuthWriterLoad(ref.generation) {
+            switch record.phase {
+            case .rpcStarted:
+                // A normally returned helper proves the synchronous RPC is over even
+                // if its final record write failed. A signal/kill never supplies this.
+                guard let status = GitHubAuthWriters.shared.completion(operation: record.operation) else { return false }
+                record.phase = .completed; record.status = status
+                try githubAuthWriterSave(record); return true
+            case .completed, .notStarted: return true
+            case .prepared:
+                // Closing this exact operation while holding the same lock as the helper
+                // proves no RPC and prevents it from being started after this return.
+                record.phase = .notStarted; try githubAuthWriterSave(record); return true
+            }
+        }
+        // Crash in auth journal -> stage handoff. No permit was ever published, so no
+        // protocol-aware helper could issue an RPC; close the slot before releasing it.
+        let closed = GitHubAuthWriterRecord(generation: ref.generation, operation: UUID().uuidString.lowercased(), phase: .notStarted)
+        try githubAuthWriterSave(closed); return true
+    } catch { return false }
+}
+private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> GitHubAuthStoreStatus {
+    guard githubAuthRefSafe(ref), c.generation == ref.generation,
+          let data = try? JSONEncoder().encode(c) else { return .failed }
+    let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    // 16 KiB tokens plus bounded identity/metadata fit this 128 KiB native envelope;
+    // no CLI command-line/interactive-line size participates in the write path.
+    guard githubAuthHelperEnvelope(Data(encoded.utf8), generation: ref.generation) != nil else { return .failed }
+    let operation = UUID().uuidString.lowercased()
+    guard let fd = githubAuthWriterLock(ref.generation) else { return .timeout }
+    do {
+        if let previous = try githubAuthWriterLoad(ref.generation), previous.phase == .rpcStarted {
+            flock(fd, LOCK_UN); close(fd); return .timeout
+        }
+        let record = GitHubAuthWriterRecord(generation: ref.generation, operation: operation, phase: .prepared, epoch: c.epoch)
+        try githubAuthWriterSave(record)
+    } catch { flock(fd, LOCK_UN); close(fd); return .unreachable }
+    flock(fd, LOCK_UN); close(fd)
+    let process = Process(), input = Pipe(), ended = DispatchSemaphore(value: 0)
+    // No security -i line parser: native SecItemAdd receives the complete envelope.
+    // Secrets are stdin only; argv contains a private operation and immutable UUID.
+    guard let executable = Bundle.main.executableURL else { return .failed }
+    process.executableURL = executable
+    process.arguments = ["--github-auth-store-helper", ref.generation, operation]
+    process.standardInput = input; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+    let writers = GitHubAuthWriters.shared
+    let jobID = UUID().uuidString
+    writers.retain(process, generation: jobID)
+    process.terminationHandler = { process in
+        if process.terminationReason == .exit, (0..<128).contains(process.terminationStatus) {
+            writers.completed(operation: operation, status: process.terminationStatus)
+        }
+        writers.release(generation: jobID); ended.signal()
+    }
+    do { try process.run() } catch { writers.release(generation: jobID); return .unreachable }
+    _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    DispatchQueue.global(qos: .utility).async {
+        try? input.fileHandleForWriting.write(contentsOf: Data(encoded.utf8))
+        try? input.fileHandleForWriting.close()
+    }
+    guard ended.wait(timeout: .now() + 15) == .success else { return .timeout }
+    guard process.terminationReason == .exit, (0..<128).contains(process.terminationStatus),
+          githubAuthSettled(ref) else { return .timeout }
+    if process.terminationStatus == 36 { return .locked }
+    return process.terminationStatus == 0 ? .success : .unreachable
+}
+private func githubAuthDelete(_ ref: GitHubAuthRef) -> GitHubAuthStoreStatus {
+    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") { return githubAuthStatus(SecuritySyncKeychain().delete()) }
+    guard githubAuthRefSafe(ref) else { return .failed }
+    return githubAuthStatus(syncSecurity(["delete-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation]).status)
+}
+private func githubAuthAtomicSave(_ manifest: GitHubAuthManifest, path: String) throws {
+    let directory = (path as NSString).deletingLastPathComponent
+    try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+    let temporary = directory + "/.github-auth-" + UUID().uuidString
+    let data = try JSONEncoder().encode(manifest)
+    let fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw GitHubAuthPersistenceError.unavailable }
+    var closed = false
+    defer { if !closed { close(fd) }; unlink(temporary) }
+    try data.withUnsafeBytes { bytes in
+        var offset = 0
+        while offset < bytes.count {
+            let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+            if count < 0 && errno == EINTR { continue }
+            guard count > 0 else { throw GitHubAuthPersistenceError.unavailable }; offset += count
+        }
+    }
+    guard fsync(fd) == 0 else { throw GitHubAuthPersistenceError.unavailable }
+    close(fd); closed = true
+    guard rename(temporary, path) == 0 else { throw GitHubAuthPersistenceError.unavailable }
+    let dirFD = open(directory, O_RDONLY)
+    guard dirFD >= 0 else { throw GitHubAuthPersistenceError.unavailable }
+    defer { close(dirFD) }
+    guard fsync(dirFD) == 0 else { throw GitHubAuthPersistenceError.unavailable }
+}
+private final class GitHubAuthTransportReply: @unchecked Sendable {
+    let lock = NSLock()
+    var value = GitHubAuthHTTP(status: 0, json: nil)
+    func set(_ response: GitHubAuthHTTP) { lock.lock(); value = response; lock.unlock() }
+    func get() -> GitHubAuthHTTP { lock.lock(); defer { lock.unlock() }; return value }
+}
+private func githubAuthOAuthTransport(_ fields: [String: String]) -> GitHubAuthHTTP {
+    let endpoint = "https://github.com/login/oauth/access_token"
+    guard syncOAuthEndpoint(endpoint), let url = URL(string: endpoint) else { return GitHubAuthHTTP(status: 0, json: nil, knownNotSent: true) }
+    var request = URLRequest(url: url, timeoutInterval: 15)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+    request.setValue("ClaudeCodexLimits", forHTTPHeaderField: "User-Agent")
+    request.httpBody = Data(fields.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")" }.joined(separator: "&").utf8)
+    let response = GitHubAuthTransportReply(), semaphore = DispatchSemaphore(value: 0)
+    let session = URLSession(configuration: .ephemeral, delegate: SyncNoRedirects(), delegateQueue: nil)
+    defer { session.invalidateAndCancel() }
+    let task = session.dataTask(with: request) { data, reply, error in
+        let http = reply as? HTTPURLResponse
+        let e = error as NSError?
+        // These transport failures prove there was no connection on which to send the
+        // grant. Read timeouts, connection loss and cancellation are deliberately unknown.
+        let notSent = http == nil && e?.domain == NSURLErrorDomain &&
+            [NSURLErrorNotConnectedToInternet, NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed,
+             NSURLErrorCannotConnectToHost].contains(e?.code ?? 0)
+        var headers: [String: String] = [:]
+        for (key, value) in http?.allHeaderFields ?? [:] { headers[String(describing: key).lowercased()] = String(describing: value) }
+        response.set(GitHubAuthHTTP(status: http?.statusCode ?? 0,
+            json: data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] },
+            headers: headers, knownNotSent: notSent))
+        semaphore.signal()
+    }
+    task.resume()
+    guard semaphore.wait(timeout: .now() + 20) == .success else { task.cancel(); return GitHubAuthHTTP(status: 0, json: nil) }
+    return response.get()
+}
+private func makeProductionGitHubAuth() -> GitHubAuthOwner {
+    let path = DATA_DIR + "/github-auth-state.json"
+    let dependencies = GitHubAuthDependencies(
+        clock: { Date().timeIntervalSince1970 },
+        loadManifest: {
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                let value = try JSONDecoder().decode(GitHubAuthManifest.self, from: data)
+                guard value.formatVersion == 2 else { throw GitHubAuthPersistenceError.corrupt }; return value
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
+        },
+        saveManifest: { try githubAuthAtomicSave($0, path: path) },
+        readStore: githubAuthRead, stageStore: githubAuthStage, deleteStore: githubAuthDelete,
+        transport: githubAuthOAuthTransport, identity: { token in
+            let r = syncHTTP("https://api.github.com/user", "GET",
+                ["Authorization": "Bearer \(token)", "Accept": "application/vnd.github+json", "User-Agent": "ClaudeCodexLimits"], nil, 20)
+            if r.status == 401 { return .unauthorized }
+            guard r.status == 200, let data = r.data,
+                  let j = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let id = j["id"] as? NSNumber, CFGetTypeID(id) != CFBooleanGetTypeID(),
+                  id.doubleValue.isFinite, id.doubleValue > 0,
+                  let login = j["login"] as? String, !login.isEmpty else { return .temporary }
+            return .ready(userID: id.stringValue, login: login)
+        }, withLock: { body in
+            try FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
+            let fd = open(DATA_DIR + "/github-auth.lock", O_CREAT | O_RDWR | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            guard fd >= 0 else { throw GitHubAuthPersistenceError.unavailable }
+            defer { close(fd) }
+            // A crashed process releases flock. Bound contention without ever proceeding unlocked.
+            let deadline = Date().addingTimeInterval(60)
+            while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+                guard (errno == EWOULDBLOCK || errno == EINTR), Date() < deadline else { throw GitHubAuthPersistenceError.unavailable }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            defer { flock(fd, LOCK_UN) }; try body()
+        }, checkpoint: { _, _, _ in }, jitter: { Double.random(in: 0...15) }, legacy: {
+            let d = UserDefaults.standard
+            if d.bool(forKey: "syncRevoked") { return .revoked }
+            guard let login = d.string(forKey: "syncLogin") else { return .signedOut }
+            switch SecuritySyncKeychain().read() {
+            case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token,
+                refreshToken: nil, obtainedAt: 0, login: login))
+            case .missing: return .missing
+            case .timedOut: return .timeout
+            case .failure(let code): return code == 36 ? .locked : .unreachable
+            }
+        }, settled: githubAuthSettled)
+    return GitHubAuthOwner(dependencies: dependencies, clientID: GITHUB_CLIENT_ID)
+}
+
+func githubAuthMessage(_ reason: String, language: String) -> String {
+    let english = language == "en"
+    switch reason {
+    case "cleanup_pending": return english ? "Signed out here; secure-storage cleanup is pending. Retrying automatically." : "Вход на этом компьютере отключён; очистка хранилища ещё не завершена. Повторим автоматически."
+    case "login_incomplete": return english ? "Sign-in was not completed. Try signing in again." : "Вход не завершён. Попробуйте войти заново."
+    case "renewing": return english ? "Renewing GitHub sign-in automatically…" : "Автоматически продлеваем вход в GitHub…"
+    case "missing": return english ? "Sign-in is missing from secure storage. Sign in again." : "Вход не найден в защищённом хранилище. Войдите заново."
+    case "lost_result": return english ? "Couldn't recover the renewal result. Sign in again." : "Не удалось восстановить результат продления. Войдите заново."
+    case "bad_refresh_token", "refresh_expired", "access_expired", "revoked": return english ? "GitHub sign-in needs renewal. Sign in again." : "Необходимо обновить вход в GitHub. Войдите заново."
+    case "incomplete_candidate", "identity_changed", "corrupt": return english ? "Couldn't verify the saved sign-in. Sign in again." : "Не удалось проверить сохранённый вход. Войдите заново."
+    case "locked": return english ? "Unlock Keychain; sign-in will recover automatically." : "Разблокируйте Связку ключей; вход восстановится автоматически."
+    case "response_unknown": return english ? "Renewal response is unavailable; checking saved sign-in." : "Ответ продления недоступен; проверяем сохранённый вход."
+    case "identity_unavailable", "candidate_unauthorized", "login_pending": return english ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."
+    default: return english ? "Sign-in is temporarily unavailable; retrying automatically." : "Вход временно недоступен; повторим автоматически."
+    }
+}
+
 final class GitHubSync {
-    static let shared = GitHubSync()
+    static let shared = GitHubSync(authOwner: makeProductionGitHubAuth())
     private let q = DispatchQueue(label: "ccl.sync", qos: .utility)
     private let lock = NSLock()
     private var _ui = SyncUIState()
     private var _remote = SyncRemoteCache()
     private var loginID: UUID?
+    private var loginEpoch: (id: UUID, epoch: String)?
     private(set) var verifyURL = "https://github.com/login/device"
     private var backoffUntil = Date.distantPast
     private var keychainBackoffUntil = Date.distantPast
@@ -1310,6 +1753,8 @@ final class GitHubSync {
         if CommandLine.arguments.contains("--sync-selftest") { selfTestLoginCheckpoint?(point) }
     }
 
+    private let authOwner: GitHubAuthOwner?
+    private var capturedAccess: GitHubAuthAccess?
     private let transport: SyncHTTP
     private let keychain: SyncKeychain
     private let defaults: UserDefaults
@@ -1320,7 +1765,9 @@ final class GitHubSync {
 
     init(transport: @escaping SyncHTTP = syncHTTP,
          keychain: SyncKeychain = SecuritySyncKeychain(), defaults: UserDefaults = .standard,
-         remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil, revokeRecheckDelay: TimeInterval = 4) {
+         remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil, revokeRecheckDelay: TimeInterval = 4,
+         authOwner: GitHubAuthOwner? = nil) {
+        self.authOwner = authOwner
         self.transport = transport; self.keychain = keychain; self.defaults = defaults
         self.remotePath = remotePath; self.suppliedMachineId = machineId
         self.revokeRecheckDelay = revokeRecheckDelay
@@ -1335,7 +1782,9 @@ final class GitHubSync {
 
     var ui: SyncUIState { lock.lock(); defer { lock.unlock() }; return _ui }
     func remoteDays() -> [String: [String: [String: DayModelUsage]]] {
-        lock.lock(); defer { lock.unlock() }; return _ui.phase == .on ? _remote.days : [:]
+        let snapshot = authOwner?.snapshot() // Nonsecret memory snapshot; no credential I/O.
+        lock.lock(); defer { lock.unlock() }
+        return _ui.phase == .on && syncCacheMatches(_remote, snapshot: snapshot) ? _remote.days : [:]
     }
     /// `f` runs under the lock — it must not call anything that takes the lock again
     /// (machineList(), ui, remoteDays()); compute those first and capture the values.
@@ -1366,6 +1815,16 @@ final class GitHubSync {
     /// For isolated callers without a run loop; do not overlap with queued operations.
     func loadSynchronously() {
         let d = defaults
+        if let owner = authOwner {
+            let result = owner.ensureAccess(reason: "startup")
+            var cache = SyncRemoteCache()
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: remotePath)),
+               let loaded = try? JSONDecoder().decode(SyncRemoteCache.self, from: data),
+               syncCacheMatches(loaded, snapshot: owner.snapshot()) { cache = loaded }
+            lock.lock(); _remote = cache; lock.unlock()
+            _ = projectAuth(result)
+            return
+        }
         if let data = try? Data(contentsOf: URL(fileURLWithPath: remotePath)),
            let c = try? JSONDecoder().decode(SyncRemoteCache.self, from: data) {
             lock.lock(); _remote = c; lock.unlock()
@@ -1397,8 +1856,47 @@ final class GitHubSync {
         if let e = keychainError { recordError(e) }
     }
 
+    /// Only nonsecret snapshots reach rendering. All owner/store I/O runs on the sync queue.
+    @discardableResult private func projectAuth(_ result: GitHubAuthResult) -> String? {
+        guard let owner = authOwner else { return nil }
+        let snapshot = owner.snapshot()
+        let ms = machineList()
+        switch result {
+        case .ready(let access):
+            capturedAccess = access
+            if let login = snapshot.login { defaults.set(login, forKey: "syncLogin") }
+            defaults.set(false, forKey: "syncRevoked")
+            setUI { state in
+                if state.phase != .awaitingCode { state.phase = .on }
+                state.login = snapshot.login; state.authState = snapshot.state
+                state.authReason = snapshot.reason; state.keychainItemLeft = true; state.machines = ms
+            }
+            return access.token
+        case .signedOut:
+            capturedAccess = nil
+            setUI {
+                if $0.phase != .awaitingCode { $0.phase = .off }
+                $0.authState = "signedOut"; $0.authReason = snapshot.reason
+                $0.keychainItemLeft = snapshot.cleanupPending; $0.login = nil
+                $0.error = snapshot.cleanupPending ? githubAuthMessage("cleanup_pending", language: appLang()) : nil
+            }
+        case .temporary(let reason), .actionRequired(let reason):
+            capturedAccess = nil
+            let action: Bool
+            if case .actionRequired = result { action = true } else { action = false }
+            setUI {
+                if $0.phase != .awaitingCode { $0.phase = action ? .revoked : .on }
+                $0.login = snapshot.login ?? $0.login; $0.authState = snapshot.state
+                $0.authReason = reason; $0.keychainItemLeft = snapshot.hasCredential; $0.machines = ms
+            }
+            recordError(githubAuthMessage(reason, language: appLang()))
+        }
+        return nil
+    }
+
     private func machineList() -> [SyncMachine] {
-        lock.lock(); let r = _remote; lock.unlock()
+        let snapshot = authOwner?.snapshot()
+        lock.lock(); let r = syncCacheMatches(_remote, snapshot: snapshot) ? _remote : SyncRemoteCache(); lock.unlock()
         let pushed = defaults.object(forKey: "syncPushedAt") as? Date
         var out = [SyncMachine(name: machineName, os: osName, updated: pushed, isSelf: true)]
         out += r.machines.sorted { $0.name < $1.name }.map { SyncMachine(name: $0.name, os: $0.os, updated: $0.updated, isSelf: false) }
@@ -1409,7 +1907,12 @@ final class GitHubSync {
         let c = URLComponents(string: path)
         let url = c?.scheme == nil && c?.host == nil && path.first == "/" ? "https://api.github.com" + path : path
         guard syncAPIOrigin(url) else { return (0, nil, [:], "GitHub API origin required") }
-        var h = ["Authorization": "Bearer \(token)", "Accept": "application/vnd.github+json",
+        let currentToken: String
+        if let owner = authOwner {
+            guard let value = projectAuth(owner.ensureAccess(reason: "api")) else { return (0, nil, [:], "Sign-in unavailable") }
+            currentToken = value
+        } else { currentToken = token }
+        var h = ["Authorization": "Bearer \(currentToken)", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ClaudeCodexLimits"]
         var data: Data? = nil
         if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
@@ -1428,16 +1931,24 @@ final class GitHubSync {
         defaults.bool(forKey: "syncRevoked") || defaults.string(forKey: "syncLogin") != nil ? .revoked : .off
     }
     func cancelLogin() {
+        let hadLogin = ui.phase == .awaitingCode
         setUI {
             guard loginID != nil else { return }
             let phase = cancelledLoginPhase
             loginID = nil; $0.phase = phase; $0.userCode = nil
         }
+        if hadLogin, let owner = authOwner { q.async {
+            if let captured = self.loginEpoch { _ = owner.cancelLogin(epoch: captured.epoch) }
+            _ = self.projectAuth(owner.ensureAccess(reason: "cancel"))
+        } }
     }
     private func loginIsCurrent(_ id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }; return loginID == id
     }
     private func loginFailed(_ id: UUID, _ error: String) {
+        if let owner = authOwner, let captured = loginEpoch, captured.id == id {
+            _ = owner.abortLogin(epoch: captured.epoch)
+        }
         let phase = cancelledLoginPhase
         setUI {
             guard loginID == id else { return }
@@ -1445,20 +1956,36 @@ final class GitHubSync {
         }
     }
     private func form(_ url: String, _ fields: [String: String]) -> [String: Any]? {
+        guard syncOAuthEndpoint(url) else { return nil }
         let body = fields.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? $0.value)" }.joined(separator: "&")
         let r = transport(url, "POST", ["Accept": "application/json", "User-Agent": "ClaudeCodexLimits",
                                                   "Content-Type": "application/x-www-form-urlencoded"], Data(body.utf8), 15)
+        guard (200..<300).contains(r.status) else { return nil }
         return r.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
     }
     private func runLogin(_ id: UUID) {
         guard loginIsCurrent(id) else { return }
-        guard let j = form("https://github.com/login/device/code", ["client_id": GITHUB_CLIENT_ID, "scope": "gist"]),
+        let authEpoch = authOwner?.beginLogin()
+        loginEpoch = authEpoch.map { (id: id, epoch: $0) }
+        if authOwner != nil && authEpoch == nil {
+            loginFailed(id, githubAuthMessage("storage_unavailable", language: appLang())); return
+        }
+        if authEpoch != nil {
+            // An explicit account change cannot reuse another account's gist or totals,
+            // including while a durably saved candidate waits for identity validation.
+            for key in ["syncLogin", "syncGistId", "syncPushHash", "syncDiscoveredAt", "syncPushedAt", "syncLastOkAt", "syncRevoked"] { defaults.removeObject(forKey: key) }
+            lock.lock(); _remote = SyncRemoteCache(); lock.unlock()
+            try? FileManager.default.removeItem(atPath: remotePath)
+            setUI { $0.login = nil; $0.machines = []; $0.lastSync = nil; $0.lastUploadAt = nil }
+        }
+        guard let j = form("https://github.com/login/device/code", ["client_id": GITHUB_CLIENT_ID, "scope": "gist offline_access"]),
               let deviceCode = j["device_code"] as? String, let userCode = j["user_code"] as? String else {
             loginFailed(id, tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again."))
             return
         }
         guard loginIsCurrent(id) else { return }
-        verifyURL = (j["verification_uri"] as? String) ?? verifyURL
+        // Do not open an issuer-supplied arbitrary URL.
+        verifyURL = "https://github.com/login/device"
         var interval = (j["interval"] as? Double) ?? 5
         let deadline = Date().addingTimeInterval((j["expires_in"] as? Double) ?? 900)
         setUI { if loginID == id { $0.userCode = userCode } }
@@ -1469,6 +1996,13 @@ final class GitHubSync {
                                ["client_id": GITHUB_CLIENT_ID, "device_code": deviceCode,
                                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code"]) else { continue }
             guard loginIsCurrent(id) else { return }
+            if let owner = authOwner, let epoch = authEpoch, t["access_token"] != nil || t["refresh_token"] != nil {
+                let result = owner.completeLogin(response: t, epoch: epoch, isCurrent: { self.loginIsCurrent(id) })
+                guard loginIsCurrent(id) else { _ = owner.cancelLogin(epoch: epoch); return }
+                setUI { loginID = nil; $0.userCode = nil; $0.error = nil; $0.phase = .on }
+                if projectAuth(result) != nil { syncBody(force: true) }
+                return
+            }
             if let token = t["access_token"] as? String {
                 let me = gh("/user", token: token)
                 // Cancellation while /user was in flight must never save the issued token.
@@ -1535,7 +2069,13 @@ final class GitHubSync {
     func logout() {
         setUI { _ in loginID = nil }
         q.async {
-            let result = self.deleteKeychain(userInitiated: true)
+            if let owner = self.authOwner {
+                let result = owner.logoutDetailed()
+                guard result.accessDisabled else { self.recordError(githubAuthMessage("storage_unavailable", language: appLang())); return }
+                // Physical deletion can remain pending while the durable tombstone already
+                // disables every old ref. A fresh explicit login uses a new epoch/ref.
+            }
+            let result = self.authOwner == nil ? self.deleteKeychain(userInitiated: true) : .success
             guard result == .success || result == .missing else {
                 self.recordError(result == .timedOut ? syncKeychainTimeout() : tr("Не удалось удалить вход из Связки ключей", "Couldn't delete the sign-in from Keychain"))
                 return
@@ -1545,6 +2085,7 @@ final class GitHubSync {
             self.lock.lock(); self._remote = SyncRemoteCache(); self.lock.unlock()
             try? FileManager.default.removeItem(atPath: self.remotePath)
             self.setUI { $0 = SyncUIState() }
+            if self.authOwner != nil { _ = self.projectAuth(.signedOut) }
         }
     }
 
@@ -1626,6 +2167,11 @@ final class GitHubSync {
     private func handle(_ status: Int, headers: [String: String] = [:], request: String, token: String?) -> Bool {
         if status == 0 || (500...599).contains(status) { transientFailure = true }
         if status == 401, let token = token {
+            if let owner = authOwner, let access = capturedAccess, access.refreshable {
+                let result = owner.ensureAccess(reason: "unauthorized")
+                if projectAuth(result) != nil { transientFailure = true }
+                return true
+            }
             var me = gh("/user", token: token)
             if me.status == 401 {
                 Thread.sleep(forTimeInterval: revokeRecheckDelay)
@@ -1633,7 +2179,11 @@ final class GitHubSync {
             }
             switch me.status {
             case 200: recordError(tr("401 на \(request), вход подтверждён", "401 on \(request), sign-in confirmed"))
-            case 401: revoked(token: token)
+            case 401:
+                if let owner = authOwner, let access = capturedAccess, access.epoch != "legacy" {
+                    _ = owner.confirmedUnauthorized(access)
+                    _ = projectAuth(.actionRequired("revoked"))
+                } else { revoked(token: token) }
             default:
                 // Couldn't confirm either way (network, 5xx, rate limit): keep the token, retry.
                 if me.status == 0 || (500...599).contains(me.status) { transientFailure = true }
@@ -1741,7 +2291,16 @@ final class GitHubSync {
     }
 
     private func syncBody(force: Bool, allowRetry: Bool = true) {
-        guard ui.phase == .on, Date() >= backoffUntil, Date() >= keychainBackoffUntil else { return }
+        let ownedToken: String?
+        if let owner = authOwner {
+            ownedToken = projectAuth(owner.ensureAccess(reason: "sync"))
+            guard ownedToken != nil, ui.phase != .awaitingCode, Date() >= backoffUntil else { return }
+        } else {
+            ownedToken = nil
+            guard ui.phase == .on, Date() >= backoffUntil, Date() >= keychainBackoffUntil else { return }
+        }
+        let cycleAccess = capturedAccess
+        let cycleBinding = authOwner?.snapshot()
         retryWork?.cancel(); retryWork = nil
         transientFailure = false
         defer {
@@ -1754,7 +2313,7 @@ final class GitHubSync {
         let d = defaults, attempt = Date()
         d.set(attempt, forKey: "syncLastAttemptAt")
         setUI { $0.lastAttemptAt = attempt; if $0.firstAttemptAt == nil { $0.firstAttemptAt = attempt } }
-        let credential = readKeychain()
+        let credential: SyncKeychainRead = ownedToken.map { .token($0) } ?? readKeychain()
         guard case .token(let token) = credential else {
             if case .missing = credential, d.string(forKey: "syncLogin") != nil { setUI { $0.phase = .revoked } }
             recordError(syncKeychainReadError(credential)); return
@@ -1857,14 +2416,28 @@ final class GitHubSync {
             }
             if let c = content { contents[name] = c }
         }
-        let cache = GitHubSync.merge(contents, excluding: machineId)
-        lock.lock(); _remote = cache; lock.unlock()
-        if let data = try? JSONEncoder().encode(cache) { try? data.write(to: URL(fileURLWithPath: remotePath), options: .atomic) }
-        let ms = machineList()
-        let ok = Date(), pushed = d.object(forKey: "syncPushedAt") as? Date
-        d.set(ok, forKey: "syncLastOkAt")
-        d.removeObject(forKey: "syncLastError"); d.removeObject(forKey: "syncLastErrorAt")
-        setUI { $0.machines = ms; $0.lastSync = ok; $0.lastUploadAt = pushed; $0.lastError = nil; $0.lastErrorAt = nil }
+        var cache = GitHubSync.merge(contents, excluding: machineId)
+        cache.authEpoch = cycleBinding?.epoch; cache.authUserID = cycleBinding?.userID
+        let publish = {
+            // Both file and memory publication are fenced. A stale callback may neither
+            // replace B's durable cache with A's data nor expose A's cached totals in UI.
+            if self.authOwner == nil || cycleAccess?.epoch != "legacy" {
+                let data = try JSONEncoder().encode(cache)
+                try data.write(to: URL(fileURLWithPath: self.remotePath), options: .atomic)
+            }
+            self.lock.lock(); self._remote = cache; self.lock.unlock()
+            let ms = self.machineList()
+            let ok = Date(), pushed = d.object(forKey: "syncPushedAt") as? Date
+            d.set(ok, forKey: "syncLastOkAt")
+            d.removeObject(forKey: "syncLastError"); d.removeObject(forKey: "syncLastErrorAt")
+            self.setUI { $0.machines = ms; $0.lastSync = ok; $0.lastUploadAt = pushed; $0.lastError = nil; $0.lastErrorAt = nil }
+        }
+        if let owner = authOwner {
+            guard let access = cycleAccess, owner.withCurrentAccess(access, publish) else {
+                recordError(tr("Вход изменился или кеш недоступен; повторим синхронизацию", "Sign-in changed or cache is unavailable; sync will retry")); return
+            }
+        } else { try? publish() }
+
     }
 
     /// Parse other machines' files (name → JSON text) into one summed cache. Pure — no network.
@@ -2237,7 +2810,10 @@ func clockText(_ d: Date) -> String {
 
 // MARK: - Login item (LaunchAgent)
 
-func loginEnabled() -> Bool { FileManager.default.fileExists(atPath: AGENT_PLIST) }
+func loginEnabled() -> Bool {
+    if isolatedSelfTestAssets != nil { return false }
+    return FileManager.default.fileExists(atPath: AGENT_PLIST)
+}
 
 func setLoginEnabled(_ on: Bool) {
     let fm = FileManager.default
@@ -2315,6 +2891,8 @@ enum SyncPhase { case off, awaitingCode, on, revoked }
 struct SyncMachine { var name: String; var os: String; var updated: Date?; var isSelf: Bool }
 struct SyncUIState {
     var phase: SyncPhase = .off
+    var authState: String? = nil
+    var authReason: String? = nil
     var keychainItemLeft = false          // unknown after a timeout also allows a manual cleanup
     var login: String? = nil
     var userCode: String? = nil
@@ -2336,6 +2914,7 @@ let SYNC_STALE_AFTER: TimeInterval = 30 * 60
 /// The orange line for the main screen, or nil when sync is fine / off. Revoked always shows:
 /// the totals silently lose the other computers otherwise.
 func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String? {
+    if let reason = s.authReason { return githubAuthMessage(reason, language: appLang()) }
     switch s.phase {
     case .revoked:
         return tr("Войдите в GitHub заново — суммы без других компьютеров", "Sign in to GitHub again — totals exclude other computers")
@@ -2440,7 +3019,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.2"
+let APP_VERSION = "3.2.3"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -3928,11 +4507,10 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 link(label, right: titleRight, topY: rowMid + 1, id: "sync:logout")
                 titleRight -= ceil(lineWidth(CTLineCreateWithAttributedString(attr(label, 11, .medium, ADV_LINK)))) + 10
             }
-            text(fitAttr(revoked ? tr("Вход в GitHub отозван", "GitHub sign-in revoked") : tr("Сводить расход", "Combine usage"),
+            text(fitAttr(revoked ? tr("Нужно проверить вход в GitHub", "GitHub sign-in needs attention") : tr("Сводить расход", "Combine usage"),
                          maxW: titleRight - cardX - 42) { attr($0, 13, .regular, textHi) }, x: cardX + 42, topY: rowMid)
             if let err = sy.error, !revoked {
-                let a = attr(err, 10.5, .regular, ADV_WARN)
-                text(a, x: cardX + 14, topY: syTop + SET_ROW_H - 2)
+                note(err, syTop + SET_ROW_H - 2)
             } else {
             note(revoked
                  ? tr("Расход других компьютеров не обновляется. Последние полученные данные остаются в истории.",
@@ -3964,7 +4542,8 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             text(attr(tr("Ждём подтверждения в браузере…", "Waiting for approval in the browser…"), 10.5, .regular, textMid), x: cardX + 14, topY: codeTop + 51)
             link(tr("Отмена", "Cancel"), right: cardX + cardW - 14, topY: codeTop + 51, id: "sync:cancel")
         case .on:
-            drawSF(ctx, "checkmark.circle.fill", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), NSColor(srgbRed: 0.2, green: 0.85, blue: 0.7, alpha: 1))
+            let authHealthy = sy.authState == nil || sy.authState == "healthy"
+            drawSF(ctx, authHealthy ? "checkmark.circle.fill" : "arrow.clockwise.circle", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), authHealthy ? NSColor(srgbRed: 0.2, green: 0.85, blue: 0.7, alpha: 1) : ADV_WARN)
             let who = NSMutableAttributedString(attributedString: attr("GitHub · ", 13, .regular, textMid))
             who.append(attr(sy.login ?? "—", 13, .semibold, textHi))
             text(who, x: cardX + 42, topY: rowMid)
@@ -4942,6 +5521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if v.mode == .settings || v.mode == .main { v.resizeToContent() } else { v.needsDisplay = true }
         }
         GitHubSync.shared.load()
+        GitHubSync.shared.syncNow()
         if advancedEnabled() {
             UsageLogs.shared.scanAsync { [weak self] changed in
                 if changed { self?.panelCtrl.view.needsDisplay = true }
@@ -4964,7 +5544,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func workspaceDidWake() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
             if autoPollEnabled() { self?.scanActivity(); self?.doRefresh(live: true, scheduled: true) }
-            if advancedEnabled() { GitHubSync.shared.syncNow() }
+            GitHubSync.shared.syncNow()
         }
     }
 
@@ -4972,6 +5552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func startLogsTimer() {
         logsTimer?.invalidate()
         let t = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
+            GitHubSync.shared.syncNow()
             guard advancedEnabled() else { return }
             UsageLogs.shared.scanAsync { changed in
                 if changed { self?.panelCtrl.view.needsDisplay = true }
@@ -5560,10 +6141,72 @@ extension GitHubSync {
     }
 }
 
+// Selftest-only adapter: override every preferences operation reached by the
+// actual AppKit draw/callback fixtures. No domain can fall through to disk.
+import ObjectiveC
+final class MemorySelfTestDefaults: UserDefaults {
+    private var values: [String: Any] = [:]
+    private var registered: [String: Any] = [:]
+    private var arguments: [String: Any] = [:]
+    init() { super.init(suiteName: "ccl-memory-only-" + UUID().uuidString)! }
+    func clear() { values = [:]; registered = [:]; arguments = [:] }
+    override func object(forKey key: String) -> Any? { arguments[key] ?? values[key] ?? registered[key] }
+    override func set(_ value: Any?, forKey key: String) { values[key] = value }
+    override func set(_ value: Bool, forKey key: String) { values[key] = value }
+    override func set(_ value: Int, forKey key: String) { values[key] = value }
+    override func set(_ value: Double, forKey key: String) { values[key] = value }
+    override func set(_ value: Float, forKey key: String) { values[key] = value }
+    override func set(_ value: URL?, forKey key: String) { values[key] = value }
+    override func removeObject(forKey key: String) { values.removeValue(forKey: key) }
+    override func string(forKey key: String) -> String? { object(forKey: key) as? String }
+    override func data(forKey key: String) -> Data? { object(forKey: key) as? Data }
+    override func array(forKey key: String) -> [Any]? { object(forKey: key) as? [Any] }
+    override func dictionary(forKey key: String) -> [String: Any]? { object(forKey: key) as? [String: Any] }
+    override func stringArray(forKey key: String) -> [String]? { object(forKey: key) as? [String] }
+    override func bool(forKey key: String) -> Bool { (object(forKey: key) as? NSNumber)?.boolValue ?? false }
+    override func integer(forKey key: String) -> Int { (object(forKey: key) as? NSNumber)?.intValue ?? 0 }
+    override func double(forKey key: String) -> Double { (object(forKey: key) as? NSNumber)?.doubleValue ?? 0 }
+    override func float(forKey key: String) -> Float { (object(forKey: key) as? NSNumber)?.floatValue ?? 0 }
+    override func url(forKey key: String) -> URL? { object(forKey: key) as? URL }
+    override func register(defaults: [String: Any]) { registered.merge(defaults) { _, new in new } }
+    override func dictionaryRepresentation() -> [String: Any] {
+        registered.merging(values) { _, new in new }.merging(arguments) { _, new in new }
+    }
+    override func volatileDomain(forName name: String) -> [String: Any] {
+        precondition(name == UserDefaults.argumentDomain, "selftest requested a real defaults domain")
+        return arguments
+    }
+    override func setVolatileDomain(_ domain: [String: Any], forName name: String) {
+        precondition(name == UserDefaults.argumentDomain, "selftest requested a real defaults domain")
+        arguments = domain
+    }
+    override func persistentDomain(forName name: String) -> [String: Any]? {
+        // AppKit queries the global domain while creating NSApplication. This
+        // fixture has no persistent domains: every name resolves to RAM-only
+        // emptiness, without super/CFPreferences or any disk fallback.
+        return [:]
+    }
+    override func removePersistentDomain(forName name: String) {
+        preconditionFailure("selftest persistent defaults mutation forbidden")
+    }
+    override func synchronize() -> Bool { true }
+}
+func installMemorySelfTestDefaults() -> MemorySelfTestDefaults {
+    precondition(CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest"))
+    let memory = MemorySelfTestDefaults()
+    guard let getter = class_getClassMethod(UserDefaults.self, NSSelectorFromString("standardUserDefaults")) else {
+        preconditionFailure("selftest cannot isolate UserDefaults.standard")
+    }
+    let replacement: @convention(block) (AnyObject) -> UserDefaults = { _ in memory }
+    method_setImplementation(getter, imp_implementationWithBlock(replacement))
+    precondition(UserDefaults.standard === memory, "standard preferences escaped the memory adapter")
+    return memory
+}
+
 // Offline regression tests and fixture previews: no real credentials, logs, or settings writes.
 if CommandLine.arguments.contains("--subscriptions-selftest") {
-    let defaults = UserDefaults.standard
-    var prefs: [String: Any] = ["advanced": true, "advHistExpanded": true, "lang": "ru",
+    let defaults = installMemorySelfTestDefaults()
+    var prefs: [String: Any] = ["advanced": true, "advHistExpanded": false, "lang": "ru",
                                "monitor_claude": true, "monitor_codex": true, "autoPoll": false,
                                "interval": 1800, "autoPollState": try! JSONEncoder().encode([String: AutoPollState]())]
     func select(_ claude: Bool, _ codex: Bool) {
@@ -5642,10 +6285,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 1800 },
           "legacy and invalid intervals migrate to 30 minutes")
     check([900.0, 1800, 3600].allSatisfy { normalizedPollInterval($0) == $0 }, "valid intervals survive restart")
-    let isolated = UserDefaults(suiteName: "ccl-subscriptions-test-" + UUID().uuidString)!
+    let isolated = MemorySelfTestDefaults()
     check(productEnabled("claude", defaults: isolated) && productEnabled("codex", defaults: isolated),
           "missing preferences keep both products enabled")
     let root = NSTemporaryDirectory() + "ccl-subscriptions-" + UUID().uuidString
+    isolatedSelfTestAssets = root + "/assets"
     let fm = FileManager.default
     let cp = root + "/.claude/projects/test/session.jsonl"
     let xp = root + "/.codex/sessions/test/rollout-test.jsonl"
@@ -5988,6 +6632,64 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     }
     authCheck(authImages == 88, "88 RU/EN Simple/Advanced actual bitmap fixtures")
     print("Auth hint fixtures: \(authChecks) checks, \(authImages) PNG")
+    // Actual Settings/main auth draw matrix. History remains collapsed because
+    // expanded draw uses the production shared sync; the explicit merge regression
+    // above covers synthetic history through its injected GitHubSync instance.
+    var githubImages = 0
+    let cachedIndexEncoder = JSONEncoder(); cachedIndexEncoder.outputFormatting = [.sortedKeys]
+    for lang in ["ru", "en"] {
+        let en = lang == "en"
+        prefs["lang"] = lang; prefs["advHistExpanded"] = false
+        let cases: [(String, SyncUIState, String?)] = [
+            ("healthy", SyncUIState(phase: .on, authState: "healthy", login: "fixture-account"), nil),
+            ("legacy-healthy", SyncUIState(phase: .on, login: "fixture-legacy"), nil),
+            ("renewing", SyncUIState(phase: .on, authState: "renewing", authReason: "renewing", keychainItemLeft: true, login: "fixture-account"),
+             en ? "Renewing GitHub sign-in automatically…" : "Автоматически продлеваем вход в GitHub…"),
+            ("storage-locked", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "locked", keychainItemLeft: true, login: "fixture-account"),
+             en ? "Unlock Keychain; sign-in will recover automatically." : "Разблокируйте Связку ключей; вход восстановится автоматически."),
+            ("identity-pending", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "identity_unavailable", keychainItemLeft: true, login: "fixture-account"),
+             en ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."),
+            ("cleanup-pending", SyncUIState(phase: .off, authState: "signedOut", authReason: "cleanup_pending", keychainItemLeft: true),
+             en ? "Signed out here; secure-storage cleanup is pending. Retrying automatically." : "Вход на этом компьютере отключён; очистка хранилища ещё не завершена. Повторим автоматически."),
+            ("terminal", SyncUIState(phase: .revoked, authState: "actionRequired", authReason: "lost_result", keychainItemLeft: true, login: "fixture-account"),
+             en ? "Couldn't recover the renewal result. Sign in again." : "Не удалось восстановить результат продления. Войдите заново.")
+        ]
+        for (name, inputState, expectedCopy) in cases {
+            var state = inputState
+            if state.phase == .off { state.error = expectedCopy }
+            else { state.lastError = expectedCopy }
+            SYNC_PREVIEW = state
+            check(syncWarning(state) == expectedCopy, "GitHub \(lang) \(name) exact truthful localized notice")
+            for advanced in [false, true] {
+                prefs["advanced"] = advanced; select(true, true)
+                let beforePreferences = defaults.dictionaryRepresentation() as NSDictionary
+                let beforeIndex = try! cachedIndexEncoder.encode(UsageLogs.shared.snapshot())
+                let size = CGSize(width: PANEL_W, height: mainPanelHeight(c, x))
+                let image = bitmapContext(Int(size.width * 2), Int(size.height * 2))!; image.scaleBy(x: 2, y: 2)
+                let hits = advanced
+                    ? drawAdvanced(image, size: size, claude: c, codex: x, interval: 1800, updated: nil, about: AboutState())
+                    : drawPanel(image, size: size, claude: c, codex: x, interval: 1800, updated: nil, about: AboutState())
+                check(hits.contains { $0.id == "settings" } && hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= size.height },
+                      "GitHub \(lang) \(name) actual main controls fit and Settings reachable")
+                if advanced {
+                    let sh = settingsTotalHeight(AboutState())
+                    let settingsImage = bitmapContext(Int(PANEL_W * 2), Int(sh * 2))!; settingsImage.scaleBy(x: 2, y: 2)
+                    let settingsHits = drawSettings(settingsImage, size: CGSize(width: PANEL_W, height: sh), about: AboutState())
+                    let expectLogin = state.phase == .off || state.phase == .revoked
+                    check(settingsHits.filter { $0.id == "sync:login" }.count == (expectLogin ? 1 : 0),
+                          "GitHub \(lang) \(name) actual login affordance matches state")
+                    check(settingsHits.contains { $0.id == "sync:logout" }, "GitHub \(lang) \(name) actual local cleanup control")
+                    check(settingsHits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= sh }, "GitHub settings control bounds")
+                    save(settingsImage, "/tmp/ccl-github-auth-settings-\(name)-\(lang).png"); githubImages += 1
+                }
+                check(beforePreferences.isEqual(to: defaults.dictionaryRepresentation())
+                      && beforeIndex == (try! cachedIndexEncoder.encode(UsageLogs.shared.snapshot())), "GitHub actual draw leaves preferences and cached usage unchanged")
+                save(image, "/tmp/ccl-github-auth-main-\(name)-\(lang)-advanced-\(advanced).png"); githubImages += 1
+            }
+        }
+    }
+    check(githubImages == 42, "42 isolated RU/EN GitHub auth actual Settings/main PNG fixtures")
+    SYNC_PREVIEW = SyncUIState()
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
     try! fm.removeItem(atPath: root)
@@ -6000,18 +6702,47 @@ if CommandLine.arguments.contains("--sync-selftest") {
     // Offline (lesson 006): no GitHub or real Keychain/defaults. Normal startup creates
     // ~/.claude-limits-monitor earlier, before CLI dispatch; that mkdir is skipped for this
     // mode. The selftest reads/writes nothing there. CLI transcripts rebuild only RAM.
-    let suite = "com.arrivarus.claudecodexlimits.selftest"
-    guard let selfTestDefaults = UserDefaults(suiteName: suite) else {
-        print("FAIL selftest defaults suite unavailable"); exit(1)
-    }
-    selfTestDefaults.removePersistentDomain(forName: suite)
+    let selfTestDefaults = installMemorySelfTestDefaults()
+    let selfTestRoot = NSTemporaryDirectory() + "ccl-sync-test-" + UUID().uuidString
+    try! FileManager.default.createDirectory(atPath: selfTestRoot, withIntermediateDirectories: true)
     func check(_ ok: Bool, _ label: String) {
         print("\(ok ? "OK" : "FAIL") \(label)")
-        if !ok { selfTestDefaults.removePersistentDomain(forName: suite); exit(1) }
+        if !ok { selfTestDefaults.clear(); exit(1) }
+    }
+    // Native writer permit protocol: pure data parsing only, never spawn helper.
+    let permitGeneration = UUID().uuidString.lowercased(), permitOperation = UUID().uuidString.lowercased()
+    let permitEpoch = UUID().uuidString.lowercased()
+    for phase in [GitHubAuthWriterPhase.prepared, .rpcStarted, .completed, .notStarted] {
+        let record = GitHubAuthWriterRecord(generation: permitGeneration, operation: permitOperation, phase: phase,
+            epoch: permitEpoch, status: phase == .completed ? 0 : nil)
+        let parsed = githubAuthWriterRecord(try! JSONEncoder().encode(record), generation: permitGeneration)
+        check(parsed != nil, "pure writer protocol parses \(phase.rawValue)")
+        check(githubAuthWriterPermitAllows(record, generation: permitGeneration, operation: permitOperation, epoch: permitEpoch) == (phase == .prepared),
+              "only exact prepared permit may start native RPC")
+        check(!githubAuthWriterPermitAllows(record, generation: permitGeneration, operation: UUID().uuidString.lowercased(), epoch: permitEpoch), "superseded operation cannot start RPC")
+        check(!githubAuthWriterPermitAllows(record, generation: UUID().uuidString.lowercased(), operation: permitOperation, epoch: permitEpoch), "permit generation binding")
+        check(!githubAuthWriterPermitAllows(record, generation: permitGeneration, operation: permitOperation, epoch: UUID().uuidString.lowercased()), "permit account epoch binding")
+    }
+    for payload in ["{}", "{broken", "{\"schema\":true}", "{\"completed\":true,\"status\":0}"] {
+        check(githubAuthWriterRecord(Data(payload.utf8), generation: permitGeneration) == nil, "corrupt/old permit cannot prove no-send")
     }
     let sync = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: OfflineSyncKeychain(), defaults: selfTestDefaults,
-                          remotePath: NSTemporaryDirectory() + "ccl-selftest-remote.json", machineId: "selftest-self")
-    _ = UsageLogs.shared.scanSync(persist: false)
+                          remotePath: selfTestRoot + "/remote.json", machineId: "selftest-self")
+    // Explicit temporary home with synthetic logs; no default-HOME scan/load.
+    let syntheticHome = selfTestRoot + "/home"
+    let fixtureStamp = ISO8601DateFormatter().string(from: Date())
+    let fixtureClaude = syntheticHome + "/.claude/projects/fixture/session.jsonl"
+    let fixtureCodex = syntheticHome + "/.codex/sessions/fixture/rollout.jsonl"
+    for path in [fixtureClaude, fixtureCodex] {
+        try! FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+    }
+    let fixtureClaudeLine = "{\"timestamp\":\"\(fixtureStamp)\",\"type\":\"assistant\",\"message\":{\"id\":\"fixture-message\",\"model\":\"fixture-model\",\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}}\n"
+    let fixtureCodexLine = "{\"timestamp\":\"\(fixtureStamp)\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":50,\"output_tokens\":10}}}}\n"
+    try! fixtureClaudeLine.write(toFile: fixtureClaude, atomically: true, encoding: .utf8)
+    try! fixtureCodexLine.write(toFile: fixtureCodex, atomically: true, encoding: .utf8)
+    var syntheticIndex = UsageIndex()
+    check(UsageLogs.scan(&syntheticIndex, home: syntheticHome, isEnabled: { _ in true }), "synthetic temporary logs indexed")
+    UsageLogs.shared.useForPreview(syntheticIndex)
     let mine = sync.selfTestFile()
     // Pretend the same data came from another machine: swap the id, keep everything else.
     guard var obj = (try? JSONSerialization.jsonObject(with: Data(mine.utf8))) as? [String: Any],
@@ -6033,7 +6764,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
     print("OK file bytes:", mine.utf8.count, "machine id:", sync.machineId.prefix(8) + "…")
 
     for (statuses, shouldRevoke) in [([401, 401, 200], false), ([401, 401, 401], true)] {
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
         selfTestDefaults.set("selftest-login", forKey: "syncLogin")
         selfTestDefaults.set("selftest-gist", forKey: "syncGistId")
         selfTestDefaults.set(Date(), forKey: "syncDiscoveredAt")
@@ -6049,7 +6780,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
             return (status, data, nil, [:])
         }
         let subject = GitHubSync(transport: scripted, keychain: keychain, defaults: selfTestDefaults,
-                                 remotePath: NSTemporaryDirectory() + "ccl-selftest-unused-remote.json",
+                                 remotePath: selfTestRoot + "/unused-remote.json",
                                  machineId: "selftest-self", revokeRecheckDelay: 0)
         subject.syncSynchronously()
         let tokenMatches: Bool
@@ -6061,10 +6792,10 @@ if CommandLine.arguments.contains("--sync-selftest") {
         check(replies.isEmpty && tokenMatches && selfTestDefaults.bool(forKey: "syncRevoked") == shouldRevoke
               && subject.ui.phase == (shouldRevoke ? .revoked : .on),
               "401 -> 401 -> \(statuses[2]): \(shouldRevoke ? "revoked, token deleted" : "not revoked, token retained")")
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
     }
 
-    selfTestDefaults.removePersistentDomain(forName: suite)
+    selfTestDefaults.clear()
     let now = Date(), day = dayKey(now), fractionalISO = ISO8601DateFormatter()
     fractionalISO.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     var oversized: [String: String] = [:]
@@ -6081,7 +6812,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
     let sum = large.days["claude"]?[day]?["selftest-model"]?.input ?? 0
     check(large.machines.count == 2 && (0...1_000_000_000_000_000).contains(sum),
           "A2 two Int.max fields: merge survived, sum=\(sum) <= 1e15")
-    selfTestDefaults.removePersistentDomain(forName: suite)
+    selfTestDefaults.clear()
 
     // ---- Regression cases for the 401 / token-boundary / merge fix (tester, 2026-09-30).
     // Each prints OK/FAIL and keeps going; the exit code is non-zero if any FAIL.
@@ -6094,13 +6825,13 @@ if CommandLine.arguments.contains("--sync-selftest") {
     let gistURL = api + "/gists/selftest-gist"
     let rawURL = "https://gist.githubusercontent.com/u/selftest-gist/raw/abc/machine-aa.json"
     let tokA = "st-tok-a", tokB = "st-tok-b", tokNew = "st-tok-new"
-    let remoteFile = NSTemporaryDirectory() + "ccl-selftest-remote-cases.json"
+    let remoteFile = selfTestRoot + "/remote-cases.json"
     func json(_ obj: Any) -> Data { (try? JSONSerialization.data(withJSONObject: obj)) ?? Data() }
     func reply(_ status: Int, _ obj: Any? = nil, _ headers: [String: String] = [:]) -> SyncHTTPResult {
         (status, obj.map(json), nil, headers)
     }
     func freshDefaults(gist: String? = "selftest-gist") {
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
         selfTestDefaults.set("selftest-login", forKey: "syncLogin")
         if let g = gist {
             selfTestDefaults.set(g, forKey: "syncGistId"); selfTestDefaults.set(Date(), forKey: "syncDiscoveredAt")
@@ -6445,7 +7176,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
             let s = makeSync(http, SelfTestKeychainStore(secret))
             s.syncSynchronously()
             texts.append(s.ui.lastError ?? "")
-            texts.append(String(describing: selfTestDefaults.persistentDomain(forName: suite) ?? [:]))
+            texts.append(String(describing: selfTestDefaults.dictionaryRepresentation()))
             texts.append((try? String(contentsOfFile: remoteFile, encoding: .utf8)) ?? "")
             for c in http.calls {
                 texts.append(c.url)
@@ -6462,7 +7193,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
     // 13. Cancellation after a Keychain write/read and just before publishing the login.
     for point in ["afterWrite", "afterRead", "beforePublish"] {
         for (replacement, wasRevoked) in [(false, false), (true, false), (false, true), (true, true)] {
-            selfTestDefaults.removePersistentDomain(forName: suite)
+            selfTestDefaults.clear()
             selfTestDefaults.set(wasRevoked, forKey: "syncRevoked")
             let store = SelfTestKeychainStore(wasRevoked ? tokA : nil)
             let http = SelfTestHTTP { c in
@@ -6504,7 +7235,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
     }
     do {
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
         let store = SelfTestKeychainStore(tokA)
         let http = SelfTestHTTP { _ in reply(599) }
         let s = makeSync(http, store)
@@ -6515,7 +7246,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
 
     // 14. Missing credentials with a known login stay revoked after cancel/failure.
     for (knownLogin, flagged) in [(false, false), (true, false), (false, true), (true, true)] {
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
         if knownLogin { selfTestDefaults.set("selftest-login", forKey: "syncLogin") }
         selfTestDefaults.set(flagged, forKey: "syncRevoked")
         let s = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: OfflineSyncKeychain(), defaults: selfTestDefaults,
@@ -6581,7 +7312,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
         for point in ["afterWrite", "afterRead", "beforePublish"] {
             for status in [SyncKeychainStatus.failure(-1), .timedOut] {
-                selfTestDefaults.removePersistentDomain(forName: suite)
+                selfTestDefaults.clear()
                 let store = SelfTestKeychainStore(nil); store.deleteStatus = status
                 let http = loginHTTP(), s = makeSync(http, store)
                 s.selfTestLoginCheckpoint = { [weak s] checkpoint in
@@ -6604,7 +7335,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
         for knownLogin in [false, true] {
             for result in [SyncKeychainRead.token(tokB), .missing, .timedOut, .failure(-1)] {
-                selfTestDefaults.removePersistentDomain(forName: suite)
+                selfTestDefaults.clear()
                 if knownLogin { selfTestDefaults.set("selftest-login", forKey: "syncLogin") }
                 let store = SelfTestKeychainStore(nil), http = loginHTTP()
                 let s = makeSync(http, store)
@@ -6626,7 +7357,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
                        "M-1 knownLogin=\(knownLogin), read=\(result): protect published token; otherwise delete without reading")
             }
         }
-        selfTestDefaults.removePersistentDomain(forName: suite)
+        selfTestDefaults.clear()
         let store = SelfTestKeychainStore(nil), http = loginHTTP()
         let s = makeSync(http, store)
         s.startLogin()
@@ -6685,8 +7416,9 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
     }
 
-    selfTestDefaults.removePersistentDomain(forName: suite)
+    selfTestDefaults.clear()
     try? FileManager.default.removeItem(atPath: remoteFile)
+    try? FileManager.default.removeItem(atPath: selfTestRoot)
     print(failures == 0 ? "OK regression cases: all passed" : "FAIL regression cases: \(failures) failed")
     exit(failures == 0 ? 0 : 1)
 }

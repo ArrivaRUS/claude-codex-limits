@@ -6,14 +6,17 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="3.2.2"
+VERSION="3.2.3"
 APP="$DIR/dist/$APP_NAME.app"
 
 echo "==> building $APP_NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-/usr/bin/swiftc -O "$DIR/Sources/LimitsMonitor.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
+BUILD_SOURCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccl-swift-build.XXXXXX")"
+trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
+cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
+/usr/bin/swiftc -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
 cp -R "$DIR/Resources/"* "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST

@@ -21,10 +21,11 @@ import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from ccl import common, sync, usage, vault  # noqa: E402
+from ccl import auth, common, sync, usage, vault  # noqa: E402
 
 API = "https://api.github.com"
 GIST = "g1"
@@ -169,7 +170,8 @@ class SyncEnv(unittest.TestCase):
     TIMEOUT = 0.3
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="ccl-sync-test-")
+        self._initial_vault_workers = set(threading.enumerate())
+        self.tmp = tempfile.mkdtemp(prefix="ccl-sync-test-", dir="/tmp")
         roots = (common.CONFIG_DIR, common.STATE_DIR)
         paths = {name: value for name, value in vars(common).items()
                  if isinstance(value, str) and name.isupper() and
@@ -183,8 +185,10 @@ class SyncEnv(unittest.TestCase):
         self._saved = [(vault, "_ss", vault._ss), (vault, "TIMEOUT", vault.TIMEOUT),
                        (sync, "transport", sync.transport), (sync, "REVOKE_RECHECK_DELAY", sync.REVOKE_RECHECK_DELAY),
                        (sync, "_sleep", sync._sleep), (sync, "LOGIN_LOCK_TIMEOUT", sync.LOGIN_LOCK_TIMEOUT),
-                       (sync, "_first_attempt_at", sync._first_attempt_at)]
+                       (sync, "_first_attempt_at", sync._first_attempt_at),
+                       (sync, "auth_owner", sync.auth_owner), (vault, "_ss_v2", vault._ss_v2)]
         self.ss = FakeSecretService()
+        self.v2ss = None
         vault._ss = self.ss.factory
         vault.TIMEOUT = self.TIMEOUT
         self.gh = FakeGitHub()
@@ -195,18 +199,68 @@ class SyncEnv(unittest.TestCase):
         sync.LOGIN_LOCK_TIMEOUT = 0.3
         sync._first_attempt_at = None
         self.token = make_token()
+        # Legacy regression retains actual vault/read/401/logout behavior, while
+        # the new owner factory/store are explicit and cannot reach a real V2
+        # namespace. All file/manifest/flock paths were redirected above.
+        def no_v2(*args, **kwargs):
+            raise AssertionError("unexpected V2 credential boundary in legacy fixture")
+        store = SimpleNamespace(read=no_v2, stage_refresh=no_v2, delete=no_v2,
+                                write_settled=no_v2, login_backend=no_v2)
+        def identity(token):
+            reply = sync.gh("/user", token)
+            return reply.status, reply.json(), reply.headers
+        self.auth_owner = auth.AuthOwner(auth.LinuxManifest(), store, sync._form_result, identity,
+            lambda: common.file_lock("sync", timeout=self.TIMEOUT), lambda: time.time(),
+            legacy=sync._legacy_credential, defer=vault._sigint_deferred,
+            publication_lock=lambda: sync._login_lock)
+        sync.auth_owner = lambda: self.auth_owner
 
     def tearDown(self):
         self.ss.release_all()
-        self.ss.zombie_done.wait(2) if self.ss._events else None
-        time.sleep(0.05)                       # let released workers finish before paths are restored
-        for mod, name, value in self._saved:
-            setattr(mod, name, value)
-        for name, value in self._saved_common.items():
-            setattr(common, name, value)
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        if self.v2ss is not None:
+            self.v2ss.release_all()
+        remaining = []
+        try:
+            # Drain every per-case late writer before restoring paths/factories.
+            # Waiting for a single fake event does not prove all V2 receipts settled.
+            for worker in threading.enumerate():
+                if worker not in self._initial_vault_workers and worker.name == "ccl-vault":
+                    worker.join(2)
+                    if worker.is_alive():
+                        remaining.append(worker.name)
+        finally:
+            for mod, name, value in self._saved:
+                setattr(mod, name, value)
+            for name, value in self._saved_common.items():
+                setattr(common, name, value)
+            shutil.rmtree(self.tmp, ignore_errors=True)
+        self.assertEqual(remaining, [], "late vault worker outlived its isolated fixture")
 
     # ---- helpers ----------------------------------------------------------------------------
+    def enable_v2_login(self):
+        """Opt in to V2 only for explicit-login regressions; keep both real factories denied.
+
+        Exercise the actual file/receipt/store code with temporary paths and a separate
+        in-memory namespace. Bypass only constructor startup: its process-wide deny
+        remains installed by _isolate, and every _ss_v2 call resolves to this fake.
+        """
+        if self.v2ss is not None:
+            return
+        self.v2ss = FakeSecretService()
+        self.v2ss.service = SimpleNamespace(ReadAlias=lambda name: "/fake/default")
+        self.v2ss._unlocked = lambda paths: list(paths)
+        vault._ss_v2 = self.v2ss.factory
+        store = object.__new__(vault.CredentialStore)
+        store.writer_id = os.getpid()
+        store._writes = {}  # no late-writer state shared with another test
+        self.auth_owner.store = store
+
+    def credential(self):
+        """Read the complete V2 envelope through the explicitly injected owner."""
+        value = self.auth_owner.read_credential()
+        self.assertEqual(value.kind, "ready")
+        return value.credential, value.ref
+
     def st(self):
         return sync.sync_state()
 

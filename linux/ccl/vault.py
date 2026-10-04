@@ -15,6 +15,8 @@ Test seams (replace before exercising sync/vault): `_ss` (Secret Service factory
 """
 
 import os
+import fcntl
+import json
 import secrets
 import signal
 import threading
@@ -38,8 +40,18 @@ class _SecretServiceAbsent(Exception):
     """No Secret Service backend exists; other connection failures are retryable."""
 
 
+class _SecretWriteNotStarted(Exception):
+    """No mutating Secret Service request was sent."""
+
+
+class _SecretWriteCompleted(Exception):
+    """The server replied to CreateItem, but the returned item was unusable."""
+
+
 class _SecretService(object):
-    def __init__(self):
+    def __init__(self, attrs=None, label=None):
+        self.attrs = attrs or ATTRS
+        self.label = label or LABEL
         try:
             import dbus  # python3-dbus from the OS repository
         except ImportError as e:
@@ -78,7 +90,7 @@ class _SecretService(object):
         return list(unlocked)
 
     def _paths(self, generation):
-        attrs = dict(ATTRS, generation=generation) if generation != "legacy" else ATTRS
+        attrs = dict(self.attrs, generation=generation) if generation != "legacy" else self.attrs
         unlocked, locked = self.service.SearchItems(attrs)
         if generation == "legacy":
             # SearchItems matches subsets: ATTRS alone also finds every new generation.
@@ -109,22 +121,27 @@ class _SecretService(object):
         return value or None
 
     def set(self, token, generation):
-        dbus = self.dbus
-        coll = self.service.ReadAlias("default")
-        if coll == "/":
-            raise RuntimeError("no default collection")
-        if coll not in self._unlocked([coll]):
-            raise RuntimeError("collection locked")
-        c = dbus.Interface(self.bus.get_object(_SS, coll), _I_COLLECTION)
-        props = {
-            "org.freedesktop.Secret.Item.Label": dbus.String(LABEL),
-            "org.freedesktop.Secret.Item.Attributes": dbus.Dictionary(dict(ATTRS, generation=generation), signature="ss"),
-        }
-        secret = dbus.Struct((self.session, dbus.ByteArray(b""), dbus.ByteArray(token.encode("utf-8")),
-                              dbus.String("text/plain")), signature="oayays")
+        try:
+            dbus = self.dbus
+            coll = self.service.ReadAlias("default")
+            if coll == "/":
+                raise RuntimeError("no default collection")
+            if coll not in self._unlocked([coll]):
+                raise RuntimeError("collection locked")
+            c = dbus.Interface(self.bus.get_object(_SS, coll), _I_COLLECTION)
+            props = {
+                "org.freedesktop.Secret.Item.Label": dbus.String(self.label),
+                "org.freedesktop.Secret.Item.Attributes": dbus.Dictionary(dict(self.attrs, generation=generation), signature="ss"),
+            }
+            secret = dbus.Struct((self.session, dbus.ByteArray(b""), dbus.ByteArray(token.encode("utf-8")),
+                                  dbus.String("text/plain")), signature="oayays")
+        except Exception as e:
+            raise _SecretWriteNotStarted() from e
+        # Any exception here can be NoReply/disconnect after the server accepted
+        # CreateItem. Client completion/death cannot prove server completion.
         item, prompt = c.CreateItem(dbus.Dictionary(props, signature="sv"), secret, True)
         if item == "/" or prompt != "/":
-            raise RuntimeError("keyring asked for a prompt")
+            raise _SecretWriteCompleted("keyring asked for a prompt")
 
     def delete(self, generation):
         unlocked, locked = self._paths(generation)
@@ -195,15 +212,25 @@ def _sigint_deferred():
             prev(signal.SIGINT, interrupted_frame)
 
 
-def _timed(fn):
+def _timed(fn, on_transfer=None, on_not_started=None):
     """Run `fn` in a daemon thread and wait at most TIMEOUT. Raises Timeout (the thread is
     left behind — a hung D-Bus call can't be cancelled) or whatever `fn` raised."""
     box = {}
     abandoned = threading.Event()
     done = threading.Event()
     guard = threading.Lock()
+    launch_gate = threading.Event()
+    launch = {"transferred": False}
 
     def run():
+        # A thread created by Thread.start may outlive an exception/SIGINT raised
+        # by start itself. It cannot touch the caller's resource until this gate
+        # explicitly transfers ownership; a revoked launch never calls fn.
+        launch_gate.wait()
+        with guard:
+            permitted = launch["transferred"]
+        if not permitted:
+            return
         _worker.buses = []
         _worker.abandoned = abandoned
         _worker.cleanup = None
@@ -229,9 +256,14 @@ def _timed(fn):
             del _worker.buses
             del _worker.abandoned
             del _worker.cleanup
-    t = threading.Thread(target=run, name="ccl-vault", daemon=True)
     try:
+        t = threading.Thread(target=run, name="ccl-vault", daemon=True)
         t.start()
+        with guard:
+            if on_transfer is not None:
+                on_transfer()
+            launch["transferred"] = True
+        launch_gate.set()
         completed = done.wait(TIMEOUT)
         if not completed:
             with guard:
@@ -241,6 +273,8 @@ def _timed(fn):
     except BaseException:
         try:
             with guard:
+                if not launch["transferred"] and on_not_started is not None:
+                    on_not_started()
                 if not done.is_set():
                     abandoned.set()
         finally:
@@ -248,6 +282,8 @@ def _timed(fn):
             # (e.g. a second, directly raised KeyboardInterrupt, rather than SIGINT).
             abandoned.set()
         raise
+    finally:
+        launch_gate.set()
     if "e" in box:
         raise box["e"]
     return box.get("v")
@@ -257,7 +293,7 @@ def _ss_read(generation):
     """(token or None, locked), restricted to the captured generation."""
     ss = _ss()
     if ss is None:
-        return None, False
+        raise _SecretServiceAbsent()
     t = ss.get(generation)
     if t:
         return t, False
@@ -366,6 +402,9 @@ def _read(generation, backend):
                 return token, "secret-service"
             if locked:
                 return None, "locked"
+        except _SecretServiceAbsent:
+            if not legacy_discovery:
+                return None, "unreachable"
         except Timeout:
             return None, "timeout"
         except Exception:
@@ -540,3 +579,251 @@ def delete():
             st = common.Store(common.SYNC_STATE_PATH)
             st.update(tokenDeletePending=_pending(st, ["legacy", "file"]))
         return not common.Store(common.SYNC_STATE_PATH).get("tokenDeletePending")
+
+# V2 uses a separate namespace. Legacy code must never interpret an envelope as
+# a raw access token. Refresh writes are immutable-by-generation and NEVER use
+# the abandoned-login cleanup or plaintext fallback in store().
+def _ss_v2():
+    try:
+        return _SecretService(dict(ATTRS, service="github-credential-v2"), LABEL + " credential v2")
+    except _SecretServiceAbsent:
+        return None
+
+
+def _v2_path(ref):
+    from .auth import valid_ref
+    if not valid_ref(ref):
+        raise ValueError("invalid credential reference")
+    return os.path.join(common.CONFIG_DIR, "github-credentials", ref["generation"])
+
+
+class CredentialStore:
+    _writes = {}  # process-wide: another owner must see every late local writer
+
+    def __init__(self):
+        self.writer_id = os.getpid()
+
+    def _writer_lock_path(self, ref):
+        _v2_path(ref)  # validate generation before constructing a path
+        return os.path.join(common.STATE_DIR, "github-credential-writers", ref["generation"] + ".lock")
+
+    def _writer_receipt(self, ref):
+        return self._writer_lock_path(ref) + ".receipt"
+
+    def _mark_server(self, ref, settled):
+        # Nonsecret acknowledgement only. Persist pending BEFORE the DBus call;
+        # only a completed backend reply (or proven no-send) can replace it.
+        common.write_json(self._writer_receipt(ref), {"settled": settled}, mode=0o600)
+
+    def _receipt_state(self, ref):
+        try:
+            with open(self._writer_receipt(ref), "r", encoding="utf-8") as f:
+                receipt = json.load(f)
+        except FileNotFoundError:
+            return "absent"
+        except (OSError, ValueError, UnicodeError):
+            return "unknown"
+        if isinstance(receipt, dict) and type(receipt.get("settled")) is bool:
+            return "settled" if receipt["settled"] else "pending"
+        return "unknown"
+
+    def write_settled(self, ref):
+        path = self._writer_lock_path(ref)
+        try:
+            fd = os.open(path, os.O_RDWR)
+        except FileNotFoundError:
+            # writeProtocol=2 is durable before stage is reachable. Every RPC
+            # requires a durable pending receipt before Thread.start; therefore
+            # absence here proves no-send, not completion of an unknown RPC.
+            # The caller holds the auth lock, excluding a future stage launcher.
+            return ref.get("writeProtocol") == 2 and self._receipt_state(ref) == "absent"
+        except OSError:
+            return False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            if ref["backend"] == "file":
+                return True  # No external daemon can finish a dead file writer.
+            state = self._receipt_state(ref)
+            return state == "settled" or (state == "absent" and ref.get("writeProtocol") == 2)
+        finally:
+            os.close(fd)
+
+    def read(self, ref):
+        from .auth import AuthRead
+        try:
+            path = _v2_path(ref)
+            if ref["backend"] == "file":
+                try:
+                    with open(path, "r", encoding="ascii") as f:
+                        value = f.read(100001)
+                except FileNotFoundError:
+                    return AuthRead("missing", ref=ref)
+                return AuthRead("ready", value, ref)
+
+            def read():
+                ss = _ss_v2()
+                if ss is None:
+                    return AuthRead("unreachable", ref=ref)
+                value = ss.get(ref["generation"])
+                if value:
+                    return AuthRead("ready", value, ref)
+                return AuthRead("locked" if ss.has_locked(ref["generation"]) else "missing", ref=ref)
+            return _timed(read)
+        except Timeout:
+            return AuthRead("timeout", ref=ref)
+        except (UnicodeError, ValueError):
+            return AuthRead("corrupt", ref=ref)
+        except Exception:
+            return AuthRead("unreachable", ref=ref)
+
+    def stage_refresh(self, ref, payload):
+        finished = threading.Event()
+        writer_fd = None
+        ownership = {"worker": False, "server_settled": False, "receipt_pending": False}
+        close_guard = threading.Lock()
+
+        def finish():
+            nonlocal writer_fd
+            with close_guard:
+                fd, writer_fd = writer_fd, None
+                if fd is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(fd)
+                finished.set()
+
+        def transfer():
+            ownership["worker"] = True
+
+        def no_worker():
+            # The launch gate proves that no CreateItem could be sent.
+            try:
+                if ownership["receipt_pending"]:
+                    self._mark_server(ref, True)
+            finally:
+                finish()
+
+        self._writes.setdefault(ref["generation"], []).append(finished)
+        try:
+            path = _v2_path(ref)
+            if not isinstance(payload, str) or not payload.isascii():
+                finished.set()
+                return "failure"
+            writer_path = self._writer_lock_path(ref)
+            os.makedirs(os.path.dirname(writer_path), mode=0o700, exist_ok=True)
+            writer_fd = os.open(writer_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(writer_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(writer_fd)
+                writer_fd = None
+                finished.set()
+                return "uncertain"  # existing writer retains the reference
+
+            if ref["backend"] == "file":
+                try:
+                    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+                    common.write_atomic(path, payload, mode=0o600)
+                    return "ready"
+                finally:
+                    finish()
+
+            # Never overwrite an unresolved prior server operation with a new
+            # apparent acknowledgement for the same generation.
+            receipt_state = self._receipt_state(ref)
+            if receipt_state not in ("absent", "settled"):
+                return "uncertain"
+            self._mark_server(ref, False)
+            ownership["receipt_pending"] = True
+
+            def write():
+                started = False
+                try:
+                    ss = _ss_v2()
+                    if ss is None:
+                        ownership["server_settled"] = True
+                        return "failure"
+                    # No abandoned-login cleanup. Intent already names this ref.
+                    started = True
+                    ss.set(payload, ref["generation"])
+                    ownership["server_settled"] = True
+                    return "ready" if ss.get(ref["generation"]) == payload else "uncertain"
+                except _SecretWriteNotStarted:
+                    ownership["server_settled"] = True
+                    return "failure"
+                except _SecretWriteCompleted:
+                    ownership["server_settled"] = True
+                    return "uncertain"
+                except Exception:
+                    if not started:
+                        ownership["server_settled"] = True
+                    return "uncertain" if started else "failure"
+                finally:
+                    try:
+                        if ownership["server_settled"]:
+                            self._mark_server(ref, True)
+                    finally:
+                        finish()
+            return _timed(write, on_transfer=transfer, on_not_started=no_worker)
+        except Timeout:
+            return "uncertain"
+        except Exception:
+            return "uncertain"
+        finally:
+            if not ownership["worker"]:
+                no_worker()
+
+    def delete(self, ref):
+        try:
+            path = _v2_path(ref)
+            if ref["backend"] == "file":
+                if ref.get("uncertain") and not self.write_settled(ref):
+                    return "uncertain"
+                directory = os.path.dirname(path)
+                try:
+                    names = os.listdir(directory)
+                except FileNotFoundError:
+                    return "ready"
+                prefix = "." + ref["generation"] + "."
+                # SIGKILL may leave write_atomic's FULL credential envelope in a
+                # generation-addressed temp. Unlink names, never symlink targets.
+                for name in names:
+                    if name == ref["generation"] or name.startswith(prefix):
+                        try:
+                            os.unlink(os.path.join(directory, name))
+                        except FileNotFoundError:
+                            pass
+                fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                return "ready"
+            if ref.get("uncertain") and not self.write_settled(ref):
+                return "uncertain"
+            def delete():
+                ss = _ss_v2()
+                return "ready" if ss is not None and ss.delete(ref["generation"]) else "failure"
+            return _timed(delete)
+        except Timeout:
+            return "uncertain"
+        except Exception:
+            return "failure"
+
+    def login_backend(self):
+        # Existing explicit-login policy permits file selection if SS is not
+        # usable. This method is NEVER used for refresh or recovery.
+        def usable():
+            ss = _ss_v2()
+            if ss is None:
+                return False
+            coll = ss.service.ReadAlias("default")
+            return coll != "/" and coll in ss._unlocked([coll])
+        try:
+            return "secret-service" if _timed(usable) else "file"
+        except Exception:
+            return "file"

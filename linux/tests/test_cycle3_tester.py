@@ -64,23 +64,32 @@ class Base(env.SyncEnv):
         if not os.path.isdir(common.CONFIG_DIR):
             return []
         base = os.path.basename(common.TOKEN_FILE_PATH)
-        return sorted(n for n in os.listdir(common.CONFIG_DIR) if base in n)
+        names = [n for n in os.listdir(common.CONFIG_DIR) if base in n]
+        directory = os.path.join(common.CONFIG_DIR, "github-credentials")
+        if os.path.isdir(directory):
+            names.extend("github-credentials/" + n for n in os.listdir(directory))
+        return sorted(names)
 
     def copies(self):
-        return len(self.ss.items) + len(self.token_files())
+        return len(self.ss.items) + (len(self.v2ss.items) if self.v2ss else 0) + len(self.token_files())
 
     def assert_signed_out_clean(self):
         self.assertEqual(self.ss.items, {}, "no Secret Service item with ATTRS may remain")
-        self.assertEqual(self.token_files(), [], "no token file, staged or main")
+        if self.v2ss is not None:
+            self.assertEqual(self.v2ss.items, {}, "no V2 credential envelope may remain")
+        self.assertEqual(self.token_files(), [], "no credential file, staged or main")
         self.assertFalse(sync.delete_pending())
         self.assertFalse(sync.sign_out_incomplete())
 
-    def script_device_login(self, token, login="me"):
+    def script_device_login(self, token, login="me", refresh=None):
         self.gh.on("POST", "https://github.com/login/device/code", env.resp(200, {
             "device_code": "dc", "user_code": "UC-T", "interval": 0.01, "expires_in": 60,
             "verification_uri": "https://github.com/login/device"}))
-        self.gh.on("POST", "https://github.com/login/oauth/access_token", env.resp(200, {"access_token": token}))
-        self.gh.on("GET", "/user", env.resp(200, {"login": login}))
+        issuance = dict(access_token=token)
+        if refresh is not None:
+            issuance["refresh_token"] = refresh
+        self.gh.on("POST", "https://github.com/login/oauth/access_token", env.resp(200, issuance))
+        self.gh.on("GET", "/user", env.resp(200, {"id": 7, "login": login}))
 
     def run_cli(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -88,32 +97,40 @@ class Base(env.SyncEnv):
             rc = cli.main(list(argv))
         return rc, out.getvalue() + err.getvalue()
 
-    def cli_login(self, token):
-        self.script_device_login(token)
+    def cli_login(self, token, refresh=None):
+        self.enable_v2_login()
+        self.script_device_login(token, refresh=refresh)
         with patch.object(cli, "cmd_push", return_value=0):
             return self.run_cli("login", "--force", "--no-browser")
 
 
 # ---- 1. K1: one stored copy, nothing after sign-out ------------------------------------------
 class TestK1Invariant(Base):
+    def setUp(self):
+        super().setUp()
+        self.enable_v2_login()
+
     def test_cli_login_force_twice_leaves_one_copy_and_logout_clears_all(self):
         # SS → SS, SS → file (keyring write fails), file → SS: after each login exactly one copy.
         plans = {"ss-ss": (True, True), "ss-file": (True, False), "file-ss": (False, True)}
         for name, backends in plans.items():
             with self.subTest(plan=name):
                 self.st().update(tokenGeneration="")      # after the first subtest, no legacy retirement
-                tokens = []
                 for use_ss in backends:
                     token = env.make_token()
-                    tokens.append(token)
+                    refresh = env.make_token()
                     failing = (contextlib.nullcontext() if use_ss else
-                               patch.object(self.ss, "set", side_effect=RuntimeError("collection locked")))
+                               patch.object(self.v2ss, "_unlocked", return_value=[]))
                     with failing:
-                        rc, out = self.cli_login(token)
+                        rc, out = self.cli_login(token, refresh)
                     self.assertEqual(rc, 0, out)
-                    self.assertEqual(self.copies(), 1, (name, self.ss.items, self.token_files()))
-                    self.assertEqual(vault.read(), (token, "secret-service" if use_ss else "file"))
+                    self.assertEqual(self.copies(), 1, name)
+                    credential, ref = self.credential()
+                    self.assertEqual(ref["backend"], "secret-service" if use_ss else "file")
+                    self.assertEqual(credential["accessToken"], token)
+                    self.assertEqual(credential["refreshToken"], refresh)
                     self.assertNotIn(token, out)
+                    self.assertNotIn(refresh, out)
                     self.assertFalse(sync.delete_pending(), self.st().get("tokenDeletePending"))
                 rc, out = self.run_cli("logout")
                 self.assertEqual(rc, 0, out)
@@ -121,76 +138,82 @@ class TestK1Invariant(Base):
 
     def test_file_to_secret_service_transition_deletes_the_file(self):
         self.st().update(tokenGeneration="")
-        with patch.object(self.ss, "set", side_effect=RuntimeError("locked")):
-            self.cli_login(env.make_token())
-        self.assertEqual(self.token_files(), ["github-token"])
-        rc, _ = self.cli_login(env.make_token())
-        self.assertEqual(rc, 0)
+        with patch.object(self.v2ss, "_unlocked", return_value=[]):
+            rc, out = self.cli_login(env.make_token())
+        self.assertEqual(rc, 0, out)
+        old_files = self.token_files()
+        self.assertEqual(len(old_files), 1)
+        self.assertTrue(old_files[0].startswith("github-credentials/"))
+        rc, out = self.cli_login(env.make_token())
+        self.assertEqual(rc, 0, out)
         self.assertEqual(self.token_files(), [])
-        self.assertEqual(len(self.ss.items), 1)
+        self.assertEqual(len(self.v2ss.items), 1)
 
     def test_cancelled_file_login_leaves_no_staged_file(self):
         self.st().update(tokenGeneration="")
-        vault._ss = lambda: None
         attempt = sync.begin_login()
-        original_store = vault.store
+        original_stage = self.auth_owner.store.stage_refresh
 
-        def store_then_cancel(token):
-            ref = original_store(token)
-            self.assertEqual(len([n for n in self.token_files() if ".pending-" in n]), 1, "staged before publish")
+        def stage_then_cancel(ref, payload):
+            result = original_stage(ref, payload)
+            self.assertEqual(result, "ready")
+            self.assertEqual(len(self.token_files()), 1, "whole envelope persisted before publish")
             sync.cancel_login(attempt)
-            return ref
-        self.gh.on("GET", "/user", env.resp(200, {"login": "me"}))
-        with patch.object(vault, "store", side_effect=store_then_cancel):
+            return result
+        with patch.object(vault, "_ss_v2", return_value=None), \
+                patch.object(self.auth_owner.store, "stage_refresh", side_effect=stage_then_cancel):
             with self.assertRaisesRegex(sync.LoginError, "^cancelled$"):
-                sync.login_finish(self.token, attempt=attempt)
+                sync.login_finish(dict(access_token=self.token), attempt=attempt)
         self.assertEqual(self.token_files(), [])
         self.assertFalse(sync.delete_pending())
+        self.assertIsNone(self.st().get("authV2")["active"])
+        self.assertEqual(self.gh.calls, [])
 
     def test_machine_without_secret_service_signs_out_completely(self):
-        """FINDING (tester 2026-09-30, regression of cycle 3 / N3): on a machine where the Secret
-        Service is never reachable (`vault._ss()` → None) a fresh install has no `tokenGeneration`,
-        so the first `publish` retires `("legacy", None)`. `_delete_stored` treats «no Secret
-        Service» as a failed delete (`ss is not None and ss.delete(...)` → False), the reference
-        stays in `tokenDeletePending` forever, `logout()` returns False, `ccl-sync logout` exits 1
-        with «Выход не завершён…» and status/tray keep showing it, although no copy exists."""
         vault._ss = lambda: None
-        rc, out = self.cli_login(self.token)
+        with patch.object(vault, "_ss_v2", return_value=None):
+            rc, out = self.cli_login(self.token)
+            self.assertEqual(rc, 0, out)
+            credential, ref = self.credential()
+            self.assertEqual((credential["accessToken"], ref["backend"]), (self.token, "file"))
+            rc, out = self.run_cli("logout")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(vault.read(), (self.token, "file"))
-        rc, out = self.run_cli("logout")
-        self.assertEqual(self.token_files(), [])        # the copy itself is gone …
-        self.assertEqual(rc, 0, out)                    # … but sign-out is reported incomplete
         self.assert_signed_out_clean()
 
     def test_ctrl_c_during_hung_keyring_write_leaves_no_orphan(self):
-        """FINDING (tester 2026-09-30, K1): Ctrl+C in `ccl-sync login` while the keyring write
-        hangs interrupts `done.wait(TIMEOUT)` in `vault._timed` with KeyboardInterrupt. The
-        `abandoned` flag is never set and `store()` never records the generation in
-        `tokenDeletePending` (it only catches Exception), so the late CreateItem stays in the
-        keyring as an untracked live token copy that no later sign-out deletes.
-        Suggested fix: in `_timed`, on BaseException while waiting, set `abandoned` under `guard`
-        (as for Timeout) and re-raise."""
         self.st().update(tokenGeneration="")
-        self.ss.hang_set = self.ss.event()
+        entered = threading.Event()
+        release = self.v2ss.hang_set = self.v2ss.event()
+        original_set = self.v2ss.set
         armed = [True]
+
+        def set_token(*args):
+            entered.set()
+            return original_set(*args)
 
         class InterruptingEvent(threading.Event):
             def wait(self, timeout=None):
                 if (armed[0] and timeout is not None and threading.current_thread() is threading.main_thread()):
+                    if not entered.wait(2):
+                        raise AssertionError("V2 write was not transferred")
                     armed[0] = False
                     raise KeyboardInterrupt
                 return super().wait(timeout)
         proxy = SimpleNamespace(Event=InterruptingEvent, Lock=threading.Lock, Thread=threading.Thread,
                                 local=threading.local)
-        with patch.object(vault, "threading", proxy):
+        with patch.object(self.auth_owner.store, "login_backend", return_value="secret-service"), \
+                patch.object(self.v2ss, "set", side_effect=set_token), \
+                patch.object(vault, "threading", proxy):
             rc, out = self.cli_login(self.token)
         self.assertEqual(rc, 130, out)
-        self.ss.hang_set.set()
-        self.assertTrue(wait_until(vault_threads_idle))  # a self-cleanup (if any) has finished
-        self.ss.hang_set = None
+        self.assertIsNone(self.st().get("authV2")["active"])
+        self.assertTrue(sync.delete_pending(), "late writer remains durably tracked")
+        release.set()
+        self.assertTrue(wait_until(vault_threads_idle))
+        self.v2ss.hang_set = None
         rc, out = self.run_cli("logout")
-        self.assertEqual(self.ss.items, {}, "orphan CreateItem survived sign-out")
+        self.assertEqual(rc, 0, out)
+        self.assert_signed_out_clean()
 
 
 # ---- 2. late CreateItem / late Delete ----------------------------------------------------------
@@ -372,7 +395,7 @@ class TestUnreachablePush(Base):
                 patch.object(usage, "refresh", return_value=(usage.new_index(), False, True)):
             rc, out = self.run_cli("push", "--quiet")
         self.assertEqual(rc, 1)
-        self.assertIn(vault.timeout_text(), out)
+        self.assertIn("Хранилище секретов не ответило — повторим автоматически", out)
         self.assertNotIn("не найден", out)
 
 
@@ -466,71 +489,93 @@ class TestNoTokenSubstring(Base):
         for token in self.tokens:
             for part in (token, token[4:], token[-16:]):
                 self.assertNotIn(part, text, where)
+        for envelope in self.envelopes:
+            self.assertNotIn(envelope, text, where + " (encoded credential)")
 
     def sandbox_dump(self):
-        """Names and contents of every sandbox file except the published main token file."""
+        """Names and nonsecret file contents; protected credential payloads are expected."""
         out = []
         for root, _dirs, files in os.walk(self.tmp):
             for name in files:
                 path = os.path.join(root, name)
                 out.append(path)
-                if path == common.TOKEN_FILE_PATH:
+                if path == common.TOKEN_FILE_PATH or root == os.path.join(common.CONFIG_DIR, "github-credentials"):
                     continue
                 with open(path, "rb") as f:
                     out.append(f.read().decode("utf-8", "replace"))
         return "\n".join(out)
 
     def test_cycle3_flows(self):
-        self.tokens = [env.make_token() for _ in range(4)]
+        self.enable_v2_login()
+        self.tokens = [env.make_token() for _ in range(5)]
+        self.envelopes = []
+        original_stage = self.auth_owner.store.stage_refresh
+        def capture_stage(ref, payload, stage=original_stage):
+            self.envelopes.append(payload)
+            return stage(ref, payload)
+        capture = patch.object(self.auth_owner.store, "stage_refresh", side_effect=capture_stage)
+        capture.start()
+        self.addCleanup(capture.stop)
         output = []
         self.st().update(tokenGeneration="")
-        # (a) file backend login (keyring write times out → staged file → published)
-        self.ss.hang_set = self.ss.event()
-        rc, out = self.cli_login(self.tokens[0])
+        # Explicit backend selection occurs before staging; a failed V2 write
+        # must not silently downgrade the received pair.
+        with patch.object(self.v2ss, "_unlocked", return_value=[]):
+            rc, out = self.cli_login(self.tokens[0])
         output.append(out)
         self.assertEqual(rc, 0, out)
-        self.assertEqual(self.token_files(), ["github-token"], "no staged copy left after publication")
-        self.ss.hang_set = None
-        # (b) cancelled file login: staged file removed, active file untouched
-        attempt = sync.begin_login()
-        original_store = vault.store
-        vault_ss = vault._ss
-        vault._ss = lambda: None
+        old_credential, old_ref = self.credential()
+        self.assertEqual(old_credential["accessToken"], self.tokens[0])
+        self.assertEqual(old_ref["backend"], "file")
+        self.assertEqual(len(self.token_files()), 1)
 
-        def store_then_cancel(token):
-            ref = original_store(token)
+        # Cancel a fully staged replacement; it must preserve the active file.
+        attempt = sync.begin_login()
+        original_stage = self.auth_owner.store.stage_refresh
+        def stage_then_cancel(ref, payload):
+            result = original_stage(ref, payload)
             sync.cancel_login(attempt)
-            return ref
-        self.gh.on("GET", "/user", env.resp(200, {"login": "me"}))
-        with patch.object(vault, "store", side_effect=store_then_cancel):
-            with self.assertRaises(sync.LoginError):
-                sync.login_finish(self.tokens[1], attempt=attempt)
-        vault._ss = vault_ss
-        self.assertEqual(self.token_files(), ["github-token"])
-        # (c) Secret Service login retires the file
+            return result
+        with patch.object(vault, "_ss_v2", return_value=None), \
+                patch.object(self.auth_owner.store, "stage_refresh", side_effect=stage_then_cancel):
+            with self.assertRaisesRegex(sync.LoginError, "^cancelled$"):
+                sync.login_finish(dict(access_token=self.tokens[1]), attempt=attempt)
+        credential, ref = self.credential()
+        self.assertEqual(ref["generation"], old_ref["generation"])
+        self.assertEqual(credential["accessToken"], self.tokens[0])
+        self.assertEqual(len(self.token_files()), 1)
+
+        # SS login retires the old envelope. Access-only triple401 and failed
+        # cleanup remain visible, then a retry and fresh explicit login clean up.
         rc, out = self.cli_login(self.tokens[2])
+        self.assertEqual(rc, 0, out)
         output.append(out)
-        # (d) status, revoke with failed delete, status with pending, logout retry
+        self.assertEqual(self.token_files(), [])
         self.st().update(gistId="g1", discoveredAt=time.time())
         self.gh.on("GET", "/gists/g1", self.ok_gist())
         output.append(self.run_cli("status")[1])
         self.gh.on("GET", "/gists/g1", env.resp(401)).on("GET", "/user", env.resp(401), env.resp(401))
-        with patch.object(self.ss, "delete", return_value=False), \
+        with patch.object(self.v2ss, "delete", return_value=False), \
                 patch.object(usage, "refresh", return_value=(usage.new_index(), False, True)):
-            output.append(self.run_cli("push")[1])
+            rc, out = self.run_cli("push")
+            self.assertEqual(rc, 2)
+            self.assertIn("Войдите в GitHub заново: ccl-sync login", out)
+            output.append(out)
         output.append(self.run_cli("status")[1])
         self.assertClean("sandbox files (pending state)", self.sandbox_dump())
-        output.append(self.run_cli("logout")[1])
-        # (e) a fresh login and a clean logout with the hint
-        self.cli_login(self.tokens[3])
-        output.append(self.run_cli("logout")[1])
+        rc, out = self.run_cli("logout")
+        self.assertEqual(rc, 0, out)
+        output.append(out)
+        rc, out = self.cli_login(self.tokens[3], refresh=self.tokens[4])
+        self.assertEqual(rc, 0, out)
+        output.append(out)
+        rc, out = self.run_cli("logout")
+        self.assertEqual(rc, 0, out)
+        output.append(out)
         self.assert_signed_out_clean()
-        self.ss.release_all()
-        self.assertTrue(wait_until(vault_threads_idle))
         self.assertClean("stdout/stderr", "\n".join(output))
         self.assertClean("sandbox files + names", self.sandbox_dump())
         self.assertClean("sync state", self.state_text())
-        self.assertEqual(self.ss.items, {})
         for call in self.gh.calls:
             headers = {k: v for k, v in call.headers.items() if k.lower() != "authorization"}
             self.assertClean("request " + repr(call), call.url + json.dumps(headers) + str(call.body or ""))

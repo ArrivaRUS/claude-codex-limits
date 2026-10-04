@@ -117,6 +117,7 @@ class TestLegacy(env.SyncEnv):
                        "/i/g2": dict(vault.ATTRS, generation="g2")},
                       {"/i/legacy": old, "/i/g1": new, "/i/g2": env.make_token()})
         ss = object.__new__(vault._SecretService)
+        ss.attrs = dict(vault.ATTRS)
         ss.dbus, ss.bus, ss.service, ss.session = FakeDbusModule, bus, bus.service, "/s/1"
         self.assertEqual(ss.get("legacy"), old)
         self.assertEqual(ss.get("g1"), new)
