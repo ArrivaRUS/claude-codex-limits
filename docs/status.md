@@ -2,7 +2,7 @@
 
 ## GH-AUTH-STABLE — текущая работа 2026-10-04
 
-Владелец исправил scope: нужны редкие ручные входы, а не точность формулировки. PM завершил PRD A1–A12; два Architect независимо исследовали lifecycle и проверили сводный контракт [architecture-github-auth.md](architecture-github-auth.md). База `297777d`, ветка `codex/stable-github-auth`; [главный план](github-auth-stability-plan.md). Production ещё не начат. Следующий шаг — freeze полного test-plan и предварительный commit, затем DeveloperComplex. Server revoke и потерянный ответ одноразовой ротации без durable candidate остаются честными границами.
+Владелец исправил scope: нужны редкие ручные входы, а не точность формулировки. PM завершил PRD A1–A12; два Architect независимо исследовали lifecycle и проверили сводный контракт [architecture-github-auth.md](architecture-github-auth.md). Pre-code commit `7f83dee` содержит требования/архитектуру/полный test-plan. Ветка `codex/stable-github-auth`; [главный план](github-auth-stability-plan.md). DeveloperComplex Astra/high реализует foundation → lifecycle → integration; Tester Sol/high отдельно готовит fake infrastructure, Reviewer Astra/high выполняет readonly preflight. Запуск тестов после exact isolation review. Server revoke и потерянный ответ одноразовой ротации без durable candidate остаются честными границами.
 
 ## GH-AUTH-UI — архивирован до production 2026-10-04
 

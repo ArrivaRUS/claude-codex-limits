@@ -44,6 +44,10 @@ Linux compatibility backend marker=`credential-v2`; старый logout/сбро
 legacy generation/login конфликтует с V2 и прекращает session, без resurrection.
 Полный downgrade/одновременная работа старого и нового binary не поддержаны.
 
+Incomplete candidate — отдельный envelope kind с optional пригодными новыми
+values, никогда active. Не дополняется старой парой; unknown→bad_refresh после
+неопределённой предыдущей ротации классифицируется lost_result.
+
 Refresh backend закреплён: SS/Keychain не переходит в plaintext даже после
 получения новой пары. Ранее выбранный file backend остаётся разрешённым с 0600.
 Обычный explicit login сохраняет согласованную прежнюю backend-selection policy.
@@ -57,6 +61,21 @@ DBus вызова. `ensureAccess(reason,now)` — единственный по�
 возвращает access с captured epoch/generation, temporary или actionRequired.
 Presentation snapshot несекретный; GUI rendering не делает DBus/HTTP.
 Clock, manifest, store, transport, lock и checkpoints injectable для тестов.
+
+Production owners: Linux новый `linux/ccl/auth.py` AuthOwner и Swift новый
+`Sources/GitHubAuth.swift` GitHubAuthOwner. Explicit dependencies не имеют I/O
+defaults: production factory живёт в integration. Linux ensure_access принимает
+lock_held для existing sync flock, исключая nested lock. Swift build.sh создаёт
+temporary main.swift из LimitsMonitor.swift и компилирует explicit core/selftests.
+Tester владеет отдельным Sources/GitHubAuthSelfTests.swift и linux/tests.
+Ранний --auth-selftest dispatch до mkdir/обычного startup/AppDelegate.
+
+Checkpoint API: before_intent, after_intent, after_request_started, after_response,
+after_parse, after_stage, after_readback, before_identity, after_identity,
+before_publish, after_publish, before_retire, after_retire, after_logout_tombstone.
+Hook получает только имя и nonsecret ref/epoch; после response/parse/stage находится
+в bounded SIGINT deferral. Return types ready/temporary/actionRequired/signedOut;
+typed read и snapshot по контракту выше. Exact сигнатуры freeze после foundation.
 
 Под lock: reload → recovery → отдельный probe generation → durable intent с
 заранее известным toRef → requestStarted → один OAuth POST → parse → FIRST

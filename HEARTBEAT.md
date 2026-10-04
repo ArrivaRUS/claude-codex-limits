@@ -4,7 +4,7 @@
 
 ## Актуальный статус · 2026-10-04
 
-- GH-AUTH-STABLE — реальная авторизация GitHub неделями/месяцами без регулярного ручного входа. Ветка `codex/stable-github-auth`, база `297777d`; production не начат. PM PRD и два независимых плана завершены; сведение/challenge принято в `docs/architecture-github-auth.md`, Tester завершает полный lifecycle test-plan. Следом pre-code commit и DeveloperComplex. План `docs/github-auth-stability-plan.md`; причина конкретного случая пока неизвестна, но не блокирует macOS/ALSE.
+- GH-AUTH-STABLE — реальная авторизация GitHub неделями/месяцами без регулярного ручного входа. Ветка `codex/stable-github-auth`; pre-code PRD/architecture/test-plan commit `7f83dee`. DeveloperComplex Astra/high получил GO: foundation → lifecycle → integration macOS/ALSE; Tester ждёт exact API freeze. План `docs/github-auth-stability-plan.md`. Причина конкретного случая пока неизвестна, но не блокирует реализацию. Root production actions=0.
 
 - GH-AUTH-UI архивирован до production после уточнения владельца. План `docs/github-auth-ui-fix.md` и предварительный `docs/test-plan-github-auth-ui.md` — история; storage/UI ошибки входят в GH-AUTH-STABLE. Отдельного косметического выпуска не будет.
 
