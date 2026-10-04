@@ -7,7 +7,7 @@ GitHub на macOS/ALSE без регулярного ручного входа. 
 [полный тест-план](test-plan-github-auth-stability.md). UI-only материалы архивированы.
 Реализация принята на `40cfdf58980acef0668bdb4915c6001322ba9e11`; независимые
 code/security/isolation review, пакеты и финальная bundled Mac QA проверены.
-Публикация 3.2.3/0.4.3 ещё pending; актуальный результат смотреть в status/HEARTBEAT. Реальные credentials и API
+Версии 3.2.3/0.4.3 опубликованы, публичные assets побайтно проверены; актуальный результат смотреть в status/HEARTBEAT. Реальные credentials и API
 не использовать в проверках. Новый V2 namespace не поддерживает полный downgrade:
 возврат к старому binary не должен восстанавливать уже ротированную старую пару.
 
@@ -76,9 +76,9 @@ cleanup; повторить выход после доступности хра�
 
 macOS: `bash build.sh`, затем `./scripts/make-dmg.sh`; сверить версию `.app`, strict codesign и DMG. Linux: `sh linux/packaging/build-deb.sh` требует `dpkg-deb`. Если его нет на Mac, использовать DEB из успешного Ubuntu CI на точной принятой ревизии: проверить `headSha`, полный лог, имя, версию, архитектуру и SHA-256 скачанного `linux-deb`. Это отдельная проверка пакета, не живой ALSE smoke.
 
-Для готовящегося выпуска используются macOS `v3.2.3` с `ClaudeCodexLimits-3.2.3.dmg`
+Для опубликованного выпуска используются macOS `v3.2.3` с `ClaudeCodexLimits-3.2.3.dmg`
 и Linux `linux-v0.4.3` с `claude-codex-limits_0.4.3_all.deb`. Пакеты этих версий собраны и проверены;
-публичные assets ещё не опубликованы. Linux-релиз создаётся с `--latest=false`:
+публичные assets скачаны и совпадают с проверенными пакетами. Linux-релиз создаётся с `--latest=false`:
 merge в `main` не обновляет пакетные установки, а Latest должен оставаться
 macOS-релизом с DMG, который используют Mac updater и `get.sh`.
 `sh linux/packaging/release.sh [notes-file]` требует проверенного main и `dpkg-deb`;
@@ -86,9 +86,9 @@ macOS-релизом с DMG, который используют Mac updater и 
 Перед выпуском сверить версии, ревизию, отсутствие существующего тега и релиза;
 после — публичные assets и SHA-256. Подготовленные [macOS notes](release-notes-3.2.3.md)
 и [Linux notes](release-notes-linux-0.4.3.md). В notes записаны фактические проверки и SHA-256 локальных пакетов;
-публикация pending; финальная bundled Mac QA завершена: PASS.
+публикация завершена, публичные assets проверены; финальная bundled Mac QA: PASS.
 
-Последние выпущенные версии до этого захода — macOS `v3.2.2` и Linux `linux-v0.4.2`.
+Текущие выпущенные версии — macOS `v3.2.3` и Linux `linux-v0.4.3` на exact source `40cfdf58980acef0668bdb4915c6001322ba9e11`.
 Полный downgrade после перехода к V2 не поддерживается: старый binary не умеет
 новую запись и не должен получить уже ротированную старую пару. Не удалять
 хранилище или локальную историю ради отката. При проблеме остановить распространение,

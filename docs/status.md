@@ -1,12 +1,12 @@
 # Статус командного внедрения
 
-## GH-AUTH-STABLE — принято к выпуску 2026-10-04
+## GH-AUTH-STABLE — выпущено 2026-10-04
 
 Принята исходная ревизия `40cfdf58980acef0668bdb4915c6001322ba9e11` для macOS 3.2.3 / Linux 0.4.3. Независимые CodeReviewer и SecurityAnalyst приняли финальные production/isolation delta: Linux rev5b + cancelled sentinel, Swift C5 и memory-only selftests. Root не менял production.
 
 Фактические проверки: Linux [CI 37192768494](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37192768494) — 284 теста OK, 0 skip, DEB build PASS; Swift и executable из DMG — auth 30862/0, sync all passed, subscriptions/Auto 1218 OK. Независимый [QA](qa-github-auth-stability.md) — 374 финальных PNG (182 macOS + 192 Linux), offline DMG/DEB, strict codesign и checksum PASS. Первый sandbox bundled UI запуск exit134 не засчитан; тот же binary с разрешённой Cocoa-средой завершился exit0. Исходники после этих проверок не менялись.
 
-DMG SHA256 `c8f796efaed0343c679d397370050ae6f5d808b5bbc3dd4c8e1eb3ca5452d4d4`; DEB SHA256 `7d1edd28339a029f50ccb2975322293a63733a589e79679e2ceab811aeb14226`. Публикация по сохраняющемуся разрешению — следующий шаг; публичные assets пока не проверены. Live ALSE, native Keychain/KWallet и реальный OAuth/установка не выполнялись. Синтетические 30/180 дней не доказывают полгода календарной работы; серверный отзыв и невозможная потеря единственной обновлённой пары остаются границами.
+DMG SHA256 `c8f796efaed0343c679d397370050ae6f5d808b5bbc3dd4c8e1eb3ca5452d4d4`; DEB SHA256 `7d1edd28339a029f50ccb2975322293a63733a589e79679e2ceab811aeb14226`. Опубликованы [macOS 3.2.3](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.3) и [Linux/ALSE 0.4.3](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.3). Теги — exact source SHA `40cfdf58980acef0668bdb4915c6001322ba9e11`; main принят fast-forward с QA metadata `b6ca7734786c93547d4eab22bec20b9f0228e7bc`. GitHub API digests совпали с локальными SHA256; оба публичных asset скачаны и побайтно сверены. Latest=v3.2.3; Linux --latest=false. Read-only DMG mount отключён. Live ALSE, native Keychain/KWallet и реальный OAuth/установка не выполнялись. Синтетические 30/180 дней не доказывают полгода календарной работы; серверный отзыв и невозможная потеря единственной обновлённой пары остаются границами.
 
 ## История GH-AUTH-STABLE до финальной приёмки
 

@@ -94,8 +94,8 @@ under `~/.claude-limits-monitor/`.
 
 ## GitHub sign-in and recovery
 
-macOS 3.2.3 / Linux 0.4.3 have passed code checks and package verification;
-independent QA of the final packages and UI is complete; publication is pending (see [macOS notes](docs/release-notes-3.2.3.md)
+macOS 3.2.3 / Linux 0.4.3 are published; code, packages and independent QA
+have passed, and public downloads match the verified packages (see [macOS notes](docs/release-notes-3.2.3.md)
 and [Linux notes](docs/release-notes-linux-0.4.3.md)). A healthy existing GitHub
 sign-in keeps working without signing in again. A new explicit login requests
 `gist offline_access` and saves refresh credentials and lifetimes if GitHub supplies

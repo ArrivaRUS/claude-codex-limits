@@ -1,9 +1,8 @@
-# Linux 0.4.3 — подготовленный выпуск
+# Linux 0.4.3 — опубликованный выпуск
 
 Статус на 2026-10-04: код и пакеты проверены на принятой ревизии
-`40cfdf58980acef0668bdb4915c6001322ba9e11`. **Публикация pending**; независимое QA финальных
-пакетов и интерфейса завершено: PASS. Результаты ниже переданы
-координатором; эти notes не объявляют релиз опубликованным.
+`40cfdf58980acef0668bdb4915c6001322ba9e11`. **Опубликовано**; независимое QA финальных пакетов и интерфейса: PASS.
+Публичный asset скачан и побайтно сверён; GitHub API digest совпадает с SHA256.
 
 ## Изменение для пользователя
 
@@ -43,8 +42,8 @@ V2-записи старым binary не поддерживается. Синт�
 - DEB `claude-codex-limits_0.4.3_all.deb`: архитектура `all`, сжатие xz;
   16 Python-модулей, scripts/resources и режимы файлов сверены с принятой ревизией.
   SHA-256: `7d1edd28339a029f50ccb2975322293a63733a589e79679e2ceab811aeb14226`.
-- Подготовленная публикация: [linux-v0.4.3](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.3)
-  на принятой ревизии, с `--latest=false`. Публикация и публичный asset ещё не проверены.
+- Публикация: [linux-v0.4.3](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.3)
+  на принятой ревизии, с `--latest=false`. Публикация и публичный asset проверены.
 
 Источники: [PRD](prd-github-auth-stability.md),
 [архитектура](architecture-github-auth.md), [тест-план](test-plan-github-auth-stability.md),

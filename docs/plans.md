@@ -1,6 +1,6 @@
 # План исполнения — устойчивая GitHub-авторизация и история UI
 
-> GH-AUTH-STABLE принят к выпуску на 40cfdf (2026-10-04); Linux284/0skip, Swift30862/0, QA374 PNG и пакеты PASS. Публикация — следующий шаг.
+> GH-AUTH-STABLE выпущен на 40cfdf (2026-10-04); Linux284/0skip, Swift30862/0, QA374 PNG и пакеты PASS. Версии 3.2.3/0.4.3 опубликованы, публичные assets проверены.
 
 > GH-AUTH-STABLE (2026-10-04): реальный auth lifecycle — [github-auth-stability-plan.md](github-auth-stability-plan.md). Прежний UI-only план ниже архивирован до production; задача уточнена владельцем.
 

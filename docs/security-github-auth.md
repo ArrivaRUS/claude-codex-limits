@@ -1,4 +1,8 @@
 # GH-AUTH-STABLE: независимая security-проверка
+## Финальная принятая ревизия — 2026-10-04
+
+Запись координатора по отдельным заключениям CodeReviewer/SecurityAnalyst: exact source `40cfdf58980acef0668bdb4915c6001322ba9e11`, Linux auth48ee/vault96ae/sync63a867 и Swift coredfa533/main3f873ef4/SelfTestsee6c1db4 — production delta и test-isolation PASS. Предыдущие FAIL/pending ниже относятся к истории исправлений. Фактические runtime/package/QA и публикация описаны в [status](status.md) и [QA](qa-github-auth-stability.md); это не native backend/runtime security acceptance.
+
 
 2026-10-04, SecurityAnalyst GPT-6 Astra/high, новый контекст. Первичное заключение
 сделано без чтения нового CodeReviewer отчёта. Только чтение/specs/hashes,
