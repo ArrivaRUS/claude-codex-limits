@@ -1,5 +1,13 @@
 # Статус командного внедрения
 
+## GH-AUTH-STABLE — текущая работа 2026-10-04
+
+Владелец исправил scope: нужны редкие ручные входы, а не точность формулировки. PM завершил PRD A1–A12; два Architect независимо исследовали lifecycle и проверили сводный контракт [architecture-github-auth.md](architecture-github-auth.md). База `297777d`, ветка `codex/stable-github-auth`; [главный план](github-auth-stability-plan.md). Production ещё не начат. Следующий шаг — freeze полного test-plan и предварительный commit, затем DeveloperComplex. Server revoke и потерянный ответ одноразовой ротации без durable candidate остаются честными границами.
+
+## GH-AUTH-UI — архивирован до production 2026-10-04
+
+Продолжение подтверждённых UI/storage ошибок на базе `297777d`. ArchitectPrimary GPT-6 Astra/high выбрал существующий `_SecretServiceAbsent` → explicit SS unreachable без новой операции хранилища, с сохранением legacy discovery; Swift общий заголовок становится нейтральным. Production ещё не менялся; предварительный test-plan Tester готовится. Маршрут: [github-auth-ui-fix.md](github-auth-ui-fix.md). Следующий шаг — зафиксировать контракт/test-plan, DeveloperComplex, независимые проверки и выпуск 3.2.3/0.4.3 по существующему разрешению. Реальная причина случая пользователя и refresh остаются отдельными вопросами.
+
 ## GH-AUTH — диагностика 2026-10-04
 
 Read-only исследование на `af4d17d`: Debugger воспроизвёл Linux GUI login-кнопку при недоступном Secret Service; macOS missing Keychain также маркирует revoked без 401. SecurityAnalyst подтвердил возможные 8-hour OAuth tokens и отсутствие refresh в обоих портах. Режим приложения и реальная причина нового случая не проверены. Подробности/источники: [github-auth-diagnosis.md](github-auth-diagnosis.md). Production, аккаунты и token policy не менялись; release-suite не повторялась. В backlog отдельные UI/refresh задачи, реализация не начата. Следующий шаг — платформа/версия и точный видимый текст последней ошибки.

@@ -1,4 +1,8 @@
-# План исполнения — текущая UI-правка Auto
+# План исполнения — устойчивая GitHub-авторизация и история UI
+
+> GH-AUTH-STABLE (2026-10-04): реальный auth lifecycle — [github-auth-stability-plan.md](github-auth-stability-plan.md). Прежний UI-only план ниже архивирован до production; задача уточнена владельцем.
+
+> GH-AUTH-UI (2026-10-04) архивирован до кода: [github-auth-ui-fix.md](github-auth-ui-fix.md), [предварительный test-plan](test-plan-github-auth-ui.md). Storage/UI исправления входят в GH-AUTH-STABLE.
 
 > GH-AUTH (2026-10-04): диагностика повторной авторизации — [github-auth-diagnosis.md](github-auth-diagnosis.md).
 

@@ -4,6 +4,10 @@
 
 ## Актуальный статус · 2026-10-04
 
+- GH-AUTH-STABLE — реальная авторизация GitHub неделями/месяцами без регулярного ручного входа. Ветка `codex/stable-github-auth`, база `297777d`; production не начат. PM PRD и два независимых плана завершены; сведение/challenge принято в `docs/architecture-github-auth.md`, Tester завершает полный lifecycle test-plan. Следом pre-code commit и DeveloperComplex. План `docs/github-auth-stability-plan.md`; причина конкретного случая пока неизвестна, но не блокирует macOS/ALSE.
+
+- GH-AUTH-UI архивирован до production после уточнения владельца. План `docs/github-auth-ui-fix.md` и предварительный `docs/test-plan-github-auth-ui.md` — история; storage/UI ошибки входят в GH-AUTH-STABLE. Отдельного косметического выпуска не будет.
+
 - 2026-10-04: GH-AUTH исследован на `af4d17d`: Debugger pure AST и независимый SecurityAnalyst подтвердили ложную Linux login-кнопку при `_ss() is None`; macOS missing Keychain тоже показывает revoked без server 401. Оба порта не поддерживают optional expiring OAuth refresh. Причина конкретного случая неизвестна без платформы/версии/видимой последней ошибки. Выводы/источники: `docs/github-auth-diagnosis.md`, отдельные UI/refresh задачи в backlog. Production, аккаунты и выбранная token policy не менялись; 3 делегирования, root production actions=0, duration_ms неизвестен.
 
 - AUTH-1 завершён: macOS **3.2.2** / Linux **0.4.2** опубликованы на `a1f885f1138c327121fb7baf794e000edfea5695`; `main` содержит код и независимую приёмку. Stale Codex больше не получает ложное «вход истёк» и Claude-команду; nil asOf без выдуманной даты. Reviewer production/isolation PASS; Swift/bundled selftest **1063 OK**, Ubuntu CI **219 tests OK / 0 skip**, QA **88 macOS + 92 Linux AUTH PNG PASS**, пакеты verified. Публичные assets побайтно совпадают; Latest=v3.2.2, Linux не Latest. Контракт/отчёт: `docs/auth-hints-fix.md`, `docs/qa-auth-hints.md`, checksums/CI — `docs/status.md`.

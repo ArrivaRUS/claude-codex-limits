@@ -71,6 +71,24 @@
 
 Принята exact ревизия `a1f885f1138c327121fb7baf794e000edfea5695`: независимые production/test isolation review, Swift 1063 OK, Linux CI 219 OK/0 skip, QA 88+92 PNG и пакеты PASS. macOS 3.2.2 / Linux 0.4.2 опубликованы по сохранённому разрешению; публичные assets совпадают с проверенными, Latest=v3.2.2. Унаследованный P3 Simple readError subtitle отделён в Could; live ALSE и реальные clicks/fonts остаются долгами. Реальную причину входа пользователя эта UI-правка не устанавливает.
 
+## 2026-10-04 — минимальное исправление GH-AUTH-UI
+
+После «Ты продолжаешь работать?» продолжаем подтверждённые ошибки независимо от уточнения клиентской ОС. ArchitectPrimary выбрал `_SecretServiceAbsent` → explicit SS `unreachable`, без дополнительного GUI keyring I/O и без изменения legacy discovery; Swift нейтральный заголовок `.revoked` с прежним подробным lastError. Контракт `docs/github-auth-ui-fix.md`, предварительный test-plan. Прежние triple-401, local-only logout/generations и timer policy сохраняются; поддержку OAuth refresh не подмешивать. Выпуск 3.2.3/0.4.3 покрыт сохраняющимся разрешением на новые версии.
+
 ## 2026-10-04 — диагностика GH-AUTH
 
 Readonly Debugger и независимый SecurityAnalyst подтвердили неоднозначность storage/UI и условную несовместимость с OAuth refresh на `af4d17d`. Выводы: `docs/github-auth-diagnosis.md`; причина случая пользователя не установлена. Нового решения о token policy, входа/выхода, изменения production или выпуска не было. Выбранные ранее локальный выход и подтверждение трёх 401 остаются в силе.
+
+## 2026-10-04 — GH-AUTH-STABLE вместо отдельного UI-only выпуска
+
+Владелец уточнил: нужна устойчивость реальной авторизации на недели/месяцы,
+а не формулировка ошибки. PM зафиксировал PRD A1–A12; Primary Astra/high и
+Alternative Sol/high выполнили независимые планы, затем challenge сводного
+контракта. Принят `docs/architecture-github-auth.md`: целая защищённая пара,
+immutable generations, pinned backend, durable candidate перед identity,
+recovery по toRef независимо от фазы, сериализация, bounded SIGINT и бюджет
+unknown recovery. Legacy healthy sessions без перевхода; только новый явный
+login использует gist offline_access. Автоматическое восстановление sync
+не зависит от Advanced/свежести индекса. UI-only материалы архивированы до кода.
+Server revoke/A9 не обещаются автоматически восстановимыми. Полный test-plan
+и предварительный commit обязательны до DeveloperComplex; публикация согласована.
