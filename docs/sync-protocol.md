@@ -17,9 +17,14 @@ to the shared file format require bumping `schema` and updating both sides.
 
 ## Transport: one secret gist
 
-- Auth: GitHub **OAuth Device Flow**, scope `gist`, one OAuth App shared by all ports
-  (see *Client ID* below). The token is stored locally (macOS Keychain; Linux: Secret Service if
-  available, else a `0600` file) and is never logged or printed.
+- Auth: GitHub **OAuth Device Flow**, scope `gist offline_access` for a new explicit login,
+  one OAuth App shared by all ports (see *Client ID* below). Healthy legacy access-only
+  credentials remain usable without a new grant. Store optional refresh and issuer lifetimes
+  exactly when supplied; missing lifetime fields do not acquire a guessed expiry.
+- The credential is local (macOS Keychain; Linux Secret Service or its already selected
+  `0600` file backend). Rotation is pinned to the active backend; a temporary secure-store
+  failure never creates a new plaintext fallback. No credential values enter prefs, gist,
+  logs, stdout, argv or UI. Legacy Linux explicit-login fallback is described below.
 - API request headers: `Authorization: Bearer <token>`, `Accept: application/vnd.github+json`,
   `X-GitHub-Api-Version: 2022-11-28`, `User-Agent: ClaudeCodexLimits`.
 - **Token boundary.** Bearer authentication is allowed only on `https://api.github.com`:
@@ -95,12 +100,18 @@ to the shared file format require bumping `schema` and updating both sides.
 
 - Run one cycle **at start** and then **every 10 minutes**, whether or not local usage changed:
   other machines' data only arrives by reading, so a cycle must never depend on local changes.
-- On **macOS**, normal sync scheduling requires the Advanced view to be enabled: startup,
-  the 10-minute timer and wake all check `advancedEnabled()`. Enabling Advanced also starts a
-  scan and sync. After wake, check Advanced inside a callback delayed by about **7 seconds**.
-  A cycle that encounters transport status `0` or `5xx` schedules **one retry after 60 seconds**;
-  that retry does not schedule another retry. A new cycle cancels a pending retry. The queued
-  retry itself does not recheck Advanced. Linux's tray schedules sync independently of Advanced.
+- Auth maintenance and sync scheduling are independent of **Advanced** and the Claude/Codex
+  **Auto** limits schedule. macOS calls sync at startup, every 10 minutes and about **7 seconds**
+  after wake. Advanced still controls local log scanning; an available cached local snapshot
+  may be synced while that scan is disabled. Linux's tray schedules sync independently of
+  Advanced and still services auth when the local index is stale (without pushing stale data).
+- Each cycle obtains usable access from the credential owner before gist requests. A short
+  issuance is renewed automatically when due, including after sleep/restart; the client does
+  not have to run during sleep. Temporary dependency failures retain durable credentials and
+  set finite retry/backoff (normally 60/300/600 seconds, with bounded jitter and issuer delay).
+  The 10-minute cycle bounds the next normal attempt under healthy dependencies; rate-limit
+  instructions may extend that pause. macOS gist transport status `0` or `5xx` also schedules
+  one retry after 60 seconds; this retry does not recursively schedule another retry.
 - Cycles require a usable sign-in and respect backoff. They are serialized on macOS's queue
   `q` (`ccl.sync`) and Linux's `file_lock("sync")`; a busy Linux cycle is skipped. Sign-in/out
   mutations use the same serialization (Linux waits up to 60 seconds and checks that it holds
@@ -166,15 +177,11 @@ to the shared file format require bumping `schema` and updating both sides.
   Use variant **a**: `401` on the gist → `GET https://api.github.com/user`; if that is also `401`,
   pause about **4 seconds**, then repeat `GET /user` with the **same captured token**. The pause
   stays inside the serialized cycle: macOS queue `q`, Linux `file_lock("sync")`.
-  - Only **three consecutive 401s** (gist, user, user) mark the sign-in revoked. Persist the
-    revoked flag **before deleting** the stored token, show «Войдите в GitHub заново», and stop
-    syncing until a new sign-in. macOS rereads the Keychain: a different token aborts revocation;
-    the same token may be deleted. If the store cannot be read, set the flag but leave the token.
-    Linux captures `(tokenGeneration, tokenBackend)`, checks that it is still active after the
-    pause and again before setting `revoked`, and adds the pair to `tokenDeletePending` in the
-    same state update as `revoked=true`, before deleting only that captured generation/backend.
-    Linux keeps «Sign out» available while revoked with pending deletions. macOS shows it while
-    revoked if `keychainItemLeft` is true, including an unknown result after a read failure/timeout.
+  - Before final rejection, a refreshable issuance gets its automatic recovery opportunity.
+    Only the confirmed triple-401 chain for the still-current captured credential disables
+    that access. Persist the rejection before addressed cleanup; a late operation may not
+    disable a newer generation or account. A single 401 never deletes credentials.
+    A usable old access may continue while renewal requires explicit recovery.
   - Any non-401 response ends the confirmation sequence immediately. `/user` `200` records
     «401 on <request>, sign-in confirmed» and still fails the cycle; `403`, `429`, `5xx`, network
     failure or any other response records an inconclusive-check error. Keep the token and retry
@@ -190,12 +197,28 @@ to the shared file format require bumping `schema` and updating both sides.
   `backoffUntil`.
 - Network failure → keep the last merged result, retry next cycle. Sync must never block or break
   the limits display.
-- The token store may hang (a locked Keychain / Secret Service waiting for an unlock prompt): every
-  call to it gets a timeout (~15 s); a token-read timeout ends the cycle as an error. macOS also
-  delays background Keychain work for 30 minutes after a timeout; explicit sign-in/out can bypass
-  that delay. Linux never falls through to a file token after a Secret Service read timeout.
-- On macOS, a Keychain `.token` without `syncLogin` loads as phase `off` unless `syncRevoked` is set.
-- **Linux token generations.** A Secret Service item carries a `generation` attribute; sync state
+- Storage reads/writes and network operations are bounded. Locked, unreachable, timeout and
+  corrupt/unreadable state are distinct from a proven missing credential and server rejection.
+  Retry retains the last durable issuance; Linux never falls through to a different backend
+  after a selected Secret Service read timeout.
+- **V2 credential owner (both platforms).** The secure record stores the whole access/refresh
+  issuance. A nonsecret manifest selects immutable generations and records login epoch,
+  active ref, transition, retry time and pending cleanup. Only the serialized owner refreshes;
+  Linux CLI/GUI share the process lock. Persist intent before the refresh request and stage
+  the returned candidate before identity validation/publication. Restart inspects the durable
+  candidate in every transition phase before sending another refresh. Cancellation, sign-out
+  or a new account prevents late publication into the newer epoch.
+- **Unknown issuer result.** A timeout may mean the one-use refresh was accepted. Consult the
+  saved candidate first; an unknown outcome permits at most one further issuer recovery POST.
+  A proven unsent attempt does not spend that budget. If the only replacement pair was lost
+  and no recovery exists, report manual sign-in rather than claiming server revocation or
+  endlessly reusing the old refresh. Terminal renewal failure preserves durable evidence;
+  it does not itself assert complete credential deletion. External revocation, refresh expiry
+  and local credential loss remain boundaries of automatic recovery.
+- **Account-bound cache.** V2 remote totals are accepted only for the current epoch/account.
+  On macOS, an old unbound remote cache is excluded after restart until the first verified
+  sync; local usage is retained. A healthy legacy login does not need a new grant to do this.
+- **Legacy Linux token generations (compatibility path).** A Secret Service item carries a `generation` attribute; sync state
   selects `tokenGeneration` plus `tokenBackend`. Reads use only the active pair and discard a
   result if the pair changed during the read.
   - Under the sync lock: persist a fresh reference in `tokenDeletePending` → store its secret →
@@ -257,24 +280,22 @@ to the shared file format require bumping `schema` and updating both sides.
 ## Device Flow, step by step
 
 1. `POST https://github.com/login/device/code` (`Accept: application/json`) with
-   `client_id`, `scope=gist` → `device_code`, `user_code`, `verification_uri`, `interval`, `expires_in`.
+   `client_id`, `scope=gist offline_access` → `device_code`, `user_code`, `verification_uri`, `interval`, `expires_in`.
 2. Show `user_code`, open `verification_uri` in the browser.
 3. Poll `POST https://github.com/login/oauth/access_token` with `client_id`, `device_code`,
    `grant_type=urn:ietf:params:oauth:grant-type:device_code` every `interval` seconds:
    `authorization_pending` → keep polling; `slow_down` → interval += 5; `expired_token` /
    `access_denied` → stop and say so.
-4. Require `GET /user` to return `200` and a nonempty `login` before saving the token and showing
-   the login («GitHub: ArrivaRUS»).
-   - Each attempt has an identity: macOS `loginID`; Linux `begin_login` / `cancel_login` / `is_current`
-     (process-local). Publish only a verified, current, noncancelled attempt; the final check and
-     publication share the lock with begin/cancel. Cancelling A and starting B prevents late A from publishing.
-   - Check cancellation after network responses and storage/verification. A cancelled attempt that
-     already stored a token attempts addressed cleanup: Linux deletes its own generation (failed
-     deletion stays pending); macOS deletes the Keychain item only if rereading returns the same token.
-   - macOS `cancelledLoginPhase` is `revoked` if `syncRevoked` is set or `syncLogin` is known, otherwise `off`.
-5. Sign-out deletes the local token (the gist stays). macOS leaves sign-in state intact and
-   records an error if deletion fails; Linux disables the local sign-in even when deletion fails
-   and reports the possibly retained token as described above.
+4. Save the full candidate issuance to the selected protected store before identity validation.
+   Require `GET /user` to return `200` with valid identity before publishing the active login.
+   Publish only a current, noncancelled epoch/attempt; the final check shares serialization
+   with begin/cancel/logout. Late A cannot overwrite B; addressed cleanup remains pending
+   if the store cannot prove deletion. Optional refresh and expiry are kept with access.
+5. Sign-out is local-only: persist the disabled epoch/tombstone, then attempt addressed cleanup
+   of access, refresh and known candidate/probe copies. The gist and other computers remain.
+   An incomplete physical deletion is reported as cleanup pending; it is not called a complete
+   deletion. If disabling state itself cannot be saved, report failure. Only explicit login
+   starts a new session; queued refresh/login results cannot resurrect the signed-out epoch.
    - «Sign out» / «Выйти» has a local-only sign-out note on both platforms, including revoked cleanup.
      Linux: «This signs out only this computer. To revoke the app's access entirely, visit github.com/settings/applications»;
      RU: «Вход удаляется только на этом компьютере. Отозвать доступ приложения полностью — github.com/settings/applications».

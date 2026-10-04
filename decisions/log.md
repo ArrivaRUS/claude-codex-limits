@@ -92,3 +92,15 @@ login использует gist offline_access. Автоматическое в�
 не зависит от Advanced/свежести индекса. UI-only материалы архивированы до кода.
 Server revoke/A9 не обещаются автоматически восстановимыми. Полный test-plan
 и предварительный commit обязательны до DeveloperComplex; публикация согласована.
+
+## 2026-10-04 — recovery до identity и до backend launch
+
+Свежие независимые review frozen Linux rev4/Swift C3 нашли P1 liveness окна.
+Приняты design двух авторов: staged candidate обновляется через successor
+transaction до identity, сохраняя epoch/account/device fences и bounded unknown
+budget; OAuth intent отделён от фактического writer RPC durable launch protocol.
+Linux receipt создаётся до Thread.start, Swift prepared permit закрывается под
+per-ref lock до no-send settlement. PID/free flock не доказывают remote completion.
+Swift initial readable probe ждёт trusted settlement до OAuth. Детали добавлены
+в architecture; Tester отдельно готовит regression/изоляцию. Root C3 auth RUN
+30767/0 не закрывает эти новые окна; release остаётся pending.

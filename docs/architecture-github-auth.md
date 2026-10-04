@@ -77,6 +77,15 @@ Hook получает только имя и nonsecret ref/epoch; после res
 в bounded SIGINT deferral. Return types ready/temporary/actionRequired/signedOut;
 typed read и snapshot по контракту выше. Exact сигнатуры freeze после foundation.
 
+Tester seam challenge: transport обязан различать доказанное knownNotSent
+(trusted adapter metadata/exception, например DNS/connect до HTTP) и status0
+с неизвестным результатом. KnownNotSent не расходует unknown budget; read timeout
+не считается таким доказательством. Повторные offline попытки с доказанным
+pre-send failure должны восстановиться автоматически после возвращения сети.
+Финализация identity metadata в той же generation допускается атомарно под lock
+при неизменных epoch/ref и криптографической паре; immutable означает identity
+generation и её выдачу, а не запрет записать проверенные несекретные метаданные.
+
 Под lock: reload → recovery → отдельный probe generation → durable intent с
 заранее известным toRef → requestStarted → один OAuth POST → parse → FIRST
 durable stage всей полученной пары → verify readback → `/user` → atomic publish
@@ -128,6 +137,16 @@ Logout под lock сначала durable tombstone/new epoch, затем cleanu
 pending и retired refs. Незавершённый logout запрещает использование всех refs;
 late workers не публикуют session. Server revoke не выполняется.
 
+Уточнение после security/review: tombstone блокирует все refs прежней epoch;
+новое явное login может создать отдельную epoch/ref. UI различает accessDisabled
+и physical cleanupPending/deleted, не объявляет удаление завершённым при uncertainty.
+Device attempt регистрируется durable ДО issuer flow и проверяется CAS при receipt
+и publish; process-local callback ID недостаточен против logout другого процесса.
+Free flock/PID death не являются доказательством завершённого backend RPC:
+NoReply/disconnect требуют сохранённой server uncertainty до trusted completion.
+Очистка file generation включает её секретные atomic-write временники после
+подтверждения отсутствия незавершённых writers, с fsync и адресным ref retention.
+
 ## Граница гарантии и проверка
 
 30/180 моделируемых дней проверяются реальными операциями fake authorized sync,
@@ -141,3 +160,26 @@ GitHub не обещает idempotency/grace для этого случая. Ж�
 неизвестный secret; bounded honest recovery может потребовать один явный login.
 Реальный server revoke и refresh expiry также требуют входа. Это не выдаётся за
 здоровые A1/A2 сценарии. Live ALSE и месяцы реального времени не заявляются по CI.
+
+## Уточнение после финального review rev4/C3
+
+Staged candidate с valid refresh продолжает lifecycle до подтверждённой identity.
+Если его access истёк/получил401 до `/user`, создаётся durable successor transition
+с from=staged candidate и новым toRef. Старый active остаётся непубликуемым;
+source берётся из transition.from. Epoch, известный stable userID и device attempt
+сохраняются, cleanup включает все предшественники. Не более одного нового grant
+за ensure; неизвестный результат имеет прежний persisted recovery budget.
+
+OAuth intent и фактический backend write различаются. Linux writeProtocol=2
+позволяет no-send по отсутствию receipt только потому, что adapter синхронно
+создаёт/fsync receipt под auth lock ДО Thread.start. Старые refs остаются
+консервативными; pending remote receipt не разрешается по PID/free flock.
+
+Swift writer использует operation UUID и per-ref lock: prepared permit до launch;
+helper под тем же lock проверяет permit, сохраняет rpcStarted, выполняет Add-only
+API, записывает completed после возврата. Settlement prepared/absent закрывает
+permit перед признанием no-RPC, так что delayed helper больше не начинает API.
+RPC-started без completion остаётся неизвестным. Auth→writer lock order единый,
+helper не берёт auth lock. Initial probe uncertainty разрешается до OAuth,
+даже если probe payload уже читается. Новые протоколы требуют отдельных
+regressions/independent review, это принятие design, а не production PASS.

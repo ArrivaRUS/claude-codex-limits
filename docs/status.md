@@ -2,6 +2,16 @@
 
 ## GH-AUTH-STABLE — текущая работа 2026-10-04
 
+После возобновления Linux rev4 и Swift C3 (3.2.3/0.4.3) прошли свежие
+независимые review: НЕ PASS. Авторы исправляют staged candidate expiry,
+reservation-before-writer recovery и initial probe settlement.
+Предыдущий Linux RUN: 52 tests, 48 PASS / 1 fixture FAIL / 3 Qt SKIP;
+Swift C3 root auth-selftest: 30767 checks / 0 FAIL. Linux rev4 новый RUN прерван
+на deadlock SIGKILL fixture, полный результат неизвестен. Release notes draft
+готов (TechWriter), validation/build/release pending. Старые Swift selftests
+требуют исправления изоляции до запуска; реальные stores/API не использованы.
+Релиз пока не опубликован; прежние PASS не принимают изменённую ревизию.
+
 Владелец исправил scope: нужны редкие ручные входы, а не точность формулировки. PM завершил PRD A1–A12; два Architect независимо исследовали lifecycle и проверили сводный контракт [architecture-github-auth.md](architecture-github-auth.md). Pre-code commit `7f83dee` содержит требования/архитектуру/полный test-plan. Ветка `codex/stable-github-auth`; [главный план](github-auth-stability-plan.md). DeveloperComplex Astra/high реализует foundation → lifecycle → integration; Tester Sol/high отдельно готовит fake infrastructure, Reviewer Astra/high выполняет readonly preflight. Запуск тестов после exact isolation review. Server revoke и потерянный ответ одноразовой ротации без durable candidate остаются честными границами.
 
 ## GH-AUTH-UI — архивирован до production 2026-10-04

@@ -88,9 +88,32 @@ in Settings — Codex plan names don't map to public prices, so that one is mark
 you set it. The app also keeps its own utilization samples (35 days, in `~/.claude-limits-monitor/`)
 so that pace can later use your recent rate, not just the window average.
 
-Nothing is sent anywhere except the authenticated usage requests to Anthropic and OpenAI
-(as you). No telemetry, no third‑party services. Runtime cache and a Keychain backup live
+Authenticated usage requests go to Anthropic and OpenAI as you. If you enable GitHub sync,
+daily usage aggregates also go to your secret gist. No telemetry. Runtime cache and a Keychain backup live
 under `~/.claude-limits-monitor/`.
+
+## GitHub sign-in and recovery
+
+The current development change targets macOS 3.2.3 / Linux 0.4.3; validation,
+packages and publication are pending (see [macOS notes](docs/release-notes-3.2.3.md)
+and [Linux notes](docs/release-notes-linux-0.4.3.md)). A healthy existing GitHub
+sign-in keeps working without signing in again. A new explicit login requests
+`gist offline_access` and saves refresh credentials and lifetimes if GitHub supplies
+them. Short access credentials are renewed automatically, including after sleep
+or restart. GitHub maintenance has its own schedule, independent of Advanced view
+and Auto polling of Claude/Codex limits.
+
+Temporary network or keyring failures retain the last safely saved sign-in and
+retry with backoff. Check Settings → GitHub sync for the latest error; unlock the
+keyring or restore the connection when needed. External revocation, an expired
+refresh credential, a missing local key or a lost replacement pair may require
+one explicit sign-in. A timeout alone is not proof that GitHub revoked access.
+Sign-out affects this computer only; if credential deletion is still pending,
+the app says so. On Mac, old remote totals without a verified account binding wait
+for the first verified sync after restart; local history is retained.
+
+Synthetic lifecycle checks do not establish six months of real-world operation
+or live Astra Linux verification. See the [sync contract](docs/sync-protocol.md).
 
 ## Install
 
@@ -184,7 +207,8 @@ docs/                         screenshots
 
 The app only ever reads **your own** local credentials and logs, and only talks to
 Anthropic's and OpenAI's APIs authenticated as you (the same endpoints their own CLIs use).
-It never embeds or transmits secrets. The source is a single readable Swift file — read it.
+Credentials authenticate their intended API requests and stay out of usage aggregates and logs.
+The Swift sources are readable in `Sources/`.
 Use at your own discretion.
 
 ## License
