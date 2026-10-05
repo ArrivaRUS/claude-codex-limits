@@ -721,7 +721,11 @@ final class GitHubAuthOwner {
                     try? self.retire(&m, force: manual)
                     self.presentSignedOut(m); result = .signedOut; return
                 }
-                if m.failureReason == "revoked" { result = .actionRequired("revoked"); self.present("actionRequired", "revoked", manifest: m); return }
+                if m.failureReason == "revoked" {
+                    try? self.retireRevoked(&m)
+                    result = .actionRequired("revoked")
+                    self.present("actionRequired", "revoked", manifest: m); return
+                }
                 if let recovered = try self.recover(&m, now: now, canPublish: { true }) {
                     if case .ready = recovered { result = recovered; return }
                     // An issuer has potentially invalidated the old access in requestStarted.
@@ -859,6 +863,20 @@ final class GitHubAuthOwner {
             try? self.retire(&m)
         } } catch { }
     }
+    /// A confirmed access-only revocation stays terminal even if deletion fails.
+    /// Journal its active ref for the existing bounded GC before clearing the pointer;
+    /// this also repairs revoked manifests left by older versions. Never read it for access.
+    private func retireRevoked(_ m: inout GitHubAuthManifest) throws {
+        guard !m.signedOut, m.failureReason == "revoked", m.transition == nil,
+              try dependencies.loadManifest() == m else { return }
+        if let ref = m.active {
+            remember(ref, in: &m); m.active = nil
+            try dependencies.saveManifest(m)
+        }
+        // The monotonic store gate owns retries here, including manual admission.
+        // Do not add GC's wall-clock throttle after the store cooldown has expired.
+        try retire(&m, force: true)
+    }
     /// Only an independently confirmed access-only 401 chain reaches this method.
     @discardableResult func confirmedUnauthorized(_ access: GitHubAuthAccess) -> Bool {
         var changed = false
@@ -869,8 +887,9 @@ final class GitHubAuthOwner {
                   c.refreshToken == nil, c.accessToken == access.token else { return }
             m.failureReason = "revoked"; m.retryAt = nil
             try self.dependencies.saveManifest(m)
-            changed = true; self.present("actionRequired", "revoked", manifest: m)
-            if let ref = m.active { _ = try self.checkedStatus { dependencies.deleteStore(ref) } }
+            changed = true
+            try? self.retireRevoked(&m)
+            self.present("actionRequired", "revoked", manifest: m)
         } } catch { }
         return changed
     }

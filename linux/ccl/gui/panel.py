@@ -248,7 +248,7 @@ def draw_simple(c, W, H, m):
         elif not stale and d.scoped:
             pill(None, fmt.num_text(d.scoped.percent) + "%", sc_col, tinted=True)
         l1, l2 = cards_top + 124, cards_top + 139
-        if stale or limit_poll_failed(d):
+        if can_fix or stale or limit_poll_failed(d):
             snapshot, action = limit_simple_stale_copy(d, product)
             msg = Attr(snapshot, 9.5, "regular", AMBER)
             ico, g = 9, 4

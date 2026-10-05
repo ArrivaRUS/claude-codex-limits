@@ -19,6 +19,27 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
+## Upcoming macOS 3.2.4 / Linux 0.4.4 (not released)
+
+The candidate keeps a timestamped reading valid by age through **4 hours inclusive**;
+a failed fetch alone does not invalidate it. Pace is historical, calculated at
+`asOf`, with session, weekly and model windows checked independently. Auto schedules
+an attempt at its deadline, subject to backoff; failed fetches retain the snapshot
+and show the next retry. Unknown timestamps and expired windows are separate cases;
+this does not prove that sign-in expired.
+
+On macOS, failed GitHub V2 Keychain access pauses background store attempts for
+**600 seconds** using a process-local gate. “Retry Keychain access” requests an
+explicit retry without signing in again; network/recovery limits still apply.
+Unavailable storage preserves sign-in data and defers credential cleanup. The gate
+resets on restart and does not fix the first access prompt or change ACLs; the
+cause of that first prompt is unknown, and further prompts remain possible.
+
+Release preparation is incomplete: two P2 fixes, a CI rerun and visual QA remain.
+See [draft RU/EN release notes and evidence](docs/freshness-keychain-release.md).
+The feature descriptions below retain details of previously released behavior,
+including the older stale-data/pace presentation.
+
 ## Features
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.

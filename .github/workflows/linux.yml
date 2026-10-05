@@ -26,12 +26,12 @@ jobs:
           cat > "$ci_context/Dockerfile" <<'DOCKERFILE'
           FROM ubuntu:22.04
           RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pyqt5 python3-dbus kde-style-breeze fonts-dejavu-core dpkg xz-utils util-linux passwd ca-certificates && rm -rf /var/lib/apt/lists/*
-          RUN useradd --create-home --uid 10001 --shell /bin/sh ccltest && mkdir -p /work /artifacts/previews /artifacts/deb && chown -R 10001:10001 /work /artifacts
+          RUN useradd --create-home --uid 10001 --shell /bin/sh ccltest && mkdir -p /work /artifacts/previews /artifacts/deb /tmp/ccl-previews && chown -R 10001:10001 /work /artifacts /tmp/ccl-previews
           COPY --chown=10001:10001 linux /work/linux
           COPY --chown=10001:10001 Resources /work/Resources
           COPY --chown=10001:10001 LICENSE /work/LICENSE
           # Login derives HOME from passwd; the runner's environment is never forwarded.
-          CMD ["su", "--login", "--shell", "/bin/sh", "ccltest", "--command", "cd /work && QT_QPA_PLATFORM=offscreen CCL_PREVIEW_DIR=/artifacts/previews PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 linux/tests/_ci_offline.py"]
+          CMD ["su", "--login", "--shell", "/bin/sh", "ccltest", "--command", "cd /work && QT_QPA_PLATFORM=offscreen CCL_PREVIEW_DIR=/tmp/ccl-previews PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 linux/tests/_ci_offline.py"]
           DOCKERFILE
           docker build --tag ccl-offline-ci "$ci_context"
       - name: Test and package with no external network or keyring
@@ -46,8 +46,9 @@ jobs:
           ci_attach_exit=$?
           set -e
           ci_exit=$(docker inspect --format '{{.State.ExitCode}}' "$ci_container")
-          mkdir -p ci-artifacts
+          mkdir -p ci-artifacts/previews
           docker cp "$ci_container:/artifacts/." ci-artifacts/
+          docker cp "$ci_container:/tmp/ccl-previews/." ci-artifacts/previews/
           test "$ci_attach_exit" -eq 0
           test "$ci_exit" -eq 0
       - uses: actions/upload-artifact@v4

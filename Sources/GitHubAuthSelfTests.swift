@@ -1,7 +1,8 @@
 import Foundation
 
 // Independent issuer and in-memory dependency oracle. This file creates no
-// production singleton, URLSession, Keychain, AppDelegate, preferences or paths.
+// production singleton, URLSession, Keychain, AppDelegate or preferences.
+// The opt-in offline sync harness writes only a UUID-named temporary cache.
 // A thrown checkpoint models a stopped owner; it is NOT an OS-fsync/process test.
 private enum GHFixtureError: Error { case stopped, unavailable, busy }
 private enum GHResponseFault {
@@ -37,6 +38,7 @@ private final class GHAuthFixture {
     var refreshTTL: Double = 180 * 86400
     var responseFaults: [GHResponseFault] = []
     var identityFault: GitHubAuthIdentity?
+    var readForRef: ((GitHubAuthRef) -> GitHubAuthRead?)?
     var readOverride: GitHubAuthRead?
     var stageFault: ((GitHubAuthRef, GitHubCredentialV2) -> GitHubAuthStoreStatus?)?
     var deleteFault: GitHubAuthStoreStatus?
@@ -132,6 +134,7 @@ private final class GHAuthFixture {
             },
             readStore: { ref in
                 self.record("store_read")
+                if let fault = self.readForRef?(ref) { return fault }
                 if let fault = self.readOverride { return fault }
                 return self.items[ref].map { .ready($0) } ?? .missing
             },
@@ -259,6 +262,7 @@ func runGitHubAuthSelfTests() {
         let f = GHAuthFixture(); let owner = f.owner(); check(isReady(f.login(owner)), "checkpoint initial login")
         f.due(); f.checkpointAction[point] = { throw GHFixtureError.stopped }
         _ = owner.ensureAccess(reason: "maintenance")
+        owner.cleanupRetiredCredentials()
         check(f.protectedRead(f.owner().ensureAccess(reason: "restart")), "checkpoint durable recovery " + point)
         check(f.counts["refresh_consumed", default: 0] == 1, "checkpoint no duplicate consumption")
         check(f.counts["refresh_request", default: 0] == 1, "checkpoint no duplicate POST")
@@ -451,12 +455,14 @@ func runGitHubAuthSelfTests() {
         }
     }
     do {
-        let f = GHAuthFixture(); let owner = f.owner(); check(isReady(f.login(owner)), "cleanup initial login"); f.due()
+        let f = GHAuthFixture(); let owner = f.owner(); check(isReady(f.login(owner)), "cleanup initial login"); owner.cleanupRetiredCredentials(); f.due()
         f.checkpointAction["before_retire"] = { f.deleteFault = .locked }
         check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "cleanup locked active still usable")
+        owner.cleanupRetiredCredentials()
         check(f.manifest?.cleanupRefs.isEmpty == false, "cleanup pending retained")
         let next = f.owner()
         check(f.protectedRead(next.ensureAccess(reason: "maintenance")), "cleanup pending next read")
+        next.cleanupRetiredCredentials()
         check(f.manifest?.cleanupRefs.isEmpty == true && !next.snapshot().cleanupPending, "healthy maintenance retries and clears settled cleanup")
     }
     // Reviewer C2: cancel during a timed-out first write must fence every owner,
@@ -696,7 +702,7 @@ func runGitHubAuthSelfTests() {
         for renamed in [false, true] {
             let f = GHAuthFixture(); f.accessTTL = 1200
             let owner = f.owner()
-            if origin == "refresh" { check(isReady(f.login(owner)), "candidate successor refresh initial login"); f.due() }
+            if origin == "refresh" { check(isReady(f.login(owner)), "candidate successor refresh initial login"); owner.cleanupRetiredCredentials(); f.due() }
             f.identityFault = .temporary
             let first = origin == "login" ? f.login(owner) : owner.ensureAccess(reason: "maintenance")
             check(isTemporary(first), "candidate successor initial identity transient")
@@ -710,6 +716,7 @@ func runGitHubAuthSelfTests() {
             check(f.manifest?.userID == "1001" && f.manifest?.login == (renamed ? "renamed-user" : "fixture-user"), "successor immutable ID and rename")
             check(f.counts["refresh_request", default: 0] == (origin == "refresh" ? 2 : 1), "successor consumes candidate once")
             check(f.counts["refresh_rejected", default: 0] == 0 && f.counts["device_flow", default: 0] == 1, "successor never spends predecessor or repeats login")
+            restarted.cleanupRetiredCredentials()
             if let source { check(f.items[source] == nil, "settled unpublished predecessor retired") }
             check(f.publicStateIsNonsecret(restarted), "successor durable state nonsecret")
         }
@@ -923,6 +930,83 @@ func runGitHubAuthSelfTests() {
         check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
               "explicit retry does not replace login or consume refresh")
     }
+    // Security P2: an explicit signed-out retry must bypass both the storage
+    // cooldown and the GC wall-clock throttle without opening a device flow.
+    for wallShift: Double in [1, -3600] {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let owner = f.owner(); check(isReady(f.login(owner)), "signed-out retry initial login")
+        f.readOverride = .locked
+        let result = owner.logoutDetailed()
+        check(result.accessDisabled && f.manifest?.cleanupRefs.isEmpty == false, "signed-out retry preserves pending cleanup")
+        let epoch = f.manifest?.epoch, reads = f.counts["store_read", default: 0]
+        f.now += wallShift; f.monotonicNow = 1001; f.readOverride = nil
+        check(isSignedOut(owner.ensureAccess(reason: "background_sync")), "signed-out background remains disabled")
+        check(f.counts["store_read", default: 0] == reads, "signed-out background respects gate")
+        check(isSignedOut(owner.retryKeychainAccess()), "explicit signed-out retry remains disabled")
+        check(f.counts["store_read", default: 0] > reads && f.manifest?.cleanupRefs.isEmpty == true,
+              "manual cleanup bypasses recent or rolled-back wall clock")
+        check(f.manifest?.epoch == epoch && f.manifest?.active == nil && f.items.isEmpty,
+              "manual cleanup retains tombstone and removes stored fixture items")
+        check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
+              "signed-out retry never logs in or refreshes")
+    }
+#if KEYCHAIN_SYNC_REGRESSION
+    // Compile only with the offline extracted GitHubSync harness: its preferences
+    // and usage-log boundaries are in-memory, native/network adapters trap.
+    // syncBody, gh (including reason: api), projectAuth and withCurrentAccess
+    // are the unchanged production implementations, not a hand-written sequence.
+    do {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let owner = f.owner(); check(isReady(f.login(owner)), "sync cleanup fixture login")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ccl-sync-cleanup-" + UUID().uuidString)
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let remote = directory.appendingPathComponent("remote.json")
+        let defaults = makeOfflineSyncDefaults()
+        defaults.set("fixture-gist", forKey: "syncGistId")
+        defaults.set(Date(), forKey: "syncDiscoveredAt")
+        var events: [String] = [], activeReads = 0
+        f.readForRef = { ref in
+            if ref == f.manifest?.active { activeReads += 1; return nil }
+            guard f.manifest?.cleanupRefs.contains(ref) == true else { return nil }
+            events.append("cleanup")
+            check(defaults.object(forKey: "syncLastOkAt") != nil && FileManager.default.fileExists(atPath: remote.path),
+                  "cleanup starts only after successful fenced publication")
+            return .locked
+        }
+        let sync = GitHubSync(transport: { url, method, headers, _, _ in
+            check(url == "https://api.github.com/gists/fixture-gist" && ["GET", "PATCH"].contains(method),
+                  "sync reaches only expected fake gist transport")
+            let bearer = headers["Authorization"] ?? ""
+            check(bearer.hasPrefix("Bearer ") && f.authorized(String(bearer.dropFirst(7))) != nil,
+                  "actual api path supplies currently valid synthetic credential")
+            events.append(method)
+            let body: [String: Any] = ["public": false, "files": [String: Any]()]
+            return (200, try! JSONSerialization.data(withJSONObject: body), nil, [:])
+        }, defaults: defaults, remotePath: remote.path, machineId: "fixture-local", authOwner: owner)
+        sync.machineName = "fixture-host"
+        for cycle in 0..<3 {
+            if cycle > 0 { f.now += 600; f.monotonicNow! += 600 }
+            events.removeAll(); activeReads = 0
+            defaults.removeObject(forKey: "syncLastOkAt")
+            try? FileManager.default.removeItem(at: remote)
+            sync.syncSynchronously(force: true)
+            check(events == ["GET", "PATCH", "cleanup"], "whole sync publishes before failing optional GC on every cooldown cycle")
+            check(activeReads == 4, "sync admission, two api calls and publication each really read active credential")
+            let cache = (try? Data(contentsOf: remote)).flatMap { try? JSONDecoder().decode(SyncRemoteCache.self, from: $0) }
+            check(cache?.authEpoch == f.manifest?.epoch && cache?.authUserID == "1001", "published cache bound to current account")
+            check(sync.ui.phase == .on && sync.ui.lastSync != nil && sync.ui.lastError == nil,
+                  "optional GC failure cannot erase healthy sync publication")
+            check(owner.keychainRetryDelay() == 600 && sync.ui.keychainRetryAvailable, "post-publication GC failure still arms cooldown")
+            let reads = f.counts["store_read", default: 0], previousEvents = events
+            sync.syncSynchronously(force: true)
+            check(events == previousEvents && f.counts["store_read", default: 0] == reads,
+                  "next sync during cooldown performs no store or API work")
+        }
+        check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
+              "three healthy syncs with GC faults never replace login or consume grants")
+    }
+#endif
     print("AUTH SELFTEST: \(checks) checks, \(failed) failures (synthetic dependencies only)")
     if failed > 0 { exit(1) }
 }

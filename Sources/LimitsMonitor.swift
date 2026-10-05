@@ -3139,7 +3139,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.3"
+let APP_VERSION = "3.2.4"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -3614,7 +3614,7 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
-        if stale || limitPollFailed(d) {
+        if canFix || stale || limitPollFailed(d) {
             // Keep the last good read distinct from the CLI's sign-in state.
             let copy = limitSimpleStaleCopy(d, product: product)
             let msg1 = copy.snapshot
