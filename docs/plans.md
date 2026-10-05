@@ -1,5 +1,7 @@
 # План исполнения — устойчивая GitHub-авторизация и история UI
 
+> AUTOSTART-1 (2026-10-05): Mac actual3.2.3 и disk/loaded LaunchAgent verified; исторический старый запуск не установлен. Read-only план: [diagnosis-autostart-version.md](diagnosis-autostart-version.md).
+
 > GH-AUTH-STABLE выпущен на 40cfdf (2026-10-04); Linux284/0skip, Swift30862/0, QA374 PNG и пакеты PASS. Версии 3.2.3/0.4.3 опубликованы, публичные assets проверены.
 
 > GH-AUTH-STABLE (2026-10-04): реальный auth lifecycle — [github-auth-stability-plan.md](github-auth-stability-plan.md). Прежний UI-only план ниже архивирован до production; задача уточнена владельцем.

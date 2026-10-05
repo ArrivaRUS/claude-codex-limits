@@ -2,7 +2,11 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-04.
 
-## Актуальный статус · 2026-10-04
+## Актуальный статус · 2026-10-05
+
+- AUTOSTART-1: после сообщения о старой версии проверен этот Mac. Работает exact принятая3.2.3 из /Applications, mapped inode/SHA/strictcodesign подтверждены; disk и loaded LaunchAgent направлены на неё. Предыдущий выпуск был публикацией без локальной установки. Историческая версия/действие установки неизвестны; Debugger отдельно воспроизвёл потенциальный path-migration механизм. Production/установка/автозапуск не менялись. План/доказательства: `docs/diagnosis-autostart-version.md`.
+
+## Выпуски и предыдущий статус · 2026-10-04
 
 - GH-AUTH-STABLE завершён: опубликованы macOS 3.2.3 / Linux/ALSE 0.4.3 на `40cfdf58980acef0668bdb4915c6001322ba9e11`: независимые CodeReviewer/SecurityAnalyst production/isolation PASS; Linux CI 284 OK/0 skip; Swift/bundled auth30862/0, sync PASS, subscriptions1218 OK; независимый QA374 PNG и DMG/DEB PASS. Main принят fast-forward с QA metadata b6ca773; оба тега exact source40cfdf. Публичные DMG/DEB скачаны и побайтно совпали, API digests подтверждены; Latest=v3.2.3, Linux не Latest. Следующие отдельные долги — live ALSE/native backends и прежний Could backlog. Подробности/hashes/границы: `docs/status.md`, `docs/qa-github-auth-stability.md`. Root production actions=0; реальные credentials/stores/API и live ALSE не использованы.
 

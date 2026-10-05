@@ -1,5 +1,13 @@
 # Статус командного внедрения
 
+## AUTOSTART-1 — диагностика 2026-10-05
+
+В текущем снимке Mac работает exact принятая3.2.3: executable SHA/mapped inode и
+strictcodesign подтверждены; disk/loaded LaunchAgent canonical. Историческая
+версия и причина пока неизвестны. Предыдущая публикация не выполняла установку.
+Read-only диагностика, production/system config не менялись;
+[план и доказательства](diagnosis-autostart-version.md).
+
 ## GH-AUTH-STABLE — выпущено 2026-10-04
 
 Принята исходная ревизия `40cfdf58980acef0668bdb4915c6001322ba9e11` для macOS 3.2.3 / Linux 0.4.3. Независимые CodeReviewer и SecurityAnalyst приняли финальные production/isolation delta: Linux rev5b + cancelled sentinel, Swift C5 и memory-only selftests. Root не менял production.

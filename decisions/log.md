@@ -112,3 +112,12 @@ Swift initial readable probe ждёт trusted settlement до OAuth. Детал�
 ## 2026-10-04 — публикация GH-AUTH-STABLE
 
 macOS v3.2.3 и Linux linux-v0.4.3 опубликованы на exact source40cfdf58980acef0668bdb4915c6001322ba9e11. Main fast-forward принят с независимым QA metadata b6ca7734786c93547d4eab22bec20b9f0228e7bc. Оба публичных пакета скачаны и побайтно совпали; GitHub API assets uploaded/digests подтверждены, Latest=v3.2.3, Linux не Latest. SHA256 DMG c8f796efaed0343c679d397370050ae6f5d808b5bbc3dd4c8e1eb3ca5452d4d4; DEB7d1edd28339a029f50ccb2975322293a63733a589e79679e2ceab811aeb14226. Read-only DMG mount отключён. Отдельный CodeReviewer Astra/high принял документационный diff6608fb2ac696e3859fa93bc1bc8831dcff486a84fea7aa6af5cda646f410ddb1 и release body после двух исправленных P2 (старое pending QA, явная synthetic/OAuth граница). Данная запись фиксирует внешний факт выпуска, production не менялся.
+
+## 2026-10-05 — AUTOSTART-1: actual binary до ремонта
+
+После сообщения о старом запуске проверять сам процесс и loaded launchd target,
+не делать вывод по одному Info.plist или публикации. Current Mac exact accepted3.2.3,
+mapped inode и подпись подтверждены, canonical target правильный. Производящая
+правка не обоснована этим снимком; история старого запуска неизвестна. Возможную
+path-migration проблему вынести отдельно после определения portable/canonical
+контракта. Installed bundle, loginitems и restart в диагностике не менялись.
