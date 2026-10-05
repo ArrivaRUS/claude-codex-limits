@@ -193,7 +193,7 @@ class TestAutoUI(unittest.TestCase):
                                             for p, v in (("claude", 14400), ("codex", 14400))},
                                win=SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock()),
                                load_local=Mock(), update_sync_warning=Mock(), check_alarms=Mock(), update_tray=Mock(),
-                               refresh_logs=Mock(), refresh_products=["claude"])
+                               refresh_logs=Mock(), start_poll_timer=Mock(), refresh_products=["claude"])
         fake.model.history.record = Mock()
         for name in ("publish_auto_intervals", "save_poll_states", "refresh_limits", "auto_summary"):
             setattr(fake, name, MethodType(getattr(app.TrayApp, name), fake))
@@ -222,6 +222,7 @@ class TestAutoUI(unittest.TestCase):
         self.assertEqual(fake.model.auto_intervals, {"claude": 900, "codex": 14400})
         fake.win.view.update.assert_called_once_with()
         self.assertFalse(fake.busy_limits)
+        fake.start_poll_timer.assert_called_once_with()
         _, _, texts, _ = self.render(fake.model)
         self.assertIn([t[0] for t in texts if t[1] == 184],
                       [["Claude 15м · Codex 4ч"], ["Claude 15м", "Codex 4ч"]])
@@ -236,6 +237,7 @@ class TestAutoUI(unittest.TestCase):
         self.assertEqual(fake.model.auto_intervals, {"claude": 1800, "codex": 14400})
         fake.win.view.update.assert_called_once_with()
         self.assertTrue(fake.poll_states["claude"].failed)
+        fake.start_poll_timer.assert_called_once_with()
         self.assertIn("пауза после ошибки", fake.auto_summary())
         # Real selection handler, with refresh_limits exercising the not-due path.
         with patch.object(app.time, "time", return_value=100400), \

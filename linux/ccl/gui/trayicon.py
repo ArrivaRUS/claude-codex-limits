@@ -40,20 +40,19 @@ def values(d, picks=None):
     """[(number, colour)] for a product, following the user's picks; nil-safe like groupString."""
     if not d.present or d.auth == limits.LOGGED_OUT:
         return []
-    stale = limits.is_stale(d)
     faint = QColor(255, 255, 255, 110)
     out = []
     for m in picks or metrics():
         if m == "session" and d.session is not None:
-            out.append((d.session, faint if stale else sev_color(d.session)))
+            out.append((d.session, faint if limits.metric_is_stale(d, "session") else sev_color(d.session)))
         elif m == "weekly" and d.weekly is not None:
-            out.append((d.weekly, faint if stale else sev_color(d.weekly)))
+            out.append((d.weekly, faint if limits.metric_is_stale(d, "weekly") else sev_color(d.weekly)))
         elif m == "model" and d.scoped is not None:
-            out.append((d.scoped.percent, faint if stale else scoped_color(d.scoped.percent)))
+            out.append((d.scoped.percent, faint if limits.metric_is_stale(d, "model") else scoped_color(d.scoped.percent)))
     if not out:     # e.g. Codex has no per-model limit — show what it does have
-        for v in (d.session, d.weekly):
+        for metric, v in (("session", d.session), ("weekly", d.weekly)):
             if v is not None:
-                out.append((v, faint if stale else sev_color(v)))
+                out.append((v, faint if limits.metric_is_stale(d, metric) else sev_color(v)))
     return out[:2]
 
 

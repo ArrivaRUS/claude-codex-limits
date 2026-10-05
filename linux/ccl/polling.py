@@ -40,6 +40,13 @@ class PollState:
         elapsed = now - self.last_attempt
         return not self.last_attempt or elapsed >= (MINIMUM if manual and not self.failed else self.interval)
 
+    def next_delay(self, now):
+        if not self.last_attempt:
+            return 0.01
+        if self.last_attempt > now:
+            return 60
+        return max(0.01, min(60, self.last_attempt + self.interval - now))
+
     def begin(self, now):
         self.last_attempt = now
 

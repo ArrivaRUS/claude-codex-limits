@@ -27,6 +27,7 @@ private struct GHIssuance {
 }
 private final class GHAuthFixture {
     var now: Double = 1_800_000_000
+    var monotonicNow: Double? // optional independent clock for retry-specific regressions
     var manifest: GitHubAuthManifest?
     var items: [GitHubAuthRef: GitHubCredentialV2] = [:]
     var issuances: [GHIssuance] = []
@@ -157,7 +158,7 @@ private final class GHAuthFixture {
                 guard !self.lateWrites.contains(where: { $0.0 == ref }) else { return false }
                 let noSend = (self.manifest?.permitWriterRefs ?? []).contains(ref) && !self.startedWriterRefs.contains(ref)
                 return self.settledWriterRefs.contains(ref) || noSend
-            })
+            }, monotonicClock: { self.monotonicNow ?? self.now })
         return GitHubAuthOwner(dependencies: deps, clientID: "fixture-client")
     }
     func login(_ owner: GitHubAuthOwner, legacy: Bool = false) -> GitHubAuthResult {
@@ -544,7 +545,17 @@ func runGitHubAuthSelfTests() {
         f.stageFault = { ref, c in
             if c.kind == "credential" { f.items[ref] = c; return .timeout }; return nil
         }
-        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "readable uncertain pair can publish validated identity")
+        check(!f.protectedRead(owner.ensureAccess(reason: "maintenance")), "uncertain timeout must not immediately re-read accessible pair")
+        let readsAfterTimeout = f.counts["store_read", default: 0]
+        let postsAfterTimeout = f.counts["refresh_request", default: 0]
+        let retryBefore = f.manifest?.retryAt
+        f.now += 599
+        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "uncertain candidate suppressed before exact cooldown boundary")
+        check(f.counts["store_read", default: 0] == readsAfterTimeout, "no protected-store re-read at 599 seconds")
+        check(f.counts["refresh_request", default: 0] == postsAfterTimeout && f.manifest?.retryAt == retryBefore,
+              "suppressed candidate leaves issuer budget and durable retry unchanged")
+        f.now += 1
+        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "readable uncertain pair can publish validated identity at 600 seconds")
         if let active = f.manifest?.active, let payload = f.items[active] {
             f.lateWrites.append((active, payload))
             _ = f.lateWrites.removeFirst()
@@ -862,6 +873,55 @@ func runGitHubAuthSelfTests() {
             check(f.counts["refresh_request", default: 0] == grants && f.counts["device_flow", default: 0] == 1,
                   "cancelled successor GC cannot renew or reopen device flow")
         } else { check(false, "cancelled successor fixture epoch missing") }
+    }
+    // KEYCHAIN-RETRY: external call counts and two independent clocks are the oracle.
+    for fault in [GitHubAuthRead.locked, .timeout, .unreachable] {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let owner = f.owner()
+        check(isReady(f.login(owner)), "cooldown fixture explicitly signed in")
+        f.readOverride = fault
+        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "protected-store access failure remains temporary")
+        let reads = f.counts["store_read", default: 0]
+        let stages = f.counts["store_stage", default: 0]
+        let deletes = f.counts["store_delete_attempt", default: 0]
+        let posts = f.counts["refresh_request", default: 0]
+        let epoch = f.manifest?.epoch
+        let retry = f.manifest?.retryAt
+        check(owner.keychainRetryDelay() == 600, "cooldown deadline from failure completion")
+        f.now += 86400 // advancing wall clock must not admit a Keychain request
+        check(isTemporary(owner.ensureAccess(reason: "startup")), "wall forward does not bypass monotonic cooldown")
+        f.now -= 172800 // nor may rollback extend it indefinitely
+        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "wall rollback does not bypass cooldown")
+        f.monotonicNow = 1599
+        check(isTemporary(owner.ensureAccess(reason: "background_sync")), "multiple background callers suppressed at 599")
+        check(owner.keychainRetryDelay() == 1, "relative monotonic delay independent of wall clock")
+        check(f.counts["store_read", default: 0] == reads && f.counts["store_stage", default: 0] == stages
+              && f.counts["store_delete_attempt", default: 0] == deletes, "suppressed operation never touches any protected-store adapter")
+        check(f.counts["refresh_request", default: 0] == posts && f.counts["device_flow", default: 0] == 1,
+              "suppression never starts OAuth or new login")
+        check(f.manifest?.epoch == epoch && f.manifest?.retryAt == retry && f.manifest?.signedOut == false,
+              "access cooldown does not rewrite issuer backoff or sign out")
+        f.monotonicNow = 1600; f.readOverride = nil
+        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "automatic access recovers at exact monotonic boundary")
+        check(f.counts["store_read", default: 0] > reads && owner.keychainRetryDelay() == nil,
+              "successful protected-store access clears runtime cooldown")
+    }
+    do {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let owner = f.owner(); check(isReady(f.login(owner)), "manual retry fixture signed in")
+        f.readOverride = .locked
+        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "manual retry begins with actual failed probe")
+        f.monotonicNow = 1001
+        check(isTemporary(owner.retryKeychainAccess()), "failed explicit retry remains temporary")
+        let reads = f.counts["store_read", default: 0]
+        check(owner.keychainRetryDelay() == 600, "explicit failure starts bounded cooldown from its completion")
+        check(isTemporary(owner.ensureAccess(reason: "background_sync")), "manual permit cannot leak into next background call")
+        check(f.counts["store_read", default: 0] == reads, "background never inherits explicit read permit")
+        f.readOverride = nil
+        check(f.protectedRead(owner.retryKeychainAccess()), "explicit recovery can read before automatic deadline")
+        check(owner.keychainRetryDelay() == nil, "successful explicit read clears gate")
+        check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
+              "explicit retry does not replace login or consume refresh")
     }
     print("AUTH SELFTEST: \(checks) checks, \(failed) failures (synthetic dependencies only)")
     if failed > 0 { exit(1) }

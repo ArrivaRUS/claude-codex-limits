@@ -11,25 +11,55 @@ permissions:
 jobs:
   test-and-package:
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    env:
-      QT_QPA_PLATFORM: offscreen
-      CCL_PREVIEW_DIR: /tmp/ccl-previews
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Install distribution dependencies
-        run: sudo apt-get update && sudo apt-get install -y python3-pyqt5 python3-dbus kde-style-breeze
-      - name: Test core, GUI and package
-        run: /usr/bin/python3 -m unittest discover -s linux/tests -v
-      - name: Build DEB
-        run: sh linux/packaging/build-deb.sh
+        with:
+          persist-credentials: false
+      - name: Build disposable test image with distribution dependencies
+        run: |
+          set -euo pipefail
+          ci_context=$(mktemp -d)
+          trap 'rm -rf "$ci_context"' EXIT
+          # Copy only suite/package inputs: no .git, runner home, secrets or host sockets.
+          cp -R linux Resources LICENSE "$ci_context/"
+          cat > "$ci_context/Dockerfile" <<'DOCKERFILE'
+          FROM ubuntu:22.04
+          RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pyqt5 python3-dbus kde-style-breeze fonts-dejavu-core dpkg xz-utils util-linux passwd ca-certificates && rm -rf /var/lib/apt/lists/*
+          RUN useradd --create-home --uid 10001 --shell /bin/sh ccltest && mkdir -p /work /artifacts/previews /artifacts/deb && chown -R 10001:10001 /work /artifacts
+          COPY --chown=10001:10001 linux /work/linux
+          COPY --chown=10001:10001 Resources /work/Resources
+          COPY --chown=10001:10001 LICENSE /work/LICENSE
+          # Login derives HOME from passwd; the runner's environment is never forwarded.
+          CMD ["su", "--login", "--shell", "/bin/sh", "ccltest", "--command", "cd /work && QT_QPA_PLATFORM=offscreen CCL_PREVIEW_DIR=/artifacts/previews PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 linux/tests/_ci_offline.py"]
+          DOCKERFILE
+          docker build --tag ccl-offline-ci "$ci_context"
+      - name: Test and package with no external network or keyring
+        run: |
+          set -euo pipefail
+          ci_container=$(docker create --network none --cap-drop ALL --cap-add SETUID --cap-add SETGID --security-opt no-new-privileges ccl-offline-ci)
+          trap 'docker rm -f "$ci_container" >/dev/null' EXIT
+          test "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$ci_container")" = none
+          test "$(docker inspect --format '{{len .Mounts}}' "$ci_container")" = 0
+          set +e
+          docker start --attach "$ci_container"
+          ci_attach_exit=$?
+          set -e
+          ci_exit=$(docker inspect --format '{{.State.ExitCode}}' "$ci_container")
+          mkdir -p ci-artifacts
+          docker cp "$ci_container:/artifacts/." ci-artifacts/
+          test "$ci_attach_exit" -eq 0
+          test "$ci_exit" -eq 0
       - uses: actions/upload-artifact@v4
         with:
           name: linux-deb
-          path: dist/*.deb
+          path: ci-artifacts/deb/*.deb
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: linux-previews
-          path: /tmp/ccl-previews/*.png
+          name: linux-test-evidence
+          path: |
+            ci-artifacts/ci-isolation.json
+            ci-artifacts/previews/*.png
+          if-no-files-found: warn

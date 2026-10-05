@@ -78,6 +78,7 @@ class TestStale(unittest.TestCase):
     def test_past_reset_is_stale(self):
         d = limits.LimitData()
         d.as_of = 1000.0
+        d.session = 31.0  # a valid snapshot requires an actual metric, not just reset timing
         d.session_reset = 500.0
         self.assertTrue(limits.is_stale(d, now=1000.0))
         d.session_reset = 5000.0

@@ -5,6 +5,7 @@ Geometry, colours and wording follow the Swift reference; both views return hit 
 """
 
 import time
+import math
 
 from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QBrush, QLinearGradient, QPainterPath, QPen, QRadialGradient
@@ -210,8 +211,8 @@ def draw_simple(c, W, H, m):
             c.icon("arrow_ne", rect_tl(x + w - 21, cards_top + 11, 11, 11), gray(1, 0.22), 1.5)
         cx, cy = x + w / 2, cards_top + 84
         stale = limits.is_stale(d)
-        s_col = gray(1, 0.3) if stale else metric_color(BLUE, d.session)
-        w_col = gray(1, 0.3) if stale else metric_color(PURPLE, d.weekly)
+        s_col = gray(1, 0.3) if limits.metric_is_stale(d, "session") else metric_color(BLUE, d.session)
+        w_col = gray(1, 0.3) if limits.metric_is_stale(d, "weekly") else metric_color(PURPLE, d.weekly)
         # Codex no longer has a 5-hour window: when the backend reports none, one ring for the
         # week instead of an empty inner ring and a "Session —" row.
         single = d.session is None and d.session_reset is None and d is m.codex
@@ -241,13 +242,13 @@ def draw_simple(c, W, H, m):
                 c.icon(symbol, QRectF(r.left() + pl, r.center().y() - ico / 2, ico, ico), color, 1.3)
             c.text_c(a, r.left() + pl + ico + mid, top, ph)
 
-        sc_col = scoped_color(d.scoped.percent) if d.scoped else SCOPED
+        sc_col = gray(1, 0.3) if limits.metric_is_stale(d, "model") else scoped_color(d.scoped.percent)
         if not stale and d.reset_credits is not None and d.reset_credits >= 1:
             pill("refresh", str(d.reset_credits), AMBER)
         elif not stale and d.scoped:
             pill(None, fmt.num_text(d.scoped.percent) + "%", sc_col, tinted=True)
         l1, l2 = cards_top + 124, cards_top + 139
-        if stale:
+        if stale or limit_poll_failed(d):
             snapshot, action = limit_simple_stale_copy(d, product)
             msg = Attr(snapshot, 9.5, "regular", AMBER)
             ico, g = 9, 4
@@ -262,15 +263,15 @@ def draw_simple(c, W, H, m):
             else:
                 c.dot(lx + 3, l1 + 5, s_col)
                 c.text(Attr(tr("Сессия", "Session"), 10.5, "regular", TEXT_MID), lx + 11, l1)
-                c.text(Attr(fmt.fmt_reset(d.session_reset), 10, "regular", TEXT_LO), x + w - 14, l1, align=2)
+                c.text(Attr(limit_reset_text(d.session_reset), 10, "regular", TEXT_LO), x + w - 14, l1, align=2)
             c.dot(lx + 3, l2 + 5, w_col)
             c.text(Attr(tr("Неделя", "Week"), 10.5, "regular", TEXT_MID), lx + 11, l2)
-            c.text(Attr(fmt.fmt_reset(d.weekly_reset), 10, "regular", TEXT_LO), x + w - 14, l2, align=2)
+            c.text(Attr(limit_reset_text(d.weekly_reset), 10, "regular", TEXT_LO), x + w - 14, l2, align=2)
             if shows_scoped_row(d):
                 l3 = l2 + SCOPED_ROW_H
                 c.dot(lx + 3, l3 + 5, sc_col)
                 c.text(Attr(d.scoped.name, 10.5, "regular", TEXT_MID), lx + 11, l3)
-                c.text(Attr(fmt.fmt_reset(d.scoped.reset), 10, "regular", TEXT_LO), x + w - 14, l3, align=2)
+                c.text(Attr(limit_reset_text(d.scoped.reset), 10, "regular", TEXT_LO), x + w - 14, l3, align=2)
 
     if not m.loaded:
         c.text(Attr(tr("Загрузка…", "Loading…"), 12, "regular", TEXT_MID), W / 2, cards_top + 70, align=1)
@@ -399,7 +400,7 @@ def limit_auth_badge(auth):
 
 
 def limit_paused_notice(as_of):
-    if as_of is None:
+    if as_of is None or not math.isfinite(as_of) or as_of > time.time():
         return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
     return tr("Данные от ", "Data as of ") + fmt.moment_lower(as_of) + tr(" · темп не считаем", " · pace paused")
 
@@ -410,8 +411,42 @@ def limit_simple_stale_copy(d, product):
     if limit_can_fix(product, d.auth):
         action = tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?")
     else:
-        action = tr("темп не считаем", "pace paused") if d.as_of is None else tr("обновите данные", "refresh data")
+        action = (limit_retry_notice(d, compact=True) if limit_poll_failed(d) else
+                  tr("темп не считаем", "pace paused") if d.as_of is None else tr("обновите данные", "refresh data"))
     return snapshot, action
+
+
+def limit_reset_text(reset):
+    if reset is not None and reset <= time.time():
+        return tr("окно сброшено", "window reset")
+    return fmt.fmt_reset(reset)
+
+
+def limit_poll_failed(d):
+    return d.poll_failed or d.error is not None
+
+
+def limit_retry_notice(d, compact=False):
+    prefix = tr("Сбой · ", "Failed · ") if compact else ""
+    if d.next_poll_at is None:
+        return prefix + tr("повтор по расписанию", "scheduled retry")
+    if d.next_poll_at <= time.time():
+        return prefix + tr("повтор ожидается", "retry due")
+    return prefix + tr("повтор в ", "retry at ") + time.strftime("%H:%M", time.localtime(d.next_poll_at))
+
+
+def limit_snapshot_notice(d):
+    if d.auth != limits.OK or d.as_of is None or not math.isfinite(d.as_of) or d.as_of > time.time():
+        return limit_paused_notice(d.as_of)
+    if not any(l["pace"] is not None for l in limits.paced_limits(d, "claude")):
+        return limit_paused_notice(d.as_of)
+    return tr("Темп по снимку от ", "Pace from snapshot at ") + time.strftime("%Y-%m-%d %H:%M", time.localtime(d.as_of))
+
+
+def limit_data_badge(d):
+    if d.auth == limits.OK and limit_poll_failed(d):
+        return tr("сбой обновления", "update failed")
+    return limit_auth_badge(d.auth)
 
 
 def adv_cards(m):
@@ -428,7 +463,7 @@ def adv_cards(m):
             p = l["pace"]
             if p is None:
                 kind = "inactive"
-            elif paused:
+            elif d.auth != limits.OK or d.as_of > time.time() or p.reset <= time.time():
                 kind = "stale"
             elif p.used >= 100:
                 kind = "exhausted"
@@ -452,7 +487,7 @@ def row_h(row):
 
 
 def notice_h(card):
-    return NOTICE * (2 if limit_can_fix(card["product"], card["data"].auth) else 1) if card["paused"] else 0
+    return NOTICE * ((2 if limit_can_fix(card["product"], card["data"].auth) else 1) + int(limit_poll_failed(card["data"])))
 
 
 def card_h(card):
@@ -496,11 +531,18 @@ def advanced_height(m):
 
 def adv_verdict(row, as_of):
     if row["kind"] == "stale":
-        return tr("по данным на ", "as of ") + fmt.moment_lower(as_of) if as_of is not None else limit_paused_notice(None)
+        pace = row["limit"]["pace"] if row["limit"] else None
+        prefix = tr("Окно сброшено · снимок ", "Window reset · snapshot ") if pace and pace.reset <= time.time() else tr("по данным на ", "as of ")
+        return prefix + fmt.moment_lower(as_of) if as_of is not None else limit_paused_notice(None)
     lim = row["limit"]
     p = lim["pace"] if lim else None
     if p is None:
+        if lim and lim.get("used") is not None:
+            return tr("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
         return tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
+    if as_of is not None and time.time() - as_of > limits.SNAPSHOT_MAX_AGE:
+        return (tr("Прогноз на снимке: ", "Snapshot forecast: ") + fmt.fmt_pct(p.projected, 0)
+                if p.projected is not None else tr("На снимке мало данных для темпа", "Not enough pace data in snapshot"))
     k = row["kind"]
     if k == "exhausted":
         return tr("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + fmt.moment_lower(p.reset)
@@ -586,8 +628,9 @@ def draw_advanced(c, W, H, m):
             p.setOpacity(0.42)
         c.dot(ADV_IX + 3, yr + 11, col if live else gray(1, 0.22))
         c.text_c(caps(lim["name"], 9.5, TEXT_LO if k == "inactive" else TEXT_MID), ADV_IX + 12, yr + 4, 14)
-        if pace:
-            c.text_c(Attr(fmt.fmt_pct(pace.used, 0), 14, "semibold", col, kern=-0.14), ADV_IX + ADV_IW, yr + 4, 14, align=2)
+        used = pace.used if pace else lim.get("used")
+        if used is not None and math.isfinite(used):
+            c.text_c(Attr(fmt.fmt_pct(used, 0), 14, "semibold", col, kern=-0.14), ADV_IX + ADV_IW, yr + 4, 14, align=2)
         else:
             c.text_c(Attr("—", 14, "semibold", TEXT_LO), ADV_IX + ADV_IW, yr + 4, 14, align=2)
         if k == "full":
@@ -646,8 +689,8 @@ def draw_advanced(c, W, H, m):
         name = Attr(cd["name"], 13, "semibold", TEXT_HI)
         c.text_c(name, ADV_IX + 23, y0, 18)
         px = ADV_IX + 23 + name.width() + 7
-        if cd["paused"]:
-            label = limit_auth_badge(d.auth)
+        if cd["paused"] or limit_poll_failed(d):
+            label = limit_data_badge(d)
             r = pill(Attr(label, 9.5, "semibold", WARN, kern=0.19), px, y0 + 1, 16, 7,
                      with_alpha(WARN, 0.16), with_alpha(WARN, 0.42))
             px = r.right() + 5
@@ -662,17 +705,20 @@ def draw_advanced(c, W, H, m):
         c.icon("arrow_ne", arrow, gray(1, 0.34), 1.5)
         hits.append(("claudefix" if can_fix else "open:" + cd["url"], rect if can_fix else arrow.adjusted(-8, -8, 8, 8)))
         ry = y + 29
-        if cd["paused"]:
-            pre = Attr(limit_paused_notice(d.as_of), 10.5, "regular", WARN)
+        if notice_h(cd):
+            pre = Attr(limit_snapshot_notice(d), 10.5, "regular", WARN)
             c.text_c(pre, ADV_IX, ry, 14)
             if can_fix:
                 code = Attr("claude → /login", 10, "regular", gray(1, 0.8), mono=True)
                 cr = rect_tl(ADV_IX, ry + NOTICE + 0.5, code.width() + 8, 14)
                 c.round_fill(cr, 4, gray(1, 0.08))
                 c.text_c(code, cr.left() + 4, ry + NOTICE, 14)
+            if limit_poll_failed(d):
+                offset = NOTICE * (2 if can_fix else 1)
+                c.text_c(Attr(limit_retry_notice(d), 10.5, "regular", WARN), ADV_IX, ry + offset, 14)
             ry += notice_h(cd)
         for i, row in enumerate(cd["rows"]):
-            draw_row(row, ry, cd["paused"] and row["kind"] != "credits", d.as_of)
+            draw_row(row, ry, (cd["paused"] or row["kind"] == "stale") and row["kind"] != "credits", d.as_of)
             ry += row_h(row)
             if i < len(cd["rows"]) - 1:
                 c.hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06))

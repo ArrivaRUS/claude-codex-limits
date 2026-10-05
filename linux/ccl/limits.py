@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import time
+import math
 
 from . import common
 
@@ -49,6 +50,8 @@ class LimitData(object):
         self.error = None
         self.stale = False
         self.from_cache = False
+        self.poll_failed = False     # transient last-request status, not part of snapshot/cache
+        self.next_poll_at = None
         self.api_fresh = False       # only successful live usage responses
         self.present = True          # False → product not set up on this machine
         self.auth = OK
@@ -536,19 +539,38 @@ def apply_cache(claude, codex):
     return claude, codex
 
 
+SNAPSHOT_MAX_AGE = 14400
+
+
+def snapshot_window_pace(used, reset, window_h, as_of, recent_rate=None):
+    def finite(v):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if not all(finite(v) for v in (used, reset, as_of)) or used < 0:
+        return None
+    if not as_of < reset <= as_of + window_h * 3600:
+        return None
+    return window_pace(used, reset, window_h, recent_rate=recent_rate, now=as_of)
+
+
+def metric_is_stale(d, metric, now=None):
+    now = time.time() if now is None else now
+    if d.as_of is None or not math.isfinite(d.as_of) or not 0 <= now - d.as_of <= SNAPSHOT_MAX_AGE:
+        return True
+    used, reset, hours = {"session": (d.session, d.session_reset, 5),
+                          "weekly": (d.weekly, d.weekly_reset, 168),
+                          "model": (d.scoped.percent, d.scoped.reset, 168) if d.scoped else (None, None, 168)}[metric]
+    return (snapshot_window_pace(used, reset, hours, d.as_of) is None or reset <= now)
+
+
 def is_stale(d, now=None):
-    """True when a card shows a frozen / aged snapshot instead of live data."""
-    if not d.present:
-        return False
-    now = now or time.time()
-    if d.session_reset and d.session_reset < now - 120:
-        return True
-    if d.weekly_reset and d.weekly_reset < now - 120:
-        return True
-    age = now - d.as_of if d.as_of else float("inf")
-    if d.error is not None or d.stale:
-        return age > 15 * 60
-    return age > 3600
+    """A reset session must not hide a valid week; paint each metric independently."""
+    return d.present and all(metric_is_stale(d, m, now) for m in ("session", "weekly", "model"))
+
+
+def with_poll_status(d, state, next_at):
+    d.poll_failed = state.failed if state else False
+    d.next_poll_at = next_at if d.poll_failed else None
+    return d
 
 
 def severity(v):
@@ -591,7 +613,12 @@ class History(object):
             return
         if d.session is None and d.weekly is None:
             return
-        s = {"t": time.time(), "p": product}
+        if d.poll_failed or d.as_of is None or not math.isfinite(d.as_of) or d.as_of > time.time():
+            return
+        previous = next((s for s in reversed(self.samples) if s["p"] == product), None)
+        if previous and previous["t"] >= d.as_of:
+            return
+        s = {"t": d.as_of, "p": product}
         for k, v in (("s", d.session), ("w", d.weekly), ("sr", d.session_reset), ("wr", d.weekly_reset)):
             if v is not None:
                 s[k] = v
@@ -613,11 +640,12 @@ class History(object):
                 return s["t"]
         return None
 
-    def recent_rate(self, product, key, minutes):
+    def recent_rate(self, product, key, minutes, now=None):
         if not common.product_enabled(product):
             return None
-        since = time.time() - minutes * 60
-        pts = [(s["t"], s[key]) for s in self.samples if s["p"] == product and s["t"] >= since and key in s]
+        now = time.time() if now is None else now
+        since = now - minutes * 60
+        pts = [(s["t"], s[key]) for s in self.samples if s["p"] == product and since <= s["t"] <= now and key in s]
         if len(pts) < 2 or pts[-1][0] - pts[0][0] < 600:
             return None
         dv = pts[-1][1] - pts[0][1]
@@ -633,7 +661,7 @@ class WindowPace(object):
     the average burn since the window opened, and whether the window lasts to its reset."""
 
     def __init__(self, used, reset, window_h, recent_rate=None, now=None):
-        now = now or time.time()
+        now = time.time() if now is None else now
         self.used, self.reset, self.window_h = used, reset, window_h
         self.start = reset - window_h * 3600
         self.elapsed_h = max(0.0, min(window_h, (now - self.start) / 3600))
@@ -672,18 +700,18 @@ def paced_limits(d, product, history=None):
     """The windows the Advanced view lists for a product, in display order:
     session → per-model week → all-models week. Codex shows a session row only if the
     backend reports one."""
-    h = history
-    rr = (lambda k, mins: h.recent_rate(product, k, mins)) if h else (lambda k, mins: None)
+    def rr(key, minutes):
+        return history.recent_rate(product, key, minutes, now=d.as_of) if history and d.as_of is not None else None
     out = []
     if product == "claude" or d.session is not None:
         out.append({"id": "session", "name": common.tr("Сессия · 5 ч", "Session · 5 h"), "color": 0,
-                    "pace": window_pace(d.session, d.session_reset, 5, rr("s", 60))})
+                    "used": d.session, "pace": snapshot_window_pace(d.session, d.session_reset, 5, d.as_of, rr("s", 60))})
     if d.scoped:
         out.append({"id": "scoped", "name": common.tr("Неделя · ", "Week · ") + d.scoped.name, "color": 2,
-                    "pace": window_pace(d.scoped.percent, d.scoped.reset, 168, rr("m", 180))})
+                    "used": d.scoped.percent, "pace": snapshot_window_pace(d.scoped.percent, d.scoped.reset, 168, d.as_of, rr("m", 180))})
     out.append({"id": "weekly", "color": 1,
                 "name": common.tr("Неделя · все модели", "Week · all models") if product == "claude" else common.tr("Неделя", "Week"),
-                "pace": window_pace(d.weekly, d.weekly_reset, 168, rr("w", 180))})
+                "used": d.weekly, "pace": snapshot_window_pace(d.weekly, d.weekly_reset, 168, d.as_of, rr("w", 180))})
     return out
 
 

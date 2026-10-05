@@ -136,6 +136,9 @@ struct LimitData {
     var fromCache = false
     var apiFresh = false      // true only for a successful live usage response
     var present = true         // false → product not set up on this Mac (hide its row/card)
+    // Transient presentation state of the last request, never serialized with a snapshot.
+    var pollFailed = false
+    var nextPollAt: Date?
     var auth: AuthState = .ok  // Claude Code sign-in state (drives the "how to fix" card)
 }
 
@@ -613,11 +616,12 @@ final class UsageHistory {
     /// be a real observation of the backend, or the pace math would see a flat line.
     func record(_ d: LimitData, product: String) {
         guard productEnabled(product), d.present, d.error == nil, d.auth == .ok, !d.fromCache, d.session != nil || d.weekly != nil else { return }
-        let s = UsageSample(t: Date().timeIntervalSince1970, product: product, session: d.session, weekly: d.weekly,
+        guard !d.pollFailed, let at = d.asOf, at.timeIntervalSince1970.isFinite, at <= Date() else { return }
+        let s = UsageSample(t: at.timeIntervalSince1970, product: product, session: d.session, weekly: d.weekly,
                             scoped: d.scoped?.percent, scopedName: d.scoped?.name,
                             sessionReset: d.sessionReset?.timeIntervalSince1970, weeklyReset: d.weeklyReset?.timeIntervalSince1970)
         q.async {
-            guard productEnabled(product) else { return }
+            guard productEnabled(product), self.all.last(where: { $0.product == product }).map({ $0.t < s.t }) ?? true else { return }
             self.all.append(s)
             let str = UsageHistory.line(s)
             if let fh = FileHandle(forWritingAtPath: HISTORY_PATH) {
@@ -640,8 +644,8 @@ final class UsageHistory {
     /// Pace over the last `minutes` for one metric, in % per hour — the "current" pace as
     /// opposed to the average since the window opened. Nil until there are two samples that
     /// far apart inside the same window (a reset in between would read as a huge negative).
-    func recentRate(_ product: String, metric: (UsageSample) -> Double?, minutes: Double) -> Double? {
-        let pts = samples(product, since: Date().addingTimeInterval(-minutes * 60)).compactMap { s in metric(s).map { (s.t, $0) } }
+    func recentRate(_ product: String, metric: (UsageSample) -> Double?, minutes: Double, now: Date = Date()) -> Double? {
+        let pts = samples(product, since: now.addingTimeInterval(-minutes * 60)).filter { $0.t <= now.timeIntervalSince1970 }.compactMap { s in metric(s).map { (s.t, $0) } }
         guard let first = pts.first, let last = pts.last, last.0 - first.0 >= 600 else { return nil }
         let dv = last.1 - first.1
         if dv < 0 { return nil }                                 // a reset happened inside the span
@@ -1140,7 +1144,7 @@ func windowPace(used: Double?, reset: Date?, windowH: Double, recentRate: Double
 }
 
 /// The windows the Advanced view lists for a product, in display order.
-struct PacedLimit { let id: String; let name: String; let pace: WindowPace?; let color: Int }   // color: 0 session, 1 weekly, 2 scoped
+struct PacedLimit { let id: String; let name: String; let pace: WindowPace?; let color: Int; var used: Double? = nil }   // color: 0 session, 1 weekly, 2 scoped
 func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
     let h = UsageHistory.shared
     var out: [PacedLimit] = []
@@ -1149,19 +1153,19 @@ func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
     // session row is always there — that window is the one you hit most.
     if product == "claude" || d.session != nil {
         out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
-                              pace: windowPace(used: d.session, reset: d.sessionReset, windowH: 5,
-                                               recentRate: h.recentRate(product, metric: { $0.session }, minutes: 60)), color: 0))
+                              pace: snapshotWindowPace(used: d.session, reset: d.sessionReset, windowH: 5,
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.session }, minutes: 60, now: $0) }), color: 0, used: d.session))
     }
     // Order (Alex, 2026-09-24): session → per-model week (Fable) → all-models week. The
     // per-model limit is the one that actually bites first, so it sits right under the session.
     if let s = d.scoped {
         out.append(PacedLimit(id: "scoped", name: tr("Неделя · ", "Week · ") + s.name,
-                              pace: windowPace(used: s.percent, reset: s.reset, windowH: 168,
-                                               recentRate: h.recentRate(product, metric: { $0.scoped }, minutes: 180)), color: 2))
+                              pace: snapshotWindowPace(used: s.percent, reset: s.reset, windowH: 168,
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.scoped }, minutes: 180, now: $0) }), color: 2, used: s.percent))
     }
     out.append(PacedLimit(id: "weekly", name: product == "claude" ? tr("Неделя · все модели", "Week · all models") : tr("Неделя", "Week"),
-                          pace: windowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
-                                           recentRate: h.recentRate(product, metric: { $0.weekly }, minutes: 180)), color: 1))
+                          pace: snapshotWindowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
+                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.weekly }, minutes: 180, now: $0) }), color: 1, used: d.weekly))
     return out
 }
 
@@ -1225,7 +1229,8 @@ private final class SyncSecurityOutput {
     func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
     func string() -> String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
-private func syncSecurity(_ args: [String], input: String? = nil) -> (status: SyncKeychainStatus, out: String) {
+private func syncSecurity(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil) -> (status: SyncKeychainStatus, out: String) {
+    guard lifetime?.begin() != false else { return (.timedOut, "") }
     let p = Process(), output = Pipe(), stdin = Pipe()
     let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
     let result = SyncSecurityOutput()
@@ -1233,8 +1238,8 @@ private func syncSecurity(_ args: [String], input: String? = nil) -> (status: Sy
     p.executableURL = URL(fileURLWithPath: "/usr/bin/security"); p.arguments = args
     p.standardOutput = output; p.standardError = FileHandle.nullDevice
     if input == nil { p.standardInput = FileHandle.nullDevice } else { p.standardInput = stdin }
-    p.terminationHandler = { _ in ended.signal() }
-    do { try p.run() } catch { return (.failure(-1), "") }
+    p.terminationHandler = { _ in lifetime?.ended(); ended.signal() }
+    do { try p.run() } catch { lifetime?.ended(); return (.failure(-1), "") }
     DispatchQueue.global(qos: .utility).async {
         result.store(output.fileHandleForReading.readDataToEndOfFile())
         try? output.fileHandleForReading.close()
@@ -1260,8 +1265,9 @@ private func syncSecurity(_ args: [String], input: String? = nil) -> (status: Sy
     return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
 }
 struct SecuritySyncKeychain: SyncKeychain {
+    var lifetime: GitHubAuthProcessFence? = nil
     func read() -> SyncKeychainRead {
-        let r = syncSecurity(["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"])
+        let r = syncSecurity(["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"], lifetime: lifetime)
         switch r.status {
         case .success:
             let token = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1277,7 +1283,7 @@ struct SecuritySyncKeychain: SyncKeychain {
         return syncSecurity(["-i"], input: command).status
     }
     func delete() -> SyncKeychainStatus {
-        syncSecurity(["delete-generic-password", "-s", SYNC_KC_SERVICE]).status
+        syncSecurity(["delete-generic-password", "-s", SYNC_KC_SERVICE], lifetime: lifetime).status
     }
 }
 typealias SyncHTTPResult = (status: Int, data: Data?, err: String?, headers: [String: String])
@@ -1327,6 +1333,7 @@ func syncOAuthEndpoint(_ url: String) -> Bool {
     return ["/login/device/code", "/login/oauth/access_token"].contains(c.percentEncodedPath)
 }
 private enum GitHubAuthPersistenceError: Error { case unavailable, corrupt }
+private let githubAuthProcessFence = GitHubAuthProcessFence()
 private let GITHUB_AUTH_SERVICE = "Claude Codex Limits GitHub Credential V2"
 
 private func githubAuthRefSafe(_ ref: GitHubAuthRef) -> Bool {
@@ -1335,7 +1342,7 @@ private func githubAuthRefSafe(_ ref: GitHubAuthRef) -> Bool {
 }
 private func githubAuthRead(_ ref: GitHubAuthRef) -> GitHubAuthRead {
     if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") {
-        switch SecuritySyncKeychain().read() {
+        switch SecuritySyncKeychain(lifetime: githubAuthProcessFence).read() {
         case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token, refreshToken: nil, obtainedAt: 0))
         case .missing: return .missing
         case .timedOut: return .timeout
@@ -1343,7 +1350,7 @@ private func githubAuthRead(_ ref: GitHubAuthRef) -> GitHubAuthRead {
         }
     }
     guard githubAuthRefSafe(ref) else { return .corrupt }
-    let result = syncSecurity(["find-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation, "-w"])
+    let result = syncSecurity(["find-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation, "-w"], lifetime: githubAuthProcessFence)
     switch result.status {
     case .missing: return .missing
     case .timedOut: return .timeout
@@ -1600,9 +1607,9 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> G
     return process.terminationStatus == 0 ? .success : .unreachable
 }
 private func githubAuthDelete(_ ref: GitHubAuthRef) -> GitHubAuthStoreStatus {
-    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") { return githubAuthStatus(SecuritySyncKeychain().delete()) }
+    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") { return githubAuthStatus(SecuritySyncKeychain(lifetime: githubAuthProcessFence).delete()) }
     guard githubAuthRefSafe(ref) else { return .failed }
-    return githubAuthStatus(syncSecurity(["delete-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation]).status)
+    return githubAuthStatus(syncSecurity(["delete-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation], lifetime: githubAuthProcessFence).status)
 }
 private func githubAuthAtomicSave(_ manifest: GitHubAuthManifest, path: String) throws {
     let directory = (path as NSString).deletingLastPathComponent
@@ -1705,14 +1712,14 @@ private func makeProductionGitHubAuth() -> GitHubAuthOwner {
             let d = UserDefaults.standard
             if d.bool(forKey: "syncRevoked") { return .revoked }
             guard let login = d.string(forKey: "syncLogin") else { return .signedOut }
-            switch SecuritySyncKeychain().read() {
+            switch SecuritySyncKeychain(lifetime: githubAuthProcessFence).read() {
             case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token,
                 refreshToken: nil, obtainedAt: 0, login: login))
             case .missing: return .missing
             case .timedOut: return .timeout
             case .failure(let code): return code == 36 ? .locked : .unreachable
             }
-        }, settled: githubAuthSettled)
+        }, settled: githubAuthSettled, storeIdle: { githubAuthProcessFence.isIdle })
     return GitHubAuthOwner(dependencies: dependencies, clientID: GITHUB_CLIENT_ID)
 }
 
@@ -1727,9 +1734,40 @@ func githubAuthMessage(_ reason: String, language: String) -> String {
     case "bad_refresh_token", "refresh_expired", "access_expired", "revoked": return english ? "GitHub sign-in needs renewal. Sign in again." : "Необходимо обновить вход в GitHub. Войдите заново."
     case "incomplete_candidate", "identity_changed", "corrupt": return english ? "Couldn't verify the saved sign-in. Sign in again." : "Не удалось проверить сохранённый вход. Войдите заново."
     case "locked": return english ? "Unlock Keychain; sign-in will recover automatically." : "Разблокируйте Связку ключей; вход восстановится автоматически."
+    case "unreachable": return english ? "No access to Keychain. Retrying automatically." : "Нет доступа к Связке ключей. Повторим автоматически."
+    case "timeout": return english ? "Keychain did not respond. Retrying automatically." : "Связка ключей не ответила. Повторим автоматически."
     case "response_unknown": return english ? "Renewal response is unavailable; checking saved sign-in." : "Ответ продления недоступен; проверяем сохранённый вход."
     case "identity_unavailable", "candidate_unauthorized", "login_pending": return english ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."
     default: return english ? "Sign-in is temporarily unavailable; retrying automatically." : "Вход временно недоступен; повторим автоматически."
+    }
+}
+
+// Pure deadline admission; all runtime state is owned by GitHubSync.q.
+// The short retry floor handles a still-terminating child or an owner-busy pass;
+// it never replaces or extends the owner's monotonic storage cooldown.
+enum KeychainRetryDecision: Equatable { case cancel, keep, arm(Double), retry }
+struct KeychainRetryDeadline {
+    private var deadline: Double?
+    private var retryNotBefore: Double = 0
+    static let busyRecheck: Double = 30
+
+    mutating func update(remaining: Double?, now: Double, fired: Bool = false,
+                         force: Bool = false, storeIdle: Bool = true) -> KeychainRetryDecision {
+        guard let remaining = remaining, remaining.isFinite, now.isFinite else {
+            deadline = nil; retryNotBefore = 0
+            return .cancel
+        }
+        if fired && remaining <= 0 && now >= retryNotBefore {
+            retryNotBefore = now + Self.busyRecheck
+            deadline = nil
+            if storeIdle { return .retry }
+            deadline = retryNotBefore
+            return .arm(Self.busyRecheck)
+        }
+        let target = max(now + max(0, remaining), retryNotBefore)
+        if !fired && !force, let deadline = deadline, abs(deadline - target) < 0.05 { return .keep }
+        deadline = target
+        return .arm(max(0.01, target - now))
     }
 }
 
@@ -1746,6 +1784,9 @@ final class GitHubSync {
     private var keychainBackoffUntil = Date.distantPast
     private var retryWork: DispatchWorkItem?
     private var transientFailure = false
+    private var keychainRetryDeadline = KeychainRetryDeadline()
+    private var keychainRetryWork: DispatchWorkItem?
+    private var keychainRetryID: UUID?
     var onChange: (() -> Void)?
     // Offline race tests only; checkpoints run on q, outside the UI lock.
     var selfTestLoginCheckpoint: ((String) -> Void)?
@@ -1754,6 +1795,19 @@ final class GitHubSync {
     }
 
     private let authOwner: GitHubAuthOwner?
+    private var keychainManualRetryPending = false // guarded by UI lock, including queue wait
+    // Scheduler owner consumes this delay and rechecks it after wake; no wall-clock conversion.
+    var keychainRetryDelay: Double? { authOwner?.keychainRetryDelay() }
+    func retryKeychainAccess() {
+        guard let owner = authOwner else { return }
+        lock.lock()
+        guard !keychainManualRetryPending else { lock.unlock(); return }
+        keychainManualRetryPending = true; lock.unlock()
+        q.async {
+            defer { self.lock.lock(); self.keychainManualRetryPending = false; self.lock.unlock() }
+            _ = self.projectAuth(owner.retryKeychainAccess())
+        }
+    }
     private var capturedAccess: GitHubAuthAccess?
     private let transport: SyncHTTP
     private let keychain: SyncKeychain
@@ -1860,6 +1914,7 @@ final class GitHubSync {
     @discardableResult private func projectAuth(_ result: GitHubAuthResult) -> String? {
         guard let owner = authOwner else { return nil }
         let snapshot = owner.snapshot()
+        setUI { $0.keychainRetryAvailable = owner.keychainRetryDelay() != nil }
         let ms = machineList()
         switch result {
         case .ready(let access):
@@ -1950,9 +2005,16 @@ final class GitHubSync {
             _ = owner.abortLogin(epoch: captured.epoch)
         }
         let phase = cancelledLoginPhase
+        let keychainPaused = authOwner?.keychainRetryDelay() != nil
+        let snapshot = authOwner?.snapshot()
         setUI {
             guard loginID == id else { return }
             loginID = nil; $0.phase = phase; $0.userCode = nil; $0.error = error
+            if keychainPaused {
+                $0.keychainRetryAvailable = true; $0.authReason = snapshot?.reason
+                $0.keychainItemLeft = snapshot?.hasCredential ?? $0.keychainItemLeft
+                $0.error = githubAuthMessage(snapshot?.reason ?? "unreachable", language: appLang())
+            }
         }
     }
     private func form(_ url: String, _ fields: [String: String]) -> [String: Any]? {
@@ -2231,6 +2293,40 @@ final class GitHubSync {
         backoffUntil = now.addingTimeInterval(min(delay, 60 * 60))
     }
 
+    // One relative deadline on the existing serial sync queue; UI changes only
+    // request a recheck. Stale/cancelled callbacks cannot admit another pass.
+    func recheckKeychainRetry(afterWake: Bool = false) {
+        q.async { self.updateKeychainRetry(force: afterWake) }
+    }
+
+    private func updateKeychainRetry(fired: Bool = false, force: Bool = false) {
+        let decision = keychainRetryDeadline.update(
+            remaining: keychainRetryDelay,
+            now: authOwner?.dependencies.monotonicClock() ?? 0,
+            fired: fired, force: force,
+            storeIdle: authOwner?.dependencies.storeIdle() ?? true)
+        if decision == .keep { return }
+        keychainRetryWork?.cancel(); keychainRetryWork = nil; keychainRetryID = nil
+        switch decision {
+        case .cancel, .keep: break
+        case .arm(let delay):
+            let id = UUID()
+            keychainRetryID = id
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self, self.keychainRetryID == id else { return }
+                self.keychainRetryWork = nil; self.keychainRetryID = nil
+                self.updateKeychainRetry(fired: true)
+            }
+            keychainRetryWork = work
+            q.asyncAfter(deadline: .now() + delay, execute: work)
+        case .retry:
+            // Existing recovery/sync path owns single flight and network backoff.
+            // No manual bypass. A still-zero owner delay gets a bounded recheck.
+            syncBody(force: false)
+            updateKeychainRetry()
+        }
+    }
+
     // MARK: push + pull
 
     func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
@@ -2436,6 +2532,10 @@ final class GitHubSync {
             guard let access = cycleAccess, owner.withCurrentAccess(access, publish) else {
                 recordError(tr("Вход изменился или кеш недоступен; повторим синхронизацию", "Sign-in changed or cache is unavailable; sync will retry")); return
             }
+            // No more authenticated work follows: optional GC cannot close the store
+            // gate between this cycle's access check, API calls and publication.
+            owner.cleanupRetiredCredentials()
+            setUI { $0.keychainRetryAvailable = owner.keychainRetryDelay() != nil }
         } else { try? publish() }
 
     }
@@ -2636,27 +2736,29 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
 func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString? {
     if d.auth == .loggedOut { return nil }                       // "sign in" → faint icon, no number
     let base = dark ? NSColor.white : NSColor.black
-    // Stale (auth/fetch error or a frozen snapshot) → fade the whole group so the tray
-    // reads as "last known, not live" rather than presenting old numbers as current.
+    // Fade each invalid/reset window independently; keep a valid weekly reading visible.
     let stale = isStale(d)
     let dim = cg(base.withAlphaComponent(stale ? 0.4 : 0.95))
     let faint = cg(base.withAlphaComponent(0.4))
+    let sessionStale = metricIsStale(d, metric: "session")
+    let weeklyStale = metricIsStale(d, metric: "weekly")
+    let modelStale = metricIsStale(d, metric: "model")
     var parts: [(value: Double, color: CGColor)] = []
     for metric in trayMetrics() {
         switch metric {
         case .session:
-            if let v = d.session { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+            if let v = d.session { parts.append((v, sessionStale ? faint : cg(sevColor(severity(v), dark: dark)))) }
         case .weekly:
-            if let v = d.weekly { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+            if let v = d.weekly { parts.append((v, weeklyStale ? faint : cg(sevColor(severity(v), dark: dark)))) }
         case .model:
-            if let s = d.scoped { parts.append((s.percent, stale ? faint : cg(trayScopedColor(s.percent, dark: dark)))) }
+            if let s = d.scoped { parts.append((s.percent, modelStale ? faint : cg(trayScopedColor(s.percent, dark: dark)))) }
         }
     }
     // Codex has no per-model limit, so a "weekly + model" pick would leave its row numberless.
     // Fall back to whatever that product does have rather than showing a bare icon.
     if parts.isEmpty {
-        if let v = d.session { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
-        if let v = d.weekly { parts.append((v, stale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+        if let v = d.session { parts.append((v, sessionStale ? faint : cg(sevColor(severity(v), dark: dark)))) }
+        if let v = d.weekly { parts.append((v, weeklyStale ? faint : cg(sevColor(severity(v), dark: dark)))) }
     }
     if parts.isEmpty { return nil }                              // genuinely no data → icon only
     let m = NSMutableAttributedString()
@@ -2785,18 +2887,33 @@ func fmtReset(_ d: Date?) -> String {
 
 /// True when a card is showing a frozen / aged snapshot instead of live data — so the UI
 /// can say so plainly instead of passing off old numbers (and a past reset time) as current.
-/// Conclusive on its own: a reset moment that's already passed — a rolling window can't
-/// reset in the past for live data, so that's a dead giveaway of a stuck snapshot.
-/// Everything else is judged by the AGE of the last good read: a single failed poll with a
-/// minute-old cache is a transient hiccup (throttling, a blip) and must NOT grey the card —
-/// only a failure streak long enough to leave the snapshot genuinely old (15+ min) does.
+/// Freshness is the age of the observation, independent of a later failed request.
+let SNAPSHOT_MAX_AGE: TimeInterval = 14400
+func snapshotWindowPace(used: Double?, reset: Date?, windowH: Double, asOf: Date?, recentRate: Double? = nil) -> WindowPace? {
+    guard let at = asOf, at.timeIntervalSince1970.isFinite,
+          let used = used, used.isFinite, used >= 0,
+          let reset = reset, reset.timeIntervalSince1970.isFinite,
+          reset > at, reset.timeIntervalSince(at) <= windowH * 3600 else { return nil }
+    return windowPace(used: used, reset: reset, windowH: windowH, recentRate: recentRate, now: at)
+}
+func metricIsStale(_ d: LimitData, metric: String, now: Date = Date()) -> Bool {
+    guard let at = d.asOf, at.timeIntervalSince1970.isFinite,
+          (0...SNAPSHOT_MAX_AGE).contains(now.timeIntervalSince(at)) else { return true }
+    let used: Double?, reset: Date?, hours: Double
+    switch metric {
+    case "session": (used, reset, hours) = (d.session, d.sessionReset, 5)
+    case "model": (used, reset, hours) = (d.scoped?.percent, d.scoped?.reset, 168)
+    default: (used, reset, hours) = (d.weekly, d.weeklyReset, 168)
+    }
+    guard let reset = reset, reset > now else { return true }
+    return snapshotWindowPace(used: used, reset: reset, windowH: hours, asOf: at) == nil
+}
 func isStale(_ d: LimitData, _ now: Date = Date()) -> Bool {
-    guard d.present else { return false }
-    if let sr = d.sessionReset, sr < now.addingTimeInterval(-120) { return true }
-    if let wr = d.weeklyReset, wr < now.addingTimeInterval(-120) { return true }
-    let age = d.asOf.map { now.timeIntervalSince($0) } ?? .infinity
-    if d.error != nil || d.stale { return age > 15 * 60 }
-    return age > 3600
+    d.present && ["session", "weekly", "model"].allSatisfy { metricIsStale(d, metric: $0, now: now) }
+}
+func limitResetText(_ reset: Date?) -> String {
+    if let reset = reset, reset <= Date() { return tr("окно сброшено", "window reset") }
+    return fmtReset(reset)
 }
 
 func pctText(_ v: Double?) -> String {
@@ -2904,6 +3021,8 @@ struct SyncUIState {
     var lastUploadAt: Date? = nil          // last PATCH of this machine's file (syncPushedAt)
     var lastError: String? = nil           // syncLastError — cleared by a good cycle
     var lastErrorAt: Date? = nil
+    var keychainRetryAvailable = false
+    var canRetryKeychain: Bool { keychainRetryAvailable || ["locked", "timeout", "unreachable"].contains(authReason ?? "") }
     var canSignOut: Bool {
         phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
     }
@@ -2964,12 +3083,13 @@ func syncSignOutHint(_ lang: String = appLang()) -> String {
         : "Выход только на этом компьютере. Отзыв доступа:\ngithub.com/settings/applications"
 }
 func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
+    let retryH: CGFloat = s.canRetryKeychain ? SET_ROW_H : 0
     switch s.phase {
-    case .off:          return SET_ROW_H + SET_SYNC_NOTE_H + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
-    case .revoked:      return SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H : 0)
+    case .off:          return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
+    case .revoked:      return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H : 0)
                                 + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
-    case .awaitingCode:  return SET_ROW_H + 44 + 26
-    case .on:            return SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
+    case .awaitingCode:  return retryH + SET_ROW_H + 44 + 26
+    case .on:            return retryH + SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
                                 + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 : 0)
                                 + SET_SYNC_SIGNOUT_HINT_H
     }
@@ -3050,6 +3170,11 @@ struct AutoPollState: Codable {
     mutating func due(_ now: Double, manual: Bool = false) -> Bool {
         if lastAttempt > now { lastAttempt = now } // clock moved backwards: restart the minimum wait
         return lastAttempt == 0 || now - lastAttempt >= (manual && !failed ? 900 : interval)
+    }
+    func nextDelay(_ now: Double) -> TimeInterval {
+        if lastAttempt == 0 { return 0.01 }
+        if lastAttempt > now { return 60 }
+        return max(0.01, min(60, lastAttempt + interval - now))
     }
     mutating func begin(_ now: Double) { lastAttempt = now }
     mutating func slowDown() {
@@ -3454,8 +3579,8 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
         // A frozen snapshot shouldn't masquerade as live: grey the ring + numbers and, below,
         // swap the reset times (which would otherwise show an impossible past moment) for a note.
         let stale = isStale(d)
-        let sCol = stale ? gray(1, 0.3) : metricColor(blue, d.session)
-        let wCol = stale ? gray(1, 0.3) : metricColor(purple, d.weekly)
+        let sCol = metricIsStale(d, metric: "session") ? gray(1, 0.3) : metricColor(blue, d.session)
+        let wCol = metricIsStale(d, metric: "weekly") ? gray(1, 0.3) : metricColor(purple, d.weekly)
         gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
         gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
         let sTxt = d.session == nil ? "—" : numText(d.session) + "%"
@@ -3482,14 +3607,14 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             }
             text(attr(label, 10, .semibold, color), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
-        let scopedCol = d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR
+        let scopedCol = metricIsStale(d, metric: "model") ? gray(1, 0.3) : (d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR)
         if !stale, let rc = d.resetCredits, rc >= 1 {
             pill("arrow.clockwise", "\(rc)", amber)
         } else if !stale, let s = d.scoped {
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
-        if stale {
+        if stale || limitPollFailed(d) {
             // Keep the last good read distinct from the CLI's sign-in state.
             let copy = limitSimpleStaleCopy(d, product: product)
             let msg1 = copy.snapshot
@@ -3503,16 +3628,16 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
             text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
-            text(attr(fmtReset(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
+            text(attr(limitResetText(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
             dot(lx, centerTopY: l2 + 5, wCol)
             text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
-            text(attr(fmtReset(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+            text(attr(limitResetText(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
             // Per-model weekly limit — named by the backend, so a future model needs no code change.
             if showsScopedRow(d), let s = d.scoped {
                 let l3 = l2 + SCOPED_ROW_H
                 dot(lx, centerTopY: l3 + 5, scopedCol)
                 text(attr(s.name, 10.5, .regular, textMid), x: lx + 11, topY: l3)
-                text(attr(fmtReset(s.reset), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
+                text(attr(limitResetText(s.reset), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
             }
         }
     }
@@ -3644,7 +3769,7 @@ func limitAuthBadge(_ auth: AuthState) -> String {
 }
 
 func limitPausedNotice(asOf: Date?) -> String {
-    guard let asOf = asOf else { return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    guard let asOf = asOf, asOf.timeIntervalSince1970.isFinite, asOf <= Date() else { return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
     return tr("Данные от ", "Data as of ") + advMomentLower(asOf) + tr(" · темп не считаем", " · pace paused")
 }
 
@@ -3654,27 +3779,61 @@ func limitSimpleStaleCopy(_ d: LimitData, product: String) -> (snapshot: String,
     if limitCanFix(product: product, auth: d.auth) {
         action = tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?")
     } else {
-        action = d.asOf == nil ? tr("темп не считаем", "pace paused") : tr("обновите данные", "refresh data")
+        action = limitPollFailed(d) ? limitRetryNotice(d, compact: true)
+            : (d.asOf == nil ? tr("темп не считаем", "pace paused") : tr("обновите данные", "refresh data"))
     }
     return (snapshot, action)
+}
+
+func snapshotMoment(_ at: Date) -> String {
+    let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd HH:mm"
+    return f.string(from: at)
+}
+func limitPollFailed(_ d: LimitData) -> Bool { d.pollFailed || d.error != nil }
+func limitRetryNotice(_ d: LimitData, compact: Bool = false) -> String {
+    let prefix = compact ? tr("Сбой · ", "Failed · ") : ""
+    guard let at = d.nextPollAt else { return prefix + tr("повтор по расписанию", "scheduled retry") }
+    guard at > Date() else { return prefix + tr("повтор ожидается", "retry due") }
+    let f = DateFormatter(); f.dateFormat = "HH:mm"
+    return prefix + tr("повтор в ", "retry at ") + f.string(from: at)
+}
+func withPollStatus(_ data: LimitData, state: AutoPollState?, next: Date?) -> LimitData {
+    var data = data
+    data.pollFailed = state?.failed == true
+    data.nextPollAt = data.pollFailed ? next : nil
+    return data
+}
+func limitSnapshotNotice(_ d: LimitData) -> String {
+    guard d.auth == .ok, let at = d.asOf, at.timeIntervalSince1970.isFinite,
+          at <= Date(), [(d.session, d.sessionReset, 5.0), (d.weekly, d.weeklyReset, 168.0),
+                        (d.scoped?.percent, d.scoped?.reset, 168.0)].contains(where: {
+              snapshotWindowPace(used: $0.0, reset: $0.1, windowH: $0.2, asOf: at) != nil
+          })
+    else { return limitPausedNotice(asOf: d.asOf) }
+    return tr("Темп по снимку от ", "Pace from snapshot at ") + snapshotMoment(at)
+}
+func limitDataBadge(_ d: LimitData) -> String {
+    if d.auth == .ok, limitPollFailed(d) { return tr("сбой обновления", "update failed") }
+    return limitAuthBadge(d.auth)
 }
 
 struct AdvCard {
     let product: String, data: LimitData, name: String, icon: String, url: String
     let paused: Bool
     let rows: [AdvRow]
-    var noticeHeight: CGFloat { paused ? ADV_NOTICE * (limitCanFix(product: product, auth: data.auth) ? 2 : 1) : 0 }
+    var noticeHeight: CGFloat { ADV_NOTICE * ((limitCanFix(product: product, auth: data.auth) ? 2 : 1) + (limitPollFailed(data) ? 1 : 0)) }
     var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight }
 }
 
 func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
     func card(_ d: LimitData, _ product: String) -> AdvCard {
         let paused = d.auth != .ok || isStale(d)
+        let invalidTime = d.asOf.map { !$0.timeIntervalSince1970.isFinite || $0 > Date() } ?? true
         var limits = pacedLimits(d, product: product)
         if product == "codex" { limits.sort { a, _ in a.id == "weekly" } }        // Codex: week first
         var rows: [AdvRow] = limits.map { l in
             guard let p = l.pace else { return AdvRow(limit: l, kind: .inactive, credits: nil) }
-            if paused { return AdvRow(limit: l, kind: .stale, credits: nil) }
+            if d.auth != .ok || invalidTime || p.reset <= Date() { return AdvRow(limit: l, kind: .stale, credits: nil) }
             if p.used >= 100 { return AdvRow(limit: l, kind: .exhausted, credits: nil) }
             if p.elapsedH < 10.0 / 60 || p.used < 2 { return AdvRow(limit: l, kind: .tooEarly, credits: nil) }
             return AdvRow(limit: l, kind: .full, credits: nil)
@@ -3737,9 +3896,18 @@ func advMomentLower(_ d: Date) -> String {
 }
 func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
     if row.kind == .stale {
-        return asOf.map { tr("по данным на ", "as of ") + advMomentLower($0) } ?? limitPausedNotice(asOf: nil)
+        let prefix = row.limit?.pace.map { $0.reset <= Date() } == true
+            ? tr("Окно сброшено · снимок ", "Window reset · snapshot ") : tr("по данным на ", "as of ")
+        return asOf.map { prefix + advMomentLower($0) } ?? limitPausedNotice(asOf: nil)
     }
-    guard let p = row.limit?.pace else { return tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request") }
+    guard let p = row.limit?.pace else {
+        return row.limit?.used != nil ? tr("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
+            : tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
+    }
+    if let at = asOf, Date().timeIntervalSince(at) > SNAPSHOT_MAX_AGE {
+        return p.projectedPct.map { tr("Прогноз на снимке: ", "Snapshot forecast: ") + fmtPct($0, decimals: 0) }
+            ?? tr("На снимке мало данных для темпа", "Not enough pace data in snapshot")
+    }
     switch row.kind {
     case .exhausted: return tr("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + advMomentLower(p.reset)
     case .tooEarly: return tr("Мало данных для темпа · сброс в ", "Not enough data for pace · resets at ") + advMomentLower(p.reset)
@@ -3898,8 +4066,8 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         // L1: dot · label · percent
         dot(ADV_IX + 3, yr + 11, live ? col : gray(1, 0.22))
         textC(caps(l.name, 9.5, row.kind == .inactive ? textLo : textMid), x: ADV_IX + 12, topY: yr + 4, h: 14)
-        if let p = pace {
-            textC(attr(fmtPct(p.used, decimals: 0), 14, .semibold, col, kern: -0.14), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
+        if let used = pace?.used ?? l.used, used.isFinite {
+            textC(attr(fmtPct(used, decimals: 0), 14, .semibold, col, kern: -0.14), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
         } else {
             textC(attr("—", 14, .semibold, textLo), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
         }
@@ -3963,8 +4131,8 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         let name = attr(c.name, 13, .semibold, textHi)
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
-        if c.paused {
-            let r = pill(attr(limitAuthBadge(c.data.auth), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
+        if c.paused || limitPollFailed(c.data) {
+            let r = pill(attr(limitDataBadge(c.data), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
         if let plan = c.data.plan {
@@ -3975,18 +4143,22 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix ? card : arrow.insetBy(dx: -8, dy: -8)))
         var ry = y + 29
-        if c.paused {
-            textC(attr(limitPausedNotice(asOf: c.data.asOf), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14)
+        do {
+            textC(attr(limitSnapshotNotice(c.data), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14)
             if canFix {
                 let code = ctAttr("claude → /login", ctMono(10, .regular), cg(gray(1, 0.8)))
                 let codeR = rectTL(ADV_IX, ry + ADV_NOTICE + 0.5, width(code) + 8, 14)
                 roundFill(codeR, 4, gray(1, 0.08))
                 textC(code, x: codeR.minX + 4, topY: ry + ADV_NOTICE, h: 14)
             }
+            if limitPollFailed(c.data) {
+                let offset = ADV_NOTICE * (canFix ? 2 : 1)
+                textC(attr(limitRetryNotice(c.data), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry + offset, h: 14)
+            }
             ry += c.noticeHeight
         }
         for (i, row) in c.rows.enumerated() {
-            drawRow(row, topY: ry, dimmed: c.paused && row.kind != .credits, rowAsOf: c.data.asOf)
+            drawRow(row, topY: ry, dimmed: (c.paused || row.kind == .stale) && row.kind != .credits, rowAsOf: c.data.asOf)
             ry += row.height
             if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
         }
@@ -4525,7 +4697,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                      x: cardX + 14, topY: syTop + SET_ROW_H + SET_SYNC_NOTE_H)
             }
             if sy.canSignOut {
-                note(syncSignOutHint(), syTop + syH - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
+                note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
             }
         case .awaitingCode:
             text(attr(tr("Введите код на github.com/login/device", "Enter the code at github.com/login/device"), 12, .regular, textHi), x: cardX + 14, topY: rowMid + 1)
@@ -4583,7 +4755,12 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
                      x: cardX + 14, topY: st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2)
             }
-            note(syncSignOutHint(), syTop + syH - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
+            note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
+        }
+        if sy.canRetryKeychain {
+            _ = button(tr("Повторить доступ к Связке ключей", "Retry Keychain access"),
+                right: cardX + cardW - 12, rowTop: syTop + syH - SET_ROW_H,
+                id: "sync:keychain-retry", primary: false)
         }
         }
     }
@@ -5080,6 +5257,8 @@ final class LimitsPanelView: NSView {
                     needsDisplay = true
                 } else if h.id == "sync:login" {
                     GitHubSync.shared.startLogin()
+                } else if h.id == "sync:keychain-retry" {
+                    GitHubSync.shared.retryKeychainAccess()
                 } else if h.id == "sync:cancel" {
                     GitHubSync.shared.cancelLogin()
                 } else if h.id == "sync:logout" {
@@ -5516,6 +5695,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             render(c, x)
         }
         GitHubSync.shared.onChange = { [weak self] in
+            GitHubSync.shared.recheckKeychainRetry()
             // Main and Settings heights both depend on sync state (orange line, status rows).
             guard let v = self?.panelCtrl.view else { return }
             if v.mode == .settings || v.mode == .main { v.resizeToContent() } else { v.needsDisplay = true }
@@ -5542,6 +5722,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func workspaceDidWake() {
+        // Dispatch deadlines may lag sleep; the owner's remaining time includes it.
+        GitHubSync.shared.recheckKeychainRetry(afterWake: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
             if autoPollEnabled() { self?.scanActivity(); self?.doRefresh(live: true, scheduled: true) }
             GitHubSync.shared.syncNow()
@@ -5565,11 +5747,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func startTimer() {
         timer?.invalidate()
-        let t = Timer(timeInterval: autoPollEnabled() ? 60 : interval, repeats: true) { [weak self] _ in
+        let auto = autoPollEnabled()
+        let now = Date().timeIntervalSince1970
+        let delays = ["claude", "codex"].filter { productEnabled($0) }.map {
+            (autoStates[$0] ?? AutoPollState()).nextDelay(now)
+        }
+        let delay = auto ? (fetchingLimits ? 60 : delays.min() ?? 60) : interval
+        let t = Timer(timeInterval: delay, repeats: !auto) { [weak self] _ in
             self?.doRefresh(live: true, scheduled: true)
+            if autoPollEnabled() { self?.startTimer() }
         }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        publishAutoIntervals()
     }
 
     @objc func themeChanged() {
@@ -5579,13 +5769,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func publishAutoIntervals() {
+        if let (claude, codex) = last {
+            last = (limitsWithPollStatus(claude, product: "claude"), limitsWithPollStatus(codex, product: "codex"))
+        }
         guard let panelCtrl = panelCtrl else { return }
         panelCtrl.view.autoIntervals = autoStates.mapValues { $0.interval }
+        panelCtrl.view.claude = limitsWithPollStatus(panelCtrl.view.claude, product: "claude")
+        panelCtrl.view.codex = limitsWithPollStatus(panelCtrl.view.codex, product: "codex")
         panelCtrl.view.needsDisplay = true
     }
 
     func saveAutoStates() {
         publishAutoIntervals()
+        if autoPollEnabled() { startTimer() }
         if let data = try? JSONEncoder().encode(autoStates) { UserDefaults.standard.set(data, forKey: "autoPollState") }
     }
 
@@ -5687,14 +5883,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return a.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
     }
 
+    func limitsWithPollStatus(_ data: LimitData, product: String) -> LimitData {
+        let state = autoStates[product]
+        let next = autoPollEnabled() ? state.map { Date(timeIntervalSince1970: $0.lastAttempt + $0.interval) } : timer?.fireDate
+        return withPollStatus(data, state: state, next: next)
+    }
     func render(_ claude: LimitData, _ codex: LimitData, sampleProducts: Set<String> = []) {
-        let claude = selectedLimits(claude, product: "claude")
-        let codex = selectedLimits(codex, product: "codex")
+        let claude = limitsWithPollStatus(selectedLimits(claude, product: "claude"), product: "claude")
+        let codex = limitsWithPollStatus(selectedLimits(codex, product: "codex"), product: "codex")
         last = (claude, codex)
         applyTrayImage(claude, codex)
         if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude") }
         if sampleProducts.contains("codex") { UsageHistory.shared.record(codex, product: "codex") }
-        let updated = sampleProducts.isEmpty ? (panelCtrl.view.updated ?? [claude.asOf, codex.asOf].compactMap { $0 }.max()) : Date()
+        let updated = [claude.asOf, codex.asOf].compactMap { $0 }.max()
         panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: updated)
         if !sampleProducts.isEmpty { checkAlarms(claude, codex) }
     }
@@ -6510,9 +6711,25 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         var d = LimitData(session: 31, weekly: 47, sessionReset: authNow.addingTimeInterval(7200),
                           weeklyReset: authNow.addingTimeInterval(86400), asOf: authNow.addingTimeInterval(-60))
         switch fixture {
-        case "age": d.asOf = authNow.addingTimeInterval(-7200)
+        case "age":
+            d.asOf = authNow.addingTimeInterval(-14401)
+            d.sessionReset = authNow.addingTimeInterval(1800) // valid at observation; stale solely by age
         case "network": d.asOf = authNow.addingTimeInterval(-1800); d.error = "offline fixture"
-        case "reset": d.sessionReset = authNow.addingTimeInterval(-3600)
+        case "reset":
+            d.asOf = authNow.addingTimeInterval(-7200)
+            d.sessionReset = authNow.addingTimeInterval(-3600)
+            d.weeklyReset = authNow.addingTimeInterval(-3600) // both observed windows have ended
+        case "weekly-only", "historical", "session-reset", "poll-failed":
+            d.asOf = authNow.addingTimeInterval(fixture == "historical" ? -14401 : -7200)
+            d.session = nil; d.sessionReset = nil
+            d.weekly = 41; d.weeklyReset = d.asOf!.addingTimeInterval(84 * 3600)
+            if fixture == "session-reset" {
+                d.session = 100; d.sessionReset = authNow.addingTimeInterval(-3600)
+            }
+            if fixture == "poll-failed" {
+                d.pollFailed = true; d.nextPollAt = authNow.addingTimeInterval(900)
+                // No error string: a fallback snapshot still carries the failed poll fact.
+            }
         case "no-asof": d.asOf = nil
         case "empty": d.session = nil; d.weekly = nil; d.asOf = nil
         case "expired": d.auth = .expired; d.asOf = authNow.addingTimeInterval(-7200)
@@ -6523,6 +6740,21 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
         return d
     }
+    // Fixed observation/time inputs: age and reset are independent of live failure/auth.
+    var boundary = authReading("age")
+    boundary.asOf = authNow.addingTimeInterval(-14400)
+    authCheck(!isStale(boundary, authNow), "exactly four hours remains fresh")
+    authCheck(isStale(authReading("age"), authNow), "four hours plus one second is stale")
+    var oneReset = authReading("reset")
+    oneReset.weeklyReset = authNow.addingTimeInterval(86400)
+    authCheck(metricIsStale(oneReset, metric: "session", now: authNow)
+              && !metricIsStale(oneReset, metric: "weekly", now: authNow) && !isStale(oneReset, authNow),
+              "ended session does not pause valid weekly window")
+    authCheck(isStale(authReading("reset"), authNow), "both ended windows pause the card")
+    let historical = authReading("age")
+    authCheck(snapshotWindowPace(used: historical.weekly, reset: historical.weeklyReset,
+                                windowH: 168, asOf: historical.asOf) != nil,
+              "age-stale valid observation still supports timestamped historical pace")
     let codexTarget = "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
     let claudeTarget = "open:https://claude.ai/settings/usage"
     for lang in ["ru", "en"] {
@@ -6547,7 +6779,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let fixtures = [("codex", "age"), ("codex", "network"), ("codex", "reset"),
                                 ("codex", "no-asof"), ("codex", "empty"), ("claude", "expired"),
                                 ("claude", "logout"), ("claude", "read-error"), ("claude", "age"),
-                                ("claude", "read-error-empty"), ("codex", "both-expired"), ("codex", "both-logout")]
+                                ("claude", "read-error-empty"), ("codex", "both-expired"), ("codex", "both-logout"),
+                                ("codex", "weekly-only"), ("codex", "historical"),
+                                ("codex", "session-reset"), ("codex", "poll-failed")]
                 for (product, fixture) in fixtures {
                     let combined = fixture.hasPrefix("both-")
                     if combined && !both { continue }
@@ -6562,11 +6796,48 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     let card = cards.first { $0.product == product }!
                     let recover = product == "claude" && (fixture == "expired" || fixture == "logout")
                     let label = "\(lang) advanced=\(advanced) both=\(both) \(product)/\(fixture)"
-                    authCheck(card.paused && card.noticeHeight == (recover ? 38 : 19), label + " notice height")
+                    let failedFresh = fixture == "network" || fixture == "poll-failed"
+                    let snapshotFresh = failedFresh || fixture == "weekly-only" || fixture == "session-reset"
+                    authCheck(card.paused == !snapshotFresh && card.noticeHeight == (recover || failedFresh ? 38 : 19),
+                              label + " freshness, recovery and failure have independent notice height")
+                    if failedFresh {
+                        authCheck(card.rows.filter { $0.limit != nil }.allSatisfy { $0.kind == .full },
+                                  label + " fresh failed fetch retains snapshot pace rows")
+                    }
+                    if ["weekly-only", "historical", "session-reset", "poll-failed"].contains(fixture) {
+                        let weeklyRow = card.rows.first { $0.limit?.id == "weekly" }!
+                        let pace = weeklyRow.limit?.pace
+                        authCheck(weeklyRow.kind == .full && pace?.used == 41 && pace?.planPct == 50
+                                  && pace?.projectedPct == 82 && pace?.elapsedH == 84,
+                                  label + " 41% at half-week projects 82% from asOf, independent of current age")
+                        authCheck(limitSnapshotNotice(sample).hasPrefix(
+                            lang == "ru" ? "Темп по снимку от " : "Pace from snapshot at "),
+                                  label + " historical/current forecast retains explicit timestamp")
+                        if fixture == "session-reset" {
+                            authCheck(card.rows.first { $0.limit?.id == "session" }?.kind == .stale
+                                      && metricIsStale(sample, metric: "session", now: authNow)
+                                      && !metricIsStale(sample, metric: "weekly", now: authNow),
+                                      label + " 100% ended session is muted without muting the week")
+                        } else {
+                            authCheck(card.rows.allSatisfy { $0.limit?.id != "session" } && sample.session == nil,
+                                      label + " missing session never blocks weekly forecast")
+                        }
+                    }
+                    let nextClock = DateFormatter(); nextClock.dateFormat = "HH:mm"
+                    let failedAction = fixture == "poll-failed"
+                        ? (lang == "ru" ? "Сбой · повтор в " : "Failed · retry at ") + nextClock.string(from: sample.nextPollAt!)
+                        : (lang == "ru" ? "Сбой · повтор по расписанию" : "Failed · scheduled retry")
+                    if fixture == "poll-failed" {
+                        authCheck(sample.error == nil && sample.pollFailed && sample.auth == .ok
+                                  && limitRetryNotice(sample) == (lang == "ru" ? "повтор в " : "retry at ")
+                                      + nextClock.string(from: sample.nextPollAt!),
+                                  label + " failed state without invented reason includes next attempt")
+                    }
                     let copy = limitSimpleStaleCopy(sample, product: product)
                     let expectedAction = recover ? (lang == "ru" ? "Вход устарел · Как починить?" : "Sign-in expired · How to fix?")
-                        : (sample.asOf == nil ? (lang == "ru" ? "темп не считаем" : "pace paused")
-                                             : (lang == "ru" ? "обновите данные" : "refresh data"))
+                        : (failedFresh ? failedAction
+                           : (sample.asOf == nil ? (lang == "ru" ? "темп не считаем" : "pace paused")
+                                                : (lang == "ru" ? "обновите данные" : "refresh data")))
                     authCheck(copy.action == expectedAction, label + " recovery versus refresh copy")
                     if sample.asOf == nil {
                         authCheck(copy.snapshot == (lang == "ru" ? "Нет свежих данных" : "No fresh data")
@@ -6578,9 +6849,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                   label + " missing percentages are dashes, never invented 0%")
                     }
                     if product == "codex" {
-                        authCheck(sample.auth == .ok && isStale(sample, authNow)
-                                  && limitAuthBadge(sample.auth) == (lang == "ru" ? "данные устарели" : "stale data"),
-                                  label + " paused Codex is not expired auth")
+                        authCheck(sample.auth == .ok && isStale(sample, authNow) == !snapshotFresh
+                                  && (snapshotFresh && !failedFresh || limitDataBadge(sample) == (failedFresh
+                                      ? (lang == "ru" ? "сбой обновления" : "update failed")
+                                      : (lang == "ru" ? "данные устарели" : "stale data"))),
+                                  label + " Codex freshness/failure never invents expired auth")
                     }
                     let height = mainPanelHeight(cl, cx)
                     let image = bitmapContext(720, Int(height * 2))!; image.scaleBy(x: 2, y: 2)
@@ -6627,10 +6900,12 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             }
         }
         select(true, true)
-        authCheck(advCards(authReading("fresh"), authReading("fresh")).allSatisfy { !$0.paused && $0.noticeHeight == 0 },
-                  "\(lang) fresh cards have no paused notice")
+        authCheck(advCards(authReading("fresh"), authReading("fresh")).allSatisfy {
+            !$0.paused && $0.noticeHeight == 19 && limitSnapshotNotice($0.data).hasPrefix(
+                lang == "ru" ? "Темп по снимку от " : "Pace from snapshot at ")
+        }, "\(lang) fresh cards have one timestamped snapshot notice")
     }
-    authCheck(authImages == 88, "88 RU/EN Simple/Advanced actual bitmap fixtures")
+    authCheck(authImages == 120, "120 RU/EN Simple/Advanced actual bitmap fixtures, including 32 FRESH-4H panels")
     print("Auth hint fixtures: \(authChecks) checks, \(authImages) PNG")
     // Actual Settings/main auth draw matrix. History remains collapsed because
     // expanded draw uses the production shared sync; the explicit merge regression

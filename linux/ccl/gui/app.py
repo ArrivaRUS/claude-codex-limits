@@ -841,7 +841,7 @@ class TrayApp(QObject):
         self.tray.show()
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(lambda: self.refresh_limits(scheduled=True))
+        self.timer.timeout.connect(self.poll_tick)
         self.start_poll_timer()
         self.activity_timer = QTimer(self)
         self.activity_timer.timeout.connect(self.scan_activity)
@@ -858,6 +858,7 @@ class TrayApp(QObject):
             self.model.loaded = True
             times = [d.as_of for d in (self.model.claude, self.model.codex) if polling.number(d.as_of)]
             self.model.updated = max(times) if times else None
+            self.publish_auto_intervals()
             self.update_tray()
         self.refresh_limits(scheduled=True)
         QTimer.singleShot(1500, self.refresh_logs)
@@ -1029,16 +1030,36 @@ class TrayApp(QObject):
                 pass
 
     def start_poll_timer(self):
-        self.timer.start((60 if common.settings().get("autoPoll") else self.model.interval) * 1000)
+        auto = common.settings().get("autoPoll")
+        delay = self.model.interval
+        if auto:
+            delays = [s.next_delay(time.time()) for p, s in self.poll_states.items() if common.product_enabled(p)]
+            delay = 60 if self.busy_limits else min(delays, default=60)
+        self.timer.setSingleShot(bool(auto))
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.start(max(1, math.ceil(delay * 1000)))
+        self.publish_auto_intervals()
+
+    def poll_tick(self):
+        self.refresh_limits(scheduled=True)
+        if common.settings().get("autoPoll"):
+            self.start_poll_timer()
 
     def publish_auto_intervals(self):
         self.model.auto_intervals = {p: state.interval for p, state in self.poll_states.items()}
+        for p, state in self.poll_states.items():
+            remaining = self.timer.remainingTime() if hasattr(self, "timer") else -1
+            next_at = (state.last_attempt + state.interval if common.settings().get("autoPoll") else
+                       time.time() + remaining / 1000 if remaining >= 0 else None)
+            limits.with_poll_status(getattr(self.model, p), state, next_at)
         win = getattr(self, "win", None)
         if win is not None:
             win.view.update()
 
     def save_poll_states(self):
         self.publish_auto_intervals()
+        if common.settings().get("autoPoll"):
+            self.start_poll_timer()
         common.state().set("autoPollState", {p: state.saved() for p, state in self.poll_states.items()})
 
     def auto_summary(self):
@@ -1129,10 +1150,11 @@ class TrayApp(QObject):
         m = self.model
         m.claude, m.codex = claude, codex
         m.loaded = True
-        m.updated = time.time()
+        m.updated = max((d.as_of for d in (claude, codex) if polling.number(d.as_of)), default=None)
         for product, data in (("claude", claude), ("codex", codex)):
             if product in self.refresh_products:
                 self.poll_states[product].observe(data, time.time())
+                limits.with_poll_status(data, self.poll_states[product], None)
                 m.history.record(data, product)
         self.save_poll_states()
         self.update_sync_warning()           # «стоит с HH:mm» ages with the clock, not only with syncs

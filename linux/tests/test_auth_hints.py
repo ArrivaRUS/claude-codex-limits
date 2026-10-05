@@ -6,6 +6,8 @@ else:
 
 import ast
 import copy
+import math
+import time
 import os
 import tempfile
 import unittest
@@ -28,10 +30,11 @@ except ImportError:
     # Pure contracts remain runnable without pretending that Qt draw was checked.
     path = Path(__file__).resolve().parents[1] / "ccl" / "gui" / "panel.py"
     names = {"limit_can_fix", "limit_auth_badge", "limit_paused_notice",
-             "limit_simple_stale_copy", "notice_h", "adv_verdict"}
+             "limit_simple_stale_copy", "notice_h", "adv_verdict", "limit_poll_failed",
+             "limit_retry_notice", "limit_snapshot_notice", "limit_data_badge"}
     nodes = [node for node in ast.parse(path.read_text()).body
              if isinstance(node, ast.FunctionDef) and node.name in names]
-    helpers = {"limits": limits, "tr": common.tr, "fmt": fmt, "NOTICE": 19}
+    helpers = {"limits": limits, "tr": common.tr, "fmt": fmt, "NOTICE": 19, "math": math, "time": time}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), helpers)
 
 NOW = 1_800_000_000.0
@@ -44,11 +47,11 @@ def reading(kind="fresh"):
     d.session, d.weekly, d.as_of = 31.0, 47.0, NOW - 60
     d.session_reset, d.weekly_reset = NOW + 7200, NOW + 86400
     if kind == "age":
-        d.as_of = NOW - 7200
+        d.as_of = NOW - 14401
     elif kind == "network":
         d.as_of, d.error = NOW - 1800, "offline fixture"
     elif kind == "reset":
-        d.session_reset = NOW - 3600
+        d.session_reset = d.weekly_reset = NOW - 3600
     elif kind == "no-asof":
         d.as_of = None
     elif kind == "empty":
@@ -100,7 +103,7 @@ class TestAuthCopy(OfflineAuthCase):
             self.st.set("lang", lang)
             notice = "Нет свежих данных · темп не считаем" if lang == "ru" else "No fresh data · pace paused"
             self.assertEqual(helpers["limit_paused_notice"](None), notice)
-            self.assertEqual(helpers["adv_verdict"]({"kind": "stale"}, None), notice)
+            self.assertEqual(helpers["adv_verdict"]({"kind": "stale", "limit": None}, None), notice)
             snapshot, action = helpers["limit_simple_stale_copy"](reading("no-asof"), "codex")
             self.assertEqual(snapshot, "Нет свежих данных" if lang == "ru" else "No fresh data")
             self.assertEqual(action, "темп не считаем" if lang == "ru" else "pace paused")
@@ -117,12 +120,16 @@ class TestAuthCopy(OfflineAuthCase):
                     if recover:
                         self.assertEqual(action, "Вход устарел · Как починить?" if lang == "ru" else "Sign-in expired · How to fix?")
                     else:
-                        self.assertEqual(action, ("темп не считаем" if lang == "ru" else "pace paused")
-                                         if d.as_of is None else ("обновите данные" if lang == "ru" else "refresh data"))
+                        expected = (("Сбой · повтор по расписанию" if lang == "ru" else "Failed · scheduled retry")
+                                    if kind == "network" else
+                                    ("темп не считаем" if lang == "ru" else "pace paused") if d.as_of is None else
+                                    ("обновите данные" if lang == "ru" else "refresh data"))
+                        self.assertEqual(action, expected)
                     card = {"product": product, "data": d, "paused": True}
-                    self.assertEqual(helpers["notice_h"](card), 38 if recover else 19)
+                    self.assertEqual(helpers["notice_h"](card), 38 if recover or kind == "network" else 19)
                     card["paused"] = False
-                    self.assertEqual(helpers["notice_h"](card), 0)
+                    # Every card carries observation-time metadata; failed polls add one retry row.
+                    self.assertEqual(helpers["notice_h"](card), 38 if recover or kind == "network" else 19)
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt5 not installed: actual auth draw/hits unverified")
@@ -201,8 +208,10 @@ class TestAuthDraw(OfflineAuthCase):
                             else:
                                 self.assertFalse(any("%" in text for text in card_text), card_text)
                             if advanced:
-                                self.assertIn("данные устарели" if lang == "ru" else "stale data", card_text)
-                                self.assertIn(panel.limit_paused_notice(m.codex.as_of), card_text)
+                                badge = ("сбой обновления" if lang == "ru" else "update failed") if kind == "network" else (
+                                    "данные устарели" if lang == "ru" else "stale data")
+                                self.assertIn(badge, card_text)
+                                self.assertIn(panel.limit_snapshot_notice(m.codex), card_text)
                             else:
                                 snapshot, action = panel.limit_simple_stale_copy(m.codex, "codex")
                                 self.assertIn(snapshot, card_text)
@@ -280,7 +289,7 @@ class TestAuthDraw(OfflineAuthCase):
                 self.assertIn(CODEX_TARGET, dict(hits))
                 self.assertIn(CLAUDE_TARGET, dict(hits))
                 self.assertNotIn("claudefix", dict(hits))
-                self.assertTrue(all(panel.notice_h(card) == 0 for card in panel.adv_cards(m)))
+                self.assertTrue(all(panel.notice_h(card) == 19 for card in panel.adv_cards(m)))
                 self.assertFalse(any("stale data" in text or "данные устарели" in text or "/login" in text
                                      for text, _, _, _ in texts))
 
