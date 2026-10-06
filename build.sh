@@ -16,7 +16,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 BUILD_SOURCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccl-swift-build.XXXXXX")"
 trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
 cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
-/usr/bin/swiftc -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
+# Match Info.plist's macOS 13.0 minimum for the current build architecture.
+/usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
 cp -R "$DIR/Resources/"* "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
