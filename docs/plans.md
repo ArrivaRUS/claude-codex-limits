@@ -1,5 +1,7 @@
 # План исполнения — устойчивая GitHub-авторизация и история UI
 
+> Текущий инкремент2026-10-05: [FRESH-4H](freshness-4h-plan.md), [KEYCHAIN-RETRY](keychain-retry-plan.md). Production/review/тесты/CI/native UI приняты. Binary target13 и пакетная приёмка PASS; осталось опубликовать и установить. [Доказательства](freshness-keychain-verification.md).
+
 > AUTOSTART-1 (2026-10-05): Mac actual3.2.3 и disk/loaded LaunchAgent verified; исторический старый запуск не установлен. Read-only план: [diagnosis-autostart-version.md](diagnosis-autostart-version.md).
 
 > GH-AUTH-STABLE выпущен на 40cfdf (2026-10-04); Linux284/0skip, Swift30862/0, QA374 PNG и пакеты PASS. Версии 3.2.3/0.4.3 опубликованы, публичные assets проверены.

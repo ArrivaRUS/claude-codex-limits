@@ -1,5 +1,9 @@
 # Статус командного внедрения
 
+## FRESH-4H / KEYCHAIN-RETRY — приёмка 2026-10-05
+
+Кандидат3.2.4/0.4.4: независимые production/isolation review PASS; CI306/0skip, auth30927/freshness105/revoked130/deadline28 без ошибок. Native QA1401/0,214PNG. Пакет пересобран с minos13.0: independent packaged selftest1401/0,214PNG, integrity/codesign/readonly PASS. [Доказательства](freshness-keychain-verification.md). Публикация/установка ещё не выполнены.
+
 ## AUTOSTART-1 — диагностика 2026-10-05
 
 В текущем снимке Mac работает exact принятая3.2.3: executable SHA/mapped inode и

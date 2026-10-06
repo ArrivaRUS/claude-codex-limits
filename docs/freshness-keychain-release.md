@@ -23,40 +23,20 @@
 - Unavailable storage does not mean revoked sign-in and does not delete active credentials. Sign-out preserves a tombstone and defers unavailable physical cleanup/GC.
 - The gate is process-local and resets on restart. Successful Allow or another item with the same name falls outside this guarantee. ACLs are unchanged; the first prompt's cause is unknown and its removal is unverified. Further prompts remain possible. Keychain changes are macOS-only; Linux receives FRESH-4H.
 
-## Доказательства и незавершённые гейты
+## Доказательства приёмки
 
-Последняя сводка передана координатором в поручении; команды этих проверок
-технический писатель не запускал и итоговую ревизию Git не устанавливал.
+Итоговый production source: `bd16d9c8e3296cd752784e61d9d456071c7bd2a6`.
+CodeReviewer и SecurityAnalyst приняли исправленный диф; два P2 закрыты.
+Linux CI: 306 tests PASS, 0 skips. Native QA: 1401 checks PASS, 214 PNG;
+проверены критические RU/EN состояния, темп и восстановление входа.
+Пакетный QA выявил неверный минимальный target macOS26: `build.sh` исправлен
+на явный target13; новый DMG прошёл integrity/codesign/readonly проверку и packaged selftest1401/0,214PNG.
 
-| Область | Переданный результат | Ограничение |
-| --- | --- | --- |
-| FRESH-review | Принят; 49 Python / 105 Swift | Не доказывает итоговый combined source |
-| Combined security | Первая проверка исходников пройдена | Два P2: developer fix pending; нужна проверка исправленного дифа |
-| CI | 306 тестов, 5 failures: 2 Simple bug + 3 path | Повтор CI ожидается; не PASS |
-| Native selftest | Passed | Не заменяет UI/пакетную проверку |
-| Visual QA | Продолжается | Финального результата нет |
-
+Точные хеши, прогоны и границы проверки — в
+[итоговом отчёте](freshness-keychain-verification.md).
 [План FRESH-4H](freshness-4h-plan.md), [ранний review-status](freshness-4h-review-status.md)
-и [план KEYCHAIN-RETRY](keychain-retry-plan.md) сохраняют исходный контракт и историю.
-Их ранние статусы не заменяют свежую сводку координатора и не обновлялись здесь.
-Указанная там база `d65df2dda14e09312e87b4d61b00417acda5a00f` — историческая база,
-не проверенная ревизия этой интеграционной копии.
+и [план KEYCHAIN-RETRY](keychain-retry-plan.md) сохраняют историю требований.
 
-Источники поведения, прочитанные статически в копии:
-
-- [Swift limits/UI/scheduler](../Sources/LimitsMonitor.swift): `metricIsStale`, `snapshotWindowPace`, `pacedLimits`, `KeychainRetryDeadline`, ручной retry и сообщения UI.
-- [Swift auth owner](../Sources/GitHubAuth.swift): `checkStoreAccess`, `storeFailed`, `withAuthLock`, `retryKeychainAccess`, `retire`, logout tombstone.
-- [Linux limits](../linux/ccl/limits.py): `SNAPSHOT_MAX_AGE`, `metric_is_stale`, `snapshot_window_pace`, `with_poll_status`.
-- [Linux scheduler](../linux/ccl/polling.py): `PollState.due`, `observe`, `next_delay`; [Linux UI](../linux/ccl/gui/panel.py): failed fetch/next retry notices.
-- [Build](../build.sh), [DMG](../scripts/make-dmg.sh), [DEB](../linux/packaging/build-deb.sh), [Linux release](../linux/packaging/release.sh): команды и источники версии. Версии оставлены координатору.
-
-## Перед выпуском — действия координатора, пока не выполнены здесь
-
-1. Исправить два P2 и Simple/path failures, зафиксировать точный итоговый source/диф; получить независимые проверки исправленной ревизии, успешный повтор CI и завершённый visual QA. Не переносить PASS с прежнего дифа.
-2. Согласовать целевые версии во всех источниках версии. Тексты выше публиковать только после проверки фактического поведения конечной сборки.
-3. На macOS с Swift compiler и средствами подписи выполнить `bash build.sh`, затем `bash scripts/make-dmg.sh` (второй скрипт также вызывает build). Ожидаются подписанная `.app` и `dist/ClaudeCodexLimits-3.2.4.dmg`; strict codesign staged app проверяет DMG-скрипт. Сверить версию, SHA-256 и пакетный QA. Сборка сама по себе не доказывает живой Keychain сценарий.
-4. С `dpkg-deb` выполнить `sh linux/packaging/build-deb.sh` либо использовать подтверждённый CI artifact той же принятой ревизии. Ожидается `dist/claude-codex-limits_0.4.4_all.deb`; сверить путь из вывода скрипта, версию, архитектуру и SHA-256. Это не живой ALSE smoke.
-5. Координатор подтверждает release gates и разрешение на публикацию. Для Linux сохранить `--latest=false`; Latest остаётся macOS. Сверить опубликованные assets после выпуска. В этой задаче сборка, публикация, установка и обращения к реальным credentials/API не выполнялись.
-
-README сохраняют исторические подробности выпущенных версий. Этот документ —
-черновик текста и передачи доказательств, а не HEARTBEAT, решение или закрытие задачи.
+Реальные credentials/API, нативные Keychain ACL и живая ALSE в тестах не использовались.
+Публикация DMG/DEB и установка пока не подтверждены. Linux release должен сохранять
+`--latest=false`; Latest остаётся macOS.
