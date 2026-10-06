@@ -1,6 +1,6 @@
 # План исполнения — устойчивая GitHub-авторизация и история UI
 
-> Текущий инкремент2026-10-05: [FRESH-4H](freshness-4h-plan.md), [KEYCHAIN-RETRY](keychain-retry-plan.md). Production/review/тесты/CI/native UI приняты. Binary target13 и пакетная приёмка PASS; осталось опубликовать и установить. [Доказательства](freshness-keychain-verification.md).
+> Текущий инкремент2026-10-05: [FRESH-4H](freshness-4h-plan.md), [KEYCHAIN-RETRY](keychain-retry-plan.md). Production/review/тесты/CI/native UI приняты. Binary target13 и пакетная приёмка PASS. Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app. [Доказательства](freshness-keychain-verification.md).
 
 > AUTOSTART-1 (2026-10-05): Mac actual3.2.3 и disk/loaded LaunchAgent verified; исторический старый запуск не установлен. Read-only план: [diagnosis-autostart-version.md](diagnosis-autostart-version.md).
 

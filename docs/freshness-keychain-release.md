@@ -1,11 +1,10 @@
-# macOS 3.2.4 / Linux 0.4.4 — release preparation
+# macOS 3.2.4 / Linux 0.4.4 — release record
 
-2026-10-05. **Черновик / draft. Не выпущено / not released.**
-Рабочая копия документации: `/private/tmp/ccl-integration.yCDZba`.
-Исходный PROJECT_ROOT: `/Users/arrivarus/Documents/VibeCoding2/2026_06_UsageLimits`.
-Номера — целевые; этот документ не подтверждает версию сборки или публикацию.
+2026-10-06. **Опубликовано / released.**
 
-## RU — текст для будущего выпуска
+Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app.
+
+## RU — заметки к выпуску
 
 - Снимки не старше 4 часов, включая ровно 4 часа, остаются допустимыми по возрасту даже после сбоя запроса. Завершённые окна и подтверждённые проблемы входа проверяются отдельно.
 - Темп и прогноз привязаны к времени снимка `asOf` и помечены как исторические. Ход часов без новых данных не изображает замедление расхода. Сессионное, недельное и модельное окна независимы; недельные данные работают без сессионных. Неизвестное время снимка не заменяется текущим.
@@ -14,7 +13,7 @@
 - Недоступность хранилища не означает отзыв входа и не удаляет действующие credentials. После выхода сохраняется tombstone, а недоступная физическая очистка/GC откладывается.
 - Gate действует только в текущем процессе и сбрасывается при restart. Успешное Allow или другая запись с тем же именем не покрываются этой гарантией. ACL не меняются; причина первого prompt не установлена и его устранение не подтверждено. Последующие диалоги возможны. Keychain-изменения относятся к macOS; Linux получает FRESH-4H.
 
-## EN — text for the upcoming release
+## EN — release notes
 
 - Readings up to 4 hours old, including exactly 4 hours, remain valid by age even after a failed fetch. Expired windows and confirmed sign-in problems are checked separately.
 - Pace and forecasts use the snapshot timestamp `asOf` and are labelled historical. Clock movement without a new reading does not imply slower consumption. Session, weekly and model windows are independent; weekly-only readings work. Missing timestamps are not replaced with the current time.
@@ -38,5 +37,5 @@ Linux CI: 306 tests PASS, 0 skips. Native QA: 1401 checks PASS, 214 PNG;
 и [план KEYCHAIN-RETRY](keychain-retry-plan.md) сохраняют историю требований.
 
 Реальные credentials/API, нативные Keychain ACL и живая ALSE в тестах не использовались.
-Публикация DMG/DEB и установка пока не подтверждены. Linux release должен сохранять
-`--latest=false`; Latest остаётся macOS.
+Публикация DMG/DEB, публичные SHA и установка подтверждены. Linux выпущен
+с `--latest=false`; Latest — macOS3.2.4.

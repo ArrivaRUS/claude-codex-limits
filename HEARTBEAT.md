@@ -1,10 +1,10 @@
 # HEARTBEAT — claude-codex-limits
 
-> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-04.
+> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-06.
 
-## Актуальный статус · 2026-10-05
+## Актуальный статус · 2026-10-06
 
-- FRESH-4H / KEYCHAIN-RETRY: кандидат macOS3.2.4/Linux0.4.4, код `bd16d9c` принят CodeReviewer/SecurityAnalyst. CI306/0skip, auth30927/0, freshness105/0, revoked130/0, deadline28/0; native QA1401/0 и214PNG. Пакет пересобран с minos13.0; independent packaged selftest1401/0,214PNG, integrity/codesign/readonly PASS. Публикация/установка ещё не выполнены. [Проверки](docs/freshness-keychain-verification.md). AUTOSTART-снимок ниже исторический.
+- FRESH-4H / KEYCHAIN-RETRY: кандидат macOS3.2.4/Linux0.4.4, код `bd16d9c` принят CodeReviewer/SecurityAnalyst. CI306/0skip, auth30927/0, freshness105/0, revoked130/0, deadline28/0; native QA1401/0 и214PNG. Пакет пересобран с minos13.0; independent packaged selftest1401/0,214PNG, integrity/codesign/readonly PASS. Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app. [Проверки](docs/freshness-keychain-verification.md). AUTOSTART-снимок ниже исторический.
 
 - AUTOSTART-1: после сообщения о старой версии проверен этот Mac. Работает exact принятая3.2.3 из /Applications, mapped inode/SHA/strictcodesign подтверждены; disk и loaded LaunchAgent направлены на неё. Предыдущий выпуск был публикацией без локальной установки. Историческая версия/действие установки неизвестны; Debugger отдельно воспроизвёл потенциальный path-migration механизм. Production/установка/автозапуск не менялись. План/доказательства: `docs/diagnosis-autostart-version.md`.
 

@@ -1,7 +1,7 @@
 # FRESH-4H / KEYCHAIN-RETRY — verification
 
 Date: 2026-10-06. Source commit: `bd16d9c8e3296cd752784e61d9d456071c7bd2a6`.
-Candidate versions: macOS 3.2.4, Linux 0.4.4. Packaging accepted; publication and installation pending. macOS build commit: `4a5c3724ae348b09b01d684d03e75b3876aef251`.
+Released versions: macOS 3.2.4, Linux 0.4.4. Packaging accepted; published and locally installed on2026-10-06. macOS build commit: `4a5c3724ae348b09b01d684d03e75b3876aef251`.
 
 ## Accepted source
 
@@ -31,3 +31,9 @@ Exact SHA256 inputs:
 ## Limits
 
 No actual macOS13 runtime, live ALSE session, real provider API, real Keychain prompt/ACL, sleep/wake soak or native child termination was exercised. System scheduling and connectivity can delay a successful update. A P3 spacing issue in Russian Simple with two subscriptions is tracked separately; it does not hide values or actions.
+
+## Publication and installation
+
+Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app.
+
+Native Gatekeeper notarization is not provided: signature remains ad-hoc. This release does not claim removal of the first security prompt. Local normal launch was performed only as the requested installation step, after isolated QA; no live credential contents were inspected.
