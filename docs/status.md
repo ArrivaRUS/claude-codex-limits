@@ -1,5 +1,10 @@
 # Статус командного внедрения
 
+## KEYCHAIN-QUIET · 2026-10-07
+
+Production66587e9 и DMG153517fc приняты; выпуск/установка завершаются. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).
+
+
 ## FRESH-4H / KEYCHAIN-RETRY — приёмка 2026-10-05
 
 Кандидат3.2.4/0.4.4: независимые production/isolation review PASS; CI306/0skip, auth30927/freshness105/revoked130/deadline28 без ошибок. Native QA1401/0,214PNG. Пакет пересобран с minos13.0: independent packaged selftest1401/0,214PNG, integrity/codesign/readonly PASS. [Доказательства](freshness-keychain-verification.md). Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app.

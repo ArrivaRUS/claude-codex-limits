@@ -19,32 +19,35 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
-## Upcoming macOS 3.2.4 / Linux 0.4.4 (not released)
+## macOS 3.2.5: quiet GitHub Keychain access
 
-The candidate keeps a timestamped reading valid by age through **4 hours inclusive**;
-a failed fetch alone does not invalidate it. Pace is historical, calculated at
-`asOf`, with session, weekly and model windows checked independently. Auto schedules
-an attempt at its deadline, subject to backoff; failed fetches retain the snapshot
-and show the next retry. Unknown timestamps and expired windows are separate cases;
-this does not prove that sign-in expired.
+Background GitHub Keychain access runs with system permission dialogs disabled,
+including after launch, wake and credential cleanup. If permission is
+needed, sync waits and keeps the saved sign-in. Linux stays at 0.4.4.
 
-On macOS, failed GitHub V2 Keychain access pauses background store attempts for
-**600 seconds** using a process-local gate. “Retry Keychain access” requests an
-explicit retry without signing in again; network/recovery limits still apply.
-Unavailable storage preserves sign-in data and defers credential cleanup. The gate
-resets on restart and does not fix the first access prompt or change ACLs; the
-cause of that first prompt is unknown, and further prompts remain possible.
+On a Mac running 3.2.5, open Settings → GitHub sync and choose
+**Retry Keychain access** if storage needs permission. The attempt has a time
+limit; a system window may appear for that action. Allow access only if you
+recognize the app and the requested GitHub item. Cancel or deny ends that attempt;
+a new interactive attempt needs another click. Sign in again only when the app
+asks for a new login.
 
-Release preparation is incomplete: two P2 fixes, a CI rerun and visual QA remain.
-See [draft RU/EN release notes and evidence](docs/freshness-keychain-release.md).
-The feature descriptions below retain details of previously released behavior,
-including the older stale-data/pace presentation.
+An existing credential may need manual permission because the helper accessing
+it changes. **Always Allow** applies to the particular item and requesting app,
+not every item in the service. Do not grant access to all applications or export
+the token to a plain-text file. The exact cause of the user's repeated live
+prompts is still unknown. The old **600-second** pause only delayed retries;
+waiting or restarting did not unlock Keychain. Scheduled retries keep system dialogs disabled.
+
+This change does not notarize the app or change Gatekeeper. The missing Codex
+pace diagnostic remains a separate issue; 3.2.5 does not claim to fix it.
+See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md).
 
 ## Features
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
-- **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. Stale cards keep cached percentages, pause the pace calculation and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
+- **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. A timestamped reading remains valid by age through 4 hours inclusive; a failed fetch alone does not invalidate it. Pace uses the reading time and checks each window separately. Expired readings keep cached percentages and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
 - **Advanced view** — a second panel layout for people who want to *manage* their limits, not just glance at them. Every window gets a pace line: where a linear plan says you should be by now, how many points you're ahead of it, your average burn rate, and a plain verdict — “Lasts until reset (forecast 53%)” or “Runs out at 09:37, 2 h 13 min before reset”. Below: 7 days of consumption as bars stacked by model, a 35‑day calendar heatmap, and money — what a day costs you out of the subscription versus what the same tokens would cost at API prices. Separately for Claude Code and Codex. Settings → *Panel view*.
 - **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Only daily token totals per model travel — no prompts, paths or project names. There is a Linux port for Astra Linux — see [Linux](#linux-astra-linux) ([protocol](docs/sync-protocol.md)).
@@ -125,9 +128,10 @@ or restart. GitHub maintenance has its own schedule, independent of Advanced vie
 and Auto polling of Claude/Codex limits.
 
 Temporary network or keyring failures retain the last safely saved sign-in and
-retry with backoff. Check Settings → GitHub sync for the latest error; unlock the
-keyring or restore the connection when needed. External revocation, an expired
-refresh credential, a missing local key or a lost replacement pair may require
+retry with backoff. Check Settings → GitHub sync for the latest error. On the
+macOS 3.2.5, use **Retry Keychain access** when permission is needed;
+background retries cannot request it. Restore the connection for network errors.
+External revocation, an expired refresh credential, a missing local key or a lost replacement pair may require
 one explicit sign-in. A timeout alone is not proof that GitHub revoked access.
 Sign-out affects this computer only; if credential deletion is still pending,
 the app says so. On Mac, old remote totals without a verified account binding wait

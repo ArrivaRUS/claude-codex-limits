@@ -2,6 +2,10 @@
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
 
+## 2026-10-07 — Keychain: запрет фонового диалога
+
+Повторы сохранились в3.2.4 даже после «Разрешать всегда» (сообщение владельца). Cooldown только замедлял интерактивные операции. Принят контракт quiet background с явным ограниченным интерактивным повтором/входом; изменение не расширяет существующие ACL и сохраняет auth journal/epoch. T2 SecurityAnalyst подтвердил необходимость запрета UI внутри каждого helper и классификации interaction-required как временной недоступности. Новая identity может потребовать ручного подтверждения существующих записей; конкретные пользовательские ACL не исследованы. Реализация и независимая приёмка идут по docs/keychain-no-background-prompts.md; до окончания проверок выпуск не объявляется.
+
 ## 2026-10-05 — FRESH-4H и ограниченные повторы Keychain
 
 Владелец подтвердил: возраст до4ч допустим; темп по asOf, окна и auth независимы, исторический прогноз с временем снимка. Плановый опрос не обещает успеха сети. После повторных окон принят процессный cooldown600с для V2, ручной повтор, cleanup после sync и terminal-revoked cleanup без использования токена. ACL не расширяются; причина первого prompt не установлена. Реальные секреты/API в тестах запрещены. DeveloperComplex, CodeReviewer, SecurityAnalyst, Tester, QA работали отдельными контекстами. Доказательства — docs/freshness-keychain-verification.md. QA обнаружил target26 при заявленном13. Исправление4a5c372 задаёт target13; rebuilt DMG и bundled selftest1401/0 прошли независимую проверку. Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app.
