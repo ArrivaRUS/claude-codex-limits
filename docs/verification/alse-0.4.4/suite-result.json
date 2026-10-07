@@ -1,0 +1,35 @@
+{
+  "preflight": "PASS",
+  "HOME": "absent",
+  "path_home": "/home/astra",
+  "home": "empty tmpfs",
+  "run": "empty tmpfs",
+  "interfaces": [
+    "lo"
+  ],
+  "local_tcp": "PASS",
+  "Qt_styles": [
+    "Breeze",
+    "bb10dark",
+    "bb10bright",
+    "FlyPlastiqueTablet",
+    "FlyPlastique",
+    "cleanlooks",
+    "cde",
+    "motif",
+    "plastique",
+    "Oxygen",
+    "Windows",
+    "Fusion"
+  ],
+  "Qt_platform": "offscreen",
+  "source": "d607ff9fb8820164d9cdf9e880f859ed89547da6",
+  "native_desktop_tested": false,
+  "tests": 306,
+  "failures": 0,
+  "errors": 0,
+  "skips": 0,
+  "skip_reasons": [],
+  "expected_failures": 0,
+  "unexpected_successes": 0
+}

@@ -1,0 +1,40 @@
+import importlib.util
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import unittest
+
+def main():
+    assert 'HOME' not in os.environ
+    assert Path.home() == Path('/home/astra')
+    assert list(Path.home().iterdir()) == []
+    assert list(Path('/run').iterdir()) == []
+    assert {name for _,name in socket.if_nameindex()} == {'lo'}
+    for name in ('DBUS_SESSION_BUS_ADDRESS','DBUS_SYSTEM_BUS_ADDRESS','DISPLAY','WAYLAND_DISPLAY','SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY'):
+        assert not os.environ.get(name),name
+    assert os.environ.get('QT_QPA_PLATFORM') == 'offscreen'
+    assert importlib.util.find_spec('PyQt5') and importlib.util.find_spec('dbus')
+    from PyQt5.QtWidgets import QStyleFactory
+    styles=list(QStyleFactory.keys())
+    assert 'Breeze' in styles,styles
+    with socket.socket() as server:
+        server.bind(('127.0.0.1',0)); server.listen(1)
+        with socket.create_connection(server.getsockname(),timeout=2) as client:
+            peer,_=server.accept()
+            with peer:
+                client.sendall(b'fixture')
+                assert peer.recv(7)==b'fixture'
+    Path('/artifacts/previews').mkdir(exist_ok=True)
+    report={'preflight':'PASS','HOME':'absent','path_home':str(Path.home()),'home':'empty tmpfs','run':'empty tmpfs','interfaces':['lo'],'local_tcp':'PASS','Qt_styles':styles,'Qt_platform':'offscreen','source':'d607ff9fb8820164d9cdf9e880f859ed89547da6','native_desktop_tested':False}
+    print(json.dumps(report),flush=True)
+    sys.path.insert(0,'/work/linux/tests')
+    suite=unittest.defaultTestLoader.discover('/work/linux/tests')
+    result=unittest.TextTestRunner(verbosity=2).run(suite)
+    report.update(tests=result.testsRun,failures=len(result.failures),errors=len(result.errors),skips=len(result.skipped),skip_reasons=result.skipped,expected_failures=len(result.expectedFailures),unexpected_successes=len(result.unexpectedSuccesses))
+    Path('/artifacts/suite-result.json').write_text(json.dumps(report,indent=2)+'\n')
+    raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+
+if __name__ == "__main__":
+    main()

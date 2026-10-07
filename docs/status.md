@@ -1,5 +1,9 @@
 # Статус командного внедрения
 
+## Linux / Astra 0.4.4 · 2026-10-07
+
+На `d607ff9` исходники приложения без изменений: опубликованный DEB 0.4.4 проверен (SHA совпал с GitHub API, 32 файла exact, права/scripts/desktop PASS); исправленный runner прошёл независимое isolation review. Astra 1.8.5 / Python 3.11.2 / PyQt5 5.15.9: bwrap offscreen suite **306 PASS, 0 failures/errors/skips/xfail, exit 0**, 71.276 с, 192 свежих PNG; QA просмотрел 4. Первый ошибочный runner-прогон не засчитан. Установка с 0.3.2 до 0.4.4 через `pkexec dpkg -i` завершилась с кодом 0; dpkg и 38 installed files подтверждены. Штатный GUI PID 249113 жив через 3 с, timer активен; успешный обмен не проверен. Пользователь подтвердил ручной smoke KDE/X11: «Значок есть, панель открывается». Это не автоматический QA; остальные clicks/fonts/KWallet/OAuth/API/sleep-wake не проверены. Live ALSE закрыт частично. [Полный отчёт](alse-0.4.4-verification.md).
+
 ## KEYCHAIN-QUIET · 2026-10-07
 
 Production66587e9 и DMG153517fc приняты; v3.2.5 опубликован (Latest) и установлен на этом Mac; публичный DMG SHA совпал, запуск PID72805 подтверждён. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).

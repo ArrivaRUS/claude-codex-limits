@@ -1,40 +1,6 @@
 # HEARTBEAT — claude-codex-limits
 
-> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-07.
-
-## Актуальный статус · 2026-10-07
-
-- Linux / Astra: на `d607ff9` опубликованный DEB 0.4.4 принят (SHA GitHub совпал, 32 файла exact, права/desktop/scripts PASS); изолированный bwrap-прогон системного Python/PyQt5 — 306 tests PASS, 0 fail/error/skip/xfail, 192 PNG (4 просмотрены). Исходники приложения не менялись. Пакет обновлён с 0.3.2 до 0.4.4: dpkg exit 0, 38 установленных файлов exact; GUI PID 249113 жив через 3 с, timer активен (не доказательство обмена). Пользователь подтвердил manual smoke KDE/X11: значок есть, панель открывается. Остальные действия, шрифты, KWallet/API/sleep-wake не проверены; live ALSE закрыт частично. [Отчёт](docs/alse-0.4.4-verification.md).
-
-- Уточнение по новому скриншоту Keychain: файл создан22:04, установка/запуск3.2.5 выполнены22:35. На22:40 работает3.2.5, процесса security нет. Повтор именно после обновления пока не подтверждён; задан вопрос о времени/ручном действии. [Доказательства](docs/keychain-quiet-verification.md).
-
-- KEYCHAIN-QUIET принят:3.2.5 production66587e9; Code/SecurityPASS, auth31039/0, независимые30/0, QA1401/0+214PNG, DMG153517fc. Опубликован v3.2.5 (Latest), публичный DMG скачан и SHA совпал. Установлен /Applications/Claude Codex Limits.app, версия/strict codesign/binary SHA подтверждены, PID72805 работает. Пользователь подтвердил повторы после Always Allow на3.2.4. Предыдущий cooldown600s не гарантировал отсутствие диалогов. [План](docs/keychain-no-background-prompts.md).
-
-## Предыдущий статус · 2026-10-06
-
-- FRESH-4H / KEYCHAIN-RETRY: кандидат macOS3.2.4/Linux0.4.4, код `bd16d9c` принят CodeReviewer/SecurityAnalyst. CI306/0skip, auth30927/0, freshness105/0, revoked130/0, deadline28/0; native QA1401/0 и214PNG. Пакет пересобран с minos13.0; independent packaged selftest1401/0,214PNG, integrity/codesign/readonly PASS. Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app. [Проверки](docs/freshness-keychain-verification.md). AUTOSTART-снимок ниже исторический.
-
-- AUTOSTART-1: после сообщения о старой версии проверен этот Mac. Работает exact принятая3.2.3 из /Applications, mapped inode/SHA/strictcodesign подтверждены; disk и loaded LaunchAgent направлены на неё. Предыдущий выпуск был публикацией без локальной установки. Историческая версия/действие установки неизвестны; Debugger отдельно воспроизвёл потенциальный path-migration механизм. Production/установка/автозапуск не менялись. План/доказательства: `docs/diagnosis-autostart-version.md`.
-
-## Выпуски и предыдущий статус · 2026-10-04
-
-- GH-AUTH-STABLE завершён: опубликованы macOS 3.2.3 / Linux/ALSE 0.4.3 на `40cfdf58980acef0668bdb4915c6001322ba9e11`: независимые CodeReviewer/SecurityAnalyst production/isolation PASS; Linux CI 284 OK/0 skip; Swift/bundled auth30862/0, sync PASS, subscriptions1218 OK; независимый QA374 PNG и DMG/DEB PASS. Main принят fast-forward с QA metadata b6ca773; оба тега exact source40cfdf. Публичные DMG/DEB скачаны и побайтно совпали, API digests подтверждены; Latest=v3.2.3, Linux не Latest. Следующие отдельные долги — live ALSE/native backends и прежний Could backlog. Подробности/hashes/границы: `docs/status.md`, `docs/qa-github-auth-stability.md`. Root production actions=0; реальные credentials/stores/API и live ALSE не использованы.
-
-- GH-AUTH-UI архивирован до production после уточнения владельца. План `docs/github-auth-ui-fix.md` и предварительный `docs/test-plan-github-auth-ui.md` — история; storage/UI ошибки входят в GH-AUTH-STABLE. Отдельного косметического выпуска не будет.
-
-- 2026-10-04: GH-AUTH исследован на `af4d17d`: Debugger pure AST и независимый SecurityAnalyst подтвердили ложную Linux login-кнопку при `_ss() is None`; macOS missing Keychain тоже показывает revoked без server 401. Оба порта не поддерживают optional expiring OAuth refresh. Причина конкретного случая неизвестна без платформы/версии/видимой последней ошибки. Выводы/источники: `docs/github-auth-diagnosis.md`, отдельные UI/refresh задачи в backlog. Production, аккаунты и выбранная token policy не менялись; 3 делегирования, root production actions=0, duration_ms неизвестен.
-
-- AUTH-1 завершён: macOS **3.2.2** / Linux **0.4.2** опубликованы на `a1f885f1138c327121fb7baf794e000edfea5695`; `main` содержит код и независимую приёмку. Stale Codex больше не получает ложное «вход истёк» и Claude-команду; nil asOf без выдуманной даты. Reviewer production/isolation PASS; Swift/bundled selftest **1063 OK**, Ubuntu CI **219 tests OK / 0 skip**, QA **88 macOS + 92 Linux AUTH PNG PASS**, пакеты verified. Публичные assets побайтно совпадают; Latest=v3.2.2, Linux не Latest. Контракт/отчёт: `docs/auth-hints-fix.md`, `docs/qa-auth-hints.md`, checksums/CI — `docs/status.md`.
-- AUTH-1: 11 делегирований (Debugger, Developer, Tester, Reviewer, QA, TechWriter), root production actions=0; вместе с предыдущим UI-заходом 31 делегирование. Native duration_ms недоступен; локальный `time.local.md` не выдумывает агент-минуты. Реальная причина входа пользователя не диагностировалась, credentials/logs/API не использованы.
-
-- Прямое правило владельца: при подключённой папке Юрки проект автоматически ведётся через роли и проектное управление; исполнение **только Codex**. Вход: `AGENTS.md` проекта и HQ `handoff/references/codex-only.md`.
-- Опубликованы macOS **3.2.1** и Linux **0.4.1** на `5b722a1`: стилизованная «А» и актуальная частота рядом, общая при совпадении/одной подписке либо с именами продуктов при разных интервалах. Выбор подписок, 15/30/60 минут (30 по умолчанию), опциональный Auto 15→30→60→240 минут сохранены.
-- Новый UI прошёл разделённые роли: PM/UX/Architect → Developer → независимые Tester/CodeReviewer → QA → TechWriter/интеграция. Linux Ubuntu CI: **212 tests OK, 0 skip**; Swift/bundled DMG selftest **288 OK**; strict codesign и checksum DMG PASS; QA 40 macOS + 48 Linux PNG PASS. Скачанные публичные assets совпадают с проверенными файлами; Latest=v3.2.1, Linux не Latest.
-- UI Auto и AUTH-1 завершены. Следующие отдельные долги: live ALSE/KDE/Fly и hover/click/user fonts; независимый аудит старого Auto на `e6e2f2e`; хвосты синхронизации. Релизы 3.2.0/0.4.0 делались одиночно, их независимый аудит задним числом не заявляется.
-- Полные планы и текущий следующий шаг: `docs/plans.md`, `docs/status.md`; приоритеты: `backlog.md`. Старые незакрытые хвосты синхронизации сохраняются, перечисленные ниже отчёты относятся к сентябрьской сессии.
-- Счётчики перехода в командный режим: delegations=20; yurka_direct_actions=0 (реализация делегирована, оркестратор ведёт память/интеграцию). Учёт длительностей — `time.local.md`; native agents не вернули duration_ms, агент-минуты не выдуманы.
-
-## Архив статуса до перехода · 2026-09-30
+> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-09-30.
 
 ## Где мы
 - 📨 **От Linux-стороны (Claude на ThinkPad), 2026-09-30.** Пакетная установка (.deb, так стоит на ThinkPad и так ставят все по README) **не обновляется из `main`**. Трей и `ccl-sync update` смотрят только GitHub-релизы `linux-v<версия>` с файлом `*_all.deb`. Поэтому merge Linux-правок в `main` — ещё не выкладка: нужен релиз `sh linux/packaging/release.sh [заметки]` (всегда `--latest=false`, иначе сломается обновление Мака и `get.sh`). Из `main` обновляется только старая установка через `linux/install.sh`. В пакете кнопки «Скачать» → в установщике «Установить» (пароль), трей перезапускается сам. Урок 009.
