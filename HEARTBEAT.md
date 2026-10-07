@@ -4,6 +4,8 @@
 
 ## Актуальный статус · 2026-10-07
 
+- MANUAL-REFRESH принят пользователем: macOS3.2.6 в работе, базаd607ff9. Ручной запрос отдельно от Auto, явный результат по сервисам. [План](docs/manual-refresh-proposal.md).
+
 - Уточнение по новому скриншоту Keychain: файл создан22:04, установка/запуск3.2.5 выполнены22:35. На22:40 работает3.2.5, процесса security нет. Повтор именно после обновления пока не подтверждён; задан вопрос о времени/ручном действии. [Доказательства](docs/keychain-quiet-verification.md).
 
 - KEYCHAIN-QUIET принят:3.2.5 production66587e9; Code/SecurityPASS, auth31039/0, независимые30/0, QA1401/0+214PNG, DMG153517fc. Опубликован v3.2.5 (Latest), публичный DMG скачан и SHA совпал. Установлен /Applications/Claude Codex Limits.app, версия/strict codesign/binary SHA подтверждены, PID72805 работает. Пользователь подтвердил повторы после Always Allow на3.2.4. Предыдущий cooldown600s не гарантировал отсутствие диалогов. [План](docs/keychain-no-background-prompts.md).

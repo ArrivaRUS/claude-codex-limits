@@ -1,6 +1,6 @@
 # MANUAL-REFRESH — предложение сценария
 
-2026-10-07. Статус: предложение по запросу пользователя; реализация не поручена. Проверенная база:331c1f7. Изменений production нет.
+2026-10-07. Статус: сценарий принят пользователем «ок, давай»; начата реализация macOS3.2.6. База:d607ff9. Linux0.4.4 не входит в текущую macOS-задачу.
 
 ## Наблюдаемая причина
 
@@ -19,3 +19,13 @@
 ## Критерии следующего шага
 
 Ручная попытка до истечения900с; ручная попытка после локальной сетевой ошибки; реальный Retry-After; двойное нажатие/in-flight; частичный успех; unchanged fresh answer; fallback со старым asOf; auth action; RU/EN и оба режима расписания. Изолированные проверки без реальных credentials/API. Это план проверок, не выполненные тесты.
+
+## План исполнения
+
+1. DeveloperComplex (Astra/high): per-provider scheduler/transport result/UI, явный manual intent, HTTP retry metadata без новых endpoints, версия3.2.6. Изолированные тестовые seams. Область Sources + macOS build scripts; GitHub auth/store не переписывать.
+2. Tester (Sol/high): независимые synthetic regressions по принятым критериям; без настоящих keychain/auth/logs/API.
+3. CodeReviewer (Astra/high) и при security surface SecurityAnalyst: frozen diff и test isolation. Исправления до приёмки.
+4. QA (Sol/high): exact bundle offline fixtures, RU/EN Simple/Advanced, один/два продукта, доступность действия, signatures/DMG. Нативные ACL/liveAPI не тестировать.
+5. Координатор: сборка, интеграция, публикация3.2.6 и установка по действующему разрешению; публичный asset hash и запуск. Обновить память/гайд и чистый исходный checkout.
+
+Обычное обновление не запускает интерактивную авторизацию или системные разрешения. Если existing Claude credential read мешает этому контракту, сначала предложить ограниченный quiet adapter и проверить SecurityAnalyst; не расширять ACL и не переделывать OAuth без необходимости. Тестовое исполнение app только после проверки изоляции конкретной ревизии.
