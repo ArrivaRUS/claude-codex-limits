@@ -19,11 +19,10 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
-## macOS 3.2.6: manual refresh (release candidate)
+## macOS 3.2.6: manual refresh
 
-3.2.6 is a release candidate undergoing final package QA. It has not been released
-or installed; the currently installed macOS version is 3.2.5, and Linux remains
-0.4.4. The instructions below describe the candidate.
+[Download macOS 3.2.6](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.6).
+Released 2026-10-07. Linux remains at 0.4.4.
 
 With at least one subscription enabled in Settings and that CLI signed in, open
 the panel and click **Refresh now** in its header, in Simple or Advanced view.
@@ -241,7 +240,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
-- **Refresh button** → request updated limits. The draft macOS 3.2.6 header labels it **Refresh now**; see the draft instructions above.
+- **Refresh button** → request updated limits. The macOS 3.2.6 header labels it **Refresh now**; see the instructions above.
 - **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto).
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).

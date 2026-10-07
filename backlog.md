@@ -1,6 +1,8 @@
 # Бэклог
 
-- In progress, MANUAL-REFRESH: явное «Обновить сейчас» отдельно от автоматического расписания; пользователь принял сценарий, macOS3.2.6 в работе. [Предложение](docs/manual-refresh-proposal.md).
+- Done, MANUAL-REFRESH: macOS3.2.6 опубликована и установлена; ручное обновление отдельно от Auto. [Приёмка](docs/manual-refresh-verification.md).
+
+- Could: EN Advanced Claude writeUnavailable badge показывает “read failed”; подробное сообщение об ошибке сохранения корректно. P3 QA3.2.6.
 
 - Done, KEYCHAIN-QUIET (macOS 3.2.5 опубликован и установлен): повторные системные запросы даже после «Разрешать всегда». Фоновые операции без диалогов, интерактивный доступ только по явному действию. [План](docs/keychain-no-background-prompts.md).
 
