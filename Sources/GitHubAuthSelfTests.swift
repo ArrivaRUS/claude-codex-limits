@@ -40,6 +40,12 @@ private final class GHAuthFixture {
     var identityFault: GitHubAuthIdentity?
     var readForRef: ((GitHubAuthRef) -> GitHubAuthRead?)?
     var readOverride: GitHubAuthRead?
+    var interactiveRead: ((GitHubAuthRef) -> GitHubAuthRead)?
+    var interactiveStage: ((GitHubAuthRef, GitHubCredentialV2) -> GitHubAuthStoreStatus)?
+    var interactiveDelete: ((GitHubAuthRef) -> GitHubAuthStoreStatus)?
+    var interactiveLegacyRead: (() -> GitHubAuthRead)?
+    var storeTrace: [(operation: String, ref: GitHubAuthRef, interactive: Bool)] = []
+    var idle = true
     var stageFault: ((GitHubAuthRef, GitHubCredentialV2) -> GitHubAuthStoreStatus?)?
     var deleteFault: GitHubAuthStoreStatus?
     var persistentDeleteFault: GitHubAuthStoreStatus?
@@ -133,13 +139,18 @@ private final class GHAuthFixture {
                 self.manifest = value; self.record("manifest_saved")
             },
             readStore: { ref in
+                self.storeTrace.append(("read", ref, false))
                 self.record("store_read")
                 if let fault = self.readForRef?(ref) { return fault }
                 if let fault = self.readOverride { return fault }
                 return self.items[ref].map { .ready($0) } ?? .missing
             },
-            stageStore: { self.stage($0, $1) },
+            stageStore: {
+                self.storeTrace.append(("stage", $0, false))
+                return self.stage($0, $1)
+            },
             deleteStore: { ref in
+                self.storeTrace.append(("delete", ref, false))
                 self.record("store_delete_attempt"); self.deleteAttempts.append(ref)
                 if let fault = self.persistentDeleteFault { return fault }
                 if let fault = self.deleteFault { self.deleteFault = nil; return fault }
@@ -155,13 +166,29 @@ private final class GHAuthFixture {
                 precondition(!epoch.contains("ccl-test-") && !generation.contains("ccl-test-"), "secret checkpoint metadata")
                 self.record("checkpoint_" + point)
                 if let action = self.checkpointAction.removeValue(forKey: point) { try action() }
-            }, jitter: { self.jitter }, legacy: { self.legacyRead },
+            }, jitter: { self.jitter }, legacy: {
+                self.storeTrace.append(("read", GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), false))
+                return self.legacyRead
+            },
             settled: { ref in
                 if let override = self.settlementOverride { return override }
                 guard !self.lateWrites.contains(where: { $0.0 == ref }) else { return false }
                 let noSend = (self.manifest?.permitWriterRefs ?? []).contains(ref) && !self.startedWriterRefs.contains(ref)
                 return self.settledWriterRefs.contains(ref) || noSend
-            }, monotonicClock: { self.monotonicNow ?? self.now })
+            }, monotonicClock: { self.monotonicNow ?? self.now },
+            interactiveReadStore: { ref, action in
+                guard action.admit({ self.storeTrace.append(("read", ref, true)) }) else { return .locked }
+                return self.interactiveRead?(ref) ?? .locked
+            }, interactiveStageStore: { ref, credential, action in
+                guard action.admit({ self.storeTrace.append(("stage", ref, true)) }) else { return .locked }
+                return self.interactiveStage?(ref, credential) ?? .locked
+            }, interactiveDeleteStore: { ref, action in
+                guard action.admit({ self.storeTrace.append(("delete", ref, true)) }) else { return .locked }
+                return self.interactiveDelete?(ref) ?? .locked
+            }, interactiveLegacy: { action in
+                guard action.admit({ self.storeTrace.append(("read", GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), true)) }) else { return .locked }
+                return self.interactiveLegacyRead?() ?? .locked
+            }, storeIdle: { self.idle })
         return GitHubAuthOwner(dependencies: deps, clientID: "fixture-client")
     }
     func login(_ owner: GitHubAuthOwner, legacy: Bool = false) -> GitHubAuthResult {
@@ -199,6 +226,237 @@ func runGitHubAuthSelfTests() {
     func isTemporary(_ result: GitHubAuthResult) -> Bool { if case .temporary = result { return true }; return false }
     func isAction(_ result: GitHubAuthResult) -> Bool { if case .actionRequired = result { return true }; return false }
     func isSignedOut(_ result: GitHubAuthResult) -> Bool { if case .signedOut = result { return true }; return false }
+
+    // KEYCHAIN-QUIET: actual helper bootstrap policy with fake native/configure
+    // closures. No compiled test path here contains Security, Process or app startup.
+    for interactive in [false, true] {
+        for failAt in [0, 1, 2] {
+            var trace: [String] = [], configureCalls = 0
+            let status = githubAuthHelperInteraction(interactive: interactive, setAllowed: { allowed in
+                configureCalls += 1; trace.append(allowed ? "allow" : "forbid")
+                return configureCalls != failAt
+            }, operation: { trace.append("native"); return 36 })
+            let failedSetup = failAt == 1 || (interactive && failAt == 2)
+            check(status == (failedSetup ? 70 : 36), "helper setup fails closed, native denial stays denial")
+            check(trace.first == "forbid" && trace.filter { $0 == "native" }.count == (failedSetup ? 0 : 1),
+                  "helper forbids UI before any native operation, failed setup reaches zero RPCs")
+            check(interactive || !trace.contains("allow"), "quiet helper never enables UI")
+        }
+    }
+    do {
+        let v2 = GitHubAuthRef(generation: "11223344-5566-7788-99aa-bbccddeeff00")
+        let legacy = GitHubAuthRef(generation: "legacy", backend: "legacy-keychain")
+        for ref in [v2, legacy] {
+            for operation in ["read", "delete"] {
+                let args = githubAuthKeychainArguments(operation: operation, ref: ref)!
+                let request = GitHubKeychainHelperRequest.parse(["fixture"] + args)
+                check(request?.interactive == false && request?.generation == ref.generation,
+                      "actual invocation constructor defaults quiet and binds generation")
+                check(request?.service == (ref == legacy ? "Claude Codex Limits GitHub" : "Claude Codex Limits GitHub Credential V2"),
+                      "helper cannot select an arbitrary service")
+                check(!args.joined().contains("ccl-test-access-"), "argv has only nonsecret operation metadata")
+            }
+        }
+        for generation in ["", "../escape", "not-a-uuid", "legacy", v2.generation.uppercased()] {
+            check(githubAuthKeychainArguments(operation: "read", ref: GitHubAuthRef(generation: generation)) == nil,
+                  "invalid V2 account rejected before process creation")
+        }
+        check(githubAuthKeychainArguments(operation: "legacy-write", ref: legacy, interactive: true) == nil,
+              "legacy compatibility writer cannot request interaction")
+        check(GitHubKeychainHelperRequest.parse(["fixture", "--github-auth-keychain-helper", "read", v2.generation]) == nil,
+              "missing policy cannot default to interactive")
+        check(GitHubKeychainHelperRequest.parse(["fixture", "--github-auth-keychain-helper", "read", v2.generation, "quiet", "--auth-selftest"]) == nil,
+              "mixed helper flags fail closed")
+    }
+    // Successful background accesses, time passage and fresh owners do not grant UI.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "quiet successful fixture login")
+        f.storeTrace.removeAll()
+        for reason in ["startup", "wake", "background_sync", "maintenance"] {
+            f.now += 601
+            check(isReady(owner.ensureAccess(reason: reason)), "successful background access stays usable")
+        }
+        check(f.storeTrace.count >= 4 && !f.storeTrace.contains { $0.interactive },
+              "successful reads reach quiet boundary on every tick")
+        f.readOverride = .locked
+        let epoch = f.manifest?.epoch, active = f.manifest?.active
+        for _ in 0..<3 {
+            f.now += 601
+            check(isTemporary(f.owner().ensureAccess(reason: "startup")), "fresh process remains unavailable without prompting")
+        }
+        check(!f.storeTrace.contains { $0.interactive } && f.manifest?.epoch == epoch && f.manifest?.active == active,
+              "restart and expired cooldown preserve credentials with no interactive fallback")
+    }
+    for interactiveResult in [GitHubAuthRead.locked, .timeout, .unreachable] {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "explicit denial fixture login")
+        let saved = f.manifest
+        f.readOverride = .locked
+        var nested: GitHubAuthResult?
+        f.interactiveRead = { _ in nested = owner.retryKeychainAccess(); return interactiveResult }
+        f.storeTrace.removeAll()
+        check(isTemporary(owner.retryKeychainAccess()), "deny/cancel/timeout remain temporary")
+        check(nested.map(isTemporary) == true && f.storeTrace.filter { $0.interactive }.count == 1,
+              "contending manual action coalesced while one prompt is active")
+        check(f.manifest == saved, "denial preserves active epoch and complete pair metadata")
+        for _ in 0..<3 { f.now += 601; _ = owner.ensureAccess(reason: "wake") }
+        check(f.storeTrace.filter { $0.interactive }.count == 1, "denial never schedules interactive retries")
+    }
+    // A requestStarted transition cannot silently become missing/revoked or issue
+    // another OAuth POST merely because the candidate/source needs permission.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "requestStarted fixture login")
+        let candidate = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        f.manifest!.transition = GitHubAuthTransition(from: f.manifest!.active, to: candidate, phase: "requestStarted")
+        let before = f.manifest, grants = f.counts["refresh_request", default: 0]
+        f.readForRef = { ref in ref == candidate ? .missing : .locked }
+        f.storeTrace.removeAll()
+        check(isTemporary(owner.ensureAccess(reason: "startup")), "in-flight source blocked in background")
+        check(isTemporary(owner.retryKeychainAccess()), "manual in-flight denial remains pending")
+        check(f.manifest == before && f.counts["refresh_request", default: 0] == grants,
+              "interaction failure preserves transition and issuer budget")
+        check(f.storeTrace.filter { $0.interactive }.count == 1
+              && f.storeTrace.first { $0.interactive }?.ref == before?.active,
+              "missing candidate does not waste permit needed by source generation")
+    }
+    // Signed-out explicit cleanup selects one ref. Allow on its read cannot
+    // cascade into UI for its delete or any neighboring generation.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "GC permit fixture login")
+        f.readOverride = .locked
+        _ = owner.logoutDetailed()
+        let refs = f.manifest!.cleanupRefs, epoch = f.manifest!.epoch
+        f.interactiveRead = { _ in .missing }
+        f.persistentDeleteFault = .locked
+        f.storeTrace.removeAll()
+        check(isSignedOut(owner.retryKeychainAccess()), "manual cleanup keeps tombstone")
+        check(f.storeTrace.filter { $0.interactive }.count == 1
+              && f.storeTrace.first { $0.interactive }?.ref == refs.first,
+              "cleanup permits one operation on first selected ref only")
+        check(Set(f.manifest!.cleanupRefs) == Set(refs) && f.manifest?.epoch == epoch,
+              "blocked delete retains every pending ref and tombstone")
+        f.now += 601; _ = f.owner().ensureAccess(reason: "startup")
+        check(f.storeTrace.filter { $0.interactive }.count == 1, "cleanup permission never survives restart")
+    }
+    // Only the explicit probe may interact during beginLogin. Denial and delayed
+    // completeLogin cannot transfer that permission to issued-token persistence.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        f.stageFault = { _, _ in .locked }
+        f.interactiveStage = { _, _ in .locked }
+        check(owner.beginLogin() == nil, "denied explicit probe cannot begin device flow")
+        check(f.storeTrace.filter { $0.interactive }.count == 1
+              && f.storeTrace.first { $0.interactive }?.operation == "stage", "explicit probe has one native permission")
+        f.now += 601; _ = owner.ensureAccess(reason: "wake")
+        check(f.storeTrace.filter { $0.interactive }.count == 1, "failed probe cannot interact on wake")
+    }
+    // Legacy goes through the same quiet-first, one-attempt boundary.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        f.legacyRead = .locked
+        check(isTemporary(owner.ensureAccess(reason: "startup")), "legacy background denial")
+        check(isTemporary(owner.retryKeychainAccess()), "legacy explicit denial")
+        f.now += 601; _ = f.owner().ensureAccess(reason: "wake")
+        check(f.storeTrace.filter { $0.interactive }.count == 1
+              && f.storeTrace.filter { !$0.interactive }.count == 3, "legacy permit is neither global nor persisted")
+    }
+
+    // Snapshot2 P2: A passed its current-ID check, then UI cancels A and
+    // starts B before A resumes. The queued operation owns the immutable A pair.
+    do {
+        let f = GHAuthFixture(), owner = f.owner()
+        let attemptA = GitHubAuthLoginAttempt()
+        var currentAttempt = attemptA
+        check(currentAttempt.id == attemptA.id, "A passes current-ID check before barrier")
+        let resumeA = { owner.beginLogin(action: attemptA.action) }
+        // Deterministic barrier interleaving; no real UI, scheduler, native or network.
+        currentAttempt.action.cancel()
+        let attemptB = GitHubAuthLoginAttempt()
+        currentAttempt = attemptB
+        check(resumeA() == nil && f.storeTrace.isEmpty && f.manifest == nil,
+              "resumed cancelled A cannot borrow B permission or reach storage")
+        check(!attemptB.action.isCancelled && currentAttempt.id == attemptB.id,
+              "A's deferred permit cleanup leaves B alive")
+        f.stageFault = { _, _ in .locked }
+        f.interactiveStage = { ref, credential in
+            f.stageFault = nil
+            return f.stage(ref, credential)
+        }
+        check(owner.beginLogin(action: attemptB.action) != nil,
+              "B's own captured permission still completes its explicit probe")
+        check(f.storeTrace.filter { $0.interactive }.count == 1,
+              "only B, never stale A, launches one interactive operation")
+    }
+
+    // Review P2: cancellation while quiet probe I/O is suspended cannot admit
+    // an interactive child when that I/O finally reports permission required.
+    for duringStage in [false, true] {
+        let f = GHAuthFixture(), action = GitHubAuthUserAction()
+        let owner = f.owner()
+        if duringStage { f.stageFault = { _, _ in action.cancel(); return .locked } }
+        else { f.readForRef = { _ in action.cancel(); return .locked } }
+        check(owner.beginLogin(action: action) == nil, "cancelled delayed probe does not start login")
+        check(!f.storeTrace.contains { $0.interactive }, "cancelled quiet operation never launches interactive helper")
+        check(f.counts["device_flow", default: 0] == 0 && f.counts["refresh_request", default: 0] == 0,
+              "cancelled probe cannot consume issuer grants")
+    }
+    do {
+        let cancelled = GitHubAuthUserAction(); cancelled.cancel()
+        var launches = 0
+        check(!cancelled.admit { launches += 1 } && launches == 0, "cancellation wins actual launch admission")
+        let action = GitHubAuthUserAction()
+        check(action.admit { launches += 1 }, "current action admits one launch")
+        check(!action.admit { launches += 1 }, "same action cannot admit a second native launch")
+        action.cancel()
+        check(!action.admit { launches += 1 } && launches == 1, "ended permission cannot be reused")
+    }
+    // Review P2: a dead writer's rpcStarted record is NOT settlement. Only a
+    // pre-issuer nonsecret probe can move to a fresh address; keep its old uncertainty.
+    for oldProbeExists in [false, true] {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(isReady(f.login(initial)), "dead probe fixture login")
+        f.due()
+        let oldProbe = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        let target = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        let active = f.manifest!.active, epoch = f.manifest!.epoch
+        f.manifest!.transition = GitHubAuthTransition(from: active, to: target, phase: "prepared", probe: oldProbe)
+        f.manifest!.uncertainRefs.append(oldProbe)
+        f.manifest!.cleanupRefs.append(oldProbe)
+        f.manifest!.permitWriterRefs = (f.manifest!.permitWriterRefs ?? []) + [oldProbe]
+        f.startedWriterRefs.insert(oldProbe) // process died without a completion receipt
+        if oldProbeExists { f.items[oldProbe] = GitHubCredentialV2(kind: "probe", epoch: epoch,
+            generation: oldProbe.generation, obtainedAt: f.now) }
+        let restarted = f.owner()
+        check(isTemporary(restarted.ensureAccess(reason: "startup")), "unknown probe gets a bounded deferred repair")
+        let replacement = f.manifest!.transition!.probe
+        check(replacement != oldProbe && f.manifest?.transition?.to == target && f.manifest?.active == active
+              && f.manifest?.epoch == epoch, "repair replaces only probe, preserves active/candidate/epoch")
+        check(f.manifest!.uncertainRefs.contains(oldProbe) && f.manifest!.cleanupRefs.contains(oldProbe)
+              && !f.settledWriterRefs.contains(oldProbe), "probe kill never fabricated as completion/no-send")
+        check(f.counts["refresh_request", default: 0] == 0, "probe repair cannot POST to issuer")
+        f.now += 601
+        check(f.protectedRead(f.owner().ensureAccess(reason: "maintenance")), "new probe resumes renewal after restart")
+        check(f.manifest?.active == target && f.counts["refresh_request", default: 0] == 1,
+              "repair uses original candidate and exactly one normal refresh grant")
+        check(f.manifest!.uncertainRefs.contains(oldProbe) && !f.storeTrace.contains { $0.interactive },
+              "unknown old probe remains tracked and all recovery is quiet")
+    }
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "unknown secret writer fixture login")
+        let target = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        let probe = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        f.manifest!.transition = GitHubAuthTransition(from: f.manifest!.active, to: target, phase: "requestStarted", probe: probe)
+        f.manifest!.uncertainRefs += [target, probe]
+        f.startedWriterRefs.formUnion([target, probe])
+        let transition = f.manifest!.transition
+        _ = owner.ensureAccess(reason: "startup")
+        check(f.manifest!.transition == transition && f.counts["refresh_request", default: 0] == 0,
+              "uncertain credential writer cannot use nonsecret probe repair or resend refresh")
+    }
 
     // A1/A2: actual protected fake reads every 10 minutes; daily new owners share
     // only durable fake dependencies. Expected renewals are independent constants.

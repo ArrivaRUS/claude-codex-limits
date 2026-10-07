@@ -10,13 +10,20 @@ import ImageIO
 import Darwin
 import Security
 
-// Dispatch before defaults, data-directory creation or production auth construction.
+// Reserved helper modes fail closed BEFORE selftests and ordinary globals, even
+// for malformed/mixed flags. No helper failure can fall through into app startup.
+if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--github-auth-") }) {
+    if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--github-auth-store-helper" {
+        exit(githubAuthNativeStoreHelper())
+    }
+    if GitHubKeychainHelperRequest.parse(CommandLine.arguments) != nil {
+        exit(githubAuthNativeKeychainHelper())
+    }
+    exit(64)
+}
 if CommandLine.arguments.contains("--auth-selftest") {
     runGitHubAuthSelfTests()
     exit(0)
-}
-if CommandLine.arguments.contains("--github-auth-store-helper") {
-    exit(githubAuthNativeStoreHelper())
 }
 
 // MARK: - Constants
@@ -1205,9 +1212,8 @@ private func syncCount(_ value: Any?) -> Int? {
     return n
 }
 
-/// Keychain through /usr/bin/security (like the Claude credentials): an ad-hoc-signed app
-/// would get an access prompt after every update if it owned the item itself. The secret is
-/// written through `security -i` on stdin so it never appears in a process's arguments.
+/// GitHub Keychain I/O runs only in short-lived native helpers. Quiet is the
+/// default for every operation, including legacy compatibility; secrets use pipes.
 enum SyncKeychainRead {
     case token(String), missing, timedOut, failure(Int32)
 }
@@ -1220,26 +1226,31 @@ protocol SyncKeychain {
     func delete() -> SyncKeychainStatus
 }
 
-/// One /usr/bin/security call with a hard 15 s deadline. A locked Keychain (or its unlock
-/// prompt) must not hang the serial ccl.sync queue forever: pipes are pumped on helper
-/// threads. SIGTERM is followed by SIGKILL after 2 s if the process is still alive.
+/// One native helper call with a hard 15 s deadline. Pipes are pumped on helper
+/// threads. SIGTERM is followed by SIGKILL after 2 s; the process fence is held
+/// until actual termination, including after a timeout in an explicit action.
 private final class SyncSecurityOutput {
     private let lock = NSLock()
     private var data = Data()
     func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
     func string() -> String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
-private func syncSecurity(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil) -> (status: SyncKeychainStatus, out: String) {
+private func githubKeychainProcess(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil, action: GitHubAuthUserAction? = nil) -> (status: SyncKeychainStatus, out: String) {
     guard lifetime?.begin() != false else { return (.timedOut, "") }
     let p = Process(), output = Pipe(), stdin = Pipe()
     let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
     let result = SyncSecurityOutput()
     let deadline = DispatchTime.now() + 15
-    p.executableURL = URL(fileURLWithPath: "/usr/bin/security"); p.arguments = args
+    guard let executable = Bundle.main.executableURL else { lifetime?.ended(); return (.failure(-1), "") }
+    p.executableURL = executable; p.arguments = args
     p.standardOutput = output; p.standardError = FileHandle.nullDevice
     if input == nil { p.standardInput = FileHandle.nullDevice } else { p.standardInput = stdin }
     p.terminationHandler = { _ in lifetime?.ended(); ended.signal() }
-    do { try p.run() } catch { lifetime?.ended(); return (.failure(-1), "") }
+    do {
+        if let action = action {
+            guard try action.admit({ try p.run() }) else { lifetime?.ended(); return (.failure(36), "") }
+        } else { try p.run() }
+    } catch { lifetime?.ended(); return (.failure(-1), "") }
     DispatchQueue.global(qos: .utility).async {
         result.store(output.fileHandleForReading.readDataToEndOfFile())
         try? output.fileHandleForReading.close()
@@ -1261,13 +1272,15 @@ private func syncSecurity(_ args: [String], input: String? = nil, lifetime: GitH
         }
         return (.timedOut, "")
     }
+    guard p.terminationReason == .exit else { return (.failure(-1), "") }
     let code = p.terminationStatus
     return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
 }
 struct SecuritySyncKeychain: SyncKeychain {
     var lifetime: GitHubAuthProcessFence? = nil
+    var action: GitHubAuthUserAction? = nil
     func read() -> SyncKeychainRead {
-        let r = syncSecurity(["find-generic-password", "-s", SYNC_KC_SERVICE, "-w"], lifetime: lifetime)
+        let r = githubKeychainProcess(["--github-auth-keychain-helper", "read", "legacy", action != nil ? "interactive" : "quiet"], lifetime: lifetime, action: action)
         switch r.status {
         case .success:
             let token = r.out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1279,11 +1292,11 @@ struct SecuritySyncKeychain: SyncKeychain {
     }
     func write(_ token: String) -> SyncKeychainStatus {
         guard !token.isEmpty, token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else { return .failure(-1) }
-        let command = "add-generic-password -U -a \"\(NSUserName())\" -s \"\(SYNC_KC_SERVICE)\" -w \(token)\n"
-        return syncSecurity(["-i"], input: command).status
+        return githubKeychainProcess(["--github-auth-keychain-helper", "legacy-write", "legacy", "quiet"],
+                                     input: token, lifetime: lifetime).status
     }
     func delete() -> SyncKeychainStatus {
-        syncSecurity(["delete-generic-password", "-s", SYNC_KC_SERVICE], lifetime: lifetime).status
+        githubKeychainProcess(["--github-auth-keychain-helper", "delete", "legacy", action != nil ? "interactive" : "quiet"], lifetime: lifetime, action: action).status
     }
 }
 typealias SyncHTTPResult = (status: Int, data: Data?, err: String?, headers: [String: String])
@@ -1337,20 +1350,20 @@ private let githubAuthProcessFence = GitHubAuthProcessFence()
 private let GITHUB_AUTH_SERVICE = "Claude Codex Limits GitHub Credential V2"
 
 private func githubAuthRefSafe(_ ref: GitHubAuthRef) -> Bool {
-    ref.backend == "keychain" && !ref.generation.isEmpty && ref.generation.utf8.count <= 128
-        && ref.generation.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-") }
+    ref.backend == "keychain" && UUID(uuidString: ref.generation)?.uuidString.lowercased() == ref.generation
 }
-private func githubAuthRead(_ ref: GitHubAuthRef) -> GitHubAuthRead {
+private func githubAuthRead(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
     if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") {
-        switch SecuritySyncKeychain(lifetime: githubAuthProcessFence).read() {
+        switch SecuritySyncKeychain(lifetime: githubAuthProcessFence, action: action).read() {
         case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token, refreshToken: nil, obtainedAt: 0))
         case .missing: return .missing
         case .timedOut: return .timeout
-        case .failure: return .unreachable
+        case .failure(let code): return code == 36 ? .locked : .unreachable
         }
     }
     guard githubAuthRefSafe(ref) else { return .corrupt }
-    let result = syncSecurity(["find-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation, "-w"], lifetime: githubAuthProcessFence)
+    guard let args = githubAuthKeychainArguments(operation: "read", ref: ref, interactive: action != nil) else { return .corrupt }
+    let result = githubKeychainProcess(args, lifetime: githubAuthProcessFence, action: action)
     switch result.status {
     case .missing: return .missing
     case .timedOut: return .timeout
@@ -1461,53 +1474,116 @@ private func githubAuthWriterSave(_ record: GitHubAuthWriterRecord) throws {
     guard fsync(dirFD) == 0 else { throw GitHubAuthPersistenceError.unavailable }
 }
 
+private func githubAuthNativeExit(_ status: OSStatus) -> Int32 {
+    if status == errSecSuccess || status == errSecDuplicateItem { return 0 }
+    if status == errSecItemNotFound { return 44 }
+    if [errSecInteractionNotAllowed, errSecInteractionRequired, errSecAuthFailed, errSecUserCanceled].contains(status) { return 36 }
+    return 1
+}
+private func githubAuthHelperInput(limit: Int) -> Data? {
+    var input = Data()
+    do {
+        while let chunk = try FileHandle.standardInput.read(upToCount: min(8192, limit + 1 - input.count)), !chunk.isEmpty {
+            input.append(chunk)
+            guard input.count <= limit else { return nil }
+        }
+    } catch { return nil }
+    return input
+}
+private func githubAuthNativeKeychainHelper() -> Int32 {
+    guard let request = GitHubKeychainHelperRequest.parse(CommandLine.arguments) else { return 64 }
+    return githubAuthHelperInteraction(interactive: request.interactive,
+        setAllowed: { SecKeychainSetUserInteractionAllowed($0) == errSecSuccess }) {
+        // kSecUseAuthenticationUI alone does not suppress file-keychain UI.
+        // All queries are fixed-service and exact UUID (legacy has its historic service).
+        var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                                    kSecAttrService as String: request.service]
+        if request.generation != "legacy" { query[kSecAttrAccount as String] = request.generation }
+        switch request.operation {
+        case "read":
+            query[kSecReturnData as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            guard status == errSecSuccess else { return githubAuthNativeExit(status) }
+            guard let data = item as? Data, !data.isEmpty, data.count <= 128 * 1024 else { return 65 }
+            // stdout is a private, drained pipe to the parent, never diagnostics.
+            do { try FileHandle.standardOutput.write(contentsOf: data) } catch { return 74 }
+            return 0
+        case "delete":
+            if request.generation == "legacy" {
+                // Historical legacy lookup selected one service match. Never turn
+                // that into a service-wide delete when several accounts exist.
+                query[kSecReturnPersistentRef as String] = true
+                query[kSecMatchLimit as String] = kSecMatchLimitOne
+                var item: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &item)
+                guard status == errSecSuccess else { return githubAuthNativeExit(status) }
+                guard let reference = item as? Data, !reference.isEmpty else { return 65 }
+                return githubAuthNativeExit(SecItemDelete([kSecValuePersistentRef as String: reference] as CFDictionary))
+            }
+            return githubAuthNativeExit(SecItemDelete(query as CFDictionary))
+        case "legacy-write":
+            guard let data = githubAuthHelperInput(limit: 16384),
+                  let token = String(data: data, encoding: .ascii), !token.isEmpty,
+                  token.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }) else { return 65 }
+            query[kSecAttrAccount as String] = NSUserName()
+            let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            guard status == errSecItemNotFound else { return githubAuthNativeExit(status) }
+            query[kSecValueData as String] = data
+            return githubAuthNativeExit(SecItemAdd(query as CFDictionary, nil))
+        default: return 64
+        }
+    }
+}
+
 private func githubAuthNativeStoreHelper() -> Int32 {
     // This private entry point cannot choose a service, account other than a UUID,
     // marker path or credential file. It runs before all ordinary application globals.
-    guard CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--github-auth-store-helper" else { return 64 }
+    guard CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--github-auth-store-helper",
+          ["quiet", "interactive"].contains(CommandLine.arguments[4]) else { return 64 }
     let generation = CommandLine.arguments[2], operation = CommandLine.arguments[3]
-    guard UUID(uuidString: operation)?.uuidString.lowercased() == operation else { return 64 }
-    var input = Data()
-    do {
-        while let chunk = try FileHandle.standardInput.read(upToCount: min(8192, 128 * 1024 + 1 - input.count)), !chunk.isEmpty {
-            input.append(chunk)
-            guard input.count <= 128 * 1024 else { return 65 }
-        }
-    } catch { return 65 }
-    guard let credential = githubAuthHelperEnvelope(input, generation: generation) else { return 65 }
-    let service = "Claude Codex Limits GitHub Credential V2"
-    var trusted: SecTrustedApplication?
-    guard SecTrustedApplicationCreateFromPath("/usr/bin/security", &trusted) == errSecSuccess, let trusted = trusted else { return 70 }
-    var access: SecAccess?
-    // Preserve the stable system security tool's access across ad-hoc app updates.
-    // This is an explicit trusted-app ACL, never an allow-all (-A) ACL.
-    guard SecAccessCreate(service as CFString, [trusted] as CFArray, &access) == errSecSuccess,
-          let access = access else { return 70 }
-    let attributes: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: service,
-        kSecAttrAccount as String: generation,
-        kSecAttrAccess as String: access,
-        kSecValueData as String: input,
-    ]
-    // The permit lock is held across the native RPC. Recovery can close an absent or
-    // prepared permit before any delayed helper gets here; operation UUIDs prevent ABA.
-    guard let writerFD = githubAuthWriterLock(generation) else { return 69 }
-    defer { flock(writerFD, LOCK_UN); close(writerFD) }
-    var record: GitHubAuthWriterRecord
-    do {
-        guard let value = try githubAuthWriterLoad(generation),
-              githubAuthWriterPermitAllows(value, generation: generation, operation: operation, epoch: credential.epoch) else { return 78 }
-        record = value; record.phase = .rpcStarted
-        try githubAuthWriterSave(record)
-    } catch { return 75 }
-    // Add only. A retry cannot overwrite any previously stored immutable generation.
-    let status = SecItemAdd(attributes as CFDictionary, nil)
-    record.phase = .completed; record.status = status
-    do { try githubAuthWriterSave(record) } catch { return 75 }
+    guard UUID(uuidString: generation)?.uuidString.lowercased() == generation,
+          UUID(uuidString: operation)?.uuidString.lowercased() == operation else { return 64 }
+    return githubAuthHelperInteraction(interactive: CommandLine.arguments[4] == "interactive",
+        setAllowed: { SecKeychainSetUserInteractionAllowed($0) == errSecSuccess }) {
+        guard let input = githubAuthHelperInput(limit: 128 * 1024),
+              let credential = githubAuthHelperEnvelope(input, generation: generation) else { return 65 }
+        let service = "Claude Codex Limits GitHub Credential V2"
+        var trusted: SecTrustedApplication?
+        guard SecTrustedApplicationCreateFromPath("/usr/bin/security", &trusted) == errSecSuccess, let trusted = trusted else { return 70 }
+        var helper: SecTrustedApplication?
+        guard SecTrustedApplicationCreateFromPath(nil, &helper) == errSecSuccess, let helper = helper else { return 70 }
+        var access: SecAccess?
+        // New items explicitly trust this helper identity plus the existing system tool.
+        // Add-only below never broadens ACLs of existing items, including duplicate refs.
+        guard SecAccessCreate(service as CFString, [trusted, helper] as CFArray, &access) == errSecSuccess,
+              let access = access else { return 70 }
+        let attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: generation,
+            kSecAttrAccess as String: access,
+            kSecValueData as String: input,
+        ]
+        // The permit lock is held across the native RPC. Recovery can close an absent or
+        // prepared permit before any delayed helper gets here; operation UUIDs prevent ABA.
+        guard let writerFD = githubAuthWriterLock(generation) else { return 69 }
+        defer { flock(writerFD, LOCK_UN); close(writerFD) }
+        var record: GitHubAuthWriterRecord
+        do {
+            guard let value = try githubAuthWriterLoad(generation),
+                  githubAuthWriterPermitAllows(value, generation: generation, operation: operation, epoch: credential.epoch) else { return 78 }
+            record = value; record.phase = .rpcStarted
+            try githubAuthWriterSave(record)
+        } catch { return 75 }
+        // Add only. A retry cannot overwrite any previously stored immutable generation.
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        record.phase = .completed; record.status = status
+        do { try githubAuthWriterSave(record) } catch { return 75 }
 
-    if status == errSecSuccess || status == errSecDuplicateItem { return 0 }
-    return status == errSecInteractionNotAllowed ? 36 : 1
+        return githubAuthNativeExit(status)
+    }
 }
 
 private final class GitHubAuthWriters: @unchecked Sendable {
@@ -1560,7 +1636,7 @@ private func githubAuthSettled(_ ref: GitHubAuthRef) -> Bool {
         try githubAuthWriterSave(closed); return true
     } catch { return false }
 }
-private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> GitHubAuthStoreStatus {
+private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2, action: GitHubAuthUserAction? = nil) -> GitHubAuthStoreStatus {
     guard githubAuthRefSafe(ref), c.generation == ref.generation,
           let data = try? JSONEncoder().encode(c) else { return .failed }
     let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
@@ -1568,6 +1644,9 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> G
     // 16 KiB tokens plus bounded identity/metadata fit this 128 KiB native envelope;
     // no CLI command-line/interactive-line size participates in the write path.
     guard githubAuthHelperEnvelope(Data(encoded.utf8), generation: ref.generation) != nil else { return .failed }
+    guard githubAuthProcessFence.begin() else { return .timeout }
+    var launched = false
+    defer { if !launched { githubAuthProcessFence.ended() } }
     let operation = UUID().uuidString.lowercased()
     guard let fd = githubAuthWriterLock(ref.generation) else { return .timeout }
     do {
@@ -1583,7 +1662,7 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> G
     // Secrets are stdin only; argv contains a private operation and immutable UUID.
     guard let executable = Bundle.main.executableURL else { return .failed }
     process.executableURL = executable
-    process.arguments = ["--github-auth-store-helper", ref.generation, operation]
+    process.arguments = ["--github-auth-store-helper", ref.generation, operation, action != nil ? "interactive" : "quiet"]
     process.standardInput = input; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
     let writers = GitHubAuthWriters.shared
     let jobID = UUID().uuidString
@@ -1592,24 +1671,34 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2) -> G
         if process.terminationReason == .exit, (0..<128).contains(process.terminationStatus) {
             writers.completed(operation: operation, status: process.terminationStatus)
         }
-        writers.release(generation: jobID); ended.signal()
+        writers.release(generation: jobID); githubAuthProcessFence.ended(); ended.signal()
     }
-    do { try process.run() } catch { writers.release(generation: jobID); return .unreachable }
+    do {
+        if let action = action {
+            guard try action.admit({ try process.run() }) else { writers.release(generation: jobID); return .locked }
+        } else { try process.run() }
+        launched = true
+    } catch { writers.release(generation: jobID); return .unreachable }
     _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
     DispatchQueue.global(qos: .utility).async {
         try? input.fileHandleForWriting.write(contentsOf: Data(encoded.utf8))
         try? input.fileHandleForWriting.close()
     }
-    guard ended.wait(timeout: .now() + 15) == .success else { return .timeout }
+    guard ended.wait(timeout: .now() + 15) == .success else {
+        if process.isRunning { process.terminate() }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+        }
+        return .timeout
+    }
     guard process.terminationReason == .exit, (0..<128).contains(process.terminationStatus),
           githubAuthSettled(ref) else { return .timeout }
     if process.terminationStatus == 36 { return .locked }
     return process.terminationStatus == 0 ? .success : .unreachable
 }
-private func githubAuthDelete(_ ref: GitHubAuthRef) -> GitHubAuthStoreStatus {
-    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") { return githubAuthStatus(SecuritySyncKeychain(lifetime: githubAuthProcessFence).delete()) }
-    guard githubAuthRefSafe(ref) else { return .failed }
-    return githubAuthStatus(syncSecurity(["delete-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation], lifetime: githubAuthProcessFence).status)
+private func githubAuthDelete(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthStoreStatus {
+    guard let args = githubAuthKeychainArguments(operation: "delete", ref: ref, interactive: action != nil) else { return .failed }
+    return githubAuthStatus(githubKeychainProcess(args, lifetime: githubAuthProcessFence, action: action).status)
 }
 private func githubAuthAtomicSave(_ manifest: GitHubAuthManifest, path: String) throws {
     let directory = (path as NSString).deletingLastPathComponent
@@ -1685,7 +1774,7 @@ private func makeProductionGitHubAuth() -> GitHubAuthOwner {
             } catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError { return nil }
         },
         saveManifest: { try githubAuthAtomicSave($0, path: path) },
-        readStore: githubAuthRead, stageStore: githubAuthStage, deleteStore: githubAuthDelete,
+        readStore: { githubAuthRead($0) }, stageStore: { githubAuthStage($0, $1) }, deleteStore: { githubAuthDelete($0) },
         transport: githubAuthOAuthTransport, identity: { token in
             let r = syncHTTP("https://api.github.com/user", "GET",
                 ["Authorization": "Bearer \(token)", "Accept": "application/vnd.github+json", "User-Agent": "ClaudeCodexLimits"], nil, 20)
@@ -1708,19 +1797,27 @@ private func makeProductionGitHubAuth() -> GitHubAuthOwner {
                 Thread.sleep(forTimeInterval: 0.05)
             }
             defer { flock(fd, LOCK_UN) }; try body()
-        }, checkpoint: { _, _, _ in }, jitter: { Double.random(in: 0...15) }, legacy: {
-            let d = UserDefaults.standard
-            if d.bool(forKey: "syncRevoked") { return .revoked }
-            guard let login = d.string(forKey: "syncLogin") else { return .signedOut }
-            switch SecuritySyncKeychain(lifetime: githubAuthProcessFence).read() {
-            case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token,
-                refreshToken: nil, obtainedAt: 0, login: login))
-            case .missing: return .missing
-            case .timedOut: return .timeout
-            case .failure(let code): return code == 36 ? .locked : .unreachable
-            }
-        }, settled: githubAuthSettled, storeIdle: { githubAuthProcessFence.isIdle })
+        }, checkpoint: { _, _, _ in }, jitter: { Double.random(in: 0...15) }, legacy: { githubAuthLegacy() },
+        settled: githubAuthSettled,
+        interactiveReadStore: { githubAuthRead($0, action: $1) },
+        interactiveStageStore: { githubAuthStage($0, $1, action: $2) },
+        interactiveDeleteStore: { githubAuthDelete($0, action: $1) },
+        interactiveLegacy: { githubAuthLegacy(action: $0) },
+        storeIdle: { githubAuthProcessFence.isIdle })
     return GitHubAuthOwner(dependencies: dependencies, clientID: GITHUB_CLIENT_ID)
+}
+
+private func githubAuthLegacy(action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
+    let d = UserDefaults.standard
+    if d.bool(forKey: "syncRevoked") { return .revoked }
+    guard let login = d.string(forKey: "syncLogin") else { return .signedOut }
+    switch SecuritySyncKeychain(lifetime: githubAuthProcessFence, action: action).read() {
+    case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token,
+        refreshToken: nil, obtainedAt: 0, login: login))
+    case .missing: return .missing
+    case .timedOut: return .timeout
+    case .failure(let code): return code == 36 ? .locked : .unreachable
+    }
 }
 
 func githubAuthMessage(_ reason: String, language: String) -> String {
@@ -1733,9 +1830,9 @@ func githubAuthMessage(_ reason: String, language: String) -> String {
     case "lost_result": return english ? "Couldn't recover the renewal result. Sign in again." : "Не удалось восстановить результат продления. Войдите заново."
     case "bad_refresh_token", "refresh_expired", "access_expired", "revoked": return english ? "GitHub sign-in needs renewal. Sign in again." : "Необходимо обновить вход в GitHub. Войдите заново."
     case "incomplete_candidate", "identity_changed", "corrupt": return english ? "Couldn't verify the saved sign-in. Sign in again." : "Не удалось проверить сохранённый вход. Войдите заново."
-    case "locked": return english ? "Unlock Keychain; sign-in will recover automatically." : "Разблокируйте Связку ключей; вход восстановится автоматически."
-    case "unreachable": return english ? "No access to Keychain. Retrying automatically." : "Нет доступа к Связке ключей. Повторим автоматически."
-    case "timeout": return english ? "Keychain did not respond. Retrying automatically." : "Связка ключей не ответила. Повторим автоматически."
+    case "locked": return english ? "Keychain needs permission. Click Retry Keychain access to allow it." : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей»."
+    case "unreachable": return english ? "No access to Keychain. Click Retry Keychain access." : "Нет доступа к Связке ключей. Нажмите «Повторить доступ к Связке ключей»."
+    case "timeout": return english ? "Keychain did not respond. Click Retry Keychain access to try again." : "Связка ключей не ответила. Для новой попытки нажмите «Повторить доступ к Связке ключей»."
     case "response_unknown": return english ? "Renewal response is unavailable; checking saved sign-in." : "Ответ продления недоступен; проверяем сохранённый вход."
     case "identity_unavailable", "candidate_unauthorized", "login_pending": return english ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."
     default: return english ? "Sign-in is temporarily unavailable; retrying automatically." : "Вход временно недоступен; повторим автоматически."
@@ -1795,17 +1892,19 @@ final class GitHubSync {
     }
 
     private let authOwner: GitHubAuthOwner?
+    private var keychainUserAction: GitHubAuthUserAction? // guarded by UI lock
     private var keychainManualRetryPending = false // guarded by UI lock, including queue wait
     // Scheduler owner consumes this delay and rechecks it after wake; no wall-clock conversion.
     var keychainRetryDelay: Double? { authOwner?.keychainRetryDelay() }
     func retryKeychainAccess() {
         guard let owner = authOwner else { return }
         lock.lock()
-        guard !keychainManualRetryPending else { lock.unlock(); return }
-        keychainManualRetryPending = true; lock.unlock()
+        guard !keychainManualRetryPending, _ui.phase != .awaitingCode else { lock.unlock(); return }
+        let action = GitHubAuthUserAction()
+        keychainUserAction = action; keychainManualRetryPending = true; lock.unlock()
         q.async {
             defer { self.lock.lock(); self.keychainManualRetryPending = false; self.lock.unlock() }
-            _ = self.projectAuth(owner.retryKeychainAccess())
+            _ = self.projectAuth(owner.retryKeychainAccess(action: action))
         }
     }
     private var capturedAccess: GitHubAuthAccess?
@@ -1978,22 +2077,33 @@ final class GitHubSync {
     // MARK: sign-in (OAuth Device Flow)
 
     func startLogin() {
-        let id = UUID()
-        setUI { loginID = id; $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil }
-        q.async { self.runLogin(id) }
+        let attempt = GitHubAuthLoginAttempt()
+        var accepted = false
+        setUI {
+            guard $0.phase != .awaitingCode, !keychainManualRetryPending else { return }
+            keychainUserAction = attempt.action
+            loginID = attempt.id; $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil
+            accepted = true
+        }
+        if accepted { q.async { self.runLogin(attempt) } }
     }
     private var cancelledLoginPhase: SyncPhase {
         defaults.bool(forKey: "syncRevoked") || defaults.string(forKey: "syncLogin") != nil ? .revoked : .off
     }
     func cancelLogin() {
-        let hadLogin = ui.phase == .awaitingCode
+        var cancelledID: UUID?
         setUI {
-            guard loginID != nil else { return }
+            guard let id = loginID else { return }
+            cancelledID = id
             let phase = cancelledLoginPhase
+            keychainUserAction?.cancel()
             loginID = nil; $0.phase = phase; $0.userCode = nil
         }
-        if hadLogin, let owner = authOwner { q.async {
-            if let captured = self.loginEpoch { _ = owner.cancelLogin(epoch: captured.epoch) }
+        if let cancelledID = cancelledID, let owner = authOwner { q.async {
+            // This cancellation also belongs to the captured attempt, never to
+            // whichever login happened to reach the serial queue in the meantime.
+            guard let captured = self.loginEpoch, captured.id == cancelledID else { return }
+            _ = owner.cancelLogin(epoch: captured.epoch)
             _ = self.projectAuth(owner.ensureAccess(reason: "cancel"))
         } }
     }
@@ -2025,10 +2135,17 @@ final class GitHubSync {
         guard (200..<300).contains(r.status) else { return nil }
         return r.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
     }
-    private func runLogin(_ id: UUID) {
+    private func runLogin(_ attempt: GitHubAuthLoginAttempt) {
+        let id = attempt.id
         guard loginIsCurrent(id) else { return }
-        let authEpoch = authOwner?.beginLogin()
+        let authEpoch = authOwner?.beginLogin(action: attempt.action)
         loginEpoch = authEpoch.map { (id: id, epoch: $0) }
+        // Quiet I/O may have outlived cancellation. Recheck BEFORE clearing saved
+        // UI/cache/defaults or asking GitHub for a device code.
+        guard loginIsCurrent(id) else {
+            if let epoch = authEpoch { _ = authOwner?.cancelLogin(epoch: epoch) }
+            return
+        }
         if authOwner != nil && authEpoch == nil {
             loginFailed(id, githubAuthMessage("storage_unavailable", language: appLang())); return
         }
@@ -2040,6 +2157,7 @@ final class GitHubSync {
             try? FileManager.default.removeItem(atPath: remotePath)
             setUI { $0.login = nil; $0.machines = []; $0.lastSync = nil; $0.lastUploadAt = nil }
         }
+        guard loginIsCurrent(id) else { return }
         guard let j = form("https://github.com/login/device/code", ["client_id": GITHUB_CLIENT_ID, "scope": "gist offline_access"]),
               let deviceCode = j["device_code"] as? String, let userCode = j["user_code"] as? String else {
             loginFailed(id, tr("GitHub не ответил. Попробуйте ещё раз.", "GitHub didn't answer. Try again."))
@@ -2129,7 +2247,7 @@ final class GitHubSync {
     }
 
     func logout() {
-        setUI { _ in loginID = nil }
+        setUI { _ in keychainUserAction?.cancel(); loginID = nil }
         q.async {
             if let owner = self.authOwner {
                 let result = owner.logoutDetailed()
@@ -3139,7 +3257,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     PANEL_H + scopedRowExtra(claude, codex)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.4"
+let APP_VERSION = "3.2.5"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -6921,7 +7039,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             ("renewing", SyncUIState(phase: .on, authState: "renewing", authReason: "renewing", keychainItemLeft: true, login: "fixture-account"),
              en ? "Renewing GitHub sign-in automatically…" : "Автоматически продлеваем вход в GitHub…"),
             ("storage-locked", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "locked", keychainItemLeft: true, login: "fixture-account"),
-             en ? "Unlock Keychain; sign-in will recover automatically." : "Разблокируйте Связку ключей; вход восстановится автоматически."),
+             en ? "Keychain needs permission. Click Retry Keychain access to allow it." : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей»."),
             ("identity-pending", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "identity_unavailable", keychainItemLeft: true, login: "fixture-account"),
              en ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."),
             ("cleanup-pending", SyncUIState(phase: .off, authState: "signedOut", authReason: "cleanup_pending", keychainItemLeft: true),
