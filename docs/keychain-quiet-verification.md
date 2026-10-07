@@ -32,3 +32,11 @@ Frozen snapshot3:/private/tmp/ccl-quiet-review3-gyjtha2b. CodeReviewer и Securi
 Установлен /Applications/Claude Codex Limits.app; версия3.2.5, strict codesign PASS, binary SHA0543c357eaf6190aacfab1625486e99094b6728d288b2984f92f90558b1a3bb7 совпал. После обычного запуска подтверждён процесс PID72805. Receipt:/private/tmp/ccl-install-3.2.5-receipt.json; предыдущая копия для отката:/private/tmp/ccl-install-backup-wvz71myo/Claude Codex Limits.app. Проверка запуска не доказывает отсутствие native окон на всех фоновых путях и не меняет указанные выше границы тестирования.
 
  Артефакты QA:/private/tmp/ccl-quiet-qa-vd6lmbnc. Тестовые артефакты:/private/tmp/ccl-independent-quiet-v46ha3no/snapshot3 и /private/tmp/ccl-quiet-tests/auth-final.log.
+
+## Повторное сообщение после выпуска · 2026-10-07
+
+Пользователь прислал ещё один скриншот запроса `security` к GitHub Credential V2. Файл `codex-clipboard-bc22010f-e230-40b9-8bb4-2c3cc3f5c2a6.png` имеет birthtime/mtime 22:04:33 +03:00, а receipt установки 3.2.5 и начало процесса PID72805 — 22:35:18 +03:00. Файл существовал до установки: этот скриншот сам по себе не доказывает повтор на 3.2.5. Пользователю задан вопрос о самостоятельном появлении окна или ручном повторе; ответ пока не получен.
+
+При диагностике около 22:40 проверены только метаданные файла/установки, имена и PID/PPID процессов и hash установленного executable. Работает canonical3.2.5 с принятым SHA0543c357; процесса `security` в снимке списка процессов нет. Отсутствие процесса в одном снимке не доказывает отсутствие кратковременных запросов. Реальные ключи, ACL и пароли не читались; системные разрешения не изменялись. Нужна временная привязка следующего события к версии и ручному действию; новый дефект не объявлен подтверждённым по старому скриншоту.
+
+Независимые Debugger (Sol/high) и SecurityAnalyst (Astra/high) прочитали production66587e9/HEAD5493076: GitHub CLI fallback не найден; в3.2.4 GitHub использовал security, в3.2.5 — собственный helper. Оставшиеся вызовы security относятся к Claude Code-credentials. Quiet helper прекращает RPC при ошибке запрета UI; ручной допуск идёт через тот же executable. Старый orphan остаётся гипотезой, не подтверждён. Нового дефекта в проверенной области не найдено. Нативное имя инициатора и реальные ACL не проверены; proposed isolated VM сценарий не выполнялся. Код приложения не изменён.
