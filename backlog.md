@@ -1,5 +1,7 @@
 # Бэклог
 
+- In progress, COMPACT-REFRESH: вернуть прежнюю цельную панель, встроить refresh/status внутрь шапки/карточек. Прямое замечание владельца к3.2.6; план docs/compact-refresh-plan.md. Отдельное независимое дизайн-ревью обязательно.
+
 - Done, MANUAL-REFRESH: macOS3.2.6 опубликована и установлена; ручное обновление отдельно от Auto. [Приёмка](docs/manual-refresh-verification.md).
 
 - Could: EN Advanced Claude writeUnavailable badge показывает “read failed”; подробное сообщение об ошибке сохранения корректно. P3 QA3.2.6.

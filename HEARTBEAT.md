@@ -4,6 +4,8 @@
 
 ## Актуальный статус · 2026-10-07
 
+- 2026-10-08 COMPACT-REFRESH: пользователь отверг дизайн3.2.6 (внешние верхняя плашка/нижний список). Исправление macOS3.2.7 через UXAnalyst → DesignEngineer → CodeReviewer → QA + DesignReviewer; рабочая логика3.2.6 сохраняется. [План](docs/compact-refresh-plan.md), урок014. Пока установлена3.2.6.
+
 - MANUAL-REFRESH завершён: macOS3.2.6 опубликована и установлена. Source d50584bcf5c7b7b63eb6df2ef50539b11fd0f045; Code/SecurityPASS, pure78/1089/0, packaged3091/0, QA36 новых PNG. Публичный DMG b8ff16fc совпал; installed strict codesign/SHA PASS, PID96073. Linux0.4.4 не меняется. [Приёмка](docs/manual-refresh-verification.md).
 
 - Уточнение по новому скриншоту Keychain: файл создан22:04, установка/запуск3.2.5 выполнены22:35. На22:40 работает3.2.5, процесса security нет. Повтор именно после обновления пока не подтверждён; задан вопрос о времени/ручном действии. [Доказательства](docs/keychain-quiet-verification.md).
