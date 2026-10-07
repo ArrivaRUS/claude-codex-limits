@@ -12,6 +12,10 @@ import Security
 
 // Reserved helper modes fail closed BEFORE selftests and ordinary globals, even
 // for malformed/mixed flags. No helper failure can fall through into app startup.
+if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--claude-quota-keychain-") }) {
+    guard let request = ClaudeQuotaHelperRequest.parse(CommandLine.arguments) else { exit(64) }
+    exit(claudeQuotaKeychainHelper(request))
+}
 if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--github-auth-") }) {
     if CommandLine.arguments.count == 5, CommandLine.arguments[1] == "--github-auth-store-helper" {
         exit(githubAuthNativeStoreHelper())
@@ -109,46 +113,6 @@ private func requestHTTP(_ url: String, method: String, headers: [String: String
 
 // MARK: - Model
 
-/// Authentication state of a product (only Claude Code uses anything but `.ok`).
-///   • ok            — signed in, data is (or can be) live
-///   • loggedOut     — no Claude Code CLI login: keychain item absent, or present
-///                     but without a `claudeAiOauth` block (e.g. only the desktop app
-///                     is signed in). Recoverable by signing into the CLI.
-///   • expired       — a saved CLI login whose token expired and could not be refreshed.
-///   • keychainError — a genuine keychain read failure (errSec other than 0 / 44).
-enum AuthState { case ok, loggedOut, expired, keychainError }
-
-/// A weekly limit scoped to one model (Anthropic's `limits[].kind == "weekly_scoped"`),
-/// e.g. Fable's own 7-day allowance, which can run out while the overall weekly still has
-/// room. `name` is the backend's own `scope.model.display_name`, so a future model shows up
-/// correctly without a code change.
-struct ScopedLimit {
-    var name: String
-    var percent: Double
-    var reset: Date?
-    var severity: String?      // backend's own "normal" | "warning" | "critical"
-}
-
-struct LimitData {
-    var session: Double?
-    var weekly: Double?
-    var sessionReset: Date?
-    var weeklyReset: Date?
-    var scoped: ScopedLimit?   // Claude: the binding per-model weekly limit, when the API reports one
-    var plan: String?
-    var resetCredits: Int?     // Codex "reset banking" — banked rate-limit resets available
-    var asOf: Date?
-    var error: String?
-    var stale = false
-    var fromCache = false
-    var apiFresh = false      // true only for a successful live usage response
-    var present = true         // false → product not set up on this Mac (hide its row/card)
-    // Transient presentation state of the last request, never serialized with a snapshot.
-    var pollFailed = false
-    var nextPollAt: Date?
-    var auth: AuthState = .ok  // Claude Code sign-in state (drives the "how to fix" card)
-}
-
 // A missing preference keeps existing installations monitoring both products.
 func productEnabled(_ product: String, defaults: UserDefaults = .standard) -> Bool {
     defaults.object(forKey: "monitor_" + product) as? Bool ?? true
@@ -190,23 +154,141 @@ func fnv64(_ s: String) -> UInt64 {
 }
 func tokenFingerprint(_ s: String) -> String { String(fnv64(s), radix: 16) }
 
-func fetchClaude() -> LimitData {
+// Only a one-shot explicit read may interact. Updates never inherit its permission.
+// No add/delete, service argument, or ACL mutation.
+// Run before ordinary startup; literals avoid accessing not-yet-initialized globals.
+private func claudeQuotaKeychainHelper(_ request: ClaudeQuotaHelperRequest) -> Int32 {
+    quotaHelperInteraction(request, setAllowed: { SecKeychainSetUserInteractionAllowed($0) == errSecSuccess }) {
+    let operation = request.operation
+    let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: "Claude Code-credentials",
+        kSecReturnData as String: true, kSecReturnPersistentRef as String: true,
+        kSecMatchLimit as String: kSecMatchLimitOne]
+    var found: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &found)
+    guard status == errSecSuccess else {
+        // Only these two native statuses justify the dedicated permission action.
+        if status == errSecInteractionNotAllowed || status == errSecInteractionRequired { return 36 }
+        return status == errSecItemNotFound ? 44 : status == errSecUserCanceled ? 37 : 1
+    }
+    guard let item = found as? [String: Any], let data = item[kSecValueData as String] as? Data,
+          data.count <= 128 * 1024 else { return 65 }
+    if operation == "read" {
+        do { try FileHandle.standardOutput.write(contentsOf: data); return 0 } catch { return 74 }
+    }
+    guard operation == "update", let input = githubAuthHelperInput(limit: 384 * 1024),
+          let envelope = try? JSONDecoder().decode(ClaudeQuotaUpdate.self, from: input),
+          envelope.expected == data, envelope.replacement.count <= 128 * 1024,
+          let json = (try? JSONSerialization.jsonObject(with: envelope.replacement)) as? [String: Any],
+          json["claudeAiOauth"] is [String: Any],
+          let reference = item[kSecValuePersistentRef as String] as? Data else { return 65 }
+    // Target exactly the item read. Do not create one or change access control.
+    return githubAuthNativeExit(SecItemUpdate([kSecValuePersistentRef as String: reference] as CFDictionary,
+        [kSecValueData as String: envelope.replacement] as CFDictionary))
+    }
+}
+private let claudeQuotaKeychainFence = GitHubAuthProcessFence()
+private func claudeQuotaKeychain(_ operation: String, input: String? = nil) -> (status: SyncKeychainStatus, out: String) {
+    githubKeychainProcess(["--claude-quota-keychain-helper", operation, "quiet"], input: input, lifetime: claudeQuotaKeychainFence)
+}
+
+/// Retain a rotated pair until the quiet update is confirmed or a newer CLI login is read.
+/// No diagnostic, defaults or unprotected file ever receives this candidate.
+private final class ClaudeQuotaPendingCredential {
+    private let lock = NSLock()
+    private var candidate: ClaudeQuotaUpdate?
+    func snapshot() -> ClaudeQuotaUpdate? { lock.lock(); defer { lock.unlock() }; return candidate }
+    func set(_ value: ClaudeQuotaUpdate) { lock.lock(); candidate = value; lock.unlock() }
+    func clear(_ expected: ClaudeQuotaUpdate) {
+        lock.lock(); defer { lock.unlock() }
+        if candidate == expected { candidate = nil }
+    }
+}
+private let claudeQuotaPendingCredential = ClaudeQuotaPendingCredential()
+private func persistClaudeQuotaUpdate(_ update: ClaudeQuotaUpdate) -> SyncKeychainStatus {
+    guard let envelope = try? JSONEncoder().encode(update), let input = String(data: envelope, encoding: .utf8) else { return .failure(65) }
+    return claudeQuotaKeychain("update", input: input).status
+}
+private func readClaudeQuotaCredential(_ permit: QuotaKeychainReadPermit?) -> QuotaCredentialRead {
+    let result = permit.map(claudeQuotaPermissionRead) ?? claudeQuotaKeychain("read")
+    switch result.status {
+    case .success: return .credentials(Data(result.out.utf8))
+    case .missing: return .missing
+    case .timedOut: return .failed(.readTimedOut)
+    case .failure(36): return .failed(.readInteractionRequired)
+    case .failure(37): return .failed(.cancelled)
+    case .failure: return .failed(.readUnavailable)
+    }
+}
+
+/// Dedicated interactive READ adapter. Cancellation is checked while waiting, and the
+/// native child is terminated; the process fence stays held until actual termination.
+private func claudeQuotaPermissionRead(_ permit: QuotaKeychainReadPermit) -> (status: SyncKeychainStatus, out: String) {
+    guard claudeQuotaKeychainFence.begin() else { return (.timedOut, "") }
+    let process = Process(), output = Pipe(), ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
+    let result = SyncSecurityOutput()
+    guard let executable = Bundle.main.executableURL else { claudeQuotaKeychainFence.ended(); return (.failure(1), "") }
+    process.executableURL = executable
+    process.arguments = ["--claude-quota-keychain-helper", "read", "interactive"]
+    process.standardInput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice; process.standardOutput = output
+    process.terminationHandler = { _ in claudeQuotaKeychainFence.ended(); ended.signal() }
+    do {
+        guard try permit.admit(now: ProcessInfo.processInfo.systemUptime, launch: { try process.run() }) else {
+            claudeQuotaKeychainFence.ended(); return (.failure(37), "")
+        }
+    } catch { claudeQuotaKeychainFence.ended(); return (.failure(1), "") }
+    DispatchQueue.global(qos: .utility).async {
+        result.store(output.fileHandleForReading.readDataToEndOfFile())
+        try? output.fileHandleForReading.close(); drained.signal()
+    }
+    let deadline = DispatchTime.now() + max(0, min(15, permit.expiresAt - ProcessInfo.processInfo.systemUptime))
+    var finished = false
+    while !permit.isCancelled, DispatchTime.now() < deadline {
+        if ended.wait(timeout: min(deadline, DispatchTime.now() + 0.05)) == .success { finished = true; break }
+    }
+    guard finished, !permit.isCancelled, drained.wait(timeout: deadline) == .success else {
+        if process.isRunning { process.terminate() }
+        if ended.wait(timeout: .now() + 0.2) != .success, process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+        return (permit.isCancelled ? .failure(37) : .timedOut, "")
+    }
+    guard process.terminationReason == .exit else { return (.failure(1), "") }
+    let code = process.terminationStatus
+    return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
+}
+
+func quotaFailureData(_ response: SyncHTTPResult, tokenEndpoint: Bool = false) -> LimitData {
+    let error = response.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["error"] as? String
+    let failure = QuotaHTTPFailure(status: response.status, headers: response.headers,
+                                  now: Date().timeIntervalSince1970, tokenEndpoint: tokenEndpoint, oauthError: error)
+    var result = LimitData()
+    result.error = response.status == 0 ? "network unavailable" : "HTTP \(response.status)"
+    result.serverRetryAt = failure.retryAt
+    result.auth = failure.authenticationRequired ? .expired : .ok
+    return result
+}
+
+func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil) -> LimitData {
     guard productEnabled("claude") else { return LimitData(present: false) }
     var d = LimitData()
-    let kc = shell("/usr/bin/security", ["find-generic-password", "-s", KC_SERVICE, "-w"])
-    // State (1) "not signed in", half A: the keychain item is absent (errSec 44 =
-    // errSecItemNotFound). Keep the card visible with a "sign in" prompt rather than
-    // hiding the product — the user still wants Claude Code limits, they just need to log in.
-    if kc.code == 44 { d.auth = .loggedOut; return d }
-    // State (3) a genuine keychain read failure (any errSec other than 0 / 44).
-    guard kc.code == 0,
-          let data = kc.out.data(using: .utf8),
-          var creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-    else { d.auth = .keychainError; d.error = "keychain read failed (errSec \(kc.code))"; return d }
+    let pending = claudeQuotaPendingCredential.snapshot()
+    let resolution = quotaReconcilePendingCredential(pending,
+        read: { readClaudeQuotaCredential(readPermit) },
+        quietUpdate: { persistClaudeQuotaUpdate($0) == .success },
+        cancelled: { readPermit?.isCancelled == true })
+    if resolution.retirePending, let pending = pending { claudeQuotaPendingCredential.clear(pending) }
+    let data: Data
+    switch resolution.read {
+    case .credentials(let current): data = current
+    case .missing: d.auth = .loggedOut; d.error = "no CLI sign-in"; return d
+    case .failed(let issue):
+        return LimitData(error: "credential operation failed", credentialIssue: issue, auth: .keychainError)
+    }
+    guard var creds = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    else { d.auth = .keychainError; d.error = "invalid credentials"; d.credentialIssue = .invalidCredentials; return d }
     // State (1) "not signed in", half B: the item exists but has NO Claude Code login
     // block (only e.g. mcpOAuth, or credentials written by the desktop app, which the
     // monitor can't use). Same user-facing state as a missing item: "sign in via the CLI".
-    guard var oauth = creds["claudeAiOauth"] as? [String: Any] else { d.auth = .loggedOut; return d }
+    guard var oauth = creds["claudeAiOauth"] as? [String: Any] else { d.auth = .loggedOut; d.error = "no CLI sign-in"; return d }
 
     d.plan = oauth["subscriptionType"] as? String
     if let tier = oauth["rateLimitTier"] as? String { UserDefaults.standard.set(tier, forKey: "claudeTier") }
@@ -228,41 +310,44 @@ func fetchClaude() -> LimitData {
             // five minutes is how a dead login earned a 429 after one night, so once refused we
             // stop asking. A fresh CLI login rewrites the keychain, which changes the
             // fingerprint and re-arms the check on its own — no manual reset needed.
-            var refused = UserDefaults.standard.string(forKey: DEAD_REFRESH_KEY) == fp
+            let refused = UserDefaults.standard.string(forKey: DEAD_REFRESH_KEY) == fp
             if !refused {
                 let bodyObj: [String: Any] = ["grant_type": "refresh_token",
                                               "refresh_token": rt, "client_id": CLIENT_ID]
                 let body = try? JSONSerialization.data(withJSONObject: bodyObj)
-                let resp = http("https://api.anthropic.com/v1/oauth/token", method: "POST",
+                if readPermit?.isCancelled == true { return LimitData(error: "permission cancelled", credentialIssue: .cancelled, auth: .keychainError) }
+                let resp = requestHTTP("https://api.anthropic.com/v1/oauth/token", method: "POST",
                                 headers: ["Content-Type": "application/json",
-                                          "User-Agent": UA, "Accept": "application/json"], body: body)
+                                          "User-Agent": UA, "Accept": "application/json"], body: body, timeout: 15, noRedirects: true)
                 if resp.status == 200, let rd = resp.data,
                    let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-                   let newAt = tok["access_token"] as? String {
+                   let newAt = tok["access_token"] as? String, !newAt.isEmpty {
                     at = newAt
                     oauth["accessToken"] = newAt
                     if let newRt = tok["refresh_token"] as? String { oauth["refreshToken"] = newRt }
                     let ein = (tok["expires_in"] as? Double) ?? 28800
                     oauth["expiresAt"] = (Date().timeIntervalSince1970 + ein) * 1000
                     creds["claudeAiOauth"] = oauth
-                    if let outData = try? JSONSerialization.data(withJSONObject: creds),
-                       let outStr = String(data: outData, encoding: .utf8) {
-                        _ = shell("/usr/bin/security",
-                                  ["add-generic-password", "-U", "-a", NSUserName(),
-                                   "-s", KC_SERVICE, "-w", outStr])
+                    guard let outData = try? JSONSerialization.data(withJSONObject: creds) else {
+                        d.auth = .keychainError; d.error = "credential encoding failed"; d.credentialIssue = .writeUnavailable; return d
                     }
+                    let candidate = ClaudeQuotaUpdate(expected: data, replacement: outData)
+                    claudeQuotaPendingCredential.set(candidate)
+                    guard persistClaudeQuotaUpdate(candidate) == .success else {
+                        d.auth = .keychainError; d.error = "credential update unavailable"; d.credentialIssue = .writeUnavailable; return d
+                    }
+                    claudeQuotaPendingCredential.clear(candidate)
                     UserDefaults.standard.removeObject(forKey: DEAD_REFRESH_KEY)
                 } else {
                     // `invalid_grant` is the server saying this login is finished — unlike a
                     // timeout or a 5xx, which is worth retrying on the next tick.
                     let err = resp.data
                         .flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["error"] as? String
-                    if err == "invalid_grant" || resp.status == 400 || resp.status == 401 {
+                    if err == "invalid_grant" || resp.status == 401 {
                         UserDefaults.standard.set(fp, forKey: DEAD_REFRESH_KEY)
-                        refused = true
-                    } else if !usable {
-                        d.auth = .expired; d.error = "refresh failed (HTTP \(resp.status))"; return d
                     }
+                    // A network/rate-limit failure is not proof that the login expired.
+                    return quotaFailureData(resp, tokenEndpoint: true)
                 }
             }
             // Nothing left to ask with. Say the login expired instead of quietly serving
@@ -272,19 +357,16 @@ func fetchClaude() -> LimitData {
         }
     }
 
-    let resp = http("https://api.anthropic.com/api/oauth/usage", method: "GET",
+    if readPermit?.isCancelled == true { return LimitData(error: "permission cancelled", credentialIssue: .cancelled, auth: .keychainError) }
+    let resp = requestHTTP("https://api.anthropic.com/api/oauth/usage", method: "GET",
                     headers: ["Authorization": "Bearer \(at)", "User-Agent": UA,
                               "Accept": "application/json",
                               "anthropic-beta": "oauth-2025-04-20",
-                              "anthropic-version": "2023-06-01"], body: nil)
+                              "anthropic-version": "2023-06-01"], body: nil, timeout: 15, noRedirects: true)
     guard resp.status == 200, let ud = resp.data,
           let j = (try? JSONSerialization.jsonObject(with: ud)) as? [String: Any]
     else {
-        // 401 here means the token we just refreshed (or were still holding) isn't accepted —
-        // that's a dead sign-in, not a hiccup, and the card should say so.
-        if resp.status == 401 { d.auth = .expired }
-        d.error = "usage HTTP \(resp.status)"
-        return d
+        return quotaFailureData(resp)
     }
 
     if let fh = j["five_hour"] as? [String: Any] {
@@ -331,6 +413,7 @@ func fetchClaude() -> LimitData {
             UserDefaults.standard.set(name, forKey: "scopedName")
         }
     }
+    guard d.session != nil || d.weekly != nil || d.scoped != nil else { d.error = "invalid usage response"; return d }
     d.asOf = Date(); d.apiFresh = true
     return d
 }
@@ -416,26 +499,26 @@ func jwtExp(_ jwt: String) -> Double? {
 
 /// Reads a valid Codex access token from ~/.codex/auth.json, refreshing it via
 /// the official OpenAI token endpoint (and persisting back) if it has expired.
-func codexAccessToken() -> (token: String, account: String)? {
+func codexAccessToken() -> (credential: (token: String, account: String)?, failure: LimitData?) {
     guard let data = FileManager.default.contents(atPath: CODEX_AUTH_PATH),
           var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           var tokens = root["tokens"] as? [String: Any],
           let acc = tokens["account_id"] as? String,
-          let at = tokens["access_token"] as? String else { return nil }
+          let at = tokens["access_token"] as? String else { return (nil, LimitData(error: "no CLI sign-in", auth: .loggedOut)) }
 
     if let exp = jwtExp(at), exp > Date().timeIntervalSince1970 + 60 {
-        return (at, acc)                         // still valid
+        return ((at, acc), nil)                  // still valid
     }
-    guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else { return nil }
+    guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else { return (nil, LimitData(error: "no refresh token", auth: .expired)) }
     let body = try? JSONSerialization.data(withJSONObject: [
         "client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt])
-    let resp = http("https://auth.openai.com/oauth/token", method: "POST",
+    let resp = requestHTTP("https://auth.openai.com/oauth/token", method: "POST",
                     headers: ["Content-Type": "application/json", "Accept": "application/json",
                               "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal"],
-                    body: body)
+                    body: body, timeout: 15, noRedirects: true)
     guard resp.status == 200, let rd = resp.data,
           let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-          let newAt = tok["access_token"] as? String else { return nil }
+          let newAt = tok["access_token"] as? String, !newAt.isEmpty else { return (nil, quotaFailureData(resp, tokenEndpoint: true)) }
     tokens["access_token"] = newAt
     if let v = tok["id_token"] as? String { tokens["id_token"] = v }
     if let v = tok["refresh_token"] as? String { tokens["refresh_token"] = v }
@@ -444,25 +527,27 @@ func codexAccessToken() -> (token: String, account: String)? {
     if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]) {
         try? out.write(to: URL(fileURLWithPath: CODEX_AUTH_PATH))
     }
-    return (newAt, acc)
+    return ((newAt, acc), nil)
 }
 
-/// Live Codex usage from `GET /backend-api/wham/usage` (nil on any failure → fall back to local).
-func codexUsageLive() -> LimitData? {
-    guard let (at, acc) = codexAccessToken() else { return nil }
-    let resp = http("https://chatgpt.com/backend-api/wham/usage", method: "GET",
+/// A failed HTTP response retains status/auth/retry metadata through every fallback.
+func codexUsageLive() -> LimitData {
+    let token = codexAccessToken()
+    guard let (at, acc) = token.credential else { return token.failure ?? LimitData(error: "credential unavailable") }
+    let resp = requestHTTP("https://chatgpt.com/backend-api/wham/usage", method: "GET",
                     headers: ["Authorization": "Bearer \(at)", "chatgpt-account-id": acc,
                               "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal",
-                              "originator": "codex_cli_rs", "Accept": "application/json"], body: nil)
+                              "originator": "codex_cli_rs", "Accept": "application/json"], body: nil, timeout: 15, noRedirects: true)
     guard resp.status == 200, let rd = resp.data,
           let obj = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-          let rl = obj["rate_limit"] as? [String: Any] else { return nil }
+          let rl = obj["rate_limit"] as? [String: Any] else { return quotaFailureData(resp) }
     var d = LimitData(); d.present = true
     if let p = rl["primary_window"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
     if let s = rl["secondary_window"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
     d.plan = obj["plan_type"] as? String
     if let pl = d.plan { UserDefaults.standard.set(pl, forKey: "codexPlan") }
     if let rc = (obj["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int { d.resetCredits = rc }
+    guard d.session != nil || d.weekly != nil else { d.error = "invalid usage response"; return d }
     d.asOf = Date(); d.apiFresh = true
     return d
 }
@@ -478,16 +563,13 @@ func loadCodexCache() -> LimitData? {
 /// otherwise uses the freshest of the local rollout files and the last cached reading.
 func fetchCodex(live: Bool) -> LimitData {
     guard productEnabled("codex") else { return LimitData(present: false) }
-    let rollout = codexFromRollout()
-    if !rollout.present { return rollout }              // Codex not set up
-    if live, let liveD = codexUsageLive() { return liveD }
-    var best = rollout
-    if let cached = loadCodexCache() {
-        let b = best.asOf?.timeIntervalSince1970 ?? 0
-        let c = cached.asOf?.timeIntervalSince1970 ?? 0
-        if c > b { best = cached; best.present = true; best.fromCache = false }
-    }
-    if let a = best.asOf, Date().timeIntervalSince(a) > 2 * 3600 { best.stale = true }
+    // A valid CLI login can exist without rollout logs. Always attempt live when asked.
+    let liveResult = live ? codexUsageLive() : nil
+    if let result = liveResult, result.apiFresh { return result }
+    var best = codexFromRollout()
+    if let cached = loadCodexCache() { best = quotaSelectSnapshot(best, previous: cached) }
+    if let failure = liveResult { return quotaFallback(failure, previous: best) }
+    if let at = best.asOf, Date().timeIntervalSince(at) > 2 * 3600 { best.stale = true }
     return best
 }
 
@@ -534,18 +616,14 @@ func applyCache(_ claude: inout LimitData, _ codex: inout LimitData) {
     var cache: [String: Any] = [:]
     if let cd = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
        let cj = (try? JSONSerialization.jsonObject(with: cd)) as? [String: Any] { cache = cj }
-    if claude.present, claude.error != nil, let cm = cache["claude"] as? [String: Any] {
-        // Restore last-known numbers behind the error flag — but keep the auth state
-        // (dict2ld resets it to .ok) so an "expired" card still reads as expired.
-        let e = claude.error; let a = claude.auth; claude = dict2ld(cm); claude.error = e; claude.auth = a
+    if claude.present, !claude.apiFresh, let cm = cache["claude"] as? [String: Any] {
+        claude = quotaSelectSnapshot(claude, previous: dict2ld(cm))
     }
-    if codex.present, codex.error != nil, let cm = cache["codex"] as? [String: Any] {
-        let e = codex.error; codex = dict2ld(cm); codex.error = e
+    if codex.present, !codex.apiFresh, let cm = cache["codex"] as? [String: Any] {
+        codex = quotaSelectSnapshot(codex, previous: dict2ld(cm))
     }
-    // Only persist genuinely-good live readings. A "not signed in" / expired Claude has no
-    // fresh data, so it must never overwrite the cache with blanks.
-    if claude.present, claude.error == nil, claude.auth == .ok { cache["claude"] = ld2dict(claude) }
-    if codex.present, codex.error == nil { cache["codex"] = ld2dict(codex) }
+    if claude.present, claude.apiFresh { cache["claude"] = ld2dict(claude) }
+    if codex.present, codex.apiFresh { cache["codex"] = ld2dict(codex) }
     if let outD = try? JSONSerialization.data(withJSONObject: cache) {
         try? outD.write(to: URL(fileURLWithPath: CACHE_PATH))
     }
@@ -3254,10 +3332,10 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 }
 /// Height of the main panel for the given data — grows when a per-model limit is shown.
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
-    PANEL_H + scopedRowExtra(claude, codex)
+    PANEL_H + scopedRowExtra(claude, codex) + quotaPanelExtraHeight()
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.5"
+let APP_VERSION = "3.2.6"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -3284,10 +3362,11 @@ struct AutoPollState: Codable {
     var observedAt: Double = 0
     var readings: [String: AutoReading] = [:]
     var failed = false
+    var serverRetryAt: Double? = nil
 
     mutating func due(_ now: Double, manual: Bool = false) -> Bool {
         if lastAttempt > now { lastAttempt = now } // clock moved backwards: restart the minimum wait
-        return lastAttempt == 0 || now - lastAttempt >= (manual && !failed ? 900 : interval)
+        return manual || lastAttempt == 0 || now - lastAttempt >= interval
     }
     func nextDelay(_ now: Double) -> TimeInterval {
         if lastAttempt == 0 { return 0.01 }
@@ -3532,7 +3611,89 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
 }
 
 @discardableResult
+// The new header action and provider feedback use the same geometry in both display modes.
+func quotaPanelExtraHeight() -> CGFloat {
+    38 + CGFloat(["claude", "codex"].filter { productEnabled($0) }.count) * 84 + 8
+}
+func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> QuotaRefreshFeedback {
+    quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
+        failed: d.pollFailed || d.error != nil, authenticationRequired: d.auth != .ok,
+        dataAt: d.asOf?.timeIntervalSince1970, nextAutomaticAt: d.nextPollAt?.timeIntervalSince1970,
+        now: now, english: appLang() == "en", credentialIssue: d.credentialIssue, permissionPending: d.permissionRequestInFlight)
+}
+func quotaTimestamp(_ value: Double?) -> String {
+    guard let value = value, value.isFinite, value >= 0, value < 253402300800 else { return "—" }
+    let f = DateFormatter(); f.dateFormat = "dd.MM HH:mm:ss"
+    return f.string(from: Date(timeIntervalSince1970: value))
+}
+private func drawQuotaPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
+                           interval: TimeInterval, updated: Date?, about: AboutState,
+                           autoIntervals: [String: TimeInterval], advanced: Bool) -> [Hit] {
+    let extra = quotaPanelExtraHeight(), footer = extra - 38
+    let bodySize = CGSize(width: size.width, height: size.height - extra)
+    ctx.setFillColor(CGColor(gray: 0.09, alpha: 1)); ctx.fill(CGRect(origin: .zero, size: size))
+    ctx.saveGState(); ctx.translateBy(x: 0, y: footer)
+    var hits = advanced
+        ? drawAdvancedBody(ctx, size: bodySize, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+        : drawPanelBody(ctx, size: bodySize, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+    ctx.restoreGState()
+    hits = hits.filter { $0.id != "refresh" }.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: footer)) }
+    let accent = NSColor(srgbRed: 1, green: 0.66, blue: 0.27, alpha: 1)
+    func label(_ value: String, x: CGFloat, y: CGFloat, color: NSColor = NSColor(white: 0.8, alpha: 1), size: CGFloat = 11) {
+        let line = CTLineCreateWithAttributedString(ctAttr(value, ctFont(size, .regular), cg(color)))
+        ctx.textPosition = CGPoint(x: x, y: y); CTLineDraw(line, ctx)
+    }
+    let header = CGRect(x: 16, y: size.height - 33, width: size.width - 32, height: 27)
+    ctx.setFillColor(cg(accent.withAlphaComponent(0.12))); ctx.fill(header)
+    drawSF(ctx, "arrow.clockwise", in: CGRect(x: 27, y: header.minY + 6, width: 15, height: 15), accent)
+    label(tr("Обновить сейчас", "Refresh now"), x: 51, y: header.minY + 8, color: accent, size: 12)
+    hits.append(Hit(id: "refresh", rect: header))
+    var y = footer - 18
+    let now = Date().timeIntervalSince1970
+    for (product, name, data) in [("claude", "Claude Code", claude), ("codex", "Codex", codex)] where productEnabled(product) {
+        let feedback = quotaFeedback(data, now: now)
+        label(name, x: 16, y: y, color: .white, size: 12)
+        if !feedback.actionTitle.isEmpty {
+            let actionWidth = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(feedback.actionTitle, ctFont(11, .regular), cg(accent)))))
+            let x = size.width - 16 - actionWidth
+            label(feedback.actionTitle, x: x, y: y, color: accent)
+            if feedback.action != .none {
+                let prefix: String
+                switch feedback.action {
+                case .allowKeychain: prefix = "allowquota:"
+                case .cancelKeychain: prefix = "cancelquota:"
+                case .retry: prefix = "retryquota:"
+                default: prefix = "restorequota:"
+                }
+                hits.append(Hit(id: prefix + product,
+                                rect: CGRect(x: x - 4, y: y - 4, width: actionWidth + 8, height: 23)))
+            }
+        }
+        var status = feedback.status
+        if !data.refreshInFlight, data.serverRetryAt == nil, data.auth == .ok, data.apiFresh, !data.pollFailed,
+           let at = data.asOf, now - at.timeIntervalSince1970 < 60 { status = tr("Проверено только что", "Checked just now") }
+        label(status, x: 16, y: y - 19)
+        label(tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt), x: 16, y: y - 36, size: 10)
+        let next = data.refreshInFlight ? tr("после ответа", "after response") : quotaTimestamp(feedback.nextAutomaticAt)
+        label(tr("Следующая автопопытка: ", "Next automatic attempt: ") + next, x: 16, y: y - 51, size: 10)
+        y -= 84
+    }
+    return hits
+}
 func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
+               interval: TimeInterval, updated: Date?, about: AboutState = AboutState(),
+               autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
+    drawQuotaPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
+                   about: about, autoIntervals: autoIntervals, advanced: false)
+}
+func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
+                  interval: TimeInterval, updated: Date?, about: AboutState = AboutState(),
+                  autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
+    drawQuotaPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
+                   about: about, autoIntervals: autoIntervals, advanced: true)
+}
+
+private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
     let W = size.width, H = size.height
     var hits: [Hit] = []
@@ -3627,9 +3788,6 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
-    let rfRect = rectTL(W - pad - 24, pad - 2, 24, 24)
-    drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 4, dy: 4), textMid, weight: .semibold)
-    hits.append(Hit(id: "refresh", rect: rfRect))
     let gearRect = rectTL(W - pad - 24 - 26, pad - 2, 24, 24)
     drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
     hits.append(Hit(id: "settings", rect: gearRect))
@@ -3912,6 +4070,7 @@ func limitRetryNotice(_ d: LimitData, compact: Bool = false) -> String {
     let prefix = compact ? tr("Сбой · ", "Failed · ") : ""
     guard let at = d.nextPollAt else { return prefix + tr("повтор по расписанию", "scheduled retry") }
     guard at > Date() else { return prefix + tr("повтор ожидается", "retry due") }
+    guard at.timeIntervalSince1970 < 253402300800 else { return prefix + tr("ожидание сервиса", "waiting for service") }
     let f = DateFormatter(); f.dateFormat = "HH:mm"
     return prefix + tr("повтор в ", "retry at ") + f.string(from: at)
 }
@@ -3989,7 +4148,7 @@ func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     for c in cards { h += 5 + c.height }
     if showMissingProduct(cards) { h += 5 + ADV_PLACEHOLDER }
     h += 5 + advHistoryHeight(cards)
-    return h + ADV_CREDIT_H
+    return h + ADV_CREDIT_H + quotaPanelExtraHeight()
 }
 /// Credit line under the footer (author · version · GitHub), same as in the Simple view —
 /// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
@@ -4043,10 +4202,10 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 }
 
 @discardableResult
-func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
+private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
     if advCards(claude, codex).isEmpty {
-        return drawPanel(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
+        return drawPanelBody(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
                          interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
     }
     let W = size.width, H = size.height
@@ -4146,11 +4305,9 @@ func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: Limi
         roundFill(rectTL(x, ly + 4, 16, 5), 2.5, gray(1, 0.30)   /* neutral: the tail takes each row's own colour */); x += 16 + 4
         textC(attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, .regular, textMid), x: x, topY: ly, h: lh)
     }
-    let gearRect = rectTL(297, 24, 18, 18), rfRect = rectTL(327, 24, 18, 18)
+    let gearRect = rectTL(327, 24, 18, 18)
     drawSF(ctx, "gearshape", in: gearRect, textMid)
-    drawSF(ctx, "arrow.clockwise", in: rfRect.insetBy(dx: 1, dy: 1), textMid, weight: .semibold)
     hits.append(Hit(id: "settings", rect: gearRect.insetBy(dx: -6, dy: -6)))
-    hits.append(Hit(id: "refresh", rect: rfRect.insetBy(dx: -6, dy: -6)))
     if about.availVersion != nil || about.phase != .idle {
         let badge = CGRect(x: gearRect.maxX - 5, y: gearRect.maxY - 5, width: 7, height: 7)
         ctx.setFillColor(cg(gray(0.10, 1))); ctx.fillEllipse(in: badge.insetBy(dx: -1.5, dy: -1.5))
@@ -5253,6 +5410,11 @@ final class LimitsPanelView: NSView {
     var hits: [Hit] = []
     var onInterval: ((TimeInterval) -> Void)?
     var onRefresh: (() -> Void)?
+    var onRefreshProduct: ((String) -> Void)?
+    var onClaudePermission: ((Bool) -> Void)?
+    private var quotaButtons: [NSButton] = []
+    var mainScroll: CGFloat = 0
+    private var mainScroller: NSScroller?
     var onQuit: (() -> Void)?
     var onOpenURL: ((String) -> Void)?
     var onPreview: ((String) -> Void)?
@@ -5280,6 +5442,7 @@ final class LimitsPanelView: NSView {
 
     func setMode(_ m: PanelMode) {
         mode = m
+        if m == .main { mainScroll = 0 }
         resizeToContent()
     }
 
@@ -5300,6 +5463,9 @@ final class LimitsPanelView: NSView {
         } else if mode == .claudeFix {
             let screenMax = (window?.screen?.visibleFrame.height ?? 800) - 40
             targetH = min(screenMax, claudeFixHeight(expired: claude.auth == .expired))
+        }
+        if mode == .main, let screen = window?.screen ?? NSScreen.main {
+            targetH = min(targetH, screen.visibleFrame.height - 24)
         }
         if let win = window {
             let f = win.frame
@@ -5322,9 +5488,49 @@ final class LimitsPanelView: NSView {
             hits = drawClaudeFix(ctx, size: bounds.size, copiedCmd: copiedCmd,
                                  expired: claude.auth == .expired)
         } else {
+            let contentHeight = mainPanelHeight(claude, codex)
+            let excess = max(0, contentHeight - bounds.height)
+            mainScroll = min(excess, max(0, mainScroll))
+            let offset = bounds.height - contentHeight + mainScroll
+            ctx.saveGState(); ctx.clip(to: bounds); ctx.translateBy(x: 0, y: offset)
+            let size = CGSize(width: bounds.width, height: contentHeight)
             hits = advancedEnabled()
-                ? drawAdvanced(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
-                : drawPanel(ctx, size: bounds.size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+                ? drawAdvanced(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+                : drawPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
+            ctx.restoreGState()
+            hits = hits.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: offset)) }
+            if excess > 0 {
+                let scroller = mainScroller ?? NSScroller(frame: .zero)
+                if mainScroller == nil {
+                    scroller.scrollerStyle = .overlay; scroller.target = self; scroller.action = #selector(mainScrolled(_:))
+                    addSubview(scroller); mainScroller = scroller
+                }
+                scroller.frame = NSRect(x: bounds.width - 12, y: 4, width: 12, height: bounds.height - 8)
+                scroller.knobProportion = bounds.height / contentHeight
+                scroller.doubleValue = Double(mainScroll / excess); scroller.isHidden = false
+            } else { mainScroller?.isHidden = true }
+        }
+        if mode != .main { mainScroller?.isHidden = true }
+        let actionHits = mode == .main ? hits.filter { $0.id == "refresh" || $0.id.hasPrefix("retryquota:") || $0.id.hasPrefix("restorequota:") || $0.id.hasPrefix("allowquota:") || $0.id.hasPrefix("cancelquota:") } : []
+        for button in quotaButtons where !actionHits.contains(where: { $0.id == button.identifier?.rawValue }) {
+            button.removeFromSuperview()
+        }
+        quotaButtons.removeAll { $0.superview == nil }
+        for hit in actionHits {
+            let existing = quotaButtons.first { $0.identifier?.rawValue == hit.id }
+            let button = existing ?? NSButton(frame: hit.rect)
+            let visibleRect = hit.rect.intersection(bounds)
+            button.frame = visibleRect.isNull ? .zero : visibleRect
+            button.isHidden = button.frame.isEmpty; button.identifier = NSUserInterfaceItemIdentifier(hit.id)
+            button.title = ""; button.isBordered = false; button.target = self; button.action = #selector(quotaButtonClicked(_:))
+            let name = hit.id.hasSuffix("claude") ? "Claude Code" : "Codex"
+            let title = hit.id == "refresh" ? tr("Обновить сейчас", "Refresh now")
+                : (hit.id.hasPrefix("retryquota:") ? tr("Повторить", "Retry") : tr("Восстановить доступ", "Restore access")) + " · " + name
+            let accessibleTitle = hit.id == "allowquota:claude" ? tr("Разрешить доступ к Связке ключей", "Allow Keychain access")
+                : hit.id == "cancelquota:claude" ? tr("Отменить запрос разрешения", "Cancel permission request") : title
+            button.setAccessibilityLabel(accessibleTitle); button.toolTip = accessibleTitle
+            if hit.id == "refresh" { button.keyEquivalent = "r"; button.keyEquivalentModifierMask = .command }
+            if existing == nil { addSubview(button); quotaButtons.append(button) }
         }
         removeAllToolTips()
         for h in hits where h.id == "iv0" { addToolTip(h.rect, owner: self, userData: nil) }
@@ -5335,7 +5541,43 @@ final class LimitsPanelView: NSView {
         onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
     }
 
+    @objc private func quotaButtonClicked(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        if id == "refresh" { onRefresh?() }
+        else if id == "allowquota:claude" { onClaudePermission?(true) }
+        else if id == "cancelquota:claude" { onClaudePermission?(false) }
+        else if id.hasPrefix("retryquota:") { onRefreshProduct?(String(id.dropFirst(11))) }
+        else if id.hasPrefix("restorequota:") { restoreQuotaAccess(String(id.dropFirst(13))) }
+    }
+    private func restoreQuotaAccess(_ product: String) {
+        // This is an explicit help action, never an automatic sign-in or permission prompt.
+        if product == "claude", claude.auth != .keychainError { setMode(.claudeFix); return }
+        let alert = NSAlert()
+        alert.messageText = tr("Восстановить доступ", "Restore access") + " · " + (product == "claude" ? "Claude Code" : "Codex")
+        if product == "claude", claude.credentialIssue == .writeUnavailable {
+            alert.informativeText = tr(
+                "Связка ключей не сохранила обновлённые данные входа. Разблокируйте её и нажмите «Обновить сейчас», чтобы повторить сохранение. Если это не помогает, новый вход через claude login — дополнительный способ восстановления. Ошибка сохранения сама по себе не означает, что вход истёк; автоматический повторный вход не запускается.",
+                "Keychain could not save the renewed sign-in. Unlock it and click Refresh now to retry saving. If that does not help, a new sign-in with claude login is an optional recovery step. A storage failure alone does not mean the sign-in expired; no automatic sign-in is started.")
+        } else {
+            alert.informativeText = product == "claude"
+                ? tr("Откройте Claude Code в Терминале и проверьте вход. При необходимости выполните claude login. Затем вернитесь и нажмите «Обновить сейчас». Фоновое обновление не запрашивает разрешений Связки ключей.",
+                     "Open Claude Code in Terminal and check your sign-in. If needed, run claude login. Then return and click Refresh now. Background refresh does not request Keychain permissions.")
+                : tr("Откройте Codex в Терминале и выполните codex login. После входа вернитесь и нажмите «Обновить сейчас».",
+                     "Open Codex in Terminal and run codex login. After signing in, return and click Refresh now.")
+        }
+        alert.addButton(withTitle: tr("Понятно", "OK")); alert.runModal()
+    }
+
+    @objc private func mainScrolled(_ sender: NSScroller) {
+        let excess = max(0, mainPanelHeight(claude, codex) - bounds.height)
+        mainScroll = CGFloat(sender.doubleValue) * excess; needsDisplay = true
+    }
     override func scrollWheel(with event: NSEvent) {
+        if mode == .main {
+            let excess = max(0, mainPanelHeight(claude, codex) - bounds.height)
+            mainScroll = min(excess, max(0, mainScroll - event.scrollingDeltaY)); needsDisplay = true
+            return
+        }
         guard mode == .whatsnew else { super.scrollWheel(with: event); return }
         let maxScroll = max(0, notesContentH - notesViewportH)
         scroll = min(maxScroll, max(0, scroll - event.scrollingDeltaY))
@@ -5347,6 +5589,8 @@ final class LimitsPanelView: NSView {
         for h in hits where h.rect.contains(p) {
             switch h.id {
             case "refresh": onRefresh?()
+            case "allowquota:claude": onClaudePermission?(true)
+            case "cancelquota:claude": onClaudePermission?(false)
             case "quit": onQuit?()
             case "settings": setMode(.settings)
             case "back": setMode(.main)
@@ -5359,7 +5603,11 @@ final class LimitsPanelView: NSView {
             case "claudefix": setMode(.claudeFix)
             case "fixrefresh": onRefresh?(); setMode(.main)
             default:
-                if h.id.hasPrefix("copy:") {
+                if h.id.hasPrefix("retryquota:") {
+                    onRefreshProduct?(String(h.id.dropFirst(11)))
+                } else if h.id.hasPrefix("restorequota:") {
+                    restoreQuotaAccess(String(h.id.dropFirst(13)))
+                } else if h.id.hasPrefix("copy:") {
                     copyToClipboard(String(h.id.dropFirst(5)))
                 } else if h.id.hasPrefix("lang:") {
                     UserDefaults.standard.set(String(h.id.dropFirst(5)), forKey: "lang")
@@ -5490,7 +5738,9 @@ final class PanelController {
 
     func show(below button: NSStatusBarButton) {
         view.mode = .main   // always open on the main screen
-        let mainH = mainPanelHeight(view.claude, view.codex)
+        view.mainScroll = 0
+        let mainH = min(mainPanelHeight(view.claude, view.codex),
+                        ((button.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 10000) - 24)
         var origin = NSPoint(x: 200, y: 200)
         if let win = button.window {
             let bf = button.frame
@@ -5724,8 +5974,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var panelCtrl: PanelController!
     var resetSound: NSSound?
     var soundBaseline = false
-    var selectionGeneration = 0
-    var fetchingLimits = false
+    var quotaStates: [String: QuotaRefreshState] = [:]
+    var claudeReadPermit: QuotaKeychainReadPermit?
+    var fetchingLimits: Bool { quotaStates.values.contains { $0.flight != nil } }
+    var refreshDisplayTimer: Timer?
     var autoStates = loadAutoPollStates()
     var activityTimer: Timer?
     var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
@@ -5747,6 +5999,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         publishAutoIntervals()
         panelCtrl.onInterval = { [weak self] sec in self?.setInterval(sec) }
         panelCtrl.onRefresh = { [weak self] in self?.doRefresh(live: true) }
+        panelCtrl.view.onRefreshProduct = { [weak self] product in self?.doRefresh(live: true, only: product) }
+        panelCtrl.view.onClaudePermission = { [weak self] allow in
+            guard let self = self else { return }
+            if allow { self.doRefresh(live: true, only: "claude", permissionRequested: true) }
+            else { self.claudeReadPermit?.cancel(); self.publishAutoIntervals() }
+        }
         panelCtrl.onQuit = { NSApp.terminate(nil) }
         panelCtrl.onOpenURL = { [weak self] url in
             if let u = URL(string: url) { NSWorkspace.shared.open(u) }
@@ -5770,7 +6028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.view.onAutoSummary = { [weak self] in self?.autoSummary() ?? "" }
         panelCtrl.view.onProductsChanged = { [weak self] in
             guard let self = self else { return }
-            self.selectionGeneration += 1
+            self.synchronizeQuotaSelection()
             self.soundBaseline = false
             let c = selectedLimits(self.last?.0 ?? LimitData(present: false), product: "claude")
             let x = selectedLimits(self.last?.1 ?? LimitData(present: false), product: "codex")
@@ -5829,11 +6087,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startTimer()
         startLogsTimer()
         startActivityTimer()
+        let displayTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self = self, self.panelCtrl.isVisible else { return }
+            self.publishAutoIntervals()
+        }
+        RunLoop.main.add(displayTimer, forMode: .common); refreshDisplayTimer = displayTimer
         doRefresh(live: true, scheduled: true)
         startUpdateChecks()     // background update check shortly after launch + every 6h
     }
 
     func applicationWillTerminate(_ note: Notification) {
+        claudeReadPermit?.cancel()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         trayAppearanceObs?.invalidate()
         trayAppearanceObs = nil
@@ -5843,7 +6107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Dispatch deadlines may lag sleep; the owner's remaining time includes it.
         GitHubSync.shared.recheckKeychainRetry(afterWake: true)
         DispatchQueue.main.asyncAfter(deadline: .now() + 7) { [weak self] in
-            if autoPollEnabled() { self?.scanActivity(); self?.doRefresh(live: true, scheduled: true) }
+            self?.scanActivity(); self?.doRefresh(live: true, scheduled: true)
             GitHubSync.shared.syncNow()
         }
     }
@@ -5863,20 +6127,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         logsTimer = t
     }
 
+    func quotaState(_ product: String) -> QuotaRefreshState {
+        quotaStates[product] ?? QuotaRefreshState(lastAttempt: autoStates[product]?.lastAttempt ?? 0,
+                                                serverUntil: autoStates[product]?.serverRetryAt)
+    }
+    func synchronizeQuotaSelection() {
+        for product in ["claude", "codex"] {
+            var state = quotaState(product)
+            let enabled = productEnabled(product)
+            if enabled != state.enabled {
+                if product == "claude" { claudeReadPermit?.cancel() }
+                state.setEnabled(enabled)
+                // Re-enable must not wait for a schedule belonging to an invalidated selection.
+                autoStates[product]?.lastAttempt = 0
+            }
+            quotaStates[product] = state
+        }
+    }
+    func scheduledAt(_ product: String) -> Double {
+        let state = autoStates[product] ?? AutoPollState()
+        return state.lastAttempt == 0 ? 0 : state.lastAttempt + (autoPollEnabled() ? state.interval : interval)
+    }
     func startTimer() {
         timer?.invalidate()
-        let auto = autoPollEnabled()
         let now = Date().timeIntervalSince1970
-        let delays = ["claude", "codex"].filter { productEnabled($0) }.map {
-            (autoStates[$0] ?? AutoPollState()).nextDelay(now)
+        let delays = ["claude", "codex"].filter { productEnabled($0) }.compactMap { product -> Double? in
+            let state = quotaState(product)
+            guard state.flight == nil else { return nil }
+            return max(0.05, min(60, state.nextAttempt(schedule: scheduledAt(product)) - now))
         }
-        let delay = auto ? (fetchingLimits ? 60 : delays.min() ?? 60) : interval
-        let t = Timer(timeInterval: delay, repeats: !auto) { [weak self] _ in
+        // Both modes use per-provider deadlines; a slow provider never delays the other.
+        let t = Timer(timeInterval: delays.min() ?? 60, repeats: false) { [weak self] _ in
             self?.doRefresh(live: true, scheduled: true)
-            if autoPollEnabled() { self?.startTimer() }
         }
-        RunLoop.main.add(t, forMode: .common)
-        timer = t
+        RunLoop.main.add(t, forMode: .common); timer = t
         publishAutoIntervals()
     }
 
@@ -5899,7 +6183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func saveAutoStates() {
         publishAutoIntervals()
-        if autoPollEnabled() { startTimer() }
+        startTimer()
         if let data = try? JSONEncoder().encode(autoStates) { UserDefaults.standard.set(data, forKey: "autoPollState") }
     }
 
@@ -5941,49 +6225,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         scanActivity()
     }
 
-    /// Auto polls are independent per product. Explicit refresh also respects the 15-minute
-    /// floor; opening the panel respects the full schedule. Fixed intervals retain manual refresh.
-    func doRefresh(live: Bool, scheduled: Bool = false) {
-        guard !fetchingLimits else { return }
+    /// Explicit intent bypasses only the local polling schedule; server wait and singleflight win.
+    func doRefresh(live: Bool, scheduled: Bool = false, only: String? = nil, permissionRequested: Bool = false) {
+        synchronizeQuotaSelection()
+        if permissionRequested {
+            guard !scheduled, only == "claude", last?.0.credentialIssue == .readInteractionRequired else { return }
+        }
         let now = Date().timeIntervalSince1970
-        var products = Set<String>()
-        for p in ["claude", "codex"] where productEnabled(p) {
-            var state = autoStates[p] ?? AutoPollState()
-            if !autoPollEnabled() || state.due(now, manual: !scheduled) {
-                products.insert(p); state.begin(now)
-            }
-            autoStates[p] = state
-        }
-        guard !products.isEmpty else {
-            if last == nil { render(LimitData(present: false), LimitData(present: false)) }
-            return
-        }
-        fetchingLimits = true; saveAutoStates()
-        let generation = selectionGeneration
-        let previous = last ?? (LimitData(present: false), LimitData(present: false))
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            var claude = products.contains("claude") ? fetchClaude() : previous.0
-            var codex = products.contains("codex") ? fetchCodex(live: live) : previous.1
-            claude = selectedLimits(claude, product: "claude")
-            codex = selectedLimits(codex, product: "codex")
-            applyCache(&claude, &codex)
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.fetchingLimits = false
-                guard self.selectionGeneration == generation else {
-                    for p in products { self.autoStates[p]?.begin(Date().timeIntervalSince1970) }
+        for product in ["claude", "codex"] where only == nil || only == product {
+            var refresh = quotaState(product)
+            let admission = refresh.admit(scheduled ? .scheduled : .manual, now: now, scheduledAt: scheduledAt(product))
+            quotaStates[product] = refresh
+            guard case .start = admission, let ticket = refresh.flight else { continue }
+            let permit = permissionRequested && product == "claude" ? QuotaKeychainReadPermit(now: ProcessInfo.processInfo.systemUptime) : nil
+            if product == "claude" { claudeReadPermit = permit }
+            var poll = autoStates[product] ?? AutoPollState(); poll.begin(now); autoStates[product] = poll
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let response = product == "claude" ? fetchClaude(readPermit: permit) : fetchCodex(live: live)
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if let permit = permit, self.claudeReadPermit === permit { permit.cancel(); self.claudeReadPermit = nil }
+                    var state = self.quotaState(product)
+                    let accepted = state.complete(ticket, retryAfter: response.serverRetryAt)
+                    self.quotaStates[product] = state
+                    self.autoStates[product]?.serverRetryAt = state.serverUntil
+                    guard accepted, productEnabled(product) else {
+                        self.saveAutoStates()
+                        // Re-enabled selection can now proceed, subject to its local/server gates.
+                        self.doRefresh(live: true, scheduled: true, only: product)
+                        return
+                    }
+                    let previous = self.last ?? (LimitData(present: false), LimitData(present: false))
+                    let old = product == "claude" ? previous.0 : previous.1
+                    var result = response
+                    result = quotaSelectSnapshot(result, previous: old)
+                    var claude = product == "claude" ? result : previous.0
+                    var codex = product == "codex" ? result : previous.1
+                    // Shared cache is serialized on main, after selection validation, never in workers.
+                    self.cacheQuotaCompletion(product, claude: &claude, codex: &codex)
+                    let completed = product == "claude" ? claude : codex
+                    var poll = self.autoStates[product] ?? AutoPollState()
+                    poll.observe(completed, now: Date().timeIntervalSince1970)
+                    poll.serverRetryAt = response.serverRetryAt
+                    self.autoStates[product] = poll
                     self.saveAutoStates()
-                    self.doRefresh(live: true, scheduled: true); return
+                    self.render(claude, codex, sampleProducts: [product])
                 }
-                for (p, data) in [("claude", claude), ("codex", codex)] where products.contains(p) {
-                    var state = self.autoStates[p] ?? AutoPollState()
-                    state.observe(data, now: Date().timeIntervalSince1970)
-                    self.autoStates[p] = state
-                }
-                self.saveAutoStates()
-                self.render(claude, codex, sampleProducts: products)
             }
         }
+        // Every path publishes visible state, including duplicate click, countdown and no products.
+        if last == nil { render(LimitData(), LimitData()) }
+        saveAutoStates()
+        if !scheduled { panelCtrl.view.needsDisplay = true }
+    }
+
+    private func cacheQuotaCompletion(_ product: String, claude: inout LimitData, codex: inout LimitData) {
+        var cache: [String: Any] = [:]
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
+           let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { cache = object }
+        var result = product == "claude" ? claude : codex
+        if !result.apiFresh, let stored = cache[product] as? [String: Any] {
+            let snapshot = dict2ld(stored)
+            result = quotaSelectSnapshot(result, previous: snapshot)
+        }
+        if result.apiFresh {
+            cache[product] = ld2dict(result)
+            if let data = try? JSONSerialization.data(withJSONObject: cache) {
+                try? data.write(to: URL(fileURLWithPath: CACHE_PATH), options: .atomic)
+            }
+        }
+        if product == "claude" { claude = result } else { codex = result }
     }
 
     @objc func refreshNow() { doRefresh(live: true) }   // user-initiated → live Codex
@@ -6002,10 +6313,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func limitsWithPollStatus(_ data: LimitData, product: String) -> LimitData {
-        let state = autoStates[product]
-        let next = autoPollEnabled() ? state.map { Date(timeIntervalSince1970: $0.lastAttempt + $0.interval) } : timer?.fireDate
-        return withPollStatus(data, state: state, next: next)
+        let state = quotaState(product)
+        let next = state.nextAttempt(schedule: scheduledAt(product))
+        var result = withPollStatus(data, state: autoStates[product], next: Date(timeIntervalSince1970: next))
+        result.nextPollAt = Date(timeIntervalSince1970: next)
+        result.serverRetryAt = state.serverUntil
+        result.refreshInFlight = state.flight != nil
+        result.permissionRequestInFlight = product == "claude" && claudeReadPermit != nil && claudeReadPermit?.isCancelled == false
+        result.localRetryAt = state.localUntil
+        return result
     }
+
     func render(_ claude: LimitData, _ codex: LimitData, sampleProducts: Set<String> = []) {
         let claude = limitsWithPollStatus(selectedLimits(claude, product: "claude"), product: "claude")
         let codex = limitsWithPollStatus(selectedLimits(codex, product: "codex"), product: "codex")
@@ -6272,7 +6590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else {
             if let (c, x) = last { panelCtrl.update(claude: c, codex: x, interval: interval, updated: panelCtrl.view.updated) }
             panelCtrl.show(below: btn)
-            doRefresh(live: true, scheduled: autoPollEnabled())   // Auto: opening the panel respects its schedule
+            doRefresh(live: true, scheduled: true)   // Opening a panel is never explicit manual intent.
         }
     }
 
@@ -6588,8 +6906,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(!asleep.due(123399) && asleep.due(123400), "local activity still respects the 15-minute floor")
     check(!auto.due(123400) && asleep.due(123400), "Claude and Codex schedules are independent")
     var restored = try! JSONDecoder().decode(AutoPollState.self, from: JSONEncoder().encode(auto))
-    check(!restored.due(123399, manual: true) && !restored.due(123500) && restored.due(123400, manual: true),
-          "restart, panel open and repeated refresh preserve persisted schedule")
+    check(restored.due(123399, manual: true) && !restored.due(123500),
+          "manual bypasses automatic schedule; admission cooldown is tested in the pure quota seam")
     observe(&auto, 30, 136900)
     check(auto.interval == 900, "active consumption restores 15-minute polling")
     observe(&auto, 2, 137800, reset: 1100000)
@@ -6597,9 +6915,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     var cached = reading(50, 138700); cached.apiFresh = false
     auto.begin(138700); auto.observe(cached, now: 138730)
     check(auto.failed && auto.interval == 1800, "cached/rollout fallback backs off instead of posing as fresh API data")
-    check(!auto.localActivity([138740, 138750, 138760], now: 138800) && !auto.due(139630, manual: true),
-          "local activity and manual refresh cannot override error backoff")
-    check(!restored.due(120000) && restored.due(120900, manual: true), "clock rollback restarts a bounded minimum wait")
+    check(!auto.localActivity([138740, 138750, 138760], now: 138800) && auto.due(139630, manual: true),
+          "manual bypasses error backoff; local activity does not")
+    check(!restored.due(120000) && restored.due(120900, manual: true), "clock rollback preserves schedule while explicit intent bypasses it")
     check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600], "refresh choices: 15 minutes, 30 minutes, 1 hour")
     check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 1800 },
           "legacy and invalid intervals migrate to 30 minutes")
@@ -6669,6 +6987,211 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         CGImageDestinationAddImage(dst, context.makeImage()!, nil)
         check(CGImageDestinationFinalize(dst), "preview " + path)
     }
+    // MANUAL-REFRESH freeze2: synthetic bitmap fixtures, no runtime refresh paths.
+    // All inputs below are RAM-only, SYNC_PREVIEW is set and history remains collapsed.
+    // Date() affects display text only: no clock value can reach network/credentials/log scans.
+    // Do not invoke callbacks, doRefresh, fetch*, NSWorkspace, or recovery alerts here.
+    var manualImages = 0, manualChecks = 0
+    func manualCheck(_ condition: Bool, _ label: String) {
+        manualChecks += 1; check(condition, "Manual refresh UI: " + label)
+    }
+    // Pure policy/selection assertions. Closures count calls; they never launch a helper.
+    do {
+        var launches = 0, nativeCalls = 0, policies: [Bool] = []
+        let permit = QuotaKeychainReadPermit(now: 1000)
+        manualCheck(permit.admit(now: 1001, launch: { launches += 1 }), "explicit read permit admits once")
+        manualCheck(!permit.admit(now: 1002, launch: { launches += 1 }) && launches == 1, "permit cannot be reused by another operation")
+        let cancelled = QuotaKeychainReadPermit(now: 1000); cancelled.cancel()
+        manualCheck(!cancelled.admit(now: 1001, launch: { launches += 1 }), "cancel before launch prevents RPC")
+        let expired = QuotaKeychainReadPermit(now: 1000)
+        manualCheck(!expired.admit(now: 1015, launch: { launches += 1 }), "permit expires at bounded deadline")
+        permit.cancel(); manualCheck(permit.isCancelled, "in-flight adapter can observe cancellation")
+        for (operation, mode, allowed) in [("read", "quiet", true), ("read", "interactive", true),
+                                           ("update", "quiet", true), ("update", "interactive", false)] {
+            let request = ClaudeQuotaHelperRequest.parse(["synthetic-helper", "--claude-quota-keychain-helper", operation, mode])
+            manualCheck((request != nil) == allowed, "strict helper policy \(operation)/\(mode)")
+            if let request = request {
+                policies = []; nativeCalls = 0
+                let result = quotaHelperInteraction(request, setAllowed: { policies.append($0); return true }, operation: { nativeCalls += 1; return 0 })
+                manualCheck(result == 0 && policies == (mode == "interactive" ? [false, true] : [false]) && nativeCalls == 1,
+                            "UI policy applied before injected operation")
+                nativeCalls = 0
+                manualCheck(quotaHelperInteraction(request, setAllowed: { _ in false }, operation: { nativeCalls += 1; return 0 }) == 70
+                            && nativeCalls == 0, "UI-policy failure prohibits RPC")
+            }
+        }
+        let noDate = LimitData(session: 0, weekly: 47)
+        let failed = LimitData(error: "synthetic offline", auth: .expired)
+        let selected = quotaSelectSnapshot(failed, previous: noDate)
+        manualCheck(selected.session == 0 && selected.weekly == 47 && selected.asOf == nil
+                    && selected.auth == .expired && selected.error == failed.error && !selected.apiFresh,
+                    "production selector retains nil-date values including zero, current auth and failure")
+        let newer = LimitData(session: 31, weekly: 47, asOf: Date(timeIntervalSince1970: 1000), error: "synthetic offline")
+        manualCheck(quotaSelectSnapshot(newer, previous: noDate).asOf == newer.asOf,
+                    "known observation wins over unknown date without fabricating timestamps")
+        for issue in [QuotaCredentialIssue.readUnavailable, .readTimedOut, .invalidCredentials, .writeUnavailable, .cancelled] {
+            let feedback = quotaRefreshFeedback(inFlight: false, serverUntil: nil, localUntil: 0, failed: true,
+                authenticationRequired: true, dataAt: nil, nextAutomaticAt: nil, now: 1000, english: true, credentialIssue: issue)
+            manualCheck(feedback.action != .allowKeychain, "only interaction-required exposes permission action: \(issue)")
+        }
+    }
+    let manualPreferences = prefs
+    // Finish AppKit's one-time registration before measuring draw side effects.
+    // The memory-only defaults adapter is already installed; no app delegate,
+    // launch callback, event loop, refresh or recovery action is invoked here.
+    _ = NSApplication.shared
+    _ = ctFont(11, .regular); _ = ctMono(11, .regular)
+    let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
+    let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
+    for lang in ["ru", "en"] {
+        for advanced in [false, true] {
+            for fixture in ["inflight-partial", "same-values-one-codex", "network-fallback",
+                            "local-30s-one-claude", "server-wait-auth", "restore-one-codex",
+                            "allow-keychain-one-claude", "cancel-keychain-one-claude", "write-denied-one-claude"] {
+                prefs["lang"] = lang; prefs["advanced"] = advanced
+                prefs["advHistExpanded"] = false
+                prefs["interval"] = 1800
+                // Cover both fixed and Auto without calling either schedule or a timer.
+                prefs["autoPoll"] = fixture == "inflight-partial" || fixture == "server-wait-auth"
+                let claudeOn = !fixture.hasSuffix("one-codex")
+                let codexOn = !fixture.hasSuffix("one-claude")
+                select(claudeOn, codexOn)
+                let now = Date().timeIntervalSince1970
+                var snapshot = LimitData(session: 31, weekly: 47,
+                    sessionReset: Date(timeIntervalSince1970: now + 7200),
+                    weeklyReset: Date(timeIntervalSince1970: now + 86400),
+                    asOf: Date(timeIntervalSince1970: now - 1800))
+                snapshot.nextPollAt = Date(timeIntervalSince1970: now + 1800)
+                var success = snapshot
+                success.asOf = Date(timeIntervalSince1970: now); success.apiFresh = true
+                var cl = success, cx = success
+                var expectedActions: Set<String> = []
+                switch fixture {
+                case "inflight-partial":
+                    cl = snapshot; cl.refreshInFlight = true
+                case "same-values-one-codex":
+                    // Same percentages, new successful observation: still a fresh response.
+                    cx = quotaFallback(success, previous: snapshot)
+                    manualCheck(cx.apiFresh && cx.asOf == success.asOf && cx.session == snapshot.session
+                                && cx.weekly == snapshot.weekly && !cx.fromCache, "unchanged answer remains fresh")
+                case "network-fallback", "local-30s-one-claude":
+                    cl = quotaFallback(LimitData(error: "synthetic offline response"), previous: snapshot)
+                    cl.nextPollAt = Date(timeIntervalSince1970: now + 3600)
+                    if fixture == "local-30s-one-claude" { cl.localRetryAt = now + 30 }
+                    else { expectedActions.insert("retryquota:claude") }
+                    manualCheck(cl.asOf == snapshot.asOf && cl.session == snapshot.session
+                                && cl.weekly == snapshot.weekly && cl.auth == .ok && !cl.apiFresh && cl.fromCache,
+                                "network fallback preserves snapshot and auth")
+                case "server-wait-auth":
+                    let failure = LimitData(error: "synthetic HTTP 401", serverRetryAt: now + 600, auth: .expired)
+                    cl = quotaFallback(failure, previous: snapshot)
+                    cl.nextPollAt = Date(timeIntervalSince1970: now + 600)
+                    expectedActions.insert("restorequota:claude")
+                    manualCheck(cl.asOf == snapshot.asOf && cl.auth == .expired && cl.serverRetryAt == now + 600,
+                                "server deadline is independent of confirmed auth failure")
+                case "restore-one-codex":
+                    cx = quotaFallback(LimitData(error: "synthetic HTTP 401", auth: .expired), previous: snapshot)
+                    expectedActions.insert("restorequota:codex")
+                case "allow-keychain-one-claude":
+                    cl = quotaSelectSnapshot(LimitData(error: "synthetic interaction-required", credentialIssue: .readInteractionRequired, auth: .keychainError), previous: snapshot)
+                    expectedActions.insert("allowquota:claude")
+                case "cancel-keychain-one-claude":
+                    cl = snapshot; cl.refreshInFlight = true; cl.permissionRequestInFlight = true
+                    expectedActions.insert("cancelquota:claude")
+                case "write-denied-one-claude":
+                    cl = quotaSelectSnapshot(LimitData(error: "synthetic quiet update denied", credentialIssue: .writeUnavailable, auth: .keychainError), previous: snapshot)
+                    expectedActions.insert("restorequota:claude")
+                default: break
+                }
+                cl = selectedLimits(cl, product: "claude"); cx = selectedLimits(cx, product: "codex")
+                let label = "\(fixture) \(lang) \(advanced ? "advanced" : "simple")"
+                let dataBefore = [String(reflecting: cl), String(reflecting: cx)]
+                let preferencesBefore = defaults.dictionaryRepresentation() as NSDictionary
+                manualCheck(defaults.double(forKey: "interval") == 1800,
+                            label + " fixture interval initialized before draw")
+                for (enabled, data) in [(claudeOn, cl), (codexOn, cx)] where enabled {
+                    let feedback = quotaFeedback(data, now: now)
+                    manualCheck(feedback.dataAt == data.asOf?.timeIntervalSince1970
+                                && feedback.nextAutomaticAt == data.nextPollAt?.timeIntervalSince1970,
+                                label + " separate data/automatic timestamps")
+                    let timestamps = [tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt),
+                        tr("Следующая автопопытка: ", "Next automatic attempt: ") + quotaTimestamp(feedback.nextAutomaticAt)]
+                    for text in timestamps {
+                        let width = lineWidth(CTLineCreateWithAttributedString(ctAttr(text, ctFont(10, .regular), cg(.white))))
+                        manualCheck(width <= PANEL_W - 32, label + " metadata text fits")
+                    }
+                    let width = lineWidth(CTLineCreateWithAttributedString(ctAttr(feedback.status, ctFont(11, .regular), cg(.white))))
+                    manualCheck(width <= PANEL_W - 32, label + " status text fits")
+                }
+                if fixture == "local-30s-one-claude" {
+                    let feedback = quotaFeedback(cl, now: now)
+                    manualCheck(feedback.action == .none && feedback.actionTitle == (lang == "ru" ? "Повтор через 30 с" : "Retry in 30 s")
+                                && cl.serverRetryAt == nil, label + " local countdown is explicitly 30 seconds")
+                }
+                if fixture == "server-wait-auth" {
+                    let feedback = quotaFeedback(cl, now: now)
+                    manualCheck(feedback.status == (lang == "ru" ? "Сервис разрешит повтор через 10 мин" : "Service allows retry in 10 min")
+                                && feedback.action == .restoreAccess, label + " server wait retains restore action")
+                }
+                let height = mainPanelHeight(cl, cx)
+                let image = bitmapContext(Int(PANEL_W * 2), Int(height * 2))!; image.scaleBy(x: 2, y: 2)
+                let size = CGSize(width: PANEL_W, height: height)
+                let hits = advanced
+                    ? drawAdvanced(image, size: size, claude: cl, codex: cx, interval: 1800, updated: success.asOf, about: AboutState())
+                    : drawPanel(image, size: size, claude: cl, codex: cx, interval: 1800, updated: success.asOf, about: AboutState())
+                let quotaActions = hits.filter { $0.id.hasPrefix("retryquota:") || $0.id.hasPrefix("restorequota:") || $0.id.hasPrefix("allowquota:") || $0.id.hasPrefix("cancelquota:") }
+                let actualActions = Set(quotaActions.map { $0.id })
+                // A suspended drawing process can cross a display deadline; either side of
+                // that boundary is valid. This never admits runtime work or skips isolation.
+                if fixture == "local-30s-one-claude", Date().timeIntervalSince1970 >= cl.localRetryAt {
+                    manualCheck(actualActions.isSubset(of: ["retryquota:claude"]), label + " elapsed local guard permits only this provider")
+                } else {
+                    manualCheck(actualActions == expectedActions, label + " exact provider actions")
+                }
+                let refreshHits = hits.filter { $0.id == "refresh" }
+                manualCheck(refreshHits.count == 1 && refreshHits[0].rect == CGRect(x: 16, y: height - 33, width: PANEL_W - 32, height: 27),
+                            label + " one labelled refresh action at top")
+                let refreshTitle = tr("Обновить сейчас", "Refresh now")
+                let titleWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(refreshTitle, ctFont(12, .regular), cg(.white))))
+                manualCheck(titleWidth <= PANEL_W - 67, label + " explicit refresh title fits beside icon")
+                manualCheck(hits.allSatisfy { $0.rect.minX.isFinite && $0.rect.minY.isFinite
+                    && $0.rect.minX >= 0 && $0.rect.maxX <= PANEL_W && $0.rect.minY >= 0 && $0.rect.maxY <= height },
+                            label + " hit rectangles fit canvas")
+                for action in refreshHits + quotaActions {
+                    manualCheck(!hits.contains { $0.id != action.id && $0.rect.intersects(action.rect) },
+                                label + " action does not overlap another control: " + action.id)
+                    if action.id != "refresh" {
+                        let name = action.id.hasSuffix("claude") ? "Claude Code" : "Codex"
+                        let nameWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(name, ctFont(12, .regular), cg(.white))))
+                        manualCheck(action.rect.minX >= 16 + nameWidth + 8, label + " action clears provider label")
+                    }
+                }
+                manualCheck(!hits.contains { !claudeOn && ($0.id.hasSuffix(":claude") || $0.id == "claudefix")
+                    || !codexOn && $0.id.hasSuffix(":codex") }, label + " disabled provider has no quota action")
+                manualCheck(dataBefore[0] == String(reflecting: cl), label + " draw preserves Claude data")
+                manualCheck(dataBefore[1] == String(reflecting: cx), label + " draw preserves Codex data")
+                // Bridge both sides alike, including Data/NSNumber. Report keys only;
+                // every key (including unexpected registrations) remains checked.
+                let preferencesAfter = defaults.dictionaryRepresentation() as NSDictionary
+                let beforeKeys = Set(preferencesBefore.allKeys.compactMap { $0 as? String })
+                let afterKeys = Set(preferencesAfter.allKeys.compactMap { $0 as? String })
+                manualCheck(beforeKeys == afterKeys, label + " draw preserves preference keys; changed: "
+                            + beforeKeys.symmetricDifference(afterKeys).sorted().joined(separator: ","))
+                for key in beforeKeys.union(afterKeys).sorted() {
+                    let before = preferencesBefore.object(forKey: key) as? NSObject
+                    let after = preferencesAfter.object(forKey: key) as? NSObject
+                    manualCheck(before != nil && after != nil && before!.isEqual(after!),
+                                label + " draw preserves preference: " + key)
+                }
+                save(image, "/tmp/ccl-manual-refresh-\(fixture)-\(lang)-\(advanced ? "advanced" : "simple").png")
+                manualImages += 1
+            }
+        }
+    }
+    manualCheck(manualImages == 36, "36 targeted RU/EN Simple/Advanced PNG fixtures")
+    manualCheck(manualIndexBefore == (try! manualEncoder.encode(UsageLogs.shared.snapshot())), "draw preserves in-memory usage index")
+    prefs = manualPreferences; select(prefs["monitor_claude"] as? Bool ?? true, prefs["monitor_codex"] as? Bool ?? true)
+    print("Manual refresh UI fixtures: \(manualChecks) checks, \(manualImages) PNG")
     for lang in ["ru", "en"] {
         prefs["lang"] = lang
         for advanced in [false, true] {
@@ -6997,7 +7520,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         let codexRect = hits.first { $0.id == codexTarget }!.rect
                         if advanced {
                             let claudeCard = cards.first { $0.product == "claude" }!
-                            let boundary = height - (58 + claudeCard.height + 5)
+                            let boundary = height - 38 - (58 + claudeCard.height + 5)
                             authCheck(fixRect.minY > boundary && codexRect.midY <= boundary
                                       && claudeCard.noticeHeight == 38,
                                       label + " recovery hit belongs only to Claude card")

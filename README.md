@@ -19,6 +19,47 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
+## macOS 3.2.6: manual refresh (release candidate)
+
+3.2.6 is a release candidate undergoing final package QA. It has not been released
+or installed; the currently installed macOS version is 3.2.5, and Linux remains
+0.4.4. The instructions below describe the candidate.
+
+With at least one subscription enabled in Settings and that CLI signed in, open
+the panel and click **Refresh now** in its header, in Simple or Advanced view.
+It requests fresh limits for each enabled service without waiting for the Auto
+or fixed interval, including after a local network-error pause. Your chosen
+polling mode stays selected. Opening the panel in Auto still follows the schedule.
+
+- Each service shows **Refreshing…**, then its own result. One service can finish
+  while the other is still waiting. A successful reply with unchanged percentages
+  is still a successful refresh.
+- Check **Data** for the reading time and **Next automatic attempt** for the
+  schedule. A failed attempt keeps the previous figures and their original time;
+  it does not make an old reading fresh. An unknown time is shown as `—`.
+- If only one service fails, use **Retry** beside that service after the displayed
+  wait. Repeated clicks do not start a second request already in progress. The
+  **30-second local guard**, counted from the start of an attempt, is separate
+  from Auto and is not a server limit.
+- **Service allows retry in…** means the service supplied a retry deadline
+  (`Retry-After`). Manual refresh must respect it; the automatic attempt becomes
+  eligible at that deadline. No server deadline is invented when it is unknown.
+- Ordinary **Refresh now** and background attempts keep permission dialogs disabled.
+  Only when reading the Claude entry requires permission does **Allow Keychain
+  access** appear after the displayed wait. Click it for one read attempt limited
+  to 15 seconds; a system dialog may appear for that separate action. **Cancel**
+  ends the attempt; a new attempt needs a new explicit request. Read permission
+  does not authorize saving renewed sign-in data or automatically change access permissions.
+- For **Could not save renewed sign-in**, open **Restore access**, unlock
+  Keychain, then click **Refresh now** to retry saving. Read permission does not mean
+  saving succeeded. A read or save failure alone does not require signing in again.
+  If saving still fails, a new `claude login` is an optional recovery step.
+  For an actual sign-in problem, follow the affected CLI's instructions:
+  `claude login` for Claude or `codex login` for Codex, then return and refresh.
+
+These quota controls are separate from **Retry Keychain access** in GitHub sync
+settings. See [draft RU/EN notes and pending checks](docs/manual-refresh-release.md).
+
 ## macOS 3.2.5: quiet GitHub Keychain access
 
 Background GitHub Keychain access runs with system permission dialogs disabled,
@@ -95,8 +136,8 @@ by `scope.model.display_name`). The older per‑model fields (`seven_day_opus` a
 now come back `null`, so `limits[]` is the only source for those.
 
 **Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
-uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 15/30/60‑min timer,
-and popover open), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
+uses — `GET /backend-api/wham/usage` — when a refresh is admitted by the
+polling rules (see Auto and manual refresh above), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
 via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
 = 7‑day. If a live call fails it falls back to the most recent local session log
 (`~/.codex/sessions/**/rollout-*.jsonl`).
@@ -200,7 +241,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
-- **Refresh button** (top‑right of the popover) → refresh now.
+- **Refresh button** → request updated limits. The draft macOS 3.2.6 header labels it **Refresh now**; see the draft instructions above.
 - **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto).
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
@@ -209,7 +250,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 Activity means an increase of at least 1 percentage point per 15 minutes in any comparable limit, measured over the time between readings. The first response establishes a baseline; limit window resets are not consumption. Local token logs are checked every 2 minutes without an API request: three distinct events with positive token usage in the past 15 minutes also restore 15-minute polling.
 
-In Auto, opening the panel keeps the schedule; manual refresh waits at least 15 minutes after the previous response. Errors and cached responses extend the pause, and local activity or manual refresh cannot shorten that error backoff. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
+In macOS 3.2.5 and Linux 0.4.4, opening the panel in Auto keeps the schedule; manual refresh waits at least 15 minutes after the previous response. Errors and cached responses extend the pause, and local activity or manual refresh cannot shorten that error backoff. The approved macOS 3.2.6 scenario above separates manual requests from this local schedule; Linux behavior is unchanged. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
 
 ## Build a release
 
