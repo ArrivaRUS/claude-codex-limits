@@ -27,4 +27,8 @@ Frozen snapshot3:/private/tmp/ccl-quiet-review3-gyjtha2b. CodeReviewer и Securi
 
 ## Выпуск
 
-Публикация и локальная установка пока не выполнены. Артефакты QA:/private/tmp/ccl-quiet-qa-vd6lmbnc. Тестовые артефакты:/private/tmp/ccl-independent-quiet-v46ha3no/snapshot3 и /private/tmp/ccl-quiet-tests/auth-final.log.
+Опубликован [macOS 3.2.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.5), Latest=v3.2.5; release tag на782087fa8d5eb753e04cf2c541c15a31ccee5c30 (production66587e9). Публичный DMG повторно скачан в /private/tmp/ccl-public-3.2.5; SHA256153517fccdcbcedf10d4c48a072bfaf588ed416a4ef3ef33ca67aae0e824e11c совпал с принятым пакетом.
+
+Установлен /Applications/Claude Codex Limits.app; версия3.2.5, strict codesign PASS, binary SHA0543c357eaf6190aacfab1625486e99094b6728d288b2984f92f90558b1a3bb7 совпал. После обычного запуска подтверждён процесс PID72805. Receipt:/private/tmp/ccl-install-3.2.5-receipt.json; предыдущая копия для отката:/private/tmp/ccl-install-backup-wvz71myo/Claude Codex Limits.app. Проверка запуска не доказывает отсутствие native окон на всех фоновых путях и не меняет указанные выше границы тестирования.
+
+ Артефакты QA:/private/tmp/ccl-quiet-qa-vd6lmbnc. Тестовые артефакты:/private/tmp/ccl-independent-quiet-v46ha3no/snapshot3 и /private/tmp/ccl-quiet-tests/auth-final.log.

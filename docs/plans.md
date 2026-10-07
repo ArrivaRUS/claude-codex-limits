@@ -2,7 +2,7 @@
 
 ## KEYCHAIN-QUIET · 2026-10-07
 
-Production66587e9 и DMG153517fc приняты; выпуск/установка завершаются. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).
+Production66587e9 и DMG153517fc приняты; v3.2.5 опубликован (Latest) и установлен на этом Mac; публичный DMG SHA совпал, запуск PID72805 подтверждён. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).
 
 
 > Текущий инкремент2026-10-05: [FRESH-4H](freshness-4h-plan.md), [KEYCHAIN-RETRY](keychain-retry-plan.md). Production/review/тесты/CI/native UI приняты. Binary target13 и пакетная приёмка PASS. Выпущено 2026-10-06: [macOS3.2.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.4) на4a5c372 и [Linux0.4.4](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.4) наbd16d9c. Публичные DMG/DEB скачаны и SHA совпали; Latest=v3.2.4. На этом Mac установлен3.2.4 в /Applications, подпись и binary SHA проверены, PID29719 запущен. Резервная3.2.3: /private/tmp/ccl-install-backup-_eivvisr/Claude Codex Limits.app. [Доказательства](freshness-keychain-verification.md).

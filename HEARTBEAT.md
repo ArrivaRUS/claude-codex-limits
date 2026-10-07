@@ -4,7 +4,7 @@
 
 ## Актуальный статус · 2026-10-07
 
-- KEYCHAIN-QUIET принят:3.2.5 production66587e9; Code/SecurityPASS, auth31039/0, независимые30/0, QA1401/0+214PNG, DMG153517fc. Готов к публикации и установке. Пользователь подтвердил повторы после Always Allow на3.2.4. Предыдущий cooldown600s не гарантировал отсутствие диалогов. [План](docs/keychain-no-background-prompts.md).
+- KEYCHAIN-QUIET принят:3.2.5 production66587e9; Code/SecurityPASS, auth31039/0, независимые30/0, QA1401/0+214PNG, DMG153517fc. Опубликован v3.2.5 (Latest), публичный DMG скачан и SHA совпал. Установлен /Applications/Claude Codex Limits.app, версия/strict codesign/binary SHA подтверждены, PID72805 работает. Пользователь подтвердил повторы после Always Allow на3.2.4. Предыдущий cooldown600s не гарантировал отсутствие диалогов. [План](docs/keychain-no-background-prompts.md).
 
 ## Предыдущий статус · 2026-10-06
 

@@ -75,6 +75,8 @@ Only document content is checked in this TechWriter task. No build, app, CLI,
 API, Keychain, real credentials or user-log inspection is performed. Runtime
 behavior, denial/cancellation, time limits, native no-UI, packaged validation,
 notarization/Gatekeeper status and installation are not verified here.
-Before publication, the coordinator must reconcile these drafts with the frozen
-source and independent evidence. Until then, release/installed/tests PASS claims
-for 3.2.5 remain absent.
+Coordinator acceptance, 2026-10-07: reconciled with frozen source and independent
+evidence; v3.2.5 published and installed. The public DMG hash matches the accepted
+package and the installed process is running. See [final verification](keychain-quiet-verification.md)
+for exact source, checks, release and limits; the paragraph above describes only the
+original TechWriter assignment.

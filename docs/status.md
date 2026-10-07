@@ -2,7 +2,7 @@
 
 ## KEYCHAIN-QUIET · 2026-10-07
 
-Production66587e9 и DMG153517fc приняты; выпуск/установка завершаются. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).
+Production66587e9 и DMG153517fc приняты; v3.2.5 опубликован (Latest) и установлен на этом Mac; публичный DMG SHA совпал, запуск PID72805 подтверждён. [План](keychain-no-background-prompts.md), [итоговые проверки](keychain-quiet-verification.md).
 
 
 ## FRESH-4H / KEYCHAIN-RETRY — приёмка 2026-10-05

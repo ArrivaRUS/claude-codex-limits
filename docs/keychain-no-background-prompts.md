@@ -15,7 +15,7 @@ DeveloperComplex реализует в отдельной копии. SecurityAn
 Тесты не обращаются к реальным credentials/API/Keychain/userlogs. Сама причина первого nativeprompt/конкретный ACL не установлены; факт «Always Allow не устранило повторы» принадлежит пользователю. Проверку живых ACL нельзя выдавать за выполненную по мокам.
 
 ## Статус
-Production66587e9 и пакет153517fc приняты независимыми CodeReviewer/SecurityAnalyst/Tester/QA. Публикация/установка ещё не выполнены. Итоговые доказательства: [verification](keychain-quiet-verification.md).
+Production66587e9 и пакет153517fc приняты независимыми CodeReviewer/SecurityAnalyst/Tester/QA. v3.2.5 опубликован и установлен; скачанный публичный DMG совпадает по SHA, приложение запущено. Итоговые доказательства: [verification](keychain-quiet-verification.md).
 
 ## Read-only снимок после уточнения
 
