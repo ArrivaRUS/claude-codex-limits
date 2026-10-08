@@ -1,7 +1,7 @@
 # macOS 3.2.7 — COMPACT-REFRESH
 
-2026-10-08. Изменения macOS 3.2.7; Linux остаётся 0.4.4.
-macOS 3.2.7 changes; Linux stays at 0.4.4.
+2026-10-08. [macOS 3.2.7 опубликована](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.7) и установлена на Mac владельца; Linux остаётся 0.4.4.
+macOS 3.2.7 released and installed on the owner’s Mac; Linux stays at 0.4.4.
 Проверки и статус выпуска / verification and release status: [реестр / acceptance](compact-refresh-verification.md).
 
 ## Русский

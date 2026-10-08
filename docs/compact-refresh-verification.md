@@ -1,6 +1,6 @@
 # COMPACT-REFRESH 3.2.7 — acceptance
 
-Status: final source a60319 accepted by independent production/isolation, packaged QA and design review. Publication and installation pending. Earlier candidates below are historical. User rejected 3.2.6 composition. Accepted layout: [UX](compact-refresh-ux.md).
+Status: final source a60319 accepted by independent production/isolation, packaged QA and design review. Published and installed as macOS3.2.7; public/installed checks passed. Earlier candidates below are historical. User rejected 3.2.6 composition. Accepted layout: [UX](compact-refresh-ux.md).
 
 - HEAD at freeze: 9fb6738f4ceed711d9c3c2f632830fa1ff748c4a, uncommitted UI/docs.
 - Snapshot: /private/tmp/ccl-compact-review-sg_4o6_v.
@@ -54,3 +54,11 @@ Independent CodeReviewer doc consistency PASS for README RU/EN, project guide, r
 ## Final independent design acceptance a60319
 
 DesignReviewer (Sol6.1/high): FINAL PASS, no P1/P2. Viewed all52 Manual and88 Auto/Fixed/Off plus8 affected Auth PNGs; all314 hashes match QA manifest. Unified gradient/radii, header refresh and compact card feedback accepted against reference/UX; no external strips/list, clipping or overlaps. Previous missing-provider/duplicate-error P2 closed; snapshot line and excess height absent. RU/EN, Simple/Advanced, one/two/off, manual4h and Auto A+actual15/30/60/240 accepted. Full frames reviewed (no footer-only crops); tooltip/native focus/hit targets not proven by PNGs. Unchanged full Auth120 not re-reviewed. Source hash still a60319.
+
+## Publication and installation · 2026-10-08
+
+Released [v3.2.7](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.7) from source commit `1078ddbe058196204265a0bc565ff591cb8ca45c`; GitHub Latest=v3.2.7. Public DMG downloaded independently and SHA256 matches accepted4b5a8ca3403bcc9d3e06b592d4270a441c817f2702c4f5a86ab897afa64c79ac; API asset digest agrees and state=uploaded. Linux remains0.4.4.
+
+Installed `/Applications/Claude Codex Limits.app`, version/build3.2.7, binary978f1aece62a8e1c8b5bfd9ad1d2d04e2420d2840711e9e415b3c5823c7d8a81, strict codesign PASS. Previous canonical PID96073 stopped normally; new canonical PID15393 verified running. Normal launch was the authorized installation step, not part of synthetic tests. Previous3.2.6 bundle retained at `/private/tmp/ccl-install-backup-rvyytyw6/Claude Codex Limits.app`.
+
+Receipts: `/private/tmp/ccl-installed-3.2.7-verified.json`, `/private/tmp/ccl-public-3.2.7-verified.json`, `/private/tmp/ccl-install-3.2.7-receipt.json`. No app credentials or account files read for installation verification. Coordinator performed integration/docs/package/release/install; substantial implementation and independent reviews stayed with approved roles.

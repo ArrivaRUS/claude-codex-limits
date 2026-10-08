@@ -141,3 +141,7 @@ path-migration проблему вынести отдельно после оп�
 ## 2026-10-08 — приёмка COMPACT-REFRESH
 
 Exact source a60319 принят независимыми CodeReviewer (production/isolation) и DesignReviewer; QA packaged5089/0,17/17files,minOS13/arm64/sign. Старые P2 закрыты; Native focus/tooltip/live accounts не заявлены проверенными. Выпуск и установка3.2.7 выполняются по действующему разрешению; Linux0.4.4 не меняется.
+
+## 2026-10-08 — публикация и установка COMPACT-REFRESH
+
+v3.2.7 опубликована на source1078ddbe058196204265a0bc565ff591cb8ca45c, Latest=v3.2.7. Публичный DMG4b5a8ca3 скачан и совпал с принятым. Установлен binary978f1aec в /Applications; strict codesign/версия3.2.7/PID15393 подтверждены. Предыдущая3.2.6 сохранена для отката. Linux0.4.4 не менялся.
