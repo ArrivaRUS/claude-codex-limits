@@ -89,3 +89,17 @@ Tester added30representativePNG scenarios in two existing UI test files: fixed15
 ## CI2 gate
 
 Narrow CodeReviewer found missing LINK in extracted-function test namespace; Tester added only syntheticLINK='link', _freshness_env SHAde2e3cca1c351e02d1906752ad0167b545768dec51d7d82eef295ccfbc266d3f. Reviewer confirmed onlythisdelta vs s4o8lp5k and closedP2. Bounded functional + isolation PASS forCI2; same outerCIconditions.
+
+## CI2 success
+
+Exactsource19440ee112f164b411bf4715d6fa65077a272c48; [run37730102871](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37730102871) succeeded.358tests /0failures /0errors /0skips. Preflight:uid10001,synthetic/home/ccltest,loopbackonly,noexternalinterface,noDBusorcredentialenv. Artifacts downloaded to /private/tmp/ccl-linux-ci2-artifacts. DEB SHA25699acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10. Independent packagedQA and visualdelta review assigned; not yet accepted or published. Two actualCI referencePNG copied into docs/linux-compact-refresh-auto4h-ru.png and docs/linux-compact-refresh-simple-ru.png.
+
+## Independent visual acceptance
+
+DesignReviewer CI2 delta PASS:37actualPNG visually inspected (30newscenarios+7P2/P3),26CI1->CI2pixelcomparisons. Contrast measured5.2823:1RU /5.5002:1EN; missingduplicategone. Fixed15/60/240,Autoequal30/30+60bothpermutations,localguard30s,server90sdisplay2min,partialcompletionbothdirections,CodexonlySimple,Fusion/Breeze accepted.18/26priorcompactimagesidentical;4errorchangedonlyactioncolor,4missingchangedfooter,all26dimensionsretained. Exactsource19440ee; panelSHAee19fe21. LiveALSE/HiDPI/interactivefocus/tooltip/keyboard remainunverified, no concrete blocker. Code/security/isolation conclusions remain valid; packageQA pending.
+
+## Independent packaged QA
+
+QA report /private/tmp/ccl-linux-qa-final/REPORT.md: bounded static packagePASS,202assertions/0failures,19Python3.7grammarchecks. DEB621880bytes;39regularfiles/18directories,34payloadfiles match exactsource19440ee blobs; generated5payload+3controlentries match buildrecipe. Version0.4.5,archall,dependsPython>=3.7/PyQt5/dbus; permissions/installpaths and existingupgradecontract accepted. No usercredentials/cache/tests/buildjunk inallowlistedpayload. CIjson358/0/0/0 and184PNGinventory checked. Liveinstall/ALSE/nativekeyring/audio/UI notrun.
+
+QA observed coordinator-owned verification.md and2referencePNG made workingtree dirty while exactsource/packageinputs remainedunchanged. These expected acceptance artifacts are committed bycoordinator beforeclean-tree verification; no packagecontent defect or rebuild required. SameDEBSHA99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10 independentlyconfirmed.
