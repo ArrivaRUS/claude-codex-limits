@@ -151,3 +151,7 @@ v3.2.7 опубликована на source1078ddbe058196204265a0bc565ff591cb8ca
 Владелец запросил Linux-версию исправленного интерфейса3.2.7. Порт UI выполняется на existing Linux refresh/poll/auth:4ч,Autohighlight,compactfeedback,noannotation. ВыпускDEB linux-v0.4.5 --latest=false, macOS3.2.7Latest. План docs/linux-compact-refresh-plan.md; изолированныйLinuxCI и независимыйdesignreview обязательны.
 
 Linux0.4.5 scope refinement: discovered existingmanual900sfloor; portacceptedMANUAL-REFRESHcontract as well soLinuxanswers originaluserproblem. DeveloperComplex forconcurrency/result/retrymetadata; SecurityAnalystT2. Existingauthstores/endpointsandAutoalgorithm retained. App.py ownershipserializedafterDesignEngineer.
+
+## 2026-10-08 — публикация Linux 0.4.5
+
+Принята ревизия19440ee112f164b411bf4715d6fa65077a272c48: CI358/0ошибок/0пропусков; независимые code/security/isolation, visualdelta37PNG+26сравнений и packagedQA202проверки PASS. Выпущен linux-v0.4.5 с точнымCI DEB, --latest=false. Публичный файл скачан и совпал побайтно; SHA99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10. Latest=v3.2.7. Измененияmetadata не подменяют ревизию пакета. LiveALSE/ThinkPad и фактическая установка не заявляются выполненными. Root вёл интеграцию/память/выпуск; реализация и проверки делегированы утверждённым ролям без изменения моделей.

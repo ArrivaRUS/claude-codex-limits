@@ -12,29 +12,27 @@ Linux-порт macOS-приложения из этого репозитория
 | **`claude-codex-limits`** | значок в трее Fly/KDE с процентами лимитов; по клику открывается панель, как на Mac: простой вид или расширенный (темп, столбики за 7 дней, календарь за 35 дней, деньги) | `python3-pyqt5` из репозитория ОС |
 
 Предыдущие версии порта проверены на Astra Linux SE 1.8.5 (Python 3.11, PyQt5 5.15, KDE Plasma / Fly).
-Для кандидата 0.4.5 CI, QA и живая проверка ALSE ещё не подтверждены. Код совместим
+Для 0.4.5 CI и QA пакета пройдены; живая проверка ALSE/ThinkPad не подтверждена. Код совместим
 с Python 3.7, который стоит в Astra 1.7. Никаких `pip install` не требуется.
 
-## Linux 0.4.5 / Linux 0.4.5 candidate
+## Linux 0.4.5
 
-**Кандидат до CI, QA и выпуска координатором / Candidate pending CI, QA and coordinator release.** Инструкции 0.4.5 сверены с исходниками freeze3; исполнение и пакет здесь не проверялись. Instructions were checked against freeze3 source, without runtime or package acceptance. Latest остаётся macOS 3.2.7; Linux DEB должен выйти как `linux-v0.4.5`, не Latest.
+**Опубликована / Published:** [linux-v0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, независимые ревью и QA пакета — PASS / CI, independent reviews and package QA passed: [приёмка / verification](../docs/linux-compact-refresh-verification.md). Linux не Latest; Latest остаётся macOS 3.2.7.
 
 **RU:** Войдите в нужный CLI и включите подписки в Настройках. В простом или расширенном виде нажмите небольшую иконку обновления рядом с Настройками в прежней шапке. Статус запроса и время данных компактно показаны внутри карточки сервиса; подробности — в подсказке. Выбор **15м / 30м / 1ч / 4ч** включает фиксированный режим (4ч сохраняются как 14400 секунд); старые 1/5 минут заменяются на 30 минут. **«А»** включает Auto: подсвечиваются «А» и фактические интервалы только включённых сервисов, при разных интервалах — оба сегмента. При выключенных подписках интервалы не подсвечены; «А» может оставаться выбранной в Auto. Отдельной частоты и строки «Темп по снимку от…» нет; прогнозы и нужные сообщения о проблемах сохраняются.
 
 **EN:** Sign in through the required CLI and enable subscriptions in Settings. In Simple or Advanced view, use the small refresh icon beside Settings in the existing header. Each provider card contains compact request status and data time; its tooltip provides details. Select **15m / 30m / 1h / 4h** for fixed polling (4h is saved as 14400 seconds); old 1/5-minute settings migrate to 30 minutes. **A** selects Auto, highlighting A and the actual intervals of enabled providers; different intervals highlight both segments. With both subscriptions off, no interval is highlighted; A may remain selected in Auto. There is no standalone frequency or “Pace from snapshot at…” annotation; forecasts and necessary warnings remain.
 
-**Ручное обновление — контракт кандидата:** обходит локальное расписание Auto/фиксированного опроса и паузу после ошибки, сохраняя выбранный режим. Защита 30 секунд и один одновременный запрос действуют отдельно для каждого сервиса; результаты появляются независимо, повтор доступен только для проблемного сервиса. Реальный Retry-After соблюдается. Неизменившийся живой ответ — успех; fallback сохраняет исходное время данных. Проблема входа показывает следующий шаг для нужного CLI без автоматического входа и запросов разрешений; механизм macOS Keychain permit на Linux не переносится.
+**Ручное обновление:** обходит локальное расписание Auto/фиксированного опроса и паузу после ошибки, сохраняя выбранный режим. Защита 30 секунд и один одновременный запрос действуют отдельно для каждого сервиса; результаты появляются независимо, повтор доступен только для проблемного сервиса. Реальный Retry-After соблюдается. Неизменившийся живой ответ — успех; fallback сохраняет исходное время данных. Проблема входа показывает следующий шаг для нужного CLI без автоматического входа и запросов разрешений; механизм macOS Keychain permit на Linux не переносится.
 
-**Manual refresh — candidate contract:** bypass the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, with retry for just the failed provider. Respect actual Retry-After deadlines. An unchanged live answer is a success; fallback keeps the old data timestamp. Show guidance for the affected CLI without automatic login or permission prompts; Linux does not use macOS Keychain permits. [RU/EN notes and post-release installation](../docs/linux-compact-refresh-release.md).
+**Manual refresh:** bypass the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, with retry for just the failed provider. Respect actual Retry-After deadlines. An unchanged live answer is a success; fallback keeps the old data timestamp. Show guidance for the affected CLI without automatic login or permission prompts; Linux does not use macOS Keychain permits. [RU/EN release notes and installation](../docs/linux-compact-refresh-release.md).
 
-## Установка 0.4.5 после выпуска
-
-Следующие шаги предназначены для будущего опубликованного пакета; кандидат ещё ожидает CI/QA и выпуска координатором.
+## Установка 0.4.5
 
 ### Пакет .deb (рекомендуется)
 
-1. После выпуска скачайте `claude-codex-limits_0.4.5_all.deb` из `linux-v0.4.5`
-   в [списке релизов](https://github.com/ArrivaRUS/claude-codex-limits/releases).
+1. Скачайте `claude-codex-limits_0.4.5_all.deb` из
+   [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5).
 2. Откройте файл двойным щелчком и нажмите «Установить» (нужен пароль администратора) или
    поставьте из терминала:
    ```sh
@@ -127,7 +125,7 @@ Linux 0.4.3 опубликован; код, DEB и публичный скача
 
 ## Выбор подписок и интервал обновления
 
-Инструкция для **кандидата 0.4.5**, ожидающего CI/QA и выпуска. В настройках есть блок **«Собирать и показывать»** с отдельными
+Инструкция для **0.4.5**. В настройках есть блок **«Собирать и показывать»** с отдельными
 переключателями Claude Code и Codex. Чтобы оставить только Codex, выключите Claude Code.
 Выбор сохраняется на этом компьютере и действует для простого и расширенного вида, трея,
 уведомлений и фонового сборщика `ccl-sync`. Можно выключить обе подписки; настройки останутся

@@ -19,15 +19,15 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
-## Linux 0.4.5: compact refresh candidate
+## Linux 0.4.5: compact refresh
 
-**Candidate; pending CI, QA and coordinator release.** The 0.4.5 instructions were checked against frozen source (freeze3); this is not runtime or package acceptance. macOS **3.2.7 remains Latest**. Earlier release sections below retain their historical behavior.
+**Published:** [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, independent reviews and package QA passed; see the [verification report](docs/linux-compact-refresh-verification.md). macOS **3.2.7 remains Latest**. Earlier release sections below retain their historical behavior.
 
 With the required CLI signed in and the desired subscriptions enabled in Settings, open Simple or Advanced view. Use the small refresh icon beside Settings in the existing header; read compact request status and data time inside each provider card, with details in its tooltip.
 Choose **15 min / 30 min / 1 h / 4 h** for fixed polling, or **A** for Auto. Auto highlights A and the actual intervals of enabled providers together: different intervals highlight both segments; disabled providers do not contribute. With both subscriptions off, no interval is highlighted; A can remain selected if Auto is saved. There is no separate frequency label or **Pace from snapshot at…** annotation; forecasts and relevant access/data warnings remain.
 
-Under the candidate contract, manual refresh bypasses the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, and a failed provider can be retried on its own. Actual server Retry-After deadlines still apply. An unchanged live response counts as success; fallback retains the old reading time. Sign-in problems show guidance for the affected CLI without automatic login or permission prompts; macOS Keychain permits are not part of the Linux flow.
-After coordinator publication, use the DEB from **linux-v0.4.5**, which must not be Latest. [RU/EN candidate notes and installation steps](docs/linux-compact-refresh-release.md).
+Manual refresh bypasses the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, and a failed provider can be retried on its own. Actual server Retry-After deadlines still apply. An unchanged live response counts as success; fallback retains the old reading time. Sign-in problems show guidance for the affected CLI without automatic login or permission prompts; macOS Keychain permits are not part of the Linux flow.
+Use the DEB from **linux-v0.4.5**, published without Latest. [RU/EN release notes and installation steps](docs/linux-compact-refresh-release.md).
 
 ## Release history — macOS 3.2.7: compact refresh
 
@@ -104,7 +104,7 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 
 ## Features
 
-Refresh and interval instructions cover macOS 3.2.7 and the **Linux 0.4.5 candidate**, pending CI/QA and release.
+Refresh and interval instructions cover macOS 3.2.7 and **Linux 0.4.5**.
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
@@ -242,11 +242,11 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 
 ### Linux (Astra Linux)
 
-Linux **0.4.5 is a candidate**, pending CI/QA and release; live ALSE/ThinkPad installation is not confirmed. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
+Linux **0.4.5 is published**; live ALSE/ThinkPad installation is not confirmed. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. **After coordinator release**, download `claude-codex-limits_0.4.5_all.deb` from `linux-v0.4.5` in the [release list](../../releases). Linux is not Latest; Latest remains macOS 3.2.7.
+1. Download `claude-codex-limits_0.4.5_all.deb` from [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5). Linux is not Latest; Latest remains macOS 3.2.7.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
    sudo apt install ./claude-codex-limits_0.4.5_all.deb
@@ -259,7 +259,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 ## Usage
 
-For macOS 3.2.7 and the **Linux 0.4.5 candidate**; Linux CI/QA and release remain pending. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
+For macOS 3.2.7 and **Linux 0.4.5**. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
 
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.

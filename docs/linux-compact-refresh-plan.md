@@ -16,6 +16,6 @@ DesignEngineer Sol6.1/high реализует UI+версию; DeveloperComplex 
 
 ## Статус
 
-План до реализации зафиксирован. Код Linux0.4.4 прочитан; обновлениеquota уже доступно черезrefreshicon. Реализация0.4.5 и проверкиpending.
+Завершено и опубликовано 2026-10-08: Linux0.4.5 на19440ee112f164b411bf4715d6fa65077a272c48. Проверенный CI DEB выпущен какlinux-v0.4.5, macOS3.2.7 остаётсяLatest. [Приёмка](linux-compact-refresh-verification.md).
 
-Уточнение после чтенияLinux: existingmanualbutton сохраняла900сfloor. ЧтобыLinuxрелиз решал исходнуюпроблему пользователя, включёнпорт принятогоMANUAL-REFRESHконтракта, а не только внешнего вида. Реализация разныхавторов вapp.py строго последовательная.
+Уточнение объёма после чтения Linux: existing manualbutton сохраняла900сfloor. Поэтому порт включил принятыйMANUAL-REFRESHконтракт. Владение app.py передавалось последовательно между DesignEngineer и DeveloperComplex; независимые проверки выполнены отдельными ролями.

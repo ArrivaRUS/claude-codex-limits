@@ -1,6 +1,6 @@
 # LINUX-COMPACT · 2026-10-08
 
-Linux0.4.5: implementation at `2d224e041d7b85a029dc1ccd723c8c595d09165e`, independent production Code/Security and isolation gates passed. [CI37728899968](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37728899968) completed with356tests/11failures/1error/0skips. Independent review accepted bounded test corrections; visual review requested a brighter recovery link and removal of duplicate missing-state text. Those UI fixes and supplementary screenshots are in progress before rerun. Package QA and publication remain pending. [План](linux-compact-refresh-plan.md), [приёмка](linux-compact-refresh-verification.md).
+Linux 0.4.5 опубликована: компактная панель, ручные 4ч, Auto с подсветкой действующих интервалов и независимое ручное обновление. Исходная ревизия `19440ee112f164b411bf4715d6fa65077a272c48`; CI 358 тестов без ошибок и пропусков, независимые code/security/isolation/design и packaged QA пройдены. Публичный DEB скачан обратно: SHA-256 совпал с принятым пакетом. Latest остаётся macOS 3.2.7. Установка на живой ALSE/ThinkPad в этом цикле не выполнялась. [Релиз](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), [приёмка](linux-compact-refresh-verification.md).
 
 # COMPACT-REFRESH · 2026-10-08
 

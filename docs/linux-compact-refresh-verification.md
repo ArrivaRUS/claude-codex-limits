@@ -1,6 +1,6 @@
 # Linux0.4.5 — приёмка
 
-Status: implementation and independent tests in progress. Base53bb5bfa8004876b9baf5bcb3766875a6d539302; plan a1bfb05 committed before code.
+Status: released 2026-10-08 as linux-v0.4.5. Accepted source19440ee112f164b411bf4715d6fa65077a272c48; full evidence below. Earlier pending/failure entries are chronological history.
 
 ## Baseline evidence
 
@@ -103,3 +103,9 @@ DesignReviewer CI2 delta PASS:37actualPNG visually inspected (30newscenarios+7P2
 QA report /private/tmp/ccl-linux-qa-final/REPORT.md: bounded static packagePASS,202assertions/0failures,19Python3.7grammarchecks. DEB621880bytes;39regularfiles/18directories,34payloadfiles match exactsource19440ee blobs; generated5payload+3controlentries match buildrecipe. Version0.4.5,archall,dependsPython>=3.7/PyQt5/dbus; permissions/installpaths and existingupgradecontract accepted. No usercredentials/cache/tests/buildjunk inallowlistedpayload. CIjson358/0/0/0 and184PNGinventory checked. Liveinstall/ALSE/nativekeyring/audio/UI notrun.
 
 QA observed coordinator-owned verification.md and2referencePNG made workingtree dirty while exactsource/packageinputs remainedunchanged. These expected acceptance artifacts are committed bycoordinator beforeclean-tree verification; no packagecontent defect or rebuild required. SameDEBSHA99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10 independentlyconfirmed.
+
+## Publication and final integration
+
+[Linux0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5) published with exact acceptedCI DEB, target19440ee112f164b411bf4715d6fa65077a272c48 and --latest=false. Publicasset downloaded to /private/tmp/ccl-linux-public-045, cmp identical; SHA25699acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10 and GitHubAPI digest agree;621880bytes, stateuploaded. APIreleases/latest remainsv3.2.7. NoLinuxinstallation performed onMac/ThinkPad.
+
+Coordinator committed expected QA metadata/2referencePNG in482a903; subsequentgitstatusshort wasempty, closing QA workingtree-cleanliness finding withoutchangingpackageinputs. Main fast-forwarded53bb5bf→482a903 beforepublication. Release tag targets acceptedsource ratherthanmetadata. Final release-status docs are a separate metadata update.

@@ -1,4 +1,4 @@
-> Текущий запрос 2026-10-08: [LINUX-COMPACT0.4.5](linux-compact-refresh-plan.md), перенос принятого компактного интерфейса и выпуск DEB. macOS3.2.7 уже выпущена.
+> LINUX-COMPACT 0.4.5 завершена и опубликована 2026-10-08. [План](linux-compact-refresh-plan.md), [проверки](linux-compact-refresh-verification.md). macOS 3.2.7 остаётся Latest.
 
 # MANUAL-REFRESH · 2026-10-07
 
