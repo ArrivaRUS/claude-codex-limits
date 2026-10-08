@@ -1,3 +1,7 @@
+# COMPACT-REFRESH · 2026-10-08
+
+COMPACT-REFRESH 3.2.7 принята: независимые code/isolation/design PASS, пакетная QA 5089 OK / 0 ошибок. Добавлены 4ч и подсветка Auto + фактических интервалов; внешние блоки и справка о снимке удалены. Публикация и установка выполняются; пока установлена 3.2.6. [Приёмка](compact-refresh-verification.md).
+
 # MANUAL-REFRESH · 2026-10-07
 
 MANUAL-REFRESH завершён: macOS3.2.6 опубликована и установлена. Source d50584bcf5c7b7b63eb6df2ef50539b11fd0f045; Code/SecurityPASS, pure78/1089/0, packaged3091/0, QA36 новых PNG. Публичный DMG b8ff16fc совпал; installed strict codesign/SHA PASS, PID96073. Linux0.4.4 не меняется. [Приёмка](manual-refresh-verification.md).

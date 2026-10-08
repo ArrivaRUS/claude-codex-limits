@@ -1,10 +1,11 @@
 # Бэклог
 
-- In progress, COMPACT-REFRESH: вернуть прежнюю цельную панель, встроить refresh/status внутрь шапки/карточек. Прямое замечание владельца к3.2.6; план docs/compact-refresh-plan.md. Отдельное независимое дизайн-ревью обязательно.
+- Accepted, COMPACT-REFRESH 3.2.7: цельная панель, refresh/status внутри шапки/карточек, ручные 4ч и Auto + фактические интервалы, удаление справки о снимке. Code/isolation/design и packaged QA PASS; публикация/установка в процессе. Приёмка: docs/compact-refresh-verification.md.
 
 - Done, MANUAL-REFRESH: macOS3.2.6 опубликована и установлена; ручное обновление отдельно от Auto. [Приёмка](docs/manual-refresh-verification.md).
 
-- Could: EN Advanced Claude writeUnavailable badge показывает “read failed”; подробное сообщение об ошибке сохранения корректно. P3 QA3.2.6.
+- Done в коде 3.2.7: EN Advanced Claude writeUnavailable badge исправлен на “save failed”; подробное сообщение об ошибке сохранения сохранено. P3 QA3.2.6.
+- Could: при readInteractionRequired во время локальной паузы обратный отсчёт виден только в tooltip, а не в карточке. Допуск действий корректен; P3 CodeReviewer3.2.7.
 
 - Done, KEYCHAIN-QUIET (macOS 3.2.5 опубликован и установлен): повторные системные запросы даже после «Разрешать всегда». Фоновые операции без диалогов, интерактивный доступ только по явному действию. [План](docs/keychain-no-background-prompts.md).
 

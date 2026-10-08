@@ -3155,7 +3155,19 @@ func setLoginEnabled(_ on: Bool) {
 
 // MARK: - Panel rendering (custom dark popover, System-Control style)
 
-struct Hit { let id: String; let rect: CGRect }
+struct Hit {
+    let id: String
+    let rect: CGRect
+    var tooltip: String? = nil
+}
+func isQuotaAction(_ id: String) -> Bool {
+    id == "refresh" || ["retryquota:", "restorequota:", "allowquota:", "cancelquota:"].contains { id.hasPrefix($0) }
+}
+/// Inline actions precede their enclosing card; passive feedback never consumes a click.
+func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
+    hits.first { isQuotaAction($0.id) && $0.rect.contains(point) }
+        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }
+}
 
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
@@ -3332,15 +3344,15 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 }
 /// Height of the main panel for the given data — grows when a per-model limit is shown.
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
-    PANEL_H + scopedRowExtra(claude, codex) + quotaPanelExtraHeight()
+    PANEL_H + scopedRowExtra(claude, codex) + (hasQuotaCards(claude, codex) ? QUOTA_CARD_FOOTER_H : 0)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.6"
+let APP_VERSION = "3.2.7"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
 let POLL_CHOICES: [(ru: String, en: String, sec: TimeInterval)] = [
-    ("15м", "15m", 900), ("30м", "30m", 1800), ("1ч", "1h", 3600)
+    ("15м", "15m", 900), ("30м", "30m", 1800), ("1ч", "1h", 3600), ("4ч", "4h", 14400)
 ]
 func normalizedPollInterval(_ value: TimeInterval) -> TimeInterval {
     POLL_CHOICES.contains { $0.sec == value } ? value : POLL_DEFAULT
@@ -3414,8 +3426,34 @@ func loadAutoPollStates() -> [String: AutoPollState] {
     return states.filter { AUTO_STEPS.contains($0.value.interval) && $0.value.lastAttempt >= 0 }
 }
 func pollSegments() -> [(ru: String, en: String, sec: TimeInterval)] { POLL_CHOICES + [("А", "A", 0)] }
-func pollSelected(_ sec: TimeInterval, manual: TimeInterval) -> Bool {
-    autoPollEnabled() ? sec == 0 : sec != 0 && abs(manual - sec) < 1
+func pollSelected(_ sec: TimeInterval, manual: TimeInterval, autoIntervals: [String: TimeInterval] = [:]) -> Bool {
+    if sec == 0 { return autoPollEnabled() }
+    guard !monitoringPaused() else { return false }
+    guard autoPollEnabled() else { return sec != 0 && abs(manual - sec) < 1 }
+    return ["claude", "codex"].contains {
+        productEnabled($0) && autoIntervals[$0] == sec
+    }
+}
+func pollAccessibleTitle(_ sec: TimeInterval) -> String {
+    switch sec {
+    case 900: return tr("15 минут", "15 minutes")
+    case 1800: return tr("30 минут", "30 minutes")
+    case 3600: return tr("1 час", "1 hour")
+    case 14400: return tr("4 часа", "4 hours")
+    default: return tr("Авто", "Auto")
+    }
+}
+func pollTooltip(_ sec: TimeInterval, autoIntervals: [String: TimeInterval]) -> String {
+    guard !monitoringPaused() else { return tr("Нет включённых подписок", "No subscriptions enabled") }
+    let title = pollAccessibleTitle(sec)
+    guard autoPollEnabled() else { return title }
+    let providers = [("claude", "Claude Code"), ("codex", "Codex")].compactMap { product, name -> String? in
+        guard productEnabled(product), let value = autoIntervals[product], AUTO_STEPS.contains(value),
+              sec == 0 || sec == value else { return nil }
+        return sec == 0 ? name + " → " + pollAccessibleTitle(value) : name
+    }
+    guard !providers.isEmpty else { return title }
+    return title + (sec == 0 ? ": " : tr("\nАвто: ", "\nAuto: ")) + providers.joined(separator: "; ")
 }
 
 /// Display-only values from the owner's snapshot, independent of the saved manual choice.
@@ -3563,16 +3601,16 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
         ctx.addPath(CGPath(roundedRect: r, cornerWidth: radius, cornerHeight: radius, transform: nil))
         ctx.setFillColor(cg(color)); ctx.fillPath()
     }
-    fill(rect(16, top, 120, 24), radius: 8, color: gray(1, 0.06))
+    fill(rect(16, top, 160, 24), radius: 8, color: gray(1, 0.06))
     for (i, seg) in POLL_CHOICES.enumerated() {
         let r = rect(16 + CGFloat(i) * 40, top, 40, 24)
-        let selected = !auto && abs(interval - seg.sec) < 1
+        let selected = pollSelected(seg.sec, manual: interval, autoIntervals: autoIntervals)
         if selected { fill(r.insetBy(dx: 2, dy: 2), radius: 6, color: gray(1, advanced ? 0.18 : 0.13)) }
         textC(attr(tr(seg.ru, seg.en), advanced ? 12 : 11, selected ? .semibold : advanced ? .medium : .regular,
                    gray(1, selected ? 0.95 : 0.5)), x: r.midX, y: top, h: 24, align: 1)
-        hits.append(Hit(id: "iv\(Int(seg.sec))", rect: r))
+        hits.append(Hit(id: "iv\(Int(seg.sec))", rect: r, tooltip: pollTooltip(seg.sec, autoIntervals: autoIntervals)))
     }
-    let autoHit = rect(136, top, 40, 24), capsule = rect(141, top + 2, 30, 20)
+    let autoHit = rect(176, top, 40, 24), capsule = rect(181, top + 2, 30, 20)
     let path = CGPath(roundedRect: capsule, cornerWidth: 10, cornerHeight: 10, transform: nil)
     if auto {
         ctx.saveGState(); ctx.addPath(path); ctx.clip()
@@ -3588,32 +3626,17 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
     ctx.setLineWidth(1); ctx.strokePath()
     let labelColor = color(217, 229, 255)
     textC(attr(tr("А", "A"), 12, .semibold, auto ? gray(1, 1) : labelColor), x: autoHit.midX, y: top, h: 24, align: 1)
-    hits.append(Hit(id: "iv0", rect: autoHit))
-    let enabled = ["claude": productEnabled("claude"), "codex": productEnabled("codex")]
-    let parts = autoPollLabelParts(auto: auto, enabled: enabled, intervals: autoIntervals, lang: appLang())
-    if !parts.isEmpty {
-        let ink = enabled.values.contains(true) ? labelColor : color(168, 179, 201)
-        let joined = attr(parts.joined(separator: " · "), 10, .medium, ink)
-        if parts.count == 2 && lineWidth(CTLineCreateWithAttributedString(joined)) > 128 {
-            for (i, part) in parts.enumerated() {
-                textC(attr(part, 10, .medium, ink), x: 184, y: top + CGFloat(i) * 12, h: 12)
-            }
-        } else { textC(joined, x: 184, y: top, h: 24) }
-    }
+    hits.append(Hit(id: "iv0", rect: autoHit, tooltip: pollTooltip(0, autoIntervals: autoIntervals)))
     let power = rect(320, top, 24, 24)
     drawPower(ctx, power.insetBy(dx: 4, dy: 4), gray(1, advanced ? 0.5 : 0.6))
     hits.append(Hit(id: "quit", rect: power))
-    if !auto, let u = updated {
-        textC(attr(tr("обновлено ", "updated ") + clockText(u), advanced ? 11 : 10, .regular, gray(1, advanced ? 0.5 : 0.34)),
-              x: advanced ? 315 : 312, y: advanced ? top + 3 : top, h: advanced ? 18 : 24, align: 2)
-    }
     return hits
 }
 
-@discardableResult
-// The new header action and provider feedback use the same geometry in both display modes.
-func quotaPanelExtraHeight() -> CGFloat {
-    38 + CGFloat(["claude", "codex"].filter { productEnabled($0) }.count) * 84 + 8
+// Refresh feedback belongs to the provider card, never to a second panel background.
+let QUOTA_CARD_FOOTER_H: CGFloat = 32
+func hasQuotaCards(_ claude: LimitData, _ codex: LimitData) -> Bool {
+    (productEnabled("claude") && claude.present) || (productEnabled("codex") && codex.present)
 }
 func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> QuotaRefreshFeedback {
     quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
@@ -3623,74 +3646,99 @@ func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -
 }
 func quotaTimestamp(_ value: Double?) -> String {
     guard let value = value, value.isFinite, value >= 0, value < 253402300800 else { return "—" }
-    let f = DateFormatter(); f.dateFormat = "dd.MM HH:mm:ss"
-    return f.string(from: Date(timeIntervalSince1970: value))
+    let date = Date(timeIntervalSince1970: value)
+    let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "dd.MM HH:mm"
+    return f.string(from: date)
 }
-private func drawQuotaPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
-                           interval: TimeInterval, updated: Date?, about: AboutState,
-                           autoIntervals: [String: TimeInterval], advanced: Bool) -> [Hit] {
-    let extra = quotaPanelExtraHeight(), footer = extra - 38
-    let bodySize = CGSize(width: size.width, height: size.height - extra)
-    ctx.setFillColor(CGColor(gray: 0.09, alpha: 1)); ctx.fill(CGRect(origin: .zero, size: size))
-    ctx.saveGState(); ctx.translateBy(x: 0, y: footer)
-    var hits = advanced
-        ? drawAdvancedBody(ctx, size: bodySize, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
-        : drawPanelBody(ctx, size: bodySize, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
-    ctx.restoreGState()
-    hits = hits.filter { $0.id != "refresh" }.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: footer)) }
-    let accent = NSColor(srgbRed: 1, green: 0.66, blue: 0.27, alpha: 1)
-    func label(_ value: String, x: CGFloat, y: CGFloat, color: NSColor = NSColor(white: 0.8, alpha: 1), size: CGFloat = 11) {
-        let line = CTLineCreateWithAttributedString(ctAttr(value, ctFont(size, .regular), cg(color)))
-        ctx.textPosition = CGPoint(x: x, y: y); CTLineDraw(line, ctx)
+func quotaTooltip(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> String {
+    let feedback = quotaFeedback(d, now: now)
+    let next = d.refreshInFlight ? tr("после ответа", "after response") : quotaTimestamp(feedback.nextAutomaticAt)
+    let issue: String
+    switch d.credentialIssue {
+    case .readInteractionRequired: issue = tr("Для чтения Связки ключей нужно разрешение. Разрешите доступ явным действием; фоновое обновление не запрашивает разрешений.", "Reading Keychain needs permission. Allow access explicitly; background refresh does not request permission.")
+    case .writeUnavailable: issue = tr("Не удалось сохранить обновлённые данные входа в Связке ключей. Разблокируйте её и повторите обновление. Ошибка сохранения не означает, что вход истёк.", "Could not save renewed sign-in to Keychain. Unlock it and refresh again. A storage failure does not mean the sign-in expired.")
+    default: issue = ""
     }
-    let header = CGRect(x: 16, y: size.height - 33, width: size.width - 32, height: 27)
-    ctx.setFillColor(cg(accent.withAlphaComponent(0.12))); ctx.fill(header)
-    drawSF(ctx, "arrow.clockwise", in: CGRect(x: 27, y: header.minY + 6, width: 15, height: 15), accent)
-    label(tr("Обновить сейчас", "Refresh now"), x: 51, y: header.minY + 8, color: accent, size: 12)
-    hits.append(Hit(id: "refresh", rect: header))
-    var y = footer - 18
-    let now = Date().timeIntervalSince1970
-    for (product, name, data) in [("claude", "Claude Code", claude), ("codex", "Codex", codex)] where productEnabled(product) {
-        let feedback = quotaFeedback(data, now: now)
-        label(name, x: 16, y: y, color: .white, size: 12)
-        if !feedback.actionTitle.isEmpty {
-            let actionWidth = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(feedback.actionTitle, ctFont(11, .regular), cg(accent)))))
-            let x = size.width - 16 - actionWidth
-            label(feedback.actionTitle, x: x, y: y, color: accent)
-            if feedback.action != .none {
-                let prefix: String
-                switch feedback.action {
-                case .allowKeychain: prefix = "allowquota:"
-                case .cancelKeychain: prefix = "cancelquota:"
-                case .retry: prefix = "retryquota:"
-                default: prefix = "restorequota:"
-                }
-                hits.append(Hit(id: prefix + product,
-                                rect: CGRect(x: x - 4, y: y - 4, width: actionWidth + 8, height: 23)))
-            }
+    return [feedback.status, feedback.actionTitle, issue,
+        tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt),
+        tr("Следующая автопопытка: ", "Next automatic attempt: ") + next].filter { !$0.isEmpty }.joined(separator: "\n")
+}
+func quotaCompactStatus(_ d: LimitData, now: Double) -> String {
+    if d.refreshInFlight { return d.permissionRequestInFlight ? tr("Ждём разрешения…", "Awaiting permission…") : tr("Обновляем…", "Refreshing…") }
+    if d.credentialIssue == .readInteractionRequired { return tr("Нужно разрешение", "Permission needed") }
+    if d.credentialIssue == .writeUnavailable { return tr("Вход не сохранён", "Sign-in not saved") }
+    if (d.serverRetryAt ?? 0) > now {
+        return tr("Ожидание сервиса", "Service wait")
+    }
+    if let issue = d.credentialIssue, [QuotaCredentialIssue.readUnavailable, .readTimedOut, .cancelled].contains(issue) { return tr("Доступ не получен", "Access not granted") }
+    if d.auth != .ok { return tr("Нет доступа", "Access issue") }
+    if d.pollFailed || d.error != nil { return tr("Не удалось обновить", "Could not refresh") }
+    if d.asOf == nil { return tr("Нет данных", "No data yet") }
+    return d.apiFresh && now - (d.asOf?.timeIntervalSince1970 ?? 0) < 60
+        ? tr("Проверено ", "Checked ") + quotaTimestamp(d.asOf?.timeIntervalSince1970)
+        : tr("Данные ", "Data ") + quotaTimestamp(d.asOf?.timeIntervalSince1970)
+}
+func quotaCompactAction(_ feedback: QuotaRefreshFeedback, data: LimitData? = nil, now: Double = Date().timeIntervalSince1970) -> String {
+    switch feedback.action {
+    case .allowKeychain: return tr("Разрешить", "Allow")
+    case .cancelKeychain: return tr("Отменить", "Cancel")
+    case .restoreAccess: return tr("Восстановить доступ", "Restore access")
+    case .retry: return tr("Повторить", "Retry")
+    case .none:
+        if let until = data?.serverRetryAt, until > now {
+            return tr("Повтор через ", "Retry in ") + quotaCountdown(until: until, now: now, english: appLang() == "en")
         }
-        var status = feedback.status
-        if !data.refreshInFlight, data.serverRetryAt == nil, data.auth == .ok, data.apiFresh, !data.pollFailed,
-           let at = data.asOf, now - at.timeIntervalSince1970 < 60 { status = tr("Проверено только что", "Checked just now") }
-        label(status, x: 16, y: y - 19)
-        label(tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt), x: 16, y: y - 36, size: 10)
-        let next = data.refreshInFlight ? tr("после ответа", "after response") : quotaTimestamp(feedback.nextAutomaticAt)
-        label(tr("Следующая автопопытка: ", "Next automatic attempt: ") + next, x: 16, y: y - 51, size: 10)
-        y -= 84
+        return feedback.actionTitle
+    }
+}
+func quotaActionID(_ feedback: QuotaRefreshFeedback, product: String) -> String? {
+    switch feedback.action {
+    case .allowKeychain: return "allowquota:" + product
+    case .cancelKeychain: return "cancelquota:" + product
+    case .retry: return "retryquota:" + product
+    case .restoreAccess: return "restorequota:" + product
+    case .none: return nil
+    }
+}
+/// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
+func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false) -> [Hit] {
+    let now = Date().timeIntervalSince1970
+    let feedback = quotaFeedback(data, now: now)
+    let inset: CGFloat = advanced ? 11 : 14
+    let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: 32)
+    let error = !data.refreshInFlight && (data.auth != .ok || data.pollFailed || data.error != nil || (data.serverRetryAt ?? 0) > now)
+    let ink = error ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1) : gray(1, 0.5)
+    func line(_ value: String, rect: CGRect, weight: NSFont.Weight, color: NSColor) {
+        let original = CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, weight), cg(color)))
+        let ellipsis = CTLineCreateWithAttributedString(ctAttr("…", ctFont(10, weight), cg(color)))
+        let fitted = CTLineCreateTruncatedLine(original, Double(rect.width), .end, ellipsis) ?? original
+        ctx.textMatrix = .identity; ctx.textPosition = CGPoint(x: rect.minX, y: rect.midY - 3.5)
+        CTLineDraw(fitted, ctx)
+    }
+    line(quotaCompactStatus(data, now: now), rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular, color: ink)
+    var hits = [Hit(id: "quotafeedback:" + product, rect: footer, tooltip: quotaTooltip(data, now: now))]
+    let title = quotaCompactAction(feedback, data: data, now: now)
+    if !title.isEmpty {
+        let width = min(footer.width, ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10, .medium), cg(ADV_LINK))))) + 8)
+        let rect = CGRect(x: footer.minX - 4, y: footer.minY, width: width, height: 24)
+        let textRect = CGRect(x: footer.minX, y: footer.minY + 2, width: width - 8, height: 14)
+        line(title, rect: textRect, weight: feedback.action == .none ? .regular : .medium,
+             color: feedback.action == .none ? gray(1, 0.5) : ADV_LINK)
+        if let id = quotaActionID(feedback, product: product) { hits.append(Hit(id: id, rect: rect, tooltip: quotaTooltip(data, now: now))) }
     }
     return hits
 }
 func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                interval: TimeInterval, updated: Date?, about: AboutState = AboutState(),
                autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
-    drawQuotaPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
-                   about: about, autoIntervals: autoIntervals, advanced: false)
+    drawPanelBody(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
+                  about: about, autoIntervals: autoIntervals)
 }
 func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState = AboutState(),
                   autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
-    drawQuotaPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
-                   about: about, autoIntervals: autoIntervals, advanced: true)
+    drawAdvancedBody(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
+                     about: about, autoIntervals: autoIntervals)
 }
 
 private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
@@ -3776,10 +3824,10 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
 
     // which products are present
     var prods: [(LimitData, String, String, String, String)] = []   // (data, name, icon, url, product)
-    if productEnabled("claude"), claude.present {
+    if productEnabled("claude"), hasQuotaCards(claude, codex) {
         prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage", "claude"))
     }
-    if productEnabled("codex"), codex.present {
+    if productEnabled("codex"), hasQuotaCards(claude, codex) {
         prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage", "codex"))
     }
 
@@ -3788,6 +3836,9 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
+    let refreshRect = rectTL(W - pad - 24, pad - 2, 24, 24)
+    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), monitoringPaused() ? gray(1, 0.22) : textMid, weight: .semibold)
+    hits.append(Hit(id: "refresh", rect: refreshRect))
     let gearRect = rectTL(W - pad - 24 - 26, pad - 2, 24, 24)
     drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
     hits.append(Hit(id: "settings", rect: gearRect))
@@ -3799,11 +3850,26 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     }
 
     // cards
-    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + scopedRowExtra(claude, codex), gap: CGFloat = 12
+    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + scopedRowExtra(claude, codex) + (prods.isEmpty ? 0 : QUOTA_CARD_FOOTER_H), gap: CGFloat = 12
     let cardW = (W - pad * 2 - gap) / 2
 
     func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String, product: String) {
         let r = rectTL(x, cardsTop, w, cardH)
+        if !d.present {
+            roundFill(r, 14, gray(1, 0.02))
+            ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
+            roundStroke(r.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.14), 1)
+            ctx.restoreGState()
+            if let img = loadCGImage(assetPath(icon)) {
+                ctx.saveGState(); ctx.setAlpha(0.45)
+                ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)); ctx.restoreGState()
+            }
+            text(attr(name, 12.5, .semibold, textMid), x: x + 39, topY: cardsTop + 15)
+            text(attr(tr("Не настроен", "Not set up"), 12, .regular, textMid), x: x + w / 2, topY: cardsTop + 77, align: 1)
+            text(attr(tr("Настройки ›", "Settings ›"), 11, .medium, ADV_LINK), x: x + w / 2, topY: cardsTop + 109, align: 1)
+            hits.append(Hit(id: "settings", rect: r))
+            return
+        }
         roundFill(r, 14, gray(1, 0.04)); roundStroke(r, 14, gray(1, 0.06), 1)
         // Claude sign-in problems (states 1 & 2) make the whole card tap-to-fix; everything
         // else opens the product's usage page in the browser.
@@ -3812,6 +3878,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
 
+        hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product)
         let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
 
         // A sign-in problem replaces the gauges with an honest status + (when recoverable)
@@ -3821,7 +3888,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(cxp - 11, cardsTop + 46, 22, 22), amber)
             text(attr(title, 12.5, .semibold, gray(1, 0.92)), x: cxp, topY: cardsTop + 78, align: 1)
             if let s = subtitle { text(attr(s, 9.5, .regular, textLo), x: cxp, topY: cardsTop + 97, align: 1) }
-            if showFix {
+            if showFix && quotaFeedback(d).action == .none {
                 let label = tr("Как починить?", "How to fix?")
                 let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(11, .semibold), cg(amber)))))
                 let pw = lw + 26, ph: CGFloat = 24, pTop = cardsTop + 116
@@ -3838,8 +3905,8 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             return
         case .keychainError:
             drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
-            problemBody(tr("Нет доступа к keychain", "Keychain access failed"),
-                        tr("проверьте доступ к «Связке ключей»", "check Keychain access"), showFix: false)
+            problemBody(d.credentialIssue == .writeUnavailable ? tr("Ошибка сохранения", "Save failed") : tr("Нет доступа", "Access issue"),
+                        nil, showFix: false)
             return
         case .expired where d.session == nil && d.weekly == nil:
             problemBody(tr("Вход устарел", "Sign-in expired"),
@@ -3899,7 +3966,9 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             let bx = cx - (icoW + g + tw) / 2
             drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(bx, l1 + 1, icoW, icoW), amber)
             text(attr(msg1, 9.5, .regular, amber), x: bx + icoW + g, topY: l1)
-            text(attr(copy.action, 9.5, canFix ? .semibold : .regular, canFix ? blue : textLo), x: cx, topY: l2, align: 1)
+            if !limitPollFailed(d), !d.refreshInFlight, quotaFeedback(d).action == .none {
+                text(attr(copy.action, 9.5, canFix ? .semibold : .regular, canFix ? blue : textLo), x: cx, topY: l2, align: 1)
+            }
         } else {
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
@@ -4087,9 +4156,10 @@ func limitSnapshotNotice(_ d: LimitData) -> String {
               snapshotWindowPace(used: $0.0, reset: $0.1, windowH: $0.2, asOf: at) != nil
           })
     else { return limitPausedNotice(asOf: d.asOf) }
-    return tr("Темп по снимку от ", "Pace from snapshot at ") + snapshotMoment(at)
+    return "" // The observation time remains in the compact card footer and its tooltip.
 }
 func limitDataBadge(_ d: LimitData) -> String {
+    if d.credentialIssue == .writeUnavailable { return tr("не сохранено", "not saved") }
     if d.auth == .ok, limitPollFailed(d) { return tr("сбой обновления", "update failed") }
     return limitAuthBadge(d.auth)
 }
@@ -4098,8 +4168,8 @@ struct AdvCard {
     let product: String, data: LimitData, name: String, icon: String, url: String
     let paused: Bool
     let rows: [AdvRow]
-    var noticeHeight: CGFloat { ADV_NOTICE * ((limitCanFix(product: product, auth: data.auth) ? 2 : 1) + (limitPollFailed(data) ? 1 : 0)) }
-    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight }
+    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data).isEmpty ? 0 : 1) + (limitCanFix(product: product, auth: data.auth) ? 1 : 0)) }
+    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight + QUOTA_CARD_FOOTER_H }
 }
 
 func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
@@ -4148,7 +4218,7 @@ func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     for c in cards { h += 5 + c.height }
     if showMissingProduct(cards) { h += 5 + ADV_PLACEHOLDER }
     h += 5 + advHistoryHeight(cards)
-    return h + ADV_CREDIT_H + quotaPanelExtraHeight()
+    return h + ADV_CREDIT_H
 }
 /// Credit line under the footer (author · version · GitHub), same as in the Simple view —
 /// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
@@ -4305,9 +4375,11 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         roundFill(rectTL(x, ly + 4, 16, 5), 2.5, gray(1, 0.30)   /* neutral: the tail takes each row's own colour */); x += 16 + 4
         textC(attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, .regular, textMid), x: x, topY: ly, h: lh)
     }
-    let gearRect = rectTL(327, 24, 18, 18)
-    drawSF(ctx, "gearshape", in: gearRect, textMid)
-    hits.append(Hit(id: "settings", rect: gearRect.insetBy(dx: -6, dy: -6)))
+    let gearRect = rectTL(294, 21, 24, 24), refreshRect = rectTL(324, 21, 24, 24)
+    drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
+    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), monitoringPaused() ? gray(1, 0.22) : textMid, weight: .semibold)
+    hits.append(Hit(id: "settings", rect: gearRect))
+    hits.append(Hit(id: "refresh", rect: refreshRect))
     if about.availVersion != nil || about.phase != .idle {
         let badge = CGRect(x: gearRect.maxX - 5, y: gearRect.maxY - 5, width: 7, height: 7)
         ctx.setFillColor(cg(gray(0.10, 1))); ctx.fillEllipse(in: badge.insetBy(dx: -1.5, dy: -1.5))
@@ -4419,16 +4491,13 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix ? card : arrow.insetBy(dx: -8, dy: -8)))
         var ry = y + 29
         do {
-            textC(attr(limitSnapshotNotice(c.data), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14)
+            let notice = limitSnapshotNotice(c.data)
+            if !notice.isEmpty { textC(attr(notice, 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14) }
             if canFix {
                 let code = ctAttr("claude → /login", ctMono(10, .regular), cg(gray(1, 0.8)))
                 let codeR = rectTL(ADV_IX, ry + ADV_NOTICE + 0.5, width(code) + 8, 14)
                 roundFill(codeR, 4, gray(1, 0.08))
                 textC(code, x: codeR.minX + 4, topY: ry + ADV_NOTICE, h: 14)
-            }
-            if limitPollFailed(c.data) {
-                let offset = ADV_NOTICE * (canFix ? 2 : 1)
-                textC(attr(limitRetryNotice(c.data), 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry + offset, h: 14)
             }
             ry += c.noticeHeight
         }
@@ -4437,6 +4506,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             ry += row.height
             if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
         }
+        hits += drawQuotaCardFooter(ctx, card: card, data: c.data, product: c.product, advanced: true)
         y += ch + 5
     }
     if showMissingProduct(cards) {
@@ -5402,6 +5472,30 @@ func drawClaudeFix(_ ctx: CGContext, size: CGSize, copiedCmd: String?, expired: 
 
 // MARK: - Panel view + window
 
+private final class QuotaActionButton: NSButton {
+    private var hovering = false
+    override var focusRingMaskBounds: NSRect { bounds }
+    override func drawFocusRingMask() { NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill() }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76 { performClick(nil) }
+        else { super.keyDown(with: event) }
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas { removeTrackingArea(area) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering || isHighlighted {
+            gray(1, isHighlighted ? 0.14 : 0.08).setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 final class LimitsPanelView: NSView {
     var claude = LimitData(); var codex = LimitData()
     var interval: TimeInterval = POLL_DEFAULT
@@ -5498,7 +5592,7 @@ final class LimitsPanelView: NSView {
                 ? drawAdvanced(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
                 : drawPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
             ctx.restoreGState()
-            hits = hits.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: offset)) }
+            hits = hits.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: offset), tooltip: $0.tooltip) }
             if excess > 0 {
                 let scroller = mainScroller ?? NSScroller(frame: .zero)
                 if mainScroller == nil {
@@ -5511,14 +5605,14 @@ final class LimitsPanelView: NSView {
             } else { mainScroller?.isHidden = true }
         }
         if mode != .main { mainScroller?.isHidden = true }
-        let actionHits = mode == .main ? hits.filter { $0.id == "refresh" || $0.id.hasPrefix("retryquota:") || $0.id.hasPrefix("restorequota:") || $0.id.hasPrefix("allowquota:") || $0.id.hasPrefix("cancelquota:") } : []
+        let actionHits = mode == .main ? hits.filter { isQuotaAction($0.id) || $0.id.hasPrefix("iv") } : []
         for button in quotaButtons where !actionHits.contains(where: { $0.id == button.identifier?.rawValue }) {
             button.removeFromSuperview()
         }
         quotaButtons.removeAll { $0.superview == nil }
         for hit in actionHits {
             let existing = quotaButtons.first { $0.identifier?.rawValue == hit.id }
-            let button = existing ?? NSButton(frame: hit.rect)
+            let button = existing ?? QuotaActionButton(frame: hit.rect)
             let visibleRect = hit.rect.intersection(bounds)
             button.frame = visibleRect.isNull ? .zero : visibleRect
             button.isHidden = button.frame.isEmpty; button.identifier = NSUserInterfaceItemIdentifier(hit.id)
@@ -5526,19 +5620,57 @@ final class LimitsPanelView: NSView {
             let name = hit.id.hasSuffix("claude") ? "Claude Code" : "Codex"
             let title = hit.id == "refresh" ? tr("Обновить сейчас", "Refresh now")
                 : (hit.id.hasPrefix("retryquota:") ? tr("Повторить", "Retry") : tr("Восстановить доступ", "Restore access")) + " · " + name
-            let accessibleTitle = hit.id == "allowquota:claude" ? tr("Разрешить доступ к Связке ключей", "Allow Keychain access")
-                : hit.id == "cancelquota:claude" ? tr("Отменить запрос разрешения", "Cancel permission request") : title
-            button.setAccessibilityLabel(accessibleTitle); button.toolTip = accessibleTitle
+            let pollInterval = hit.id.hasPrefix("iv") ? Double(hit.id.dropFirst(2)) : nil
+            let accessibleTitle = pollInterval.map { pollAccessibleTitle($0) }
+                ?? (hit.id == "allowquota:claude" ? tr("Разрешить доступ к Связке ключей · Claude Code", "Allow Keychain access · Claude Code")
+                : hit.id == "cancelquota:claude" ? tr("Отменить запрос разрешения · Claude Code", "Cancel permission request · Claude Code") : title
+                )
+            button.setAccessibilityLabel(accessibleTitle)
+            button.setAccessibilityHelp(hit.tooltip ?? accessibleTitle)
+            button.toolTip = hit.id == "refresh" ? accessibleTitle : accessibleTitle + "\n" + (hit.tooltip ?? "")
+            if let sec = pollInterval {
+                button.toolTip = hit.tooltip
+                button.setAccessibilityValue((pollSelected(sec, manual: interval, autoIntervals: autoIntervals)
+                    ? tr("Выбрано · ", "Selected · ") : "") + (hit.tooltip ?? accessibleTitle))
+            }
+            button.focusRingType = .default; button.setAccessibilityRole(.button)
+            button.isEnabled = hit.id != "refresh" || !monitoringPaused()
+            if hit.id == "refresh" && monitoringPaused() {
+                button.toolTip = accessibleTitle + "\n" + tr("Выберите подписки в настройках", "Choose subscriptions in Settings")
+            }
             if hit.id == "refresh" { button.keyEquivalent = "r"; button.keyEquivalentModifierMask = .command }
             if existing == nil { addSubview(button); quotaButtons.append(button) }
         }
+        let orderedButtons = actionHits.compactMap { hit in quotaButtons.first { $0.identifier?.rawValue == hit.id && $0.isEnabled && !$0.isHidden } }
+        for (index, button) in orderedButtons.enumerated() {
+            button.nextKeyView = index + 1 < orderedButtons.count ? orderedButtons[index + 1] : nil
+        }
+        if mode == .main {
+            var accessibleChildren: [Any] = subviews.filter { !$0.isHidden }
+            for hit in hits where hit.id.hasPrefix("quotafeedback:") {
+                let visible = hit.rect.intersection(bounds)
+                guard !visible.isNull && !visible.isEmpty else { continue }
+                let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
+                let element = NSAccessibilityElement()
+                element.setAccessibilityRole(.staticText); element.setAccessibilityFrame(screenRect)
+                element.setAccessibilityLabel(hit.id.hasSuffix("claude") ? "Claude Code" : "Codex")
+                element.setAccessibilityParent(self)
+                element.setAccessibilityValue(hit.tooltip ?? "")
+                accessibleChildren.append(element)
+            }
+            setAccessibilityChildren(accessibleChildren)
+        } else { setAccessibilityChildren(nil) }
         removeAllToolTips()
-        for h in hits where h.id == "iv0" { addToolTip(h.rect, owner: self, userData: nil) }
+        for h in hits where h.id.hasPrefix("quotafeedback:") {
+            let rect = h.rect.intersection(bounds)
+            if !rect.isNull && !rect.isEmpty { addToolTip(rect, owner: self, userData: nil) }
+        }
     }
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
                        userData data: UnsafeMutableRawPointer?) -> String {
-        onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
+        if let feedback = hits.first(where: { $0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }) { return feedback.tooltip ?? "" }
+        return onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
     }
 
     @objc private func quotaButtonClicked(_ sender: NSButton) {
@@ -5548,6 +5680,7 @@ final class LimitsPanelView: NSView {
         else if id == "cancelquota:claude" { onClaudePermission?(false) }
         else if id.hasPrefix("retryquota:") { onRefreshProduct?(String(id.dropFirst(11))) }
         else if id.hasPrefix("restorequota:") { restoreQuotaAccess(String(id.dropFirst(13))) }
+        else if id.hasPrefix("iv"), let sec = Double(id.dropFirst(2)) { onInterval?(sec) }
     }
     private func restoreQuotaAccess(_ product: String) {
         // This is an explicit help action, never an automatic sign-in or permission prompt.
@@ -5586,7 +5719,8 @@ final class LimitsPanelView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        for h in hits where h.rect.contains(p) {
+        if let h = panelHit(at: p, hits: hits) {
+            if h.id == "refresh" && monitoringPaused() { return }
             switch h.id {
             case "refresh": onRefresh?()
             case "allowquota:claude": onClaudePermission?(true)
@@ -6918,10 +7052,16 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(!auto.localActivity([138740, 138750, 138760], now: 138800) && auto.due(139630, manual: true),
           "manual bypasses error backoff; local activity does not")
     check(!restored.due(120000) && restored.due(120900, manual: true), "clock rollback preserves schedule while explicit intent bypasses it")
-    check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600], "refresh choices: 15 minutes, 30 minutes, 1 hour")
+    check(POLL_CHOICES.map { $0.sec } == [900, 1800, 3600, 14400], "refresh choices: 15 minutes, 30 minutes, 1 hour, 4 hours")
     check([0.0, 60, 300, -1, 1200, .infinity, .nan].allSatisfy { normalizedPollInterval($0) == 1800 },
           "legacy and invalid intervals migrate to 30 minutes")
-    check([900.0, 1800, 3600].allSatisfy { normalizedPollInterval($0) == $0 }, "valid intervals survive restart")
+    check([900.0, 1800, 3600, 14400].allSatisfy { normalizedPollInterval($0) == $0 }, "valid intervals survive restart")
+    prefs["interval"] = 14400
+    select(true, true)
+    check(storedPollInterval() == 14400 && defaults.double(forKey: "interval") == 14400,
+          "saved four-hour manual interval remains valid without migration")
+    prefs["interval"] = 1800
+    select(true, true)
     let isolated = MemorySelfTestDefaults()
     check(productEnabled("claude", defaults: isolated) && productEnabled("codex", defaults: isolated),
           "missing preferences keep both products enabled")
@@ -7047,14 +7187,15 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         for advanced in [false, true] {
             for fixture in ["inflight-partial", "same-values-one-codex", "network-fallback",
                             "local-30s-one-claude", "server-wait-auth", "restore-one-codex",
-                            "allow-keychain-one-claude", "cancel-keychain-one-claude", "write-denied-one-claude"] {
+                            "allow-keychain-one-claude", "cancel-keychain-one-claude", "write-denied-one-claude",
+                            "idle-two", "missing-one", "missing-both", "off"] {
                 prefs["lang"] = lang; prefs["advanced"] = advanced
                 prefs["advHistExpanded"] = false
                 prefs["interval"] = 1800
                 // Cover both fixed and Auto without calling either schedule or a timer.
                 prefs["autoPoll"] = fixture == "inflight-partial" || fixture == "server-wait-auth"
-                let claudeOn = !fixture.hasSuffix("one-codex")
-                let codexOn = !fixture.hasSuffix("one-claude")
+                let claudeOn = fixture != "off" && !fixture.hasSuffix("one-codex")
+                let codexOn = fixture != "off" && !fixture.hasSuffix("one-claude")
                 select(claudeOn, codexOn)
                 let now = Date().timeIntervalSince1970
                 var snapshot = LimitData(session: 31, weekly: 47,
@@ -7067,6 +7208,12 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 var cl = success, cx = success
                 var expectedActions: Set<String> = []
                 switch fixture {
+                case "missing-one":
+                    cl = LimitData(present: false)
+                case "missing-both":
+                    cl = LimitData(present: false); cx = LimitData(present: false)
+                case "idle-two":
+                    cl = snapshot; cx = snapshot
                 case "inflight-partial":
                     cl = snapshot; cl.refreshInFlight = true
                 case "same-values-one-codex":
@@ -7114,14 +7261,18 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     manualCheck(feedback.dataAt == data.asOf?.timeIntervalSince1970
                                 && feedback.nextAutomaticAt == data.nextPollAt?.timeIntervalSince1970,
                                 label + " separate data/automatic timestamps")
-                    let timestamps = [tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt),
-                        tr("Следующая автопопытка: ", "Next automatic attempt: ") + quotaTimestamp(feedback.nextAutomaticAt)]
-                    for text in timestamps {
-                        let width = lineWidth(CTLineCreateWithAttributedString(ctAttr(text, ctFont(10, .regular), cg(.white))))
-                        manualCheck(width <= PANEL_W - 32, label + " metadata text fits")
+                    let tooltip = quotaTooltip(data, now: now)
+                    manualCheck(tooltip.contains(tr("Данные: ", "Data: ") + quotaTimestamp(feedback.dataAt))
+                        && tooltip.contains(tr("Следующая автопопытка: ", "Next automatic attempt: ")),
+                        label + " distinct timestamps in tooltip")
+                    for value in [feedback.dataAt, feedback.nextAutomaticAt] {
+                        let timestamp = quotaTimestamp(value)
+                        manualCheck(timestamp.filter { $0 == ":" }.count <= 1, label + " timestamps have no seconds")
                     }
-                    let width = lineWidth(CTLineCreateWithAttributedString(ctAttr(feedback.status, ctFont(11, .regular), cg(.white))))
-                    manualCheck(width <= PANEL_W - 32, label + " status text fits")
+                    if data.credentialIssue == .writeUnavailable || data.credentialIssue == .readInteractionRequired {
+                        manualCheck(tooltip.contains(feedback.status) && tooltip.count > feedback.status.count + 60,
+                                    label + " full read/write explanation retained in tooltip")
+                    }
                 }
                 if fixture == "local-30s-one-claude" {
                     let feedback = quotaFeedback(cl, now: now)
@@ -7149,23 +7300,71 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     manualCheck(actualActions == expectedActions, label + " exact provider actions")
                 }
                 let refreshHits = hits.filter { $0.id == "refresh" }
-                manualCheck(refreshHits.count == 1 && refreshHits[0].rect == CGRect(x: 16, y: height - 33, width: PANEL_W - 32, height: 27),
-                            label + " one labelled refresh action at top")
-                let refreshTitle = tr("Обновить сейчас", "Refresh now")
-                let titleWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(refreshTitle, ctFont(12, .regular), cg(.white))))
-                manualCheck(titleWidth <= PANEL_W - 67, label + " explicit refresh title fits beside icon")
+                let usesAdvanced = advanced && !advCards(cl, cx).isEmpty
+                let expectedRefresh = CGRect(x: usesAdvanced ? 324 : 320, y: height - (usesAdvanced ? 45 : 38), width: 24, height: 24)
+                manualCheck(refreshHits.count == 1 && refreshHits[0].rect == expectedRefresh,
+                            label + " one 24x24 refresh in original header")
+                let gear = hits.first { $0.id == "settings" }!
+                manualCheck(gear.rect.width == 24 && gear.rect.height == 24 && gear.rect.maxX < refreshHits[0].rect.minX,
+                            label + " refresh right of settings without overlap")
                 manualCheck(hits.allSatisfy { $0.rect.minX.isFinite && $0.rect.minY.isFinite
                     && $0.rect.minX >= 0 && $0.rect.maxX <= PANEL_W && $0.rect.minY >= 0 && $0.rect.maxY <= height },
                             label + " hit rectangles fit canvas")
-                for action in refreshHits + quotaActions {
-                    manualCheck(!hits.contains { $0.id != action.id && $0.rect.intersects(action.rect) },
-                                label + " action does not overlap another control: " + action.id)
-                    if action.id != "refresh" {
-                        let name = action.id.hasSuffix("claude") ? "Claude Code" : "Codex"
-                        let nameWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(name, ctFont(12, .regular), cg(.white))))
-                        manualCheck(action.rect.minX >= 16 + nameWidth + 8, label + " action clears provider label")
+                let presentProducts = [("claude", cl), ("codex", cx)].filter { productEnabled($0.0) && $0.1.present }
+                var cardRects: [String: CGRect] = [:]
+                if usesAdvanced {
+                    var top: CGFloat = 58
+                    for card in advCards(cl, cx) {
+                        let baseline = 38 + card.rows.reduce(CGFloat(0)) { $0 + $1.height }
+                            + CGFloat(max(0, card.rows.count - 1)) + card.noticeHeight
+                        manualCheck(card.height == baseline + 32, label + " Advanced card adds only 32pt")
+                        cardRects[card.product] = CGRect(x: 15, y: height - top - card.height, width: 330, height: card.height)
+                        top += card.height + 5
+                    }
+                } else {
+                    let body = 152 + scopedRowExtra(cl, cx)
+                    manualCheck(height == 286 + scopedRowExtra(cl, cx) + (presentProducts.isEmpty ? 0 : 32),
+                                label + " Simple baseline plus at most 32pt")
+                    let simpleProducts = presentProducts.isEmpty ? [] : [("claude", cl), ("codex", cx)].filter { productEnabled($0.0) }
+                    for (index, item) in simpleProducts.enumerated() {
+                        // Original 360pt panel: 16pt margins, 12pt gap, two 158pt cards.
+                        let expectedCard = CGRect(x: simpleProducts.count == 2 && index == 1 ? 186 : 16,
+                            y: height - 58 - body - 32, width: simpleProducts.count == 2 ? 158 : 328, height: body + 32)
+                        cardRects[item.0] = expectedCard
+                        let cardHitID = !item.1.present ? "settings"
+                            : item.0 == "claude" && (item.1.auth == .loggedOut || item.1.auth == .expired)
+                            ? "claudefix" : item.0 == "claude" ? "open:https://claude.ai/settings/usage"
+                            : "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
+                        manualCheck(hits.filter { $0.id == cardHitID && $0.rect != gear.rect }.map { $0.rect } == [expectedCard],
+                                    label + " Simple whole-card or missing setup hit exactly matches original card bounds")
                     }
                 }
+                let footerHits = hits.filter { $0.id.hasPrefix("quotafeedback:") }
+                manualCheck(footerHits.count == presentProducts.count, label + " feedback only in present provider cards")
+                for footer in footerHits {
+                    let product = String(footer.id.dropFirst(14))
+                    manualCheck(cardRects[product]?.contains(footer.rect) == true && footer.rect.height == 32,
+                                label + " 32pt footer contained by own card")
+                }
+                for action in quotaActions {
+                    let product = action.id.hasSuffix("claude") ? "claude" : "codex"
+                    manualCheck(cardRects[product]?.contains(action.rect) == true && action.rect.height == 24,
+                                label + " inline action inside its provider card")
+                    let data = product == "claude" ? cl : cx
+                    let caption = quotaCompactAction(quotaFeedback(data, now: now), data: data, now: now)
+                    let captionWidth = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(caption, ctFont(10, .medium), cg(ADV_LINK)))))
+                    manualCheck(captionWidth <= action.rect.width - 8,
+                                label + " full visible action caption fits without truncation")
+                    manualCheck(action.tooltip?.contains(quotaFeedback(data, now: now).status) == true,
+                                label + " action retains full status tooltip")
+                    let center = CGPoint(x: action.rect.midX, y: action.rect.midY)
+                    manualCheck(panelHit(at: center, hits: hits)?.id == action.id,
+                                label + " inline action wins over whole-card hit")
+                    manualCheck(!quotaActions.contains { $0.id != action.id && $0.rect.intersects(action.rect) },
+                                label + " provider actions do not overlap")
+                }
+                manualCheck(!hits.contains { $0.id != "refresh" && !$0.id.hasPrefix("quotafeedback:") && $0.rect.intersects(refreshHits[0].rect) },
+                            label + " header refresh clears other controls")
                 manualCheck(!hits.contains { !claudeOn && ($0.id.hasSuffix(":claude") || $0.id == "claudefix")
                     || !codexOn && $0.id.hasSuffix(":codex") }, label + " disabled provider has no quota action")
                 manualCheck(dataBefore[0] == String(reflecting: cl), label + " draw preserves Claude data")
@@ -7188,7 +7387,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             }
         }
     }
-    manualCheck(manualImages == 36, "36 targeted RU/EN Simple/Advanced PNG fixtures")
+    manualCheck(manualImages == 52, "36 targeted plus 16 idle/missing/off RU/EN Simple/Advanced PNG fixtures")
     manualCheck(manualIndexBefore == (try! manualEncoder.encode(UsageLogs.shared.snapshot())), "draw preserves in-memory usage index")
     prefs = manualPreferences; select(prefs["monitor_claude"] as? Bool ?? true, prefs["monitor_codex"] as? Bool ?? true)
     print("Manual refresh UI fixtures: \(manualChecks) checks, \(manualImages) PNG")
@@ -7213,7 +7412,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let phits = advanced
                     ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
                     : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
-                check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600", "iv0"],
+                check(phits.filter { $0.id.hasPrefix("iv") }.map { $0.id } == ["iv900", "iv1800", "iv3600", "iv14400", "iv0"],
                       "\(lang) advanced=\(advanced): all fixed intervals and Auto are clickable")
                 check(phits.contains { $0.id == "settings" } && !phits.contains { $0.id == "claudefix" || $0.id.contains("claude.ai") },
                       "\(lang) advanced=\(advanced) paused=\(bothOff): Settings reachable; no Claude links")
@@ -7263,6 +7462,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(delegate.panelCtrl.view.autoIntervals == ["claude": 1800, "codex": 900],
           "observed backoff publishes its own interval while Codex stays unchanged")
     let fixtureUpdated = Date(timeIntervalSince1970: 100000)
+    var autoImages = 0
     for lang in ["ru", "en"] {
         prefs["lang"] = lang; select(true, true)
         let prefix = lang == "en" ? "updated " : "обновлено "
@@ -7279,18 +7479,21 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(!delegate.autoSummary().contains("Claude Code:"), "\(lang) tooltip filters disabled subscription")
         select(true, true)
         for advanced in [false, true] {
-            func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400]) -> (Data, [Hit]) {
+            func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400], manual: TimeInterval = 3600) -> (Data, [Hit]) {
+                let preferencesBefore = defaults.dictionaryRepresentation() as NSDictionary
                 let ctx = bitmapContext(360, 40)!
                 ctx.clear(CGRect(x: 0, y: 0, width: 360, height: 40))
                 let hits = drawPollFooter(ctx, size: CGSize(width: 360, height: 40), top: 8,
-                                          interval: 3600, updated: updated,
+                                          interval: manual, updated: updated,
                                           autoIntervals: intervals, advanced: advanced)
+                check(preferencesBefore.isEqual(defaults.dictionaryRepresentation() as NSDictionary),
+                      "\(lang) advanced=\(advanced): footer repaint preserves Auto and saved interval")
                 return (Data(bytes: ctx.data!, count: ctx.bytesPerRow * ctx.height), hits)
             }
             let (withTime, hits) = footer(fixtureUpdated)
             let (withoutTime, _) = footer(nil)
             check(withTime == withoutTime, "\(lang) advanced=\(advanced): actual Auto footer has no timestamp ink")
-            for (id, x, w) in [("iv900", 16.0, 40.0), ("iv1800", 56, 40), ("iv3600", 96, 40), ("iv0", 136, 40), ("quit", 320, 24)] {
+            for (id, x, w) in [("iv900", 16.0, 40.0), ("iv1800", 56, 40), ("iv3600", 96, 40), ("iv14400", 136, 40), ("iv0", 176, 40), ("quit", 320, 24)] {
                 check(hits.contains { $0.id == id && $0.rect == CGRect(x: x, y: 8, width: w, height: 24) },
                       "\(lang) advanced=\(advanced): \(id) footer hit geometry")
             }
@@ -7299,48 +7502,95 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             prefs["autoPoll"] = false; select(true, true)
             let (manualTime, _) = footer(fixtureUpdated)
             let (manualNoTime, _) = footer(nil)
-            check(manualTime != manualNoTime && pollSelected(3600, manual: 3600) && !pollSelected(0, manual: 3600),
-                  "\(lang) advanced=\(advanced): manual keeps timestamp and selected fixed interval")
+            check(manualTime == manualNoTime && pollSelected(3600, manual: 3600) && !pollSelected(0, manual: 3600),
+                  "\(lang) advanced=\(advanced): manual footer keeps selected interval without a global timestamp")
+            let (fourHour, _) = footer(nil, manual: 14400)
+            check(fourHour != manualNoTime && pollSelected(14400, manual: 14400)
+                  && !pollSelected(0, manual: 14400) && !pollSelected(3600, manual: 14400),
+                  "\(lang) advanced=\(advanced): fixed four-hour slot is highlighted alone")
             check(!delegate.autoSummary().contains(prefix), "\(lang) manual tooltip retains prior timestamp behavior")
             prefs["autoPoll"] = true; select(true, true)
-            for (fixture, ci, xi, claudeOn, codexOn, autoOn) in [
-                ("different", 900.0, 14400.0, true, true, true), ("equal", 1800, 1800, true, true, true),
-                ("backoff", 3600, 900, true, true, true), ("paused", 900, 14400, false, false, true),
-                ("single-codex-15", 1800, 900, false, true, true), ("single-codex-30", 1800, 1800, false, true, true),
-                ("single-codex-60", 1800, 3600, false, true, true), ("single-codex-240", 1800, 14400, false, true, true),
-                ("manual-60", 900, 14400, true, true, false), ("long", 1800, 900, true, true, true)
-            ] {
+            check(pollSegments().filter { pollSelected($0.sec, manual: 1800, autoIntervals: [:]) }.map { $0.sec } == [0],
+                  "\(lang) advanced=\(advanced): absent Auto state never invents an effective interval")
+            let autoFixtures: [(String, TimeInterval, TimeInterval, Bool, Bool, Bool, [TimeInterval])] = [
+                ("different", 900.0, 14400.0, true, true, true, [0.0, 900, 14400]),
+                ("different-swapped", 14400, 900, true, true, true, [0, 900, 14400]),
+                ("different-middle", 1800, 3600, true, true, true, [0, 1800, 3600]),
+                ("different-middle-swapped", 3600, 1800, true, true, true, [0, 1800, 3600]),
+                ("equal", 1800, 1800, true, true, true, [0, 1800]),
+                ("equal-15", 900, 900, true, true, true, [0, 900]),
+                ("backoff", 3600, 900, true, true, true, [0, 900, 3600]),
+                ("paused", 900, 14400, false, false, true, [0]),
+                ("paused-fixed", 900, 14400, false, false, false, []),
+                ("single-claude-15", 900, 1800, true, false, true, [0, 900]),
+                ("single-claude-30", 1800, 1800, true, false, true, [0, 1800]),
+                ("single-claude-60", 3600, 1800, true, false, true, [0, 3600]),
+                ("single-claude-240", 14400, 1800, true, false, true, [0, 14400]),
+                ("single-codex-15", 1800, 900, false, true, true, [0, 900]),
+                ("single-codex-30", 1800, 1800, false, true, true, [0, 1800]),
+                ("single-codex-60", 1800, 3600, false, true, true, [0, 3600]),
+                ("single-codex-240", 1800, 14400, false, true, true, [0, 14400]),
+                ("manual-15", 900, 14400, true, true, false, [900]),
+                ("manual-30", 900, 14400, true, true, false, [1800]),
+                ("manual-60", 900, 14400, true, true, false, [3600]),
+                ("manual-240", 900, 14400, true, true, false, [14400]),
+                ("long", 1800, 900, true, true, true, [0, 900, 1800])
+            ]
+            for (fixture, ci, xi, claudeOn, codexOn, autoOn, expectedSelected) in autoFixtures {
                 prefs["advanced"] = advanced; prefs["autoPoll"] = autoOn; select(claudeOn, codexOn)
+                let manual: TimeInterval = !autoOn && !expectedSelected.isEmpty ? expectedSelected[0] : 3600
+                let snapshot = ["claude": ci, "codex": xi]
+                check(Set(pollSegments().filter { pollSelected($0.sec, manual: manual, autoIntervals: snapshot) }.map { $0.sec }) == Set(expectedSelected),
+                      "\(lang) advanced=\(advanced) \(fixture): exact Auto plus effective or fixed selection")
                 let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
                 let height = mainPanelHeight(cl, cx)
                 func panelImage(_ intervals: [String: TimeInterval]) -> (CGContext, [Hit]) {
                     let ctx = bitmapContext(720, Int(height * 2))!; ctx.scaleBy(x: 2, y: 2)
                     let size = CGSize(width: PANEL_W, height: height)
                     let hits = advanced
-                        ? drawAdvanced(ctx, size: size, claude: cl, codex: cx, interval: 3600,
+                        ? drawAdvanced(ctx, size: size, claude: cl, codex: cx, interval: manual,
                                        updated: fixtureUpdated, about: AboutState(), autoIntervals: intervals)
-                        : drawPanel(ctx, size: size, claude: cl, codex: cx, interval: 3600,
+                        : drawPanel(ctx, size: size, claude: cl, codex: cx, interval: manual,
                                     updated: fixtureUpdated, about: AboutState(), autoIntervals: intervals)
                     return (ctx, hits)
                 }
                 let (image, panelHits) = panelImage(["claude": ci, "codex": xi])
+                let autoTooltip = panelHits.first { $0.id == "iv0" }!.tooltip ?? ""
+                if !claudeOn && !codexOn {
+                    check(panelHits.filter { $0.id.hasPrefix("iv") }.allSatisfy {
+                        $0.tooltip == (lang == "ru" ? "Нет включённых подписок" : "No subscriptions enabled")
+                    }, "\(lang) advanced=\(advanced) \(fixture): all interval tooltips explain Off")
+                } else if autoOn {
+                    for (name, enabled, value) in [("Claude Code", claudeOn, ci), ("Codex", codexOn, xi)] {
+                        check(autoTooltip.contains(name + " → " + pollAccessibleTitle(value)) == enabled,
+                              "\(lang) advanced=\(advanced) \(fixture): Auto tooltip maps only enabled \(name)")
+                        for segment in POLL_CHOICES {
+                            let tooltip = panelHits.first { $0.id == "iv\(Int(segment.sec))" }!.tooltip ?? ""
+                            check(tooltip.contains(name) == (enabled && segment.sec == value),
+                                  "\(lang) advanced=\(advanced) \(fixture): \(name) appears only on its effective segment")
+                        }
+                    }
+                }
                 // Full cards include live countdown/pace calculations. Compare the actual
                 // shared footer in isolation; keep the full-panel image for visual QA.
-                let (bytes, _) = footer(fixtureUpdated, intervals: ["claude": ci, "codex": xi])
-                let (changedBytes, _) = footer(fixtureUpdated, intervals: ["claude": ci == 14400 ? 900 : 14400,
-                                                                         "codex": xi == 14400 ? 900 : 14400])
+                let (bytes, _) = footer(fixtureUpdated, intervals: snapshot, manual: manual)
+                let nextFixtureInterval: [TimeInterval: TimeInterval] = [900: 1800, 1800: 3600, 3600: 14400, 14400: 900]
+                let (changedBytes, _) = footer(fixtureUpdated, intervals: ["claude": nextFixtureInterval[ci]!,
+                                                                         "codex": nextFixtureInterval[xi]!], manual: manual)
                 check(autoOn && (claudeOn || codexOn) ? bytes != changedBytes : bytes == changedBytes,
                       "\(lang) advanced=\(advanced) \(fixture): shared footer consumes only enabled Auto snapshot")
                 let autoHit = panelHits.first { $0.id == "iv0" }!.rect
                 let powerHit = panelHits.first { $0.id == "quit" }!.rect
-                check(autoHit.minX == 136 && autoHit.width == 40 && powerHit.minX == 320
+                check(autoHit.minX == 176 && autoHit.width == 40 && powerHit.minX == 320
                       && !autoHit.intersects(powerHit) && autoHit.minY >= 0 && autoHit.maxY <= height,
                       "\(lang) advanced=\(advanced) \(fixture): full-panel footer bounds and fallback")
                 save(image, "/tmp/ccl-auto-ui-\(fixture)-\(lang)-advanced-\(advanced).png")
+                autoImages += 1
             }
             prefs["autoPoll"] = true; select(true, true)
         }
     }
+    check(autoImages == 88, "88 RU/EN Simple/Advanced Auto, Fixed and Off actual bitmap fixtures")
     // Auth-copy regressions (tester): synthetic LimitData and pure bitmap draw only.
     // Never call AppDelegate refresh/scan/timers or infer I/O safety from not-due.
     let authNow = Date()
@@ -7439,8 +7689,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     let label = "\(lang) advanced=\(advanced) both=\(both) \(product)/\(fixture)"
                     let failedFresh = fixture == "network" || fixture == "poll-failed"
                     let snapshotFresh = failedFresh || fixture == "weekly-only" || fixture == "session-reset"
-                    authCheck(card.paused == !snapshotFresh && card.noticeHeight == (recover || failedFresh ? 38 : 19),
-                              label + " freshness, recovery and failure have independent notice height")
+                    let expectedNoticeHeight: CGFloat = recover ? 38 : ["no-asof", "empty", "read-error", "read-error-empty"].contains(fixture) ? 19 : 0
+                    authCheck(card.paused == !snapshotFresh && card.noticeHeight == expectedNoticeHeight,
+                              label + " only necessary missing/auth notices retain their height")
                     if failedFresh {
                         authCheck(card.rows.filter { $0.limit != nil }.allSatisfy { $0.kind == .full },
                                   label + " fresh failed fetch retains snapshot pace rows")
@@ -7451,9 +7702,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         authCheck(weeklyRow.kind == .full && pace?.used == 41 && pace?.planPct == 50
                                   && pace?.projectedPct == 82 && pace?.elapsedH == 84,
                                   label + " 41% at half-week projects 82% from asOf, independent of current age")
-                        authCheck(limitSnapshotNotice(sample).hasPrefix(
-                            lang == "ru" ? "Темп по снимку от " : "Pace from snapshot at "),
-                                  label + " historical/current forecast retains explicit timestamp")
+                        authCheck(limitSnapshotNotice(sample).isEmpty
+                                  && quotaTooltip(sample).contains((lang == "ru" ? "Данные: " : "Data: ") + quotaTimestamp(sample.asOf?.timeIntervalSince1970)),
+                                  label + " historical/current forecast keeps observation time in tooltip without a verbose notice")
                         if fixture == "session-reset" {
                             authCheck(card.rows.first { $0.limit?.id == "session" }?.kind == .stale
                                       && metricIsStale(sample, metric: "session", now: authNow)
@@ -7520,9 +7771,14 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         let codexRect = hits.first { $0.id == codexTarget }!.rect
                         if advanced {
                             let claudeCard = cards.first { $0.product == "claude" }!
-                            let boundary = height - 38 - (58 + claudeCard.height + 5)
-                            authCheck(fixRect.minY > boundary && codexRect.midY <= boundary
-                                      && claudeCard.noticeHeight == 38,
+                            let codexCard = cards.first { $0.product == "codex" }!
+                            // Cards start at y=58 in the unified panel, without the former 38pt wrapper.
+                            let claudeBounds = CGRect(x: 15, y: height - 58 - claudeCard.height,
+                                                      width: 330, height: claudeCard.height)
+                            let codexBounds = CGRect(x: 15, y: claudeBounds.minY - 5 - codexCard.height,
+                                                     width: 330, height: codexCard.height)
+                            authCheck(fixRect == claudeBounds && codexBounds.contains(codexRect)
+                                      && !fixRect.intersects(codexBounds) && claudeCard.noticeHeight == 38,
                                       label + " recovery hit belongs only to Claude card")
                         } else {
                             authCheck(fixRect.maxX <= PANEL_W / 2 && codexRect.minX >= PANEL_W / 2,
@@ -7542,9 +7798,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
         select(true, true)
         authCheck(advCards(authReading("fresh"), authReading("fresh")).allSatisfy {
-            !$0.paused && $0.noticeHeight == 19 && limitSnapshotNotice($0.data).hasPrefix(
-                lang == "ru" ? "Темп по снимку от " : "Pace from snapshot at ")
-        }, "\(lang) fresh cards have one timestamped snapshot notice")
+            !$0.paused && $0.noticeHeight == 0 && limitSnapshotNotice($0.data).isEmpty
+        }, "\(lang) fresh cards have no verbose snapshot notice or empty notice row")
     }
     authCheck(authImages == 120, "120 RU/EN Simple/Advanced actual bitmap fixtures, including 32 FRESH-4H panels")
     print("Auth hint fixtures: \(authChecks) checks, \(authImages) PNG")
@@ -7609,7 +7864,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
     try! fm.removeItem(atPath: root)
-    check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800), "Auto button selected independently of saved fixed interval")
+    check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
+          "Auto selection uses provider snapshots independently of the saved fixed interval")
     print("Subscription selection and adaptive polling selftest passed")
     exit(0)
 }

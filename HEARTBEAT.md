@@ -1,10 +1,10 @@
 # HEARTBEAT — claude-codex-limits
 
-> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-07.
+> Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-08.
 
-## Актуальный статус · 2026-10-07
+## Актуальный статус · 2026-10-08
 
-- 2026-10-08 COMPACT-REFRESH: пользователь отверг дизайн3.2.6 (внешние верхняя плашка/нижний список). Исправление macOS3.2.7 через UXAnalyst → DesignEngineer → CodeReviewer → QA + DesignReviewer; рабочая логика3.2.6 сохраняется. [План](docs/compact-refresh-plan.md), урок014. Пока установлена3.2.6.
+- COMPACT-REFRESH 3.2.7 принята: независимые code/isolation/design PASS, пакетная QA 5089 OK / 0 ошибок. Добавлены 4ч и подсветка Auto + фактических интервалов; внешние блоки и справка о снимке удалены. Публикация и установка выполняются; пока установлена 3.2.6. [Приёмка](docs/compact-refresh-verification.md).
 
 - MANUAL-REFRESH завершён: macOS3.2.6 опубликована и установлена. Source d50584bcf5c7b7b63eb6df2ef50539b11fd0f045; Code/SecurityPASS, pure78/1089/0, packaged3091/0, QA36 новых PNG. Публичный DMG b8ff16fc совпал; installed strict codesign/SHA PASS, PID96073. Linux0.4.4 не меняется. [Приёмка](docs/manual-refresh-verification.md).
 

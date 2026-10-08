@@ -19,6 +19,15 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
+## macOS 3.2.7: compact refresh
+
+[Download macOS 3.2.7](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.7).
+Click the refresh icon beside Settings (tooltip: **Refresh now**); status and actions fit inside each card, with times shown without seconds in its tooltip.
+On macOS 3.2.7, choose a fixed interval of **15 min / 30 min / 1 h / 4 h**; Linux 0.4.4 keeps its three choices, without fixed 4 h.
+In Auto, **A** and the actual interval segments are highlighted together; different Claude/Codex intervals highlight both segments, with the service mapping in the tooltip.
+There is no separate frequency label to the right of A. The **Pace from snapshot at…** line is removed; forecasts still use the reading time.
+Manual refresh, the 30-second guard and server retry deadlines keep their 3.2.6 behavior. [Release notes](docs/compact-refresh-release.md).
+
 ## macOS 3.2.6: manual refresh
 
 [Download macOS 3.2.6](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.6).
@@ -57,7 +66,7 @@ polling mode stays selected. Opening the panel in Auto still follows the schedul
   `claude login` for Claude or `codex login` for Codex, then return and refresh.
 
 These quota controls are separate from **Retry Keychain access** in GitHub sync
-settings. See [draft RU/EN notes and pending checks](docs/manual-refresh-release.md).
+settings. See [RU/EN notes](docs/manual-refresh-release.md).
 
 ## macOS 3.2.5: quiet GitHub Keychain access
 
@@ -99,8 +108,8 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 - **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
 - **Opening the popover requests a fresh reading** with a fixed interval; Auto respects its schedule.
-- **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
-- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. When Auto is on, the blue-to-violet A button shows the current interval beside it in both Simple and Advanced views. One enabled subscription or equal intervals shows one value; different intervals show each product, for example `Claude 15m · Codex 4h`. With both subscriptions off, the label reads `no subscriptions`. The last-update time is available in the A tooltip while Auto is on. Auto is off by default; the fixed default remains 30 minutes.
+- **Refresh interval** — macOS 3.2.6 and Linux 0.4.4 offer 15 minutes, 30 minutes, or 1 hour; the macOS 3.2.7 adds fixed 4 hours. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
+- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. In macOS 3.2.6 and Linux 0.4.4, Auto shows the current interval beside the blue-to-violet A button in both views: one value for equal intervals or one subscription, or product-specific values such as `Claude 15m · Codex 4h`; with both off, it reads `no subscriptions`. These versions show the last-update time in the A tooltip. The macOS 3.2.7 instead highlights A and the actual interval segments, with service mapping in the tooltip and no separate frequency label; when both subscriptions are off, no interval is highlighted. Auto is off by default; the fixed default remains 30 minutes.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -240,8 +249,8 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
-- **Refresh button** → request updated limits. The macOS 3.2.6 header labels it **Refresh now**; see the instructions above.
-- **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto).
+- **Refresh** → request updated limits. In the 3.2.7 layout, click the icon beside Settings with the **Refresh now** tooltip; 3.2.6 uses the labeled header button.
+- **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto) in macOS 3.2.6 and Linux 0.4.4. The macOS 3.2.7 adds **4 hours**; clicking an interval selects fixed polling, and **A** selects Auto.
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
 
