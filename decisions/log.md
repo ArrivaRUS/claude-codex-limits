@@ -1,3 +1,11 @@
+# 2026-10-07 — ручное обновление остатков
+
+Уточнение2026-10-08 №2: прямой запрос владельца расширяетCOMPACT-REFRESH:15м/30м/1ч/4ч; AutoподсвечиваетА и фактическиеинтервалывключённыхсервисов,безотдельнойчастотысправа. Справка«Темппоснимкуот…»удаляетсяизкарточки. Повторноевыпускноеразрешениене требуется;3.2.7ещёне опубликована.
+
+Уточнение2026-10-08: пользователь отверг визуальные внешние блоки3.2.6. Сохраняем ручную семантику, возвращаем прежнюю композицию: refresh в существующую шапку, статусы внутрь карточек. Это исправление дизайна, без новых внешних/auth контрактов. План docs/compact-refresh-plan.md; урок014.
+
+Пользователь принял предложенный сценарий «ок, давай». Явный запрос должен обходить локальное расписание и паузу после временной ошибки, но соблюдать реальные серверные ограничения. Каждый сервис имеет независимый результат и single-flight; повтор не делает сохранённый снимок свежим. Обычное обновление не означает согласия на интерактивную авторизацию. Целевой выпуск macOS3.2.6, Linux0.4.4 не меняется. При отказе quietClaudehelper из-за системного разрешения нужен отдельный однократный ручной read-допуск; обычное обновление остаётся quiet. Read-допуск не распространяется на запись или таймер. ACL программно не расширять. Это устраняет найденный на ревью тупик восстановления в рамках согласованного действия «Восстановить доступ». План/критерии: docs/manual-refresh-proposal.md. Реализовано и выпущено в3.2.6; доказательства: docs/manual-refresh-verification.md.
+
 # Журнал решений — claude-codex-limits
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
@@ -129,3 +137,21 @@ mapped inode и подпись подтверждены, canonical target пра
 правка не обоснована этим снимком; история старого запуска неизвестна. Возможную
 path-migration проблему вынести отдельно после определения portable/canonical
 контракта. Installed bundle, loginitems и restart в диагностике не менялись.
+
+## 2026-10-08 — приёмка COMPACT-REFRESH
+
+Exact source a60319 принят независимыми CodeReviewer (production/isolation) и DesignReviewer; QA packaged5089/0,17/17files,minOS13/arm64/sign. Старые P2 закрыты; Native focus/tooltip/live accounts не заявлены проверенными. Выпуск и установка3.2.7 выполняются по действующему разрешению; Linux0.4.4 не меняется.
+
+## 2026-10-08 — публикация и установка COMPACT-REFRESH
+
+v3.2.7 опубликована на source1078ddbe058196204265a0bc565ff591cb8ca45c, Latest=v3.2.7. Публичный DMG4b5a8ca3 скачан и совпал с принятым. Установлен binary978f1aec в /Applications; strict codesign/версия3.2.7/PID15393 подтверждены. Предыдущая3.2.6 сохранена для отката. Linux0.4.4 не менялся.
+
+## 2026-10-08 — Linux0.4.5
+
+Владелец запросил Linux-версию исправленного интерфейса3.2.7. Порт UI выполняется на existing Linux refresh/poll/auth:4ч,Autohighlight,compactfeedback,noannotation. ВыпускDEB linux-v0.4.5 --latest=false, macOS3.2.7Latest. План docs/linux-compact-refresh-plan.md; изолированныйLinuxCI и независимыйdesignreview обязательны.
+
+Linux0.4.5 scope refinement: discovered existingmanual900sfloor; portacceptedMANUAL-REFRESHcontract as well soLinuxanswers originaluserproblem. DeveloperComplex forconcurrency/result/retrymetadata; SecurityAnalystT2. Existingauthstores/endpointsandAutoalgorithm retained. App.py ownershipserializedafterDesignEngineer.
+
+## 2026-10-08 — публикация Linux 0.4.5
+
+Принята ревизия19440ee112f164b411bf4715d6fa65077a272c48: CI358/0ошибок/0пропусков; независимые code/security/isolation, visualdelta37PNG+26сравнений и packagedQA202проверки PASS. Выпущен linux-v0.4.5 с точнымCI DEB, --latest=false. Публичный файл скачан и совпал побайтно; SHA99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10. Latest=v3.2.7. Измененияmetadata не подменяют ревизию пакета. LiveALSE/ThinkPad и фактическая установка не заявляются выполненными. Root вёл интеграцию/память/выпуск; реализация и проверки делегированы утверждённым ролям без изменения моделей.

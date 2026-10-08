@@ -1,3 +1,15 @@
+# LINUX-COMPACT · 2026-10-08
+
+Linux 0.4.5 опубликована: компактная панель, ручные 4ч, Auto с подсветкой действующих интервалов и независимое ручное обновление. Исходная ревизия `19440ee112f164b411bf4715d6fa65077a272c48`; CI 358 тестов без ошибок и пропусков, независимые code/security/isolation/design и packaged QA пройдены. Публичный DEB скачан обратно: SHA-256 совпал с принятым пакетом. Latest остаётся macOS 3.2.7. На текущей Astra обновлено 0.4.4 → 0.4.5: установка exit 0, dpkg `install ok installed`, 39 установленных файлов совпали с DEB по bytes/правам/владельцам. Штатный GUI PID 133128 жив через 3 секунды, timer активен. Новый ручной smoke 0.4.5 и успешный обмен не подтверждены. [Установка](alse-0.4.5-installation.md). [Релиз](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), [приёмка](linux-compact-refresh-verification.md).
+
+# История COMPACT-REFRESH · 2026-10-08
+
+COMPACT-REFRESH завершена: macOS 3.2.7 опубликована как Latest и установлена на этом Mac. Source `1078ddbe058196204265a0bc565ff591cb8ca45c`; независимые code/isolation/design PASS, packaged QA 5089 OK / 0 ошибок, визуально проверены 148 экранов. Публичный DMG SHA и установленный binary SHA совпали; strict codesign PASS, процесс PID15393 запущен. Linux остаётся 0.4.4. [Приёмка](compact-refresh-verification.md).
+
+# История MANUAL-REFRESH · 2026-10-07
+
+MANUAL-REFRESH завершён: macOS3.2.6 опубликована и установлена. Source d50584bcf5c7b7b63eb6df2ef50539b11fd0f045; Code/SecurityPASS, pure78/1089/0, packaged3091/0, QA36 новых PNG. Публичный DMG b8ff16fc совпал; installed strict codesign/SHA PASS, PID96073. Linux0.4.4 не меняется. [Приёмка](manual-refresh-verification.md).
+
 # Статус командного внедрения
 
 ## Linux / Astra 0.4.4 · 2026-10-07

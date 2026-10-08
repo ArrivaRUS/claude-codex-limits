@@ -4,53 +4,27 @@ if __package__:
 else:
     import _isolate  # noqa: F401
 
-import ast
 import os
+import socket
+import subprocess
 import tempfile
 import unittest
-from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ccl import common, limits, polling, sync, usage, vault
+from ccl import common, limits, polling, quota_refresh, sync, usage, vault
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PyQt5.QtGui import QImage, QPainter
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QStyleFactory
     from ccl.gui import app, panel
-    from ccl.gui.paint import Attr, Canvas
-    label_parts = panel.auto_poll_label_parts
+    from ccl.gui.paint import Canvas
     HAVE_QT = True
 except ImportError:
     HAVE_QT = False
-    # Run the exact dependency-free production formatter when Qt is unavailable.
-    # This is not a substitute for the skipped draw/runtime tests below.
-    path = Path(__file__).parents[1] / "ccl" / "gui" / "panel.py"
-    tree = ast.parse(path.read_text())
-    nodes = [n for n in tree.body if
-             isinstance(n, ast.FunctionDef) and n.name == "auto_poll_label_parts" or
-             isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "POLL_DEFAULT" for t in n.targets)]
-    namespace = {}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), namespace)
-    label_parts = namespace["auto_poll_label_parts"]
 
-
-class TestAutoLabel(unittest.TestCase):
-    def test_all_pairs_single_none_manual_and_missing_state(self):
-        for lang, labels in (("ru", ["15м", "30м", "1ч", "4ч"]), ("en", ["15m", "30m", "1h", "4h"])):
-            values = dict(zip((900, 1800, 3600, 14400), labels))
-            both = {"claude": True, "codex": True}
-            for ci, ct in values.items():
-                for xi, xt in values.items():
-                    with self.subTest(lang=lang, claude=ci, codex=xi):
-                        expected = [ct] if ci == xi else ["Claude " + ct, "Codex " + xt]
-                        self.assertEqual(label_parts(True, both, {"claude": ci, "codex": xi}, lang), expected)
-                for product in ("claude", "codex"):
-                    self.assertEqual(label_parts(True, {product: True}, {product: ci}, lang), [ct])
-            self.assertEqual(label_parts(True, {}, {}, lang), ["no subscriptions" if lang == "en" else "нет подписок"])
-            self.assertEqual(label_parts(False, both, {"claude": 900, "codex": 14400}, lang), [])
-            self.assertEqual(label_parts(True, both, {}, lang), [labels[1]])
+NOW = 1_800_000_000
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt5 not installed: actual draw/runtime unverified")
@@ -62,18 +36,60 @@ class TestAutoUI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        previous_style = self.qapp.style().objectName()
+        self.addCleanup(self.qapp.setStyle, previous_style)
+        # Every preview has an explicit style, including the existing compact set.
+        TestAutoUI.set_preview_style(self, "Fusion")
+        p = patch.object(app.time, "monotonic", lambda: app.time.time())
+        p.start(); self.addCleanup(p.stop)
         self.st = common.Store(os.path.join(self.tmp.name, "settings.json"), common.SETTINGS_DEFAULTS)
         self.state = common.Store(os.path.join(self.tmp.name, "state.json"), {})
         self.st.update(autoPoll=True, interval=3600, monitor_claude=True, monitor_codex=True)
         def forbidden(*args, **kwargs):
             raise AssertionError("real transport/credentials/logs forbidden")
         for owner, name, value in ((common, "_settings", self.st), (common, "_state", self.state),
+                                   (common, "CACHE_PATH", os.path.join(self.tmp.name, "cache.json")),
                                    (vault, "_ss", forbidden), (vault, "read", forbidden),
                                    (vault, "_file_get", forbidden), (sync, "sync_cycle", forbidden),
                                    (limits, "fetch_claude", forbidden), (limits, "fetch_codex", forbidden),
-                                   (usage, "refresh", forbidden)):
+                                   (usage, "refresh", forbidden), (usage, "load_index", forbidden),
+                                   (vault, "_ss_v2", forbidden), (sync, "transport", forbidden),
+                                   (sync, "auth_owner", forbidden), (common, "http", forbidden),
+                                   (socket, "create_connection", forbidden),
+                                   (subprocess, "Popen", forbidden), (subprocess, "run", forbidden)):
             p = patch.object(owner, name, value)
             p.start(); self.addCleanup(p.stop)
+
+    def set_preview_style(self, name):
+        available = {key.lower() for key in QStyleFactory.keys()}
+        self.assertIn(name.lower(), available, "requested CI preview style is unavailable")
+        self.qapp.setStyle(name)
+        self.assertEqual(self.qapp.style().objectName().lower(), name.lower())
+
+    def save_preview(self, image, case, lang, advanced, prefix="auto-ui"):
+        # Unittest previously discarded these QImages; CI already collects this path.
+        root = os.environ.get("CCL_PREVIEW_DIR")
+        if root:
+            real_root = os.path.realpath(root)
+            self.assertTrue(real_root.startswith(("/tmp/", "/private/tmp/")),
+                            "preview output must remain in the synthetic temporary directory")
+            os.makedirs(root, exist_ok=True)
+            style = self.qapp.style().objectName().lower()
+            self.assertIn(style, ("fusion", "breeze"))
+            name = "%s-%s-%s-%s-%s.png" % (prefix, style, case, lang, "advanced" if advanced else "simple")
+            self.assertTrue(image.save(os.path.join(root, name)), name)
+
+    def preview_model(self):
+        # Fixed coherent observations: these PNGs also contain valid pace/forecasts.
+        m = panel.Model()
+        m.loaded, m.updated, m.interval = True, NOW - 60, 3600
+        for product in ("claude", "codex"):
+            d = getattr(m, product)
+            d.present, d.api_fresh, d.as_of = True, True, NOW - 60
+            d.weekly, d.weekly_reset = 47, d.as_of + 84 * 3600
+            if product == "claude":
+                d.session, d.session_reset = 31, d.as_of + 2.5 * 3600
+        return m
 
     def model(self):
         m = panel.Model()
@@ -87,7 +103,10 @@ class TestAutoUI(unittest.TestCase):
     def render(self, model, advanced=False):
         h = panel.advanced_height(model) if advanced else panel.simple_height(model)
         image = QImage(panel.PANEL_W, int(h), QImage.Format_ARGB32)
+        image.fill(0)
         painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.TextAntialiasing)
         texts, fills = [], []
         original_text, original_fill = Canvas.text_c, Canvas.round_fill
         def text(canvas, attr, x, top, height, align=0):
@@ -110,92 +129,125 @@ class TestAutoUI(unittest.TestCase):
 
     def assert_geometry(self, hits):
         boxes = dict(hits)
-        for hid, x, width in (("iv900", 16, 40), ("iv1800", 56, 40), ("iv3600", 96, 40),
-                              ("iv0", 136, 40), ("quit", 320, 24)):
-            self.assertEqual((boxes[hid].x(), boxes[hid].width(), boxes[hid].height()), (x, width, 24))
-        self.assertFalse(boxes["iv0"].intersects(boxes["quit"]))
-        self.assertEqual(boxes["iv0"].y(), boxes["quit"].y())
+        ids = ("iv900", "iv1800", "iv3600", "iv14400", "iv0")
+        self.assertEqual([hid for hid, _ in hits if hid.startswith("iv")], list(ids))
+        for i, hid in enumerate(ids):
+            r = boxes[hid]
+            self.assertEqual((r.x(), r.width(), r.height()), (16 + 40 * i, 40, 24))
+            self.assertEqual(r.y(), boxes["quit"].y())
+        self.assertEqual((boxes["quit"].x(), boxes["quit"].width()), (320, 24))
+        for i, hid in enumerate(ids):
+            for other in ids[i + 1:] + ("quit",):
+                self.assertFalse(boxes[hid].intersects(boxes[other]))
 
-    def test_actual_draw_text_geometry_manual_and_fallback(self):
+    def selected_intervals(self, hits, fills):
+        top = dict(hits)["iv0"].y()
+        # Contract: selected fixed/actual Auto segments have an inset neutral fill.
+        return {seconds for i, seconds in enumerate((900, 1800, 3600, 14400))
+                if any((r.x(), r.y(), r.width(), r.height()) ==
+                       (18 + i * 40, top + 2, 36, 20) for r in fills)}
+
+    def assert_schedule(self, hits, texts, fills, expected):
+        self.assert_geometry(hits)
+        self.assertEqual(self.selected_intervals(hits, fills), set(expected))
+        top = dict(hits)["iv0"].y()
+        row = [t for t in texts if top <= t[2] < top + 24]
+        self.assertFalse(any(216 <= t[1] <= 320 for t in row), row)
+        labels = [t[0] for t in row]
+        self.assertEqual(labels, ["15m", "30m", "1h", "4h", "A"] if self.st.get("lang") == "en"
+                         else ["15м", "30м", "1ч", "4ч", "А"])
+
+    def test_actual_auto_highlights_enabled_intervals_not_saved_fixed_or_retry(self):
+        m = self.model()
+        scenarios = (
+            ((True, True), {"claude": 900, "codex": 900}, {900}),
+            ((True, True), {"claude": 900, "codex": 14400}, {900, 14400}),
+            ((True, True), {"claude": 14400, "codex": 900}, {900, 14400}),
+            ((True, True), {"claude": 1800, "codex": 3600}, {1800, 3600}),
+            ((True, True), {"claude": 3600, "codex": 1800}, {1800, 3600}),
+            ((True, False), {"claude": 14400, "codex": 900}, {14400}),
+            ((False, True), {"claude": 900, "codex": 1800}, {1800}),
+            ((False, False), {"claude": 900, "codex": 14400}, set()),
+            ((True, True), {}, set()),
+            ((True, True), {"claude": 900}, {900}),
+        )
+        for lang in ("ru", "en"):
+            self.st.set("lang", lang)
+            for advanced in (False, True):
+                for enabled, intervals, expected in scenarios:
+                    with self.subTest(lang=lang, advanced=advanced, enabled=enabled, intervals=intervals):
+                        self.st.update(autoPoll=True, monitor_claude=enabled[0], monitor_codex=enabled[1])
+                        m.auto_intervals = intervals
+                        m.interval = 3600
+                        m.claude.next_poll_at = 100410  # Retry deadline is not the interval.
+                        _, hits, texts, fills = self.render(m, advanced)
+                        self.assert_schedule(hits, texts, fills, expected)
+                        # Auto capsule gradient must coexist with actual segment fills.
+                        self.assertFalse(any(r.x() == 181 and r.width() == 30 and r.height() == 20 for r in fills))
+
+    def test_fixed_only_selected_segment_and_off_preserves_choice(self):
         m = self.model()
         for lang in ("ru", "en"):
             self.st.set("lang", lang)
             for advanced in (False, True):
-                for enabled in ((True, True), (True, False), (False, True), (False, False)):
-                    self.st.update(monitor_claude=enabled[0], monitor_codex=enabled[1])
-                    image, hits, texts, fills = self.render(m, advanced)
-                    self.assert_geometry(hits)
-                    expected = label_parts(True, dict(zip(("claude", "codex"), enabled)), m.auto_intervals, lang)
-                    labels = [t for t in texts if t[1] == 184]
-                    self.assertIn([t[0] for t in labels], [[" · ".join(expected)], expected])
-                    self.assertFalse(any(t[0].startswith(("updated ", "обновлено ")) for t in texts))
-                    self.assertFalse(any(r.x() in (18, 58, 98) and r.width() == 36 for r in fills))
-                    # Includes Advanced -> Simple when both products are disabled.
-                    output = os.environ.get("CCL_PREVIEW_DIR")
-                    if output:
-                        os.makedirs(output, exist_ok=True)
-                        name = "auto-ui-%s-advanced-%s-enabled-%s%s.png" % (lang, advanced, *enabled)
-                        self.assertTrue(image.save(os.path.join(output, name)))
-                self.st.update(monitor_claude=True, monitor_codex=True)
-                for fixture, intervals, expected in (("equal", {"claude": 1800, "codex": 1800}, ["30m" if lang == "en" else "30м"]),
-                                                     ("backoff", {"claude": 3600, "codex": 900},
-                                                      ["Claude 1h", "Codex 15m"] if lang == "en" else ["Claude 1ч", "Codex 15м"]),
-                                                     ("long", {"claude": 1800, "codex": 900},
-                                                      ["Claude 30m", "Codex 15m"] if lang == "en" else ["Claude 30м", "Codex 15м"])):
-                    m.auto_intervals = intervals
-                    image, hits, texts, _ = self.render(m, advanced)
-                    self.assert_geometry(hits)
-                    self.assertIn([t[0] for t in texts if t[1] == 184], [[" · ".join(expected)], expected])
-                    if output:
-                        self.assertTrue(image.save(os.path.join(output, "auto-ui-%s-%s-advanced-%s.png" % (fixture, lang, advanced))))
-                self.st.update(monitor_claude=False, monitor_codex=True)
-                for seconds, minutes, label in ((900, 15, "15m" if lang == "en" else "15м"),
-                                                 (1800, 30, "30m" if lang == "en" else "30м"),
-                                                 (3600, 60, "1h" if lang == "en" else "1ч"),
-                                                 (14400, 240, "4h" if lang == "en" else "4ч")):
-                    m.auto_intervals = {"codex": seconds}
-                    image, hits, texts, _ = self.render(m, advanced)
-                    self.assert_geometry(hits)
-                    self.assertEqual([t[0] for t in texts if t[1] == 184], [label])
-                    if output:
-                        name = "auto-ui-single-codex-%s-%s-advanced-%s.png" % (minutes, lang, advanced)
-                        self.assertTrue(image.save(os.path.join(output, name)))
-                m.auto_intervals = {"claude": 900, "codex": 14400}
-                self.st.update(autoPoll=False, monitor_claude=True, monitor_codex=True)
-                image, hits, texts, fills = self.render(m, advanced)
-                self.assert_geometry(hits)
-                self.assertFalse(any(t[1] == 184 for t in texts))
-                self.assertTrue(any(t[0].startswith(("updated ", "обновлено ")) for t in texts))
-                self.assertEqual([r.x() for r in fills if r.width() == 36 and r.height() == 20], [98])
-                if output:
-                    self.assertTrue(image.save(os.path.join(output, "auto-ui-manual-60-%s-advanced-%s.png" % (lang, advanced))))
-                self.st.set("autoPoll", True)
+                for seconds in (900, 1800, 3600, 14400):
+                    for enabled in ((True, True), (True, False), (False, False)):
+                        with self.subTest(lang=lang, advanced=advanced, seconds=seconds, enabled=enabled):
+                            self.st.update(autoPoll=False, interval=seconds,
+                                           monitor_claude=enabled[0], monitor_codex=enabled[1])
+                            m.interval = seconds
+                            _, hits, texts, fills = self.render(m, advanced)
+                            self.assert_schedule(hits, texts, fills, {seconds} if any(enabled) else set())
+                            self.assertTrue(any((r.x(), r.width(), r.height()) == (181, 30, 20) for r in fills))
+                            self.assertEqual(self.st.get("interval"), seconds)
 
-    def test_width_boundary_and_two_rows_stay_in_label_region(self):
-        m = self.model()
-        real_width = Attr.width
-        for width in (128, 129):
-            with patch.object(Attr, "width", lambda a: width if " · " in a.s else real_width(a)):
-                _, hits, texts, _ = self.render(m)
-            label = [t for t in texts if t[1] == 184]
-            self.assertEqual([t[0] for t in label], ["Claude 15м · Codex 4ч"] if width == 128 else ["Claude 15м", "Codex 4ч"])
-            top = dict(hits)["iv0"].y()
-            for value, x, y, height, align in label:
-                self.assertLessEqual(real_width(Attr(value, 10, "medium")) if width > 128 else width, 128)
-                self.assertGreaterEqual(y, top)
-                self.assertLessEqual(y + height, top + 24)
-            if width > 128:
-                self.assertEqual(label[1][2] - label[0][2], 12)
+    def test_representative_schedule_previews(self):
+        # Eight curated rows x RU/EN = 16 PNGs, not a style/view/state cross product.
+        # Fixed 15/60 use Simple; Fixed 240 and distinct 30/60 use Advanced.
+        cases = (
+            ("fixed-15", "Fusion", False, 900, {}),
+            ("fixed-60", "Fusion", False, 3600, {}),
+            ("fixed-240", "Fusion", True, 14400, {}),
+            ("auto-equal-30", "Fusion", False, None, {"claude": 1800, "codex": 1800}),
+            ("auto-claude30-codex60", "Fusion", True, None, {"claude": 1800, "codex": 3600}),
+            ("auto-claude60-codex30", "Fusion", True, None, {"claude": 3600, "codex": 1800}),
+            ("fixed-240", "Breeze", True, 14400, {}),
+            ("auto-claude60-codex30", "Breeze", True, None, {"claude": 3600, "codex": 1800}),
+        )
+        with patch.object(app.time, "time", return_value=NOW):
+            for case, style, advanced, fixed, intervals in cases:
+                self.set_preview_style(style)
+                for lang in ("ru", "en"):
+                    with self.subTest(case=case, style=style, lang=lang):
+                        self.st.update(lang=lang, autoPoll=fixed is None, interval=fixed or 14400,
+                                       monitor_claude=True, monitor_codex=True, advHistExpanded=False)
+                        m = self.preview_model()
+                        m.interval, m.auto_intervals = fixed or 14400, intervals
+                        image, hits, texts, fills = self.render(m, advanced)
+                        self.assert_schedule(hits, texts, fills, {fixed} if fixed else set(intervals.values()))
+                        auto_off = any(r.x() == 181 and r.width() == 30 and r.height() == 20 for r in fills)
+                        self.assertEqual(auto_off, fixed is not None)
+                        if fixed is None:
+                            for seconds in set(intervals.values()):
+                                tooltip = panel.interval_tooltip(m, seconds)
+                                self.assertEqual("Claude Code" in tooltip, intervals["claude"] == seconds)
+                                self.assertEqual("Codex" in tooltip, intervals["codex"] == seconds)
+                        if advanced:
+                            self.assertIn("94%", "\n".join(t[0] for t in texts))
+                        self.save_preview(image, case, lang, advanced)
 
     def fake_app(self):
         fake = SimpleNamespace(model=self.model(), activity_busy=False, busy_limits=False, selection_generation=1,
+                               sound_baselines={"claude": False, "codex": False},
                                poll_states={p: polling.PollState({"interval": v, "last_attempt": 100000})
                                             for p, v in (("claude", 14400), ("codex", 14400))},
                                win=SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock()),
                                load_local=Mock(), update_sync_warning=Mock(), check_alarms=Mock(), update_tray=Mock(),
-                               refresh_logs=Mock(), start_poll_timer=Mock(), refresh_products=["claude"])
+                               refresh_logs=Mock(), start_poll_timer=Mock())
         fake.model.history.record = Mock()
-        for name in ("publish_auto_intervals", "save_poll_states", "refresh_limits", "auto_summary"):
+        fake.refresh_states = {p: quota_refresh.RefreshState(state.last_attempt) for p, state in fake.poll_states.items()}
+        fake.start_poll_timer.side_effect = lambda: fake.publish_auto_intervals()
+        for name in ("scheduled_at", "publish_auto_intervals", "save_poll_states", "refresh_limits", "auto_summary"):
             setattr(fake, name, MethodType(getattr(app.TrayApp, name), fake))
         return fake
 
@@ -220,12 +272,11 @@ class TestAutoUI(unittest.TestCase):
              patch.object(app.threading, "Thread", side_effect=AssertionError("not-due request")):
             app.TrayApp.on_activity(fake, {"claude": [100100, 100200, 100300]})
         self.assertEqual(fake.model.auto_intervals, {"claude": 900, "codex": 14400})
-        fake.win.view.update.assert_called_once_with()
+        fake.win.view.update.assert_called_with()
         self.assertFalse(fake.busy_limits)
-        fake.start_poll_timer.assert_called_once_with()
-        _, _, texts, _ = self.render(fake.model)
-        self.assertIn([t[0] for t in texts if t[1] == 184],
-                      [["Claude 15м · Codex 4ч"], ["Claude 15м", "Codex 4ч"]])
+        fake.start_poll_timer.assert_called_with()
+        _, hits, texts, fills = self.render(fake.model)
+        self.assert_schedule(hits, texts, fills, {900, 14400})
 
     def test_observe_backoff_and_subscription_toggle_publish(self):
         fake = self.fake_app()
@@ -233,38 +284,44 @@ class TestAutoUI(unittest.TestCase):
         error = limits.LimitData()
         error.error = "offline fixture"
         with patch.object(app.time, "time", return_value=100400):
-            app.TrayApp.on_limits(fake, error, fake.model.codex, 1)
+            ticket = fake.refresh_states["claude"].admit("manual", 100400, monotonic_now=100400).ticket
+            app.TrayApp.on_limits(fake, "claude", ticket, error)
         self.assertEqual(fake.model.auto_intervals, {"claude": 1800, "codex": 14400})
-        fake.win.view.update.assert_called_once_with()
+        fake.win.view.update.assert_called_with()
         self.assertTrue(fake.poll_states["claude"].failed)
-        fake.start_poll_timer.assert_called_once_with()
-        self.assertIn("пауза после ошибки", fake.auto_summary())
+        fake.start_poll_timer.assert_called_with()
+        self.assertIn("Claude Code → 30 минут", fake.auto_summary())
         # Real selection handler, with refresh_limits exercising the not-due path.
         with patch.object(app.time, "time", return_value=100400), \
              patch.object(app.threading, "Thread", side_effect=AssertionError("not-due request")):
             app.TrayApp.set_product_enabled(fake, "codex", False)
-        _, _, texts, _ = self.render(fake.model)
-        self.assertEqual([t[0] for t in texts if t[1] == 184], ["30м"])
+        _, hits, texts, fills = self.render(fake.model)
+        self.assert_schedule(hits, texts, fills, {1800})
         fake.win.page0_changed.assert_called()
 
-    def test_timestamp_and_error_are_tooltip_only_when_auto_on(self):
+    def test_auto_tooltip_names_only_enabled_actual_intervals_and_off(self):
         fake = self.fake_app()
-        fake.poll_states["claude"].failed = True
-        for lang, clock_prefix, error_text in (("ru", "обновлено ", "пауза после ошибки"),
-                                                ("en", "updated ", "backing off after an error")):
-            self.st.set("lang", lang)
-            for updated in (100000, None):
-                fake.model.updated = updated
-                summary = fake.auto_summary()
-                self.assertEqual(clock_prefix in summary, updated is not None)
-                self.assertIn(error_text, summary)
-                self.assertIn(error_text, next(line for line in summary.splitlines() if line.startswith("Claude Code:")))
-                self.assertNotIn(error_text, next(line for line in summary.splitlines() if line.startswith("Codex:")))
-                _, _, texts, _ = self.render(fake.model)
-                self.assertFalse(any(clock_prefix in t[0] or error_text in t[0] for t in texts))
-            self.st.set("autoPoll", False)
-            self.assertNotIn(clock_prefix, fake.auto_summary())
-            self.st.set("autoPoll", True)
+        fake.model.auto_intervals = {"claude": 900, "codex": 14400}
+        for lang, claude, codex, off in (("ru", "Claude Code → 15 минут", "Codex → 4 часа", "Нет включённых подписок"),
+                                       ("en", "Claude Code → 15 minutes", "Codex → 4 hours", "No subscriptions enabled")):
+            self.st.update(lang=lang, monitor_claude=True, monitor_codex=True)
+            summary = fake.auto_summary()
+            self.assertIn(claude, summary)
+            self.assertIn(codex, summary)
+            both = panel.interval_tooltip(fake.model, 900)
+            self.assertIn("Claude Code", both)
+            self.assertNotIn("Codex", both)
+            fake.model.auto_intervals["codex"] = 900
+            both = panel.interval_tooltip(fake.model, 900)
+            self.assertIn("Claude Code", both)
+            self.assertIn("Codex", both)
+            self.st.set("monitor_claude", False)
+            self.assertNotIn("Claude Code", fake.auto_summary())
+            self.assertNotIn("Claude Code", panel.interval_tooltip(fake.model, 900))
+            self.st.set("monitor_codex", False)
+            self.assertEqual(fake.auto_summary(), off)
+            self.assertEqual(panel.interval_tooltip(fake.model, 14400), off)
+            fake.model.auto_intervals = {"claude": 900, "codex": 14400}
 
 
 if __name__ == "__main__":

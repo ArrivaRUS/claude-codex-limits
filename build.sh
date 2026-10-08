@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="3.2.5"
+VERSION="3.2.7"
 APP="$DIR/dist/$APP_NAME.app"
 
 echo "==> building $APP_NAME.app"
@@ -17,7 +17,7 @@ BUILD_SOURCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccl-swift-build.XXXXXX")"
 trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
 cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
 # Match Info.plist's macOS 13.0 minimum for the current build architecture.
-/usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
+/usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/QuotaRefresh.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
 cp -R "$DIR/Resources/"* "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST

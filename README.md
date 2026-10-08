@@ -19,7 +19,66 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
-## macOS 3.2.5: quiet GitHub Keychain access
+## Linux 0.4.5: compact refresh
+
+**Published:** [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, independent reviews and package QA passed; see the [verification report](docs/linux-compact-refresh-verification.md). macOS **3.2.7 remains Latest**. Earlier release sections below retain their historical behavior.
+
+With the required CLI signed in and the desired subscriptions enabled in Settings, open Simple or Advanced view. Use the small refresh icon beside Settings in the existing header; read compact request status and data time inside each provider card, with details in its tooltip.
+Choose **15 min / 30 min / 1 h / 4 h** for fixed polling, or **A** for Auto. Auto highlights A and the actual intervals of enabled providers together: different intervals highlight both segments; disabled providers do not contribute. With both subscriptions off, no interval is highlighted; A can remain selected if Auto is saved. There is no separate frequency label or **Pace from snapshot at…** annotation; forecasts and relevant access/data warnings remain.
+
+Manual refresh bypasses the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, and a failed provider can be retried on its own. Actual server Retry-After deadlines still apply. An unchanged live response counts as success; fallback retains the old reading time. Sign-in problems show guidance for the affected CLI without automatic login or permission prompts; macOS Keychain permits are not part of the Linux flow.
+Use the DEB from **linux-v0.4.5**, published without Latest. [RU/EN release notes and installation steps](docs/linux-compact-refresh-release.md).
+
+## Release history — macOS 3.2.7: compact refresh
+
+[Download macOS 3.2.7](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.7).
+Click the refresh icon beside Settings (tooltip: **Refresh now**); status and actions fit inside each card, with times shown without seconds in its tooltip.
+On macOS 3.2.7, choose a fixed interval of **15 min / 30 min / 1 h / 4 h**; Linux 0.4.4 keeps its three choices, without fixed 4 h.
+In Auto, **A** and the actual interval segments are highlighted together; different Claude/Codex intervals highlight both segments, with the service mapping in the tooltip.
+There is no separate frequency label to the right of A. The **Pace from snapshot at…** line is removed; forecasts still use the reading time.
+Manual refresh, the 30-second guard and server retry deadlines keep their 3.2.6 behavior. [Release notes](docs/compact-refresh-release.md).
+
+## Release history — macOS 3.2.6: manual refresh
+
+[Download macOS 3.2.6](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.6).
+Released 2026-10-07. Linux remains at 0.4.4.
+
+With at least one subscription enabled in Settings and that CLI signed in, open
+the panel and click **Refresh now** in its header, in Simple or Advanced view.
+It requests fresh limits for each enabled service without waiting for the Auto
+or fixed interval, including after a local network-error pause. Your chosen
+polling mode stays selected. Opening the panel in Auto still follows the schedule.
+
+- Each service shows **Refreshing…**, then its own result. One service can finish
+  while the other is still waiting. A successful reply with unchanged percentages
+  is still a successful refresh.
+- Check **Data** for the reading time and **Next automatic attempt** for the
+  schedule. A failed attempt keeps the previous figures and their original time;
+  it does not make an old reading fresh. An unknown time is shown as `—`.
+- If only one service fails, use **Retry** beside that service after the displayed
+  wait. Repeated clicks do not start a second request already in progress. The
+  **30-second local guard**, counted from the start of an attempt, is separate
+  from Auto and is not a server limit.
+- **Service allows retry in…** means the service supplied a retry deadline
+  (`Retry-After`). Manual refresh must respect it; the automatic attempt becomes
+  eligible at that deadline. No server deadline is invented when it is unknown.
+- Ordinary **Refresh now** and background attempts keep permission dialogs disabled.
+  Only when reading the Claude entry requires permission does **Allow Keychain
+  access** appear after the displayed wait. Click it for one read attempt limited
+  to 15 seconds; a system dialog may appear for that separate action. **Cancel**
+  ends the attempt; a new attempt needs a new explicit request. Read permission
+  does not authorize saving renewed sign-in data or automatically change access permissions.
+- For **Could not save renewed sign-in**, open **Restore access**, unlock
+  Keychain, then click **Refresh now** to retry saving. Read permission does not mean
+  saving succeeded. A read or save failure alone does not require signing in again.
+  If saving still fails, a new `claude login` is an optional recovery step.
+  For an actual sign-in problem, follow the affected CLI's instructions:
+  `claude login` for Claude or `codex login` for Codex, then return and refresh.
+
+These quota controls are separate from **Retry Keychain access** in GitHub sync
+settings. See [RU/EN notes](docs/manual-refresh-release.md).
+
+## Release history — macOS 3.2.5: quiet GitHub Keychain access
 
 Background GitHub Keychain access runs with system permission dialogs disabled,
 including after launch, wake and credential cleanup. If permission is
@@ -45,6 +104,8 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 
 ## Features
 
+Refresh and interval instructions cover macOS 3.2.7 and **Linux 0.4.5**.
+
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
 - **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. A timestamped reading remains valid by age through 4 hours inclusive; a failed fetch alone does not invalidate it. Pace uses the reading time and checks each window separately. Expired readings keep cached percentages and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
@@ -58,9 +119,9 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 - **Click a card** to open the relevant limits page in your browser.
 - **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
-- **Opening the popover requests a fresh reading** with a fixed interval; Auto respects its schedule.
-- **Refresh interval** — 15 minutes, 30 minutes, or 1 hour. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
-- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. When Auto is on, the blue-to-violet A button shows the current interval beside it in both Simple and Advanced views. One enabled subscription or equal intervals shows one value; different intervals show each product, for example `Claude 15m · Codex 4h`. With both subscriptions off, the label reads `no subscriptions`. The last-update time is available in the A tooltip while Auto is on. Auto is off by default; the fixed default remains 30 minutes.
+- **Refresh now** — the small icon beside Settings requests fresh limits without waiting for the local schedule or error backoff. Each provider has a 30-second guard and one request at a time; server Retry-After still applies. Status and data time fit inside each card.
+- **Refresh interval** — choose **15 minutes / 30 minutes / 1 hour / 4 hours**. The default is 30 minutes; saved supported choices are preserved, and old 1/5-minute settings migrate to 30 minutes.
+- **Adaptive polling (A)** — active usage returns polling to 15 minutes; quiet readings extend it to 30 minutes, 1 hour, then 4 hours, independently per provider. Auto highlights A and the actual intervals of enabled providers; different intervals highlight both segments. Tooltips map intervals to providers; there is no separate frequency label. With both subscriptions off, no interval is highlighted; A may remain selected. Auto is off by default.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -95,8 +156,8 @@ by `scope.model.display_name`). The older per‑model fields (`seven_day_opus` a
 now come back `null`, so `limits[]` is the only source for those.
 
 **Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
-uses — `GET /backend-api/wham/usage` — on every refresh (launch, the 15/30/60‑min timer,
-and popover open), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
+uses — `GET /backend-api/wham/usage` — when a refresh is admitted by the
+polling rules (see Auto and manual refresh above), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
 via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
 = 7‑day. If a live call fails it falls back to the most recent local session log
 (`~/.codex/sessions/**/rollout-*.jsonl`).
@@ -181,14 +242,14 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 
 ### Linux (Astra Linux)
 
-Earlier Linux versions were tested on Astra Linux SE 1.8 (KDE / Fly). The 0.4.2 UI change has not yet been tested on a live ALSE system; Linux CI uses Ubuntu 22.04. The port gives a tray icon with the same
+Linux **0.4.5 is published**; live ALSE/ThinkPad installation is not confirmed. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.4.2_all.deb` from the [Linux 0.4.2](../../releases/tag/linux-v0.4.2) release.
+1. Download `claude-codex-limits_0.4.5_all.deb` from [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5). Linux is not Latest; Latest remains macOS 3.2.7.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.4.2_all.deb
+   sudo apt install ./claude-codex-limits_0.4.5_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -198,10 +259,14 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 ## Usage
 
+For macOS 3.2.7 and **Linux 0.4.5**. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
+
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
-- **Refresh button** (top‑right of the popover) → refresh now.
-- **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto).
+- **Refresh now** → click the small icon beside Settings. Manual refresh bypasses the local schedule/error backoff, preserves the selected mode and respects each provider's 30-second guard, active request and server Retry-After. On Linux, opening the panel alone does not request fresh limits.
+- **Read each card's result** → providers finish independently. Unchanged live values count as success; fallback retains the old data time. Use **Retry** on the failed card once its wait ends; its tooltip separates data time from the next automatic attempt.
+- **Restore access on Linux** → follow the affected card's instructions: start `claude` and run `/login`, or run `codex login`. For file read/save errors, check that the CLI runs as your user, its credential file is accessible and disk space is available. Login and permissions are not requested automatically.
+- **Interval buttons** → **15 min / 30 min / 1 h / 4 h** selects fixed polling; **A** selects Auto. Auto highlights A and enabled providers' actual intervals together; different intervals highlight both, and both subscriptions off means no highlighted interval. No separate frequency or snapshot-pace annotation; forecasts remain.
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
 
@@ -209,7 +274,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 Activity means an increase of at least 1 percentage point per 15 minutes in any comparable limit, measured over the time between readings. The first response establishes a baseline; limit window resets are not consumption. Local token logs are checked every 2 minutes without an API request: three distinct events with positive token usage in the past 15 minutes also restore 15-minute polling.
 
-In Auto, opening the panel keeps the schedule; manual refresh waits at least 15 minutes after the previous response. Errors and cached responses extend the pause, and local activity or manual refresh cannot shorten that error backoff. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
+Opening the panel in Auto keeps its schedule. Errors and cached responses extend automatic polling's pause; local activity cannot shorten error backoff. **Refresh now** bypasses that local pause, subject to the provider's 30-second guard, active request and actual server retry deadline. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
 
 ## Build a release
 

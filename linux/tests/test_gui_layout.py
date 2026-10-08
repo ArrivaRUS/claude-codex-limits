@@ -34,6 +34,7 @@ class TestSettingsFit(unittest.TestCase):
                         r = subprocess.run([sys.executable, PROBE, style, lang] + state.split(), stdout=subprocess.PIPE,
                                            stderr=subprocess.PIPE, timeout=120)
                         out = r.stdout.decode("utf-8", "replace").strip()     # Qt's warnings go to stderr
+                        self.assertEqual(r.returncode, 0, r.stderr.decode("utf-8", "replace")[-400:])
                         self.assertEqual(out, "OK", out + r.stderr.decode("utf-8", "replace")[-400:])
 
 

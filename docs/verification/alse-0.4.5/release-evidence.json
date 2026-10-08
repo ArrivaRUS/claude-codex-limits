@@ -1,0 +1,21 @@
+{
+  "tag": "linux-v0.4.5",
+  "published_at": "2026-10-08T05:08:42Z",
+  "source": "19440ee112f164b411bf4715d6fa65077a272c48",
+  "url": "https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5",
+  "assets": [
+    {
+      "name": "claude-codex-limits_0.4.5_all.deb",
+      "size": 621880,
+      "state": "uploaded",
+      "digest": "sha256:99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10",
+      "url": "https://github.com/ArrivaRUS/claude-codex-limits/releases/download/linux-v0.4.5/claude-codex-limits_0.4.5_all.deb"
+    }
+  ],
+  "ci": {
+    "head_sha": "19440ee112f164b411bf4715d6fa65077a272c48",
+    "status": "completed",
+    "conclusion": "success",
+    "url": "https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37730102871"
+  }
+}

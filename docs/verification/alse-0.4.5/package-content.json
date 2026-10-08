@@ -1,0 +1,1252 @@
+{
+  "verdict": "PASS",
+  "source_ref": "linux-v0.4.5",
+  "source_revision": "19440ee112f164b411bf4715d6fa65077a272c48",
+  "package_sha256": "99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10",
+  "source_exact_files": 34,
+  "payload_files": 39,
+  "control_files": 3,
+  "syntax_compiled_files": 19,
+  "rebuilt_payload_and_control_exact": true,
+  "dependencies": "alsa-utils 1.2.8-1+b6 install ok installed\npipewire-bin 1.4.9-1~bpo13+1+ci5 install ok installed\npulseaudio-utils 16.1+dfsg1-2.astra16+ci8b2 install ok installed\npython3 3.11.2-1+b7 install ok installed\npython3-dbus 1.3.2-4+b7 install ok installed\npython3-pyqt5 5.15.9+dfsg-1+b9 install ok installed\n",
+  "git_after": {
+    "head": "02f824c9eace5177aaa40763c17d00c4631579ad",
+    "status": "A  .patches/014-geometry-is-not-design-acceptance.md\nM  .patches/INDEX.md\nM  HEARTBEAT.md\nM  README.md\nM  README.ru.md\nM  Sources/LimitsMonitor.swift\nA  Sources/QuotaRefresh.swift\nM  backlog.md\nM  build.sh\nM  decisions/log.md\nA  docs/compact-refresh-auto4h-ru.png\nA  docs/compact-refresh-plan.md\nA  docs/compact-refresh-release.md\nA  docs/compact-refresh-success-ru.png\nA  docs/compact-refresh-ux.md\nA  docs/compact-refresh-verification.md\nA  docs/linux-compact-refresh-auto4h-ru.png\nA  docs/linux-compact-refresh-plan.md\nA  docs/linux-compact-refresh-release.md\nA  docs/linux-compact-refresh-simple-ru.png\nA  docs/linux-compact-refresh-verification.md\nA  docs/linux-manual-refresh-contract.md\nM  docs/manual-refresh-proposal.md\nA  docs/manual-refresh-release.md\nA  docs/manual-refresh-verification.md\nM  docs/plans.md\nM  docs/project-guide.md\nM  docs/status.md\nA  docs/test-plan-manual-refresh.md\nA  fixtures/manual-refresh-author/PendingRecovery.swift\nA  fixtures/manual-refresh-independent/ManualRefreshIndependent.swift\nA  fixtures/manual-refresh-independent/README.md\nA  fixtures/manual-refresh-independent/run.sh\nM  linux/README.md\nM  linux/ccl/__init__.py\nM  linux/ccl/gui/app.py\nM  linux/ccl/gui/panel.py\nM  linux/ccl/limits.py\nA  linux/ccl/quota_refresh.py\nM  linux/tests/_freshness_env.py\nM  linux/tests/gui_width_probe.py\nM  linux/tests/test_auth_hints.py\nM  linux/tests/test_auto_polling.py\nM  linux/tests/test_auto_ui.py\nM  linux/tests/test_freshness_4h.py\nM  linux/tests/test_github_auth_ui.py\nM  linux/tests/test_gui_layout.py\nA  linux/tests/test_linux_compact_refresh.py\nA  linux/tests/test_manual_refresh.py\nM  linux/tests/test_poll_interval.py\nM  linux/tests/test_subscriptions.py\nM  scripts/make-dmg.sh\n"
+  },
+  "archives": {
+    "data": [
+      {
+        "path": ".",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/bin",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/bin/ccl-sync",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 77,
+        "sha256": "aa8fd8d6f0eb9ae1bdcd5fbbe6ce4b9dc0b344c492ab40278325f15ed975c270",
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/bin/claude-codex-limits",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 88,
+        "sha256": "c732c89b6e1d3a284c4de9bf0ae62b9f58b5429f7d8920e0345f2894ea635a4b",
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/lib",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/lib/systemd",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/lib/systemd/user",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/lib/systemd/user/ccl-sync.service",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 202,
+        "sha256": "270cd0591a693ad0fbaec4bf6d8867934b83e8443aba3f90657b068b10e8caff",
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/lib/systemd/user/ccl-sync.timer",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 158,
+        "sha256": "1ae9f0f852df1407f452f414444ac34104c49e356fffa610af3e43e9d13ee7dd",
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/applications",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/applications/claude-codex-limits.desktop",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 278,
+        "sha256": "c8ce80347d74fcf030bdf04d6577a49f73fb2a1bd5cb43d1d646ff5da8f4de57",
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/appicon.png",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 56589,
+        "sha256": "610529bdf84bb8993dc8c38d8124168845af98640a0d903876974268dcd646db",
+        "git_source": "Resources/appicon.png",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/claude_128.png",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 21744,
+        "sha256": "b34b484026cd2dbcbbb3bcd560e16a4e9b5fbfd65392735490af128cb39482a1",
+        "git_source": "Resources/claude_128.png",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/codex_128.png",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 13681,
+        "sha256": "99c4819fbdbf3260fced3762d05cec26da630d40200f91749ebe2d2506ac66ee",
+        "git_source": "Resources/codex_128.png",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-celebrate.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 72368,
+        "sha256": "c13de761c0f5259fd521acdf2d0e7848333c8241360c55c7350940e03d6286dc",
+        "git_source": "Resources/snd-celebrate.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-chime.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 70604,
+        "sha256": "9d705f7de7c15f345a0aa455cc2c756ce33a8a32389e963d6a598654c2da1611",
+        "git_source": "Resources/snd-chime.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-coin.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 58256,
+        "sha256": "268f6e2757abf8ae52e13b50e4a5162934c2c7da41b5218fc81ced23e6a7dab1",
+        "git_source": "Resources/snd-coin.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-drop.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 70604,
+        "sha256": "79a45184b1f3701e59951572a6344e3e08400c7d722cc57282fed9805f4f6ba3",
+        "git_source": "Resources/snd-drop.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-fadeout.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 88244,
+        "sha256": "b82e06b5c1b652fed39d7d3ed5024a92a3702241cff34bab447db6b86a78ac67",
+        "git_source": "Resources/snd-fadeout.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-hop.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 44144,
+        "sha256": "266e26f2e8e547da8204674f0179e4b761da4f6b2e73fcf004c172c041302f38",
+        "git_source": "Resources/snd-hop.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-outage.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 101472,
+        "sha256": "2846a43219584351ed78ada9faaeab5a1b63dc2f8e3afe6fbe04bed981b8d6f7",
+        "git_source": "Resources/snd-outage.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-rise.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 61782,
+        "sha256": "67e29c4cff18e849b87c4a6d654ea8e60088bd9de77d3c1cbd6cf84901d4b8f8",
+        "git_source": "Resources/snd-rise.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-sunset.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 101472,
+        "sha256": "2652ca469f7142ef242fb73ca2af085ba4442be31116612a66dc31edb3719bba",
+        "git_source": "Resources/snd-sunset.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/Resources/snd-victory.wav",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 90008,
+        "sha256": "1ca357154d19364eb84111fcc7a3105b4545667a84aeb63bed7dee06851eaa01",
+        "git_source": "Resources/snd-victory.wav",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/__init__.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 357,
+        "sha256": "8f2d78cb13dbcb9e290b005a4daea7865d0003a6fcb2433abeda82153be00b6d",
+        "git_source": "linux/ccl/__init__.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/auth.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 41484,
+        "sha256": "48ee84cac854b7174eebd78446cb346199ffb2ff09f76801eb537838daef9d60",
+        "git_source": "linux/ccl/auth.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/cli.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 22820,
+        "sha256": "718c727c8b28a8a2c22ef5eaeb2d8d2df43d3b5ed6a01c364738398a674f7825",
+        "git_source": "linux/ccl/cli.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/common.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 15161,
+        "sha256": "69a1a9412e1cde454a6c7d74f11feea1912da681895f3fafc346c9a838ea5b8c",
+        "git_source": "linux/ccl/common.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/__init__.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 61,
+        "sha256": "7047bfdc784540e79146ba753208e349579340d6930744ff4b99d2e232d74601",
+        "git_source": "linux/ccl/gui/__init__.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/app.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 81720,
+        "sha256": "25d030ff08fbae5f48e512b34c3305597af31ca347c0cca6d8c08b6a09b8df3c",
+        "git_source": "linux/ccl/gui/app.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/fmt.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 3690,
+        "sha256": "74201b83745eecd5fe83b5d7e0c99878130b16dbbec6fc0686bc0e1af32c7409",
+        "git_source": "linux/ccl/gui/fmt.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/paint.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 9701,
+        "sha256": "5e5beec92d4b73c8b0c77b4ed9b59df1bedc4e92357017a475821c8ab168c62f",
+        "git_source": "linux/ccl/gui/paint.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/panel.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 49021,
+        "sha256": "ee19fe2161120bc26b20d8d7833212236de97552aa3e25f13baeda265407bd09",
+        "git_source": "linux/ccl/gui/panel.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/gui/trayicon.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 5132,
+        "sha256": "537bc162255c772d8ad2fb93a7fcfa81a2590173d66c63ebb318e5386c8d90bc",
+        "git_source": "linux/ccl/gui/trayicon.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/limits.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 36618,
+        "sha256": "0f47d6663066de9690cab812dd8f127ab77635de1d47981197d0200a2a5f48d5",
+        "git_source": "linux/ccl/limits.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/polling.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 4150,
+        "sha256": "163c0c8f8433b41bea62bf98597291cdc78e50b576f69ba6fc3bdd8d1ee26c7c",
+        "git_source": "linux/ccl/polling.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/quota_refresh.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 7933,
+        "sha256": "e79f6a8ac2d5f390c1233709d6b03726447ec8334da8ef675fdfd4f0605d186a",
+        "git_source": "linux/ccl/quota_refresh.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/sync.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 40601,
+        "sha256": "63a8674557df6c1da06385c1d2e5c214a821deb5719b3b192c1a3d609a60772f",
+        "git_source": "linux/ccl/sync.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/update.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 11424,
+        "sha256": "5665e430c2add7f64a00c92c512149c44fc512bd08a4d330aabe995631d4cdeb",
+        "git_source": "linux/ccl/update.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/usage.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 17033,
+        "sha256": "b6993109c6ad1ecf25e0b8236421f418891f60bc72a8d53a4a4cc2ea03a78416",
+        "git_source": "linux/ccl/usage.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl/vault.py",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 32144,
+        "sha256": "96ae997f72d384a10c51d2667930ad9f6da2ac864b174b7120584a7c822e0fcc",
+        "git_source": "linux/ccl/vault.py",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/ccl-sync",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 356,
+        "sha256": "44c45c30a36338c02b702ab1839ef17f62242e3ed639143ac2ef6a9260a4b80f",
+        "git_source": "linux/ccl-sync",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/claude-codex-limits/claude-codex-limits",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 426,
+        "sha256": "b2b358fd7792423135b38443e0032a4ad8e8fa18c2af53c0c8e0781738a18100",
+        "git_source": "linux/claude-codex-limits",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/doc",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/doc/claude-codex-limits",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/doc/claude-codex-limits/copyright",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 1069,
+        "sha256": "8e61283c8d10bee2f14d773a5df0e5f8ebbfcb62770af4b5c64b21e036262c05",
+        "git_source": "LICENSE",
+        "exact": true,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/icons",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/icons/hicolor",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/icons/hicolor/256x256",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/icons/hicolor/256x256/apps",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "usr/share/icons/hicolor/256x256/apps/claude-codex-limits.png",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 56589,
+        "sha256": "610529bdf84bb8993dc8c38d8124168845af98640a0d903876974268dcd646db",
+        "git_source": "Resources/appicon.png",
+        "exact": true,
+        "rebuild_exact": true
+      }
+    ],
+    "control": [
+      {
+        "path": ".",
+        "type": "directory",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 0,
+        "sha256": null,
+        "rebuild_exact": true
+      },
+      {
+        "path": "control",
+        "type": "file",
+        "mode": "0o644",
+        "uid": 0,
+        "gid": 0,
+        "size": 684,
+        "sha256": "94f1de2adbbf1fa536b912fe4219952d23920c044a9f542131a27b17ae8a25c1",
+        "rebuild_exact": true
+      },
+      {
+        "path": "postinst",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 378,
+        "sha256": "d788d77d88e1421414d6c26889f9acd2a62c5266bf19ab6335e5128e262db776",
+        "rebuild_exact": true
+      },
+      {
+        "path": "prerm",
+        "type": "file",
+        "mode": "0o755",
+        "uid": 0,
+        "gid": 0,
+        "size": 271,
+        "sha256": "bafe4f9719e8856bef0a9a16a7f75802c76100b549d4a78885ddffc25ad93862",
+        "rebuild_exact": true
+      }
+    ]
+  },
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "linux-v0.4.5^{commit}"
+      ],
+      "returncode": 0,
+      "stdout": "19440ee112f164b411bf4715d6fa65077a272c48\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-deb",
+        "--fsys-tarfile",
+        "/tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "[binary tar captured in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-deb",
+        "--ctrl-tarfile",
+        "/tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "[binary tar captured in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/appicon.png"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/claude_128.png"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/codex_128.png"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-celebrate.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-chime.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-coin.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-drop.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-fadeout.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-hop.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-outage.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-rise.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-sunset.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/snd-victory.wav"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/__init__.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/auth.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/cli.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/common.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/__init__.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/app.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/fmt.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/paint.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/panel.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/gui/trayicon.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/limits.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/polling.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/quota_refresh.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/sync.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/update.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/usage.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl/vault.py"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/ccl-sync"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:linux/claude-codex-limits"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:LICENSE"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "19440ee112f164b411bf4715d6fa65077a272c48:Resources/appicon.png"
+      ],
+      "returncode": 0,
+      "stdout": "[source bytes compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "archive",
+        "19440ee112f164b411bf4715d6fa65077a272c48",
+        "linux",
+        "Resources",
+        "LICENSE"
+      ],
+      "returncode": 0,
+      "stdout": "[source tar extracted under QA directory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sh",
+        "/tmp/ccl-alse-20261008/qa/source/linux/packaging/build-deb.sh",
+        "/tmp/ccl-alse-20261008/qa/rebuilt"
+      ],
+      "returncode": 0,
+      "stdout": "/tmp/ccl-alse-20261008/qa/rebuilt/claude-codex-limits_0.4.5_all.deb\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-deb",
+        "--fsys-tarfile",
+        "/tmp/ccl-alse-20261008/qa/rebuilt/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "[rebuilt tar compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-deb",
+        "--ctrl-tarfile",
+        "/tmp/ccl-alse-20261008/qa/rebuilt/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "[rebuilt tar compared in memory]",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sh",
+        "-n",
+        "/tmp/ccl-alse-20261008/qa/checks/postinst"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sh",
+        "-n",
+        "/tmp/ccl-alse-20261008/qa/checks/prerm"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "desktop-file-validate",
+        "/tmp/ccl-alse-20261008/qa/checks/claude-codex-limits.desktop"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "systemd-analyze",
+        "--user",
+        "verify",
+        "/tmp/ccl-alse-20261008/qa/checks/ccl-sync.service",
+        "/tmp/ccl-alse-20261008/qa/checks/ccl-sync.timer"
+      ],
+      "returncode": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-query",
+        "-W",
+        "-f=${Package} ${Version} ${Status}\n",
+        "python3",
+        "python3-pyqt5",
+        "python3-dbus",
+        "pulseaudio-utils",
+        "pipewire-bin",
+        "alsa-utils"
+      ],
+      "returncode": 0,
+      "stdout": "alsa-utils 1.2.8-1+b6 install ok installed\npipewire-bin 1.4.9-1~bpo13+1+ci5 install ok installed\npulseaudio-utils 16.1+dfsg1-2.astra16+ci8b2 install ok installed\npython3 3.11.2-1+b7 install ok installed\npython3-dbus 1.3.2-4+b7 install ok installed\npython3-pyqt5 5.15.9+dfsg-1+b9 install ok installed\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "returncode": 0,
+      "stdout": "02f824c9eace5177aaa40763c17d00c4631579ad\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--short"
+      ],
+      "returncode": 0,
+      "stdout": "A  .patches/014-geometry-is-not-design-acceptance.md\nM  .patches/INDEX.md\nM  HEARTBEAT.md\nM  README.md\nM  README.ru.md\nM  Sources/LimitsMonitor.swift\nA  Sources/QuotaRefresh.swift\nM  backlog.md\nM  build.sh\nM  decisions/log.md\nA  docs/compact-refresh-auto4h-ru.png\nA  docs/compact-refresh-plan.md\nA  docs/compact-refresh-release.md\nA  docs/compact-refresh-success-ru.png\nA  docs/compact-refresh-ux.md\nA  docs/compact-refresh-verification.md\nA  docs/linux-compact-refresh-auto4h-ru.png\nA  docs/linux-compact-refresh-plan.md\nA  docs/linux-compact-refresh-release.md\nA  docs/linux-compact-refresh-simple-ru.png\nA  docs/linux-compact-refresh-verification.md\nA  docs/linux-manual-refresh-contract.md\nM  docs/manual-refresh-proposal.md\nA  docs/manual-refresh-release.md\nA  docs/manual-refresh-verification.md\nM  docs/plans.md\nM  docs/project-guide.md\nM  docs/status.md\nA  docs/test-plan-manual-refresh.md\nA  fixtures/manual-refresh-author/PendingRecovery.swift\nA  fixtures/manual-refresh-independent/ManualRefreshIndependent.swift\nA  fixtures/manual-refresh-independent/README.md\nA  fixtures/manual-refresh-independent/run.sh\nM  linux/README.md\nM  linux/ccl/__init__.py\nM  linux/ccl/gui/app.py\nM  linux/ccl/gui/panel.py\nM  linux/ccl/limits.py\nA  linux/ccl/quota_refresh.py\nM  linux/tests/_freshness_env.py\nM  linux/tests/gui_width_probe.py\nM  linux/tests/test_auth_hints.py\nM  linux/tests/test_auto_polling.py\nM  linux/tests/test_auto_ui.py\nM  linux/tests/test_freshness_4h.py\nM  linux/tests/test_github_auth_ui.py\nM  linux/tests/test_gui_layout.py\nA  linux/tests/test_linux_compact_refresh.py\nA  linux/tests/test_manual_refresh.py\nM  linux/tests/test_poll_interval.py\nM  linux/tests/test_subscriptions.py\nM  scripts/make-dmg.sh\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "dpkg-deb",
+        "--info",
+        "/tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": " new Debian package, version 2.0.\n size 621880 bytes: control archive=956 bytes.\n     684 bytes,    15 lines      control              \n     378 bytes,    10 lines   *  postinst             #!/bin/sh\n     271 bytes,     7 lines   *  prerm                #!/bin/sh\n Package: claude-codex-limits\n Version: 0.4.5\n Architecture: all\n Maintainer: Alex Kovalev <arrivarus@gmail.com>\n Installed-Size: 1412\n Depends: python3 (>= 3.7), python3-pyqt5, python3-dbus\n Recommends: pulseaudio-utils | pipewire-bin | alsa-utils\n Section: utils\n Priority: optional\n Homepage: https://github.com/ArrivaRUS/claude-codex-limits\n Description: Claude Code and Codex usage limits in the system tray\n  Shows the 5-hour and weekly limits of Claude Code and Codex in the tray,\n  usage history by day and model with its API-price equivalent, and syncs\n  per-machine usage with the macOS app through a private GitHub gist\n  (ccl-sync). Linux port of Claude Codex Limits for Astra Linux SE.\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "ar",
+        "t",
+        "/tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "debian-binary\ncontrol.tar.xz\ndata.tar.xz\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "sha256sum",
+        "/tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb"
+      ],
+      "returncode": 0,
+      "stdout": "99acde08c13b7c66335718554ec09af087253e3e3b58113e720e3a67dfc71b10  /tmp/ccl-alse-20261008/claude-codex-limits_0.4.5_all.deb\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--short"
+      ],
+      "returncode": 0,
+      "stdout": "A  .patches/014-geometry-is-not-design-acceptance.md\nM  .patches/INDEX.md\nM  HEARTBEAT.md\nM  README.md\nM  README.ru.md\nM  Sources/LimitsMonitor.swift\nA  Sources/QuotaRefresh.swift\nM  backlog.md\nM  build.sh\nM  decisions/log.md\nA  docs/compact-refresh-auto4h-ru.png\nA  docs/compact-refresh-plan.md\nA  docs/compact-refresh-release.md\nA  docs/compact-refresh-success-ru.png\nA  docs/compact-refresh-ux.md\nA  docs/compact-refresh-verification.md\nA  docs/linux-compact-refresh-auto4h-ru.png\nA  docs/linux-compact-refresh-plan.md\nA  docs/linux-compact-refresh-release.md\nA  docs/linux-compact-refresh-simple-ru.png\nA  docs/linux-compact-refresh-verification.md\nA  docs/linux-manual-refresh-contract.md\nM  docs/manual-refresh-proposal.md\nA  docs/manual-refresh-release.md\nA  docs/manual-refresh-verification.md\nM  docs/plans.md\nM  docs/project-guide.md\nM  docs/status.md\nA  docs/test-plan-manual-refresh.md\nA  fixtures/manual-refresh-author/PendingRecovery.swift\nA  fixtures/manual-refresh-independent/ManualRefreshIndependent.swift\nA  fixtures/manual-refresh-independent/README.md\nA  fixtures/manual-refresh-independent/run.sh\nM  linux/README.md\nM  linux/ccl/__init__.py\nM  linux/ccl/gui/app.py\nM  linux/ccl/gui/panel.py\nM  linux/ccl/limits.py\nA  linux/ccl/quota_refresh.py\nM  linux/tests/_freshness_env.py\nM  linux/tests/gui_width_probe.py\nM  linux/tests/test_auth_hints.py\nM  linux/tests/test_auto_polling.py\nM  linux/tests/test_auto_ui.py\nM  linux/tests/test_freshness_4h.py\nM  linux/tests/test_github_auth_ui.py\nM  linux/tests/test_gui_layout.py\nA  linux/tests/test_linux_compact_refresh.py\nA  linux/tests/test_manual_refresh.py\nM  linux/tests/test_poll_interval.py\nM  linux/tests/test_subscriptions.py\nM  scripts/make-dmg.sh\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "returncode": 0,
+      "stdout": "02f824c9eace5177aaa40763c17d00c4631579ad\n",
+      "stderr": ""
+    }
+  ],
+  "compression": "xz",
+  "git_final_status": "A  .patches/014-geometry-is-not-design-acceptance.md\nM  .patches/INDEX.md\nM  HEARTBEAT.md\nM  README.md\nM  README.ru.md\nM  Sources/LimitsMonitor.swift\nA  Sources/QuotaRefresh.swift\nM  backlog.md\nM  build.sh\nM  decisions/log.md\nA  docs/compact-refresh-auto4h-ru.png\nA  docs/compact-refresh-plan.md\nA  docs/compact-refresh-release.md\nA  docs/compact-refresh-success-ru.png\nA  docs/compact-refresh-ux.md\nA  docs/compact-refresh-verification.md\nA  docs/linux-compact-refresh-auto4h-ru.png\nA  docs/linux-compact-refresh-plan.md\nA  docs/linux-compact-refresh-release.md\nA  docs/linux-compact-refresh-simple-ru.png\nA  docs/linux-compact-refresh-verification.md\nA  docs/linux-manual-refresh-contract.md\nM  docs/manual-refresh-proposal.md\nA  docs/manual-refresh-release.md\nA  docs/manual-refresh-verification.md\nM  docs/plans.md\nM  docs/project-guide.md\nM  docs/status.md\nA  docs/test-plan-manual-refresh.md\nA  fixtures/manual-refresh-author/PendingRecovery.swift\nA  fixtures/manual-refresh-independent/ManualRefreshIndependent.swift\nA  fixtures/manual-refresh-independent/README.md\nA  fixtures/manual-refresh-independent/run.sh\nM  linux/README.md\nM  linux/ccl/__init__.py\nM  linux/ccl/gui/app.py\nM  linux/ccl/gui/panel.py\nM  linux/ccl/limits.py\nA  linux/ccl/quota_refresh.py\nM  linux/tests/_freshness_env.py\nM  linux/tests/gui_width_probe.py\nM  linux/tests/test_auth_hints.py\nM  linux/tests/test_auto_polling.py\nM  linux/tests/test_auto_ui.py\nM  linux/tests/test_freshness_4h.py\nM  linux/tests/test_github_auth_ui.py\nM  linux/tests/test_gui_layout.py\nA  linux/tests/test_linux_compact_refresh.py\nA  linux/tests/test_manual_refresh.py\nM  linux/tests/test_poll_interval.py\nM  linux/tests/test_subscriptions.py\nM  scripts/make-dmg.sh\n",
+  "git_final_head": "02f824c9eace5177aaa40763c17d00c4631579ad",
+  "limitations": [
+    "No installation or package maintainer script execution",
+    "No application startup, real keyring/credentials/logs/API access",
+    "No unit suite rerun or independent online CI verification",
+    "No live KDE/Fly GUI, interaction, sound or hardware probe",
+    "Missing configured HQ ../2026.06 Юрка; read project AGENTS/006 and Git-tagged task plan instead",
+    "Working tree/index changed by coordinator during verification; verification fixed to immutable release commit"
+  ]
+}

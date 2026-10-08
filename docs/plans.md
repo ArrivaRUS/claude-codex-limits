@@ -1,3 +1,11 @@
+> LINUX-COMPACT 0.4.5 завершена и опубликована 2026-10-08. [План](linux-compact-refresh-plan.md), [проверки](linux-compact-refresh-verification.md). macOS 3.2.7 остаётся Latest.
+
+# MANUAL-REFRESH · 2026-10-07
+
+> 2026-10-08: [COMPACT-REFRESH](compact-refresh-plan.md) прошла независимые code/isolation/design review и packaged QA. 3.2.7 опубликована и установлена; [приёмка](compact-refresh-verification.md).
+
+MANUAL-REFRESH завершён: macOS3.2.6 опубликована и установлена. Source d50584bcf5c7b7b63eb6df2ef50539b11fd0f045; Code/SecurityPASS, pure78/1089/0, packaged3091/0, QA36 новых PNG. Публичный DMG b8ff16fc совпал; installed strict codesign/SHA PASS, PID96073. Linux0.4.4 не меняется. [Приёмка](manual-refresh-verification.md).
+
 # План исполнения — устойчивая GitHub-авторизация и история UI
 
 ## KEYCHAIN-QUIET · 2026-10-07

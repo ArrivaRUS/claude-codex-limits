@@ -10,7 +10,7 @@ import math
 from PyQt5.QtCore import QPointF, QRectF, Qt
 from PyQt5.QtGui import QBrush, QLinearGradient, QPainterPath, QPen, QRadialGradient
 
-from .. import APP_AUTHOR, APP_VERSION, REPO_URL, common, limits, usage
+from .. import APP_AUTHOR, APP_VERSION, REPO_URL, common, limits, usage, quota_refresh
 from ..common import tr
 from . import fmt
 from .paint import (AMBER, BLUE, CRIT, LINK, MODEL, PURPLE, SCOPED, TEXT_HI, TEXT_LO, TEXT_MID, WARN,
@@ -19,12 +19,13 @@ from .paint import (AMBER, BLUE, CRIT, LINK, MODEL, PURPLE, SCOPED, TEXT_HI, TEX
 PANEL_W = 360
 PANEL_H = 286
 SCOPED_ROW_H = 15
+FEEDBACK_H = 32
 CLAUDE_URL = "https://claude.ai/settings/usage"
 CODEX_URL = "https://chatgpt.com/codex/cloud/settings/analytics#usage"
 CREDIT = "Claude Codex Limits %s · by %s · " % (APP_VERSION, APP_AUTHOR)
 
 # Refresh intervals match macOS; old 1/5-minute choices migrate to 30 minutes.
-POLL_CHOICES = (900, 1800, 3600)
+POLL_CHOICES = (900, 1800, 3600, 14400)
 POLL_DEFAULT = 1800
 
 
@@ -38,24 +39,39 @@ def poll_interval(value):
 
 
 def poll_segments():
-    return [(tr("1ч", "1h") if sec == 3600 else tr("%dм", "%dm") % (sec // 60), sec) for sec in POLL_CHOICES] + [(tr("А", "A"), 0)]
+    return [(tr("%dч", "%dh") % (sec // 3600) if sec >= 3600 else tr("%dм", "%dm") % (sec // 60), sec)
+            for sec in POLL_CHOICES] + [(tr("А", "A"), 0)]
 
 
-def auto_poll_label_parts(auto, enabled, intervals, lang):
-    """Display-only snapshot: never normalize Auto through the manual choices."""
-    if not auto:
-        return []
-    products = [p for p in ("claude", "codex") if enabled.get(p, False)]
-    if not products:
-        return ["no subscriptions" if lang == "en" else "нет подписок"]
-    values = [intervals.get(p, POLL_DEFAULT) for p in products]
-    labels = {900: "15", 1800: "30", 3600: "1", 14400: "4"}
-    def label(sec):
-        unit = ("h" if lang == "en" else "ч") if sec >= 3600 else ("m" if lang == "en" else "м")
-        return labels[sec] + unit
-    if len(values) == 1 or values[0] == values[1]:
-        return [label(values[0])]
-    return [title + " " + label(sec) for title, sec in zip(("Claude", "Codex"), values)]
+def highlighted_intervals(m):
+    """Actual enabled-provider intervals, independent of request retry deadlines."""
+    enabled = [p for p in ("claude", "codex") if common.product_enabled(p)]
+    if not enabled:
+        return set()
+    if common.settings().get("autoPoll"):
+        return {m.auto_intervals.get(p) for p in enabled} & set(POLL_CHOICES)
+    return {m.interval}
+
+
+def interval_name(sec):
+    return {900: tr("15 минут", "15 minutes"), 1800: tr("30 минут", "30 minutes"),
+            3600: tr("1 час", "1 hour"), 14400: tr("4 часа", "4 hours")}.get(sec, "—")
+
+
+def no_subscriptions():
+    return tr("Нет включённых подписок", "No subscriptions enabled")
+
+
+def interval_tooltip(m, sec):
+    if not any(common.product_enabled(p) for p in ("claude", "codex")):
+        return no_subscriptions()
+    label = interval_name(sec)
+    if common.settings().get("autoPoll"):
+        names = [name for p, name in (("claude", "Claude Code"), ("codex", "Codex"))
+                 if common.product_enabled(p) and m.auto_intervals.get(p) == sec]
+        if names:
+            label += " · " + ", ".join(names)
+    return label
 
 
 class Model(object):
@@ -68,6 +84,7 @@ class Model(object):
         self.loaded = False
         self.interval = POLL_DEFAULT
         self.auto_intervals = {}
+        self.pending_products = set()    # enabled providers with reserved worker flights
         self.updated = None
         self.history = limits.History()
         self.days = {}            # merged usage days (local + other machines)
@@ -122,18 +139,132 @@ def shows_scoped_row(d):
 
 
 def simple_height(m):
-    extra = SCOPED_ROW_H if (shows_scoped_row(limits.selected_limits(m.claude, "claude"))
-                              or shows_scoped_row(limits.selected_limits(m.codex, "codex"))) else 0
-    return PANEL_H + extra
+    prods = products(m)
+    extra = SCOPED_ROW_H if any(shows_scoped_row(d) for d, *_ in prods) else 0
+    return PANEL_H + extra + (FEEDBACK_H if prods else 0)
 
 
 def products(m):
     out = []
-    if common.product_enabled("claude") and m.claude.present:
+    if common.product_enabled("claude"):
         out.append((m.claude, "Claude Code", "claude_128.png", CLAUDE_URL, "claude"))
-    if common.product_enabled("codex") and m.codex.present:
+    if common.product_enabled("codex"):
         out.append((m.codex, "Codex", "codex_128.png", CODEX_URL, "codex"))
     return out
+
+
+def feedback_countdown(until, now):
+    seconds = max(0, until - now)
+    if seconds >= 86400 * 100000:
+        return tr("долго", "a long time")
+    for unit, ru, en in ((86400, " д", " d"), (3600, " ч", " h"), (60, " мин", " min")):
+        if seconds >= unit:
+            return str(math.ceil(seconds / unit)) + tr(ru, en)
+    return str(math.ceil(seconds)) + tr(" с", " s")
+
+
+def feedback_action(m, d, product, now=None):
+    now = time.time() if now is None else now
+    if product in m.pending_products or d.refresh_in_flight:
+        return None, ""
+    if d.auth != limits.OK:
+        return "feedbackfix:" + product, tr("Восстановить доступ", "Restore access")
+    if ((quota_refresh.finite(d.server_retry_at) and now < d.server_retry_at)
+            or now < d.local_retry_at):
+        return None, ""
+    if limit_poll_failed(d):
+        return "feedbackretry:" + product, tr("Повторить", "Retry")
+    return None, ""
+
+
+def feedback_moment(value):
+    try:
+        return fmt.fmt_moment(value)
+    except (OverflowError, OSError, ValueError):
+        return tr("позже", "later")  # Huge valid delta-seconds need not fit localtime().
+
+
+def feedback_copy(m, d, product):
+    """Compact request state; observation time and automatic deadline stay distinct."""
+    now = time.time()
+    known = quota_refresh.finite(d.as_of) and 0 <= d.as_of <= now
+    data = tr("Данные ", "Data ") + (fmt.hhmm(d.as_of) if known else "—")
+    detail = [data]
+    if known:
+        detail.append(tr("Снимок: ", "Snapshot: ") + fmt.fmt_moment(d.as_of))
+    if d.auth != limits.OK:
+        detail.append(limit_auth_badge(d.auth))
+    if limit_poll_failed(d):
+        detail.append(limit_retry_notice(d))
+        if d.error:
+            detail.append(str(d.error))
+    if quota_refresh.finite(d.next_poll_at):
+        detail.append(tr("Автопроверка: ", "Automatic check: ") + feedback_moment(d.next_poll_at))
+    server_wait = quota_refresh.finite(d.server_retry_at) and d.server_retry_at > now
+    local_wait = d.local_retry_at > now
+    if server_wait:
+        detail.append(tr("Сервис разрешит повтор через ", "Service allows retry in ")
+                      + feedback_countdown(d.server_retry_at, now))
+    elif d.http_status == 429 and d.server_retry_at is None:
+        detail.append(tr("Сервис не сообщил срок повтора.", "The service did not specify a retry time."))
+    if local_wait:
+        detail.append(tr("Защита от частых запросов: повтор через ", "Local request guard: retry in ")
+                      + feedback_countdown(d.local_retry_at, now))
+    if product in m.pending_products or d.refresh_in_flight:
+        first, second, color = tr("Обновляем…", "Refreshing…"), data, TEXT_MID
+    elif d.auth != limits.OK:
+        first, second, color = limit_auth_badge(d.auth), data, AMBER
+    elif server_wait:
+        first = tr("Пауза сервиса · ", "Service wait · ") + feedback_countdown(d.server_retry_at, now)
+        second, color = data, AMBER
+    elif d.api_fresh and not limit_poll_failed(d):
+        first = tr("Проверено ", "Checked ") + (fmt.hhmm(d.as_of) if known else "—")
+        second = (tr("Повтор через ", "Retry in ") + feedback_countdown(d.local_retry_at, now)) if local_wait else data
+        color = TEXT_MID
+    elif local_wait:
+        first = (tr("Сбой · повтор ", "Failed · retry ") if limit_poll_failed(d) else
+                 tr("Повтор через ", "Retry in ")) + feedback_countdown(d.local_retry_at, now)
+        second, color = data, AMBER if limit_poll_failed(d) else TEXT_MID
+    elif limit_poll_failed(d):
+        first, second, color = tr("Сбой обновления", "Update failed"), data, AMBER
+    else:
+        first, second, color = data, "", TEXT_MID
+    if d.api_fresh and not limit_poll_failed(d):
+        detail.append(tr("Получен свежий ответ; значения могли не измениться.",
+                         "Live response received; values may be unchanged."))
+    action, title = feedback_action(m, d, product, now)
+    if action:
+        # The action occupies row two; keep the old data time visible in row one.
+        if action.startswith("feedbackretry:"):
+            first = tr("Сбой", "Failed")
+        first += " · " + (fmt.hhmm(d.as_of) if known else "—")
+        second = title
+    detail.insert(0, first)
+    if limits.is_stale(d):
+        detail.append(tr("Данные устарели · темп не считаем", "Stale data · pace paused"))
+    return first, second, color, "\n".join(detail)
+
+
+def draw_feedback(c, m, d, product, x, top, w, hits):
+    first, second, color, _ = feedback_copy(m, d, product)
+    area = rect_tl(x, top, w, FEEDBACK_H)
+    # Tooltip region precedes the whole-card link; actions get their own native hit.
+    hits.append(("feedback:" + product, area))
+    def fit(text, weight, ink, width):
+        label = Attr(text, 10, weight, ink)
+        if label.width() <= width:
+            return label
+        while text and Attr(text + "…", 10, weight, ink).width() > width:
+            text = text[:-1]
+        return Attr(text + "…", 10, weight, ink)
+    c.text_c(fit(first, "regular", color, w), x, top + 2, 12)
+    action, title = feedback_action(m, d, product)
+    if action:
+        label = fit(title, "medium", LINK, w - 8)
+        c.text_c(label, x + 4, top + 16, 14)
+        hits.insert(0, (action, rect_tl(x, top + 8, min(w, label.width() + 8), 24)))
+    elif second:
+        c.text_c(fit(second, "regular", TEXT_MID, w), x, top + 16, 14)
 
 
 def credit_line(c, W, top, hits):
@@ -158,7 +289,8 @@ def draw_simple(c, W, H, m):
     c.text(Attr(tr("Лимиты", "Limits"), 15, "semibold", TEXT_HI), pad + 40, pad - 1)
     c.text(Attr(subtitle, 11, "regular", TEXT_LO), pad + 40, pad + 17)
     rf = rect_tl(W - pad - 24, pad - 2, 24, 24)
-    c.icon("refresh", rf.adjusted(5, 5, -5, -5), TEXT_MID, 1.7)
+    refresh_color = TEXT_MID if prods else TEXT_LO
+    c.icon("refresh", rf.adjusted(4, 4, -4, -4), refresh_color, 1.7)
     hits.append(("refresh", rf))
     gear = rect_tl(W - pad - 24 - 26, pad - 2, 24, 24)
     c.icon("gear", gear.adjusted(4, 4, -4, -4), TEXT_MID, 1.5)
@@ -175,37 +307,36 @@ def draw_simple(c, W, H, m):
         r = rect_tl(x, cards_top, w, card_h)
         c.round_fill(r, 14, gray(1, 0.04))
         c.round_stroke(r, 14, gray(1, 0.06), 1)
+        draw_feedback(c, m, d, product, x + 14, cards_top + card_h - FEEDBACK_H, w - 28, hits)
         can_fix = limit_can_fix(product, d.auth)
-        hits.append(("claudefix" if can_fix else "open:" + url, r))
+        hits.append(("settings" if not d.present else "claudefix" if can_fix else "open:" + url, r))
         c.image(icon, rect_tl(x + 14, cards_top + 13, 18, 18))
         c.text(Attr(name, 12.5, "semibold", gray(1, 0.9)), x + 39, cards_top + 15)
 
-        def problem(title, sub, show_fix):
+        def problem(title, sub):
             cx = x + w / 2
             c.icon("warning", rect_tl(cx - 11, cards_top + 46, 22, 22), AMBER)
             c.text(Attr(title, 12.5, "semibold", gray(1, 0.92)), cx, cards_top + 78, align=1)
             if sub:
                 c.text(Attr(sub, 9.5, "regular", TEXT_LO), cx, cards_top + 97, align=1)
-            if show_fix:
-                label = Attr(tr("Как починить?", "How to fix?"), 11, "semibold", AMBER)
-                pw, ph, ptop = label.width() + 26, 24, cards_top + 116
-                pr = rect_tl(cx - pw / 2, ptop, pw, ph)
-                c.round_fill(pr, ph / 2, with_alpha(AMBER, 0.16))
-                c.round_stroke(pr, ph / 2, with_alpha(AMBER, 0.5), 1)
-                c.text_c(label, cx, ptop, ph, align=1)
+
+        if not d.present:
+            c.text_c(Attr(tr("Загрузка…", "Loading…") if not m.loaded else tr("Не настроен", "Not set up"),
+                          12, "regular", TEXT_MID), x + w / 2, cards_top + 65, 20, align=1)
+            return
 
         if d.auth == limits.LOGGED_OUT:
             problem(tr("Вход не выполнен", "Not signed in"),
-                    tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI") if can_fix else None, can_fix)
+                    tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI") if can_fix else None)
             return
         if d.auth == limits.READ_ERROR:
             sub = (tr("проверьте ~/.claude/.credentials.json", "check ~/.claude/.credentials.json")
                    if product == "claude" else tr("проверьте доступ к данным", "check data access"))
-            problem(tr("Нет доступа к входу", "Can't read sign-in"), sub, False)
+            problem(tr("Сбой доступа к входу", "Sign-in access issue"), sub)
             return
         if d.auth == limits.EXPIRED and d.session is None and d.weekly is None:
             problem(tr("Вход устарел", "Sign-in expired"),
-                    (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)) if d.as_of is not None else None, can_fix)
+                    (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)) if d.as_of is not None else None)
             return
         if d.auth == limits.OK:
             c.icon("arrow_ne", rect_tl(x + w - 21, cards_top + 11, 11, 11), gray(1, 0.22), 1.5)
@@ -248,15 +379,7 @@ def draw_simple(c, W, H, m):
         elif not stale and d.scoped:
             pill(None, fmt.num_text(d.scoped.percent) + "%", sc_col, tinted=True)
         l1, l2 = cards_top + 124, cards_top + 139
-        if can_fix or stale or limit_poll_failed(d):
-            snapshot, action = limit_simple_stale_copy(d, product)
-            msg = Attr(snapshot, 9.5, "regular", AMBER)
-            ico, g = 9, 4
-            bx = cx - (ico + g + msg.width()) / 2
-            c.icon("warning", rect_tl(bx, l1 + 1, ico, ico), AMBER)
-            c.text(msg, bx + ico + g, l1)
-            c.text(Attr(action, 9.5, "semibold" if can_fix else "regular", BLUE if can_fix else TEXT_LO), cx, l2, align=1)
-        else:
+        if not can_fix:
             lx = x + 16
             if single:
                 l2 = l1
@@ -273,9 +396,7 @@ def draw_simple(c, W, H, m):
                 c.text(Attr(d.scoped.name, 10.5, "regular", TEXT_MID), lx + 11, l3)
                 c.text(Attr(limit_reset_text(d.scoped.reset), 10, "regular", TEXT_LO), x + w - 14, l3, align=2)
 
-    if not m.loaded:
-        c.text(Attr(tr("Загрузка…", "Loading…"), 12, "regular", TEXT_MID), W / 2, cards_top + 70, align=1)
-    elif len(prods) >= 2:
+    if len(prods) >= 2:
         draw_card(pad, card_w, *prods[0])
         draw_card(pad + card_w + gap, card_w, *prods[1])
     elif len(prods) == 1:
@@ -297,19 +418,20 @@ def draw_simple(c, W, H, m):
 def footer_simple(c, W, foot, m, hits, advanced=False):
     pad = 16
     auto = common.settings().get("autoPoll")
-    segs = poll_segments()[:3]
+    segs = poll_segments()[:-1]
+    selected = highlighted_intervals(m)
     sw, sh = 40, 24
     c.round_fill(rect_tl(pad, foot, sw * len(segs), sh), 8, gray(1, 0.06))
     for i, (label, sec) in enumerate(segs):
         r = rect_tl(pad + i * sw, foot, sw, sh)
-        on = not auto and abs(m.interval - sec) < 1
+        on = sec in selected
         if on:
             c.round_fill(r.adjusted(2, 2, -2, -2), 6, gray(1, 0.18 if advanced else 0.13))
         c.text_c(Attr(label, 12 if advanced else 11, "semibold" if on else "medium" if advanced else "regular",
                       TEXT_HI if on else TEXT_MID), r.center().x(), foot, sh, align=1)
         hits.append(("iv%d" % sec, r))
-    auto_hit = rect_tl(136, foot, 40, 24)
-    capsule = rect_tl(141, foot + 2, 30, 20)
+    auto_hit = rect_tl(176, foot, 40, 24)
+    capsule = rect_tl(181, foot + 2, 30, 20)
     if auto:
         gradient = QLinearGradient(capsule.topLeft(), capsule.bottomRight())
         gradient.setColorAt(0, rgb(52 / 255, 121 / 255, 239 / 255))
@@ -325,24 +447,9 @@ def footer_simple(c, W, foot, m, hits, advanced=False):
     c.text_c(Attr(tr("А", "A"), 12, "semibold", gray(1, 1) if auto else label_color),
              auto_hit.center().x(), foot, sh, align=1)
     hits.append(("iv0", auto_hit))
-    enabled = {p: common.product_enabled(p) for p in ("claude", "codex")}
-    parts = auto_poll_label_parts(auto, enabled, m.auto_intervals, common.settings().get("lang"))
-    if parts:
-        color = label_color if any(enabled.values()) else rgb(168 / 255, 179 / 255, 201 / 255)
-        joined = Attr(" · ".join(parts), 10, "medium", color)
-        if len(parts) == 2 and joined.width() > 128:
-            for i, part in enumerate(parts):
-                c.text_c(Attr(part, 10, "medium", color), 184, foot + i * 12, 12)
-        else:
-            c.text_c(joined, 184, foot, sh)
     pwr = rect_tl(W - pad - 24, foot, 24, 24)
     c.icon("power", pwr.adjusted(5, 5, -5, -5), gray(1, 0.5 if advanced else 0.6), 1.6 if advanced else 1.7)
     hits.append(("quit", pwr))
-    if m.updated and not auto:
-        c.text_c(Attr(tr("обновлено ", "updated ") + fmt.clock(m.updated), 11 if advanced else 10,
-                      "regular", TEXT_MID if advanced else TEXT_LO),
-                 315 if advanced else W - pad - 32, foot + 3 if advanced else foot,
-                 18 if advanced else sh, align=2)
 
 
 # ---- advanced view («Темп») ------------------------------------------------------------------
@@ -395,7 +502,7 @@ def limit_auth_badge(auth):
     if auth == limits.EXPIRED:
         return tr("вход истёк", "sign-in expired")
     if auth == limits.READ_ERROR:
-        return tr("нет доступа", "read failed")
+        return tr("сбой доступа", "access issue")
     return tr("данные устарели", "stale data")
 
 
@@ -403,17 +510,6 @@ def limit_paused_notice(as_of):
     if as_of is None or not math.isfinite(as_of) or as_of > time.time():
         return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
     return tr("Данные от ", "Data as of ") + fmt.moment_lower(as_of) + tr(" · темп не считаем", " · pace paused")
-
-
-def limit_simple_stale_copy(d, product):
-    snapshot = (tr("данные от ", "as of ") + fmt.fmt_reset(d.as_of)
-                if d.as_of is not None else tr("Нет свежих данных", "No fresh data"))
-    if limit_can_fix(product, d.auth):
-        action = tr("Вход устарел · Как починить?", "Sign-in expired · How to fix?")
-    else:
-        action = (limit_retry_notice(d, compact=True) if limit_poll_failed(d) else
-                  tr("темп не считаем", "pace paused") if d.as_of is None else tr("обновите данные", "refresh data"))
-    return snapshot, action
 
 
 def limit_reset_text(reset):
@@ -432,15 +528,11 @@ def limit_retry_notice(d, compact=False):
         return prefix + tr("повтор по расписанию", "scheduled retry")
     if d.next_poll_at <= time.time():
         return prefix + tr("повтор ожидается", "retry due")
-    return prefix + tr("повтор в ", "retry at ") + time.strftime("%H:%M", time.localtime(d.next_poll_at))
-
-
-def limit_snapshot_notice(d):
-    if d.auth != limits.OK or d.as_of is None or not math.isfinite(d.as_of) or d.as_of > time.time():
-        return limit_paused_notice(d.as_of)
-    if not any(l["pace"] is not None for l in limits.paced_limits(d, "claude")):
-        return limit_paused_notice(d.as_of)
-    return tr("Темп по снимку от ", "Pace from snapshot at ") + time.strftime("%Y-%m-%d %H:%M", time.localtime(d.as_of))
+    try:
+        moment = time.strftime("%H:%M", time.localtime(d.next_poll_at))
+    except (OverflowError, OSError, ValueError):
+        return prefix + tr("повтор позже", "retry later")
+    return prefix + tr("повтор в ", "retry at ") + moment
 
 
 def limit_data_badge(d):
@@ -452,10 +544,10 @@ def limit_data_badge(d):
 def adv_cards(m):
     out = []
     for d, product in ((m.claude, "claude"), (m.codex, "codex")):
-        if not common.product_enabled(product) or not d.present:
+        if not common.product_enabled(product):
             continue
         paused = d.auth != limits.OK or limits.is_stale(d)
-        lims = limits.paced_limits(d, product, m.history)
+        lims = limits.paced_limits(d, product, m.history) if d.present else []
         if product == "codex":
             lims.sort(key=lambda l: 0 if l["id"] == "weekly" else 1)
         rows = []
@@ -472,7 +564,7 @@ def adv_cards(m):
             else:
                 kind = "full"
             rows.append({"limit": l, "kind": kind})
-        if product == "codex":
+        if product == "codex" and d.present:
             rows.append({"limit": None, "kind": "credits", "credits": d.reset_credits or 0})
         out.append({"product": product, "data": d, "paused": paused, "rows": rows,
                     "name": "Claude Code" if product == "claude" else "Codex",
@@ -487,12 +579,16 @@ def row_h(row):
 
 
 def notice_h(card):
-    return NOTICE * ((2 if limit_can_fix(card["product"], card["data"].auth) else 1) + int(limit_poll_failed(card["data"])))
+    # Keep an actual sign-in instruction; snapshot/retry details live in the card footer.
+    return NOTICE if card["data"].present and card["data"].auth != limits.OK else 0
 
 
 def card_h(card):
+    if not card["data"].present:
+        return PLACEHOLDER + FEEDBACK_H
     rows = card["rows"]
-    return 38 + sum(row_h(r) for r in rows) + max(0, len(rows) - 1) + notice_h(card)
+    body = sum(row_h(r) for r in rows) + max(0, len(rows) - 1) if rows else PLACEHOLDER
+    return 38 + body + notice_h(card) + FEEDBACK_H
 
 
 def hist_product(m, present):
@@ -508,23 +604,17 @@ def hist_height(m, cards):
     warn = NOTICE if m.sync_warning else 0          # orange sync line under the header
     if not common.settings().get("advHistExpanded"):
         return HIST_COLLAPSED + warn
-    p = hist_product(m, [c["product"] for c in cards])
+    p = hist_product(m, [c["product"] for c in cards if c["data"].present])
     return HIST_EXPANDED + (HIST_EMPTY_EXTRA if hist_empty(m, p) else 0) + warn
-
-
-def show_missing_product(cards):
-    return len(cards) == 1 and common.product_enabled("codex" if cards[0]["product"] == "claude" else "claude")
 
 
 def advanced_height(m):
     cards = adv_cards(m)
-    if not cards:
+    if not any(cd["data"].present for cd in cards):
         return simple_height(m)
     h = 94
     for cd in cards:
         h += 5 + card_h(cd)
-    if show_missing_product(cards):
-        h += 5 + PLACEHOLDER
     h += 5 + hist_height(m, cards)
     return h + CREDIT_H
 
@@ -560,7 +650,7 @@ def adv_verdict(row, as_of):
 
 
 def draw_advanced(c, W, H, m):
-    if not adv_cards(m):
+    if not any(cd["data"].present for cd in adv_cards(m)):
         return draw_simple(c, W, H, m)
     hits = []
     p = c.p
@@ -592,13 +682,13 @@ def draw_advanced(c, W, H, m):
     c.round_fill(rect_tl(x, ly + 4, 16, 5), 2.5, gray(1, 0.30))
     x += 20
     c.text_c(Attr(tr("прогноз к сбросу", "forecast to reset"), 10.5, "regular", TEXT_MID), x, ly, lh)
-    gear, rf = rect_tl(297, 24, 18, 18), rect_tl(327, 24, 18, 18)
+    gear, rf = rect_tl(297, 24, 18, 18), rect_tl(328, 25, 16, 16)
     c.icon("gear", gear, TEXT_MID, 1.4)
     if m.update_available:
         update_badge(c, gear)
-    c.icon("refresh", rf.adjusted(2, 2, -2, -2), TEXT_MID, 1.7)
-    hits.append(("settings", gear.adjusted(-6, -6, 6, 6)))
-    hits.append(("refresh", rf.adjusted(-6, -6, 6, 6)))
+    c.icon("refresh", rf, TEXT_MID, 1.7)
+    hits.append(("settings", rect_tl(294, 21, 24, 24)))
+    hits.append(("refresh", rect_tl(324, 21, 24, 24)))
 
     cards = adv_cards(m)
     y = 58.0
@@ -682,6 +772,21 @@ def draw_advanced(c, W, H, m):
         d = cd["data"]
         rect = rect_tl(ADV_CX, y, ADV_CW, ch)
         c.round_fill(rect, 14, gray(1, 0.04))
+        draw_feedback(c, m, d, cd["product"], ADV_IX, y + ch - FEEDBACK_H, ADV_IW, hits)
+        if not d.present:
+            p.save()
+            pen = QPen(gray(1, 0.14), 1)
+            pen.setDashPattern([4, 3])
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
+            p.restore()
+            label = cd["name"] + (tr(" · загрузка…", " · loading…") if not m.loaded else
+                                   tr(" не настроен", " not set up"))
+            c.text_c(Attr(label, 13, "medium", TEXT_MID), ADV_IX + 4, y, PLACEHOLDER)
+            hits.append(("settings", rect_tl(ADV_CX, y, ADV_CW, PLACEHOLDER)))
+            y += ch + 5
+            continue
         c.round_stroke(rect.adjusted(0.5, 0.5, -0.5, -0.5), 14, gray(1, 0.06), 1)
         can_fix = limit_can_fix(cd["product"], d.auth)
         y0 = y + 9
@@ -706,17 +811,13 @@ def draw_advanced(c, W, H, m):
         hits.append(("claudefix" if can_fix else "open:" + cd["url"], rect if can_fix else arrow.adjusted(-8, -8, 8, 8)))
         ry = y + 29
         if notice_h(cd):
-            pre = Attr(limit_snapshot_notice(d), 10.5, "regular", WARN)
-            c.text_c(pre, ADV_IX, ry, 14)
-            if can_fix:
-                code = Attr("claude → /login", 10, "regular", gray(1, 0.8), mono=True)
-                cr = rect_tl(ADV_IX, ry + NOTICE + 0.5, code.width() + 8, 14)
-                c.round_fill(cr, 4, gray(1, 0.08))
-                c.text_c(code, cr.left() + 4, ry + NOTICE, 14)
-            if limit_poll_failed(d):
-                offset = NOTICE * (2 if can_fix else 1)
-                c.text_c(Attr(limit_retry_notice(d), 10.5, "regular", WARN), ADV_IX, ry + offset, 14)
+            instruction = ("claude → /login" if can_fix else
+                           tr("Проверьте доступ к входу", "Check sign-in access"))
+            c.text_c(Attr(instruction, 10, "regular", TEXT_MID), ADV_IX, ry, 14)
             ry += notice_h(cd)
+        if not cd["rows"]:
+            label = tr("Нет данных об окнах", "No window data")
+            c.text_c(Attr(label, 12, "regular", TEXT_MID), ADV_IX, ry, PLACEHOLDER)
         for i, row in enumerate(cd["rows"]):
             draw_row(row, ry, (cd["paused"] or row["kind"] == "stale") and row["kind"] != "credits", d.as_of)
             ry += row_h(row)
@@ -725,21 +826,8 @@ def draw_advanced(c, W, H, m):
                 ry += 1
         y += ch + 5
 
-    if show_missing_product(cards):
-        r = rect_tl(ADV_CX, y, ADV_CW, PLACEHOLDER)
-        p.save()
-        pen = QPen(gray(1, 0.14), 1)
-        pen.setDashPattern([4, 3])
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), 14, 14)
-        p.restore()
-        missing = "Codex" if cards[0]["product"] == "claude" else "Claude Code"
-        c.text_c(Attr(missing + tr(" не настроен", " not set up"), 13, "medium", TEXT_MID), ADV_IX + 4, y, PLACEHOLDER)
-        y += PLACEHOLDER + 5
-
     # history & money
-    present = [cd["product"] for cd in cards]
+    present = [cd["product"] for cd in cards if cd["data"].present]
     hp = hist_product(m, present)
     expanded = bool(common.settings().get("advHistExpanded"))
     hh = hist_height(m, cards)

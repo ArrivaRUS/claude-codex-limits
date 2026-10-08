@@ -1,12 +1,12 @@
 # Индекс знаний Claude Codex Limits
 
-[Вводная](00_START_HERE.md) · [Текущее состояние](01_PROJECT_STATE.md) · [Обновление 7 октября](02_UPDATE_2026-10-07.md)
+[Вводная](00_START_HERE.md) · [Текущее состояние](01_PROJECT_STATE.md) · [Обновление 8 октября](03_UPDATE_2026-10-08.md) · [История 7 октября](02_UPDATE_2026-10-07.md)
 
 ## Актуальные документы репозитория
 
 Ссылки `../../…` ведут в текущий checkout; в отдельной копии этой папки требуется оригинальный репозиторий.
 
-- [Текущая проверка Linux 0.4.4 на Astra](../../docs/alse-0.4.4-verification.md).
+- [Установка Linux 0.4.5 на Astra](../../docs/alse-0.4.5-installation.md); [историческая проверка 0.4.4](../../docs/alse-0.4.4-verification.md).
 - [HEARTBEAT](../../HEARTBEAT.md), [статус](../../docs/status.md), [рабочий гайд](../../docs/project-guide.md).
 - [README RU](../../README.ru.md), [Linux README](../../linux/README.md).
 - [AGENTS](../../AGENTS.md), [codex-only](../../docs/codex-team.md).
@@ -14,7 +14,8 @@
 - [Протокол синхронизации](../../docs/sync-protocol.md), [архитектура GitHub auth](../../docs/architecture-github-auth.md).
 - [FRESH-4H](../../docs/freshness-4h-plan.md), [проверки 3.2.4/0.4.4](../../docs/freshness-keychain-verification.md).
 - [KEYCHAIN-QUIET](../../docs/keychain-no-background-prompts.md), [проверки 3.2.5](../../docs/keychain-quiet-verification.md).
-- [MANUAL-REFRESH: только предложение](../../docs/manual-refresh-proposal.md).
+- [MANUAL-REFRESH: реализованный контракт](../../docs/manual-refresh-proposal.md), [Linux-контракт](../../docs/linux-manual-refresh-contract.md).
+- [Linux 0.4.5: выпуск и CI](../../docs/linux-compact-refresh-verification.md), [macOS 3.2.7](../../docs/compact-refresh-verification.md).
 
 ## Архив среза 5 октября
 

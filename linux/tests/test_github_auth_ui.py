@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from ccl import common, sync, usage
+from ccl import common, quota_refresh, sync, usage
 
 try:
     from PyQt5.QtCore import QTimer
@@ -47,6 +47,7 @@ class TestGitHubAuthQt(PipelineCase):
 
     def setUp(self):
         super().setUp()
+        self.patch(app.time, "monotonic", self.world.clock)
         self.patch(QDesktopServices, "openUrl", forbidden)
         self.patch(QTimer, "singleShot", forbidden)
         self.patch(app.threading, "Thread", forbidden)
@@ -172,6 +173,11 @@ class TestGitHubAuthQt(PipelineCase):
         fixture.busy_logs = fixture.force_pending = fixture.busy_limits = False
         fixture.selection_generation = 0
         fixture.poll_states = {}
+        fixture.refresh_states = {p: quota_refresh.RefreshState() for p in ("claude", "codex")}
+        for state in fixture.refresh_states.values(): state.set_enabled(False)
+        fixture.scheduled_at = lambda product, now=None: 0
+        fixture.publish_auto_intervals = lambda: None
+        fixture.save_poll_states = lambda: None
         deliveries = []
         fixture.bridge = SimpleNamespace(logs_done=SimpleNamespace(emit=lambda *args: deliveries.append(args)))
         # Actual callback runs an isolated stale-index read and actual protected

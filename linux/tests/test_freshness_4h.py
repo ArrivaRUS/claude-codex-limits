@@ -28,7 +28,9 @@ class TestFreshness(OfflineCase):
                 self.assertTrue(limits.is_stale(d, now=NOW))
                 if at is None or not math.isfinite(at):
                     self.assertTrue(all(row['pace'] is None for row in limits.paced_limits(d, 'codex')))
-                self.assertIn('pace paused', panel_helpers()['limit_snapshot_notice'](d))
+                model = SimpleNamespace(pending_products=set())
+                detail = panel_helpers()['feedback_copy'](model, d, 'codex')[3]
+                self.assertIn('pace paused', detail)
 
     def test_each_window_expires_at_reset_without_hiding_the_other_windows(self):
         for metric in ('session', 'weekly', 'model'):
@@ -93,18 +95,22 @@ class TestPresentation(OfflineCase):
         self.assertNotEqual(c.gauges[0][1], ('gray', 1, 0.3))
         self.assertEqual([v for v, _ in tray_values(d, ['session'])], [47])
         self.assertNotEqual(tray_values(d, ['session'])[0][1], (255, 255, 255, 110))
-        rows = panel_helpers()['adv_cards'](SimpleNamespace(claude=limits.absent_limits(), codex=d, history=None))[0]['rows']
+        cards = panel_helpers()['adv_cards'](SimpleNamespace(claude=limits.absent_limits(), codex=d, history=None))
+        rows = next(c for c in cards if c['product'] == 'codex')['rows']
         self.assertEqual([r['limit']['id'] for r in rows if r['limit']], ['weekly'])
         self.assertEqual(rows[0]['kind'], 'full')
 
     def test_old_snapshot_is_labeled_with_asof_and_keeps_historical_projection(self):
         d = reading(14401, weekly_only=True)
         h = panel_helpers()
-        card = h['adv_cards'](SimpleNamespace(claude=limits.absent_limits(), codex=d, history=None))[0]
+        cards = h['adv_cards'](SimpleNamespace(claude=limits.absent_limits(), codex=d, history=None))
+        card = next(c for c in cards if c['product'] == 'codex')
         self.assertTrue(card['paused'])
         self.assertIsNotNone(card['rows'][0]['limit']['pace'])
-        self.assertIn('snapshot', h['limit_snapshot_notice'](d))
-        self.assertNotIn('sign-in', h['limit_snapshot_notice'](d))
+        detail = h['feedback_copy'](SimpleNamespace(pending_products=set()), d, 'codex')[3]
+        self.assertIn('Snapshot:', detail)
+        self.assertNotIn('sign-in', detail)
+        self.assertEqual(h['notice_h'](card), 0, 'stale annotation must not reserve an empty row')
 
     def test_confirmed_auth_is_separate_from_fresh_snapshot_and_network_error(self):
         h = panel_helpers()
@@ -118,7 +124,8 @@ class TestPresentation(OfflineCase):
             self.assertFalse(h['limit_can_fix']('codex', auth))
         d = reading(7200); d.error = 'offline fixture'; d.next_poll_at = NOW + 1800
         c = simple_card(d)
-        self.assertTrue(any('retry at' in s for s, _ in c.texts))
+        detail = h['feedback_copy'](SimpleNamespace(pending_products=set()), d, 'codex')[3]
+        self.assertIn('retry at', detail)
         self.assertFalse(any('sign-in' in s for s, _ in c.texts))
         self.assertTrue(all(color != ('gray', 1, 0.3) for _, color in c.gauges))
 
@@ -162,7 +169,8 @@ class TestFailedLive(OfflineCase):
                 rollout = reading(8000, weekly_only=True) if cached else fallback
                 cache = {'codex': fallback.to_dict()} if cached else {}
                 common.write_json(common.CACHE_PATH, cache)
-                with patch.object(limits, 'codex_usage_live', return_value=None) as live, \
+                attempt = limits.LimitData(); attempt.error = 'offline fixture'
+                with patch.object(limits, 'codex_usage_live', return_value=attempt) as live, \
                      patch.object(limits, 'codex_from_rollout', return_value=rollout):
                     result = limits.fetch_codex(live=True)
                 live.assert_called_once_with()
@@ -171,12 +179,15 @@ class TestFailedLive(OfflineCase):
                 self.assertFalse(limits.is_stale(result, NOW))
                 state = polling.PollState({'interval': 900}); state.begin(NOW - 10)
                 ns = publish_callbacks()
-                fake = SimpleNamespace(busy_limits=True, selection_generation=1, refresh_products=['codex'],
-                    model=SimpleNamespace(claude=limits.absent_limits(), codex=result, history=limits.History()),
+                fake = SimpleNamespace(busy_limits=True, selection_generation=1,
+                    model=SimpleNamespace(claude=limits.absent_limits(), codex=result, history=limits.History(), pending_products={'codex'}),
                     poll_states={'codex': state}, update_sync_warning=Mock(), check_alarms=Mock(), update_tray=Mock(),
                     win=SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock()))
+                bind_owner(fake, ns)
+                fake.refresh_states['codex'] = quota_refresh.RefreshState()
+                ticket = fake.refresh_states['codex'].admit('manual', NOW - 10, monotonic_now=NOW - 10).ticket
                 fake.save_poll_states = MethodType(ns['publish_auto_intervals'], fake)
-                ns['on_limits'](fake, fake.model.claude, result, 1)
+                ns['on_limits'](fake, 'codex', ticket, result)
                 self.assertTrue(state.failed); self.assertEqual(state.interval, 1800)
                 self.assertTrue(fake.model.codex.poll_failed, 'failed live status was erased before UI')
                 self.assertEqual(fake.model.codex.next_poll_at, NOW + 1800)
@@ -186,27 +197,33 @@ class TestFailedLive(OfflineCase):
                 self.assertNotIn('poll_failed', result.to_dict())
                 self.assertNotIn('next_poll_at', result.to_dict())
                 good = reading(0, weekly_only=True); good.api_fresh = True
-                ns['on_limits'](fake, fake.model.claude, good, 1)
+                with patch.object(limits.time, 'time', return_value=NOW + 30):
+                    ticket = fake.refresh_states['codex'].admit('manual', NOW + 30, monotonic_now=NOW + 30).ticket
+                    ns['on_limits'](fake, 'codex', ticket, good)
                 self.assertFalse(fake.model.codex.poll_failed)
-                self.assertIsNone(fake.model.codex.next_poll_at)
+                self.assertGreater(fake.model.codex.next_poll_at, NOW + 30)
 
-    def test_fixed_timer_retry_uses_remaining_deadline_and_does_not_leak_to_other_product(self):
+    def test_fixed_retry_uses_provider_attempt_deadline_not_global_timer_and_does_not_leak(self):
         self.settings.set('autoPoll', False)
-        failed = polling.PollState({'failed': True, 'interval': 14400, 'last_attempt': NOW - 100})
-        healthy = polling.PollState({'failed': False})
-        fake = SimpleNamespace(model=SimpleNamespace(claude=reading(), codex=reading()),
+        failed = polling.PollState({'failed': True, 'interval': 14400, 'last_attempt': NOW - 810})
+        healthy = polling.PollState({'failed': False, 'last_attempt': NOW - 100})
+        fake = SimpleNamespace(model=SimpleNamespace(claude=reading(), codex=reading(), interval=900, pending_products=set()),
             poll_states={'claude': healthy, 'codex': failed}, timer=SimpleNamespace(remainingTime=lambda: 90000))
-        publish_callbacks()['publish_auto_intervals'](fake)
+        ns = publish_callbacks(); bind_owner(fake, ns)
+        ns['publish_auto_intervals'](fake)
         self.assertEqual(fake.model.codex.next_poll_at, NOW + 90)
         self.assertTrue(fake.model.codex.poll_failed)
-        self.assertIsNone(fake.model.claude.next_poll_at)
+        self.assertEqual(fake.model.claude.next_poll_at, NOW + 800)
         self.assertFalse(fake.model.claude.poll_failed)
+        failed.last_attempt = NOW - 900
         fake.timer.remainingTime = lambda: 0
-        publish_callbacks()['publish_auto_intervals'](fake)
+        ns['publish_auto_intervals'](fake)
         self.assertIn('retry due', panel_helpers()['limit_retry_notice'](fake.model.codex))
         fake.timer.remainingTime = lambda: -1
-        publish_callbacks()['publish_auto_intervals'](fake)
-        self.assertIn('scheduled retry', panel_helpers()['limit_retry_notice'](fake.model.codex))
+        ns['publish_auto_intervals'](fake)
+        self.assertEqual(fake.model.codex.next_poll_at, NOW)
+        unknown = reading(); unknown.poll_failed = True
+        self.assertIn('scheduled retry', panel_helpers()['limit_retry_notice'](unknown))
 
     def test_offline_only_read_is_not_labeled_failed_live(self):
         with patch.object(limits, 'codex_usage_live', side_effect=AssertionError('offline must not call live')), \
@@ -216,16 +233,16 @@ class TestFailedLive(OfflineCase):
 
 
 class TestDeadlines(OfflineCase):
-    def test_scheduled_attempt_due_at_four_hours_and_failed_manual_cannot_bypass_backoff(self):
+    def test_scheduled_four_hour_boundary_and_local_activity_cannot_bypass_error_backoff(self):
         state = polling.PollState({'interval': 14400, 'last_attempt': NOW})
         for age, due in ((14399, False), (14400, True), (14401, True)):
             self.assertEqual(state.due(NOW + age), due)
         state.failed = True
-        self.assertFalse(state.due(NOW + 900, manual=True))
+        self.assertFalse(state.due(NOW + 900))
         self.assertFalse(state.local_activity([NOW + 10, NOW + 20, NOW + 30], NOW + 40))
         self.assertEqual(state.interval, 14400)
         restored = polling.PollState(json.loads(json.dumps(state.saved())))
-        self.assertTrue(restored.due(NOW + 14400, manual=True))
+        self.assertTrue(restored.due(NOW + 14400))
 
     def test_backoff_cap_request_duration_and_busy_worker(self):
         state = polling.PollState({'interval': 900})
@@ -233,33 +250,41 @@ class TestDeadlines(OfflineCase):
         for interval in (1800, 3600, 14400, 14400):
             state.begin(NOW); state.observe(d, NOW + 30)
             self.assertEqual(state.interval, interval)
-            self.assertFalse(state.due(NOW + 30 + interval - 1, manual=True))
-            self.assertTrue(state.due(NOW + 30 + interval, manual=True))
+            self.assertFalse(state.due(NOW + 30 + interval - 1))
+            self.assertTrue(state.due(NOW + 30 + interval))
         ns = refresh_method()
-        fake = SimpleNamespace(busy_limits=True)
+        fake = SimpleNamespace(busy_limits=True, poll_states={p: polling.PollState({'last_attempt': NOW - 14400, 'interval': 14400})
+                                                            for p in ('claude', 'codex')},
+                               model=SimpleNamespace(claude=reading(), codex=reading(), interval=14400), save_poll_states=Mock())
+        bind_owner(fake, ns)
+        for state in fake.refresh_states.values():
+            state.admit('manual', NOW, monotonic_now=NOW)
         ns['refresh_limits'](fake, scheduled=True)
         ns['threading'].Thread.assert_not_called()
 
     def test_actual_worker_callback_attempts_only_due_product_once(self):
         ns = refresh_method()
         fake = SimpleNamespace(busy_limits=False, selection_generation=7, save_poll_states=Mock(),
-                               model=SimpleNamespace(claude=reading(), codex=reading()),
+                               model=SimpleNamespace(claude=reading(), codex=reading(), pending_products=set()),
                                poll_states={'claude': polling.PollState({'interval': 14400, 'last_attempt': NOW - 14399}),
                                             'codex': polling.PollState({'interval': 14400, 'last_attempt': NOW - 14400})},
-                               bridge=SimpleNamespace(limits_done=SimpleNamespace(emit=Mock())))
+                               bridge=SimpleNamespace(limits_done=SimpleNamespace(emit=Mock())),
+                               win=SimpleNamespace(view=SimpleNamespace(update=Mock())))
+        bind_owner(fake, ns)
         ns['threading'].Thread = Mock(side_effect=lambda target, **kw: SimpleNamespace(start=target))
         with patch.object(limits, 'fetch_claude', side_effect=AssertionError('Claude not due')), \
              patch.object(limits, 'fetch_codex', return_value=reading()) as fetch, \
-             patch.object(limits, 'apply_cache', side_effect=lambda c, x: (c, x)):
+             patch.object(limits, 'apply_provider_cache', side_effect=AssertionError('worker cache publication')):
             ns['refresh_limits'](fake, scheduled=True)
             ns['refresh_limits'](fake, scheduled=True)  # busy guard, no second attempt
         fetch.assert_called_once_with(live=True)
         ns['threading'].Thread.assert_called_once()
-        self.assertEqual(fake.refresh_products, ['codex'])
+        self.assertIsNotNone(fake.refresh_states['codex'].flight)
+        self.assertIsNone(fake.refresh_states['claude'].flight)
         self.assertEqual(fake.poll_states['codex'].last_attempt, NOW)
         self.assertEqual(fake.poll_states['claude'].last_attempt, NOW - 14399)
         fake.bridge.limits_done.emit.assert_called_once()
-        fake.save_poll_states.assert_called_once_with()
+        fake.save_poll_states.assert_called_with()
 
     def test_weekly_only_live_observation_recovers_backoff(self):
         state = polling.PollState({'interval': 3600, 'failed': True})
@@ -280,7 +305,8 @@ class TestIntervalTransitions(OfflineCase):
                                scan_activity=Mock(), refresh_limits=Mock())
         win = SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock())
         fake.win = win
-        for name in ('start_poll_timer', 'publish_auto_intervals'):
+        bind_owner(fake, ns)
+        for name in ('start_poll_timer', 'publish_auto_intervals', 'scheduled_at'):
             setattr(fake, name, MethodType(ns[name], fake))
         fake.start_poll_timer(); fake.publish_auto_intervals()
         return ns, fake
@@ -288,23 +314,25 @@ class TestIntervalTransitions(OfflineCase):
     def test_real_interval_handler_updates_canonical_retry_for_auto_fixed_and_fixed_fixed(self):
         ns, fake = self.fake_owner()
         self.assertEqual(fake.model.codex.next_poll_at, NOW + 14400)
-        for hid, delay in (('iv900', 900), ('iv3600', 3600), ('iv1800', 1800), ('iv0', 14400), ('iv900', 900)):
+        for hid, delay in (('iv900', 900), ('iv3600', 3600), ('iv1800', 1800), ('iv14400', 14400), ('iv0', 14400), ('iv900', 900)):
             with self.subTest(hid=hid):
                 ns['action'](fake, hid)
                 self.assertEqual(fake.model.codex.next_poll_at, NOW + delay)
                 self.assertTrue(fake.model.codex.poll_failed)
                 self.assertEqual(fake.model.codex.as_of, NOW - 60)
                 self.assertEqual(fake.model.codex.weekly, 47)
-                if hid != 'iv0': self.assertEqual(fake.timer.remainingTime(), delay * 1000)
+                self.assertGreater(fake.timer.remainingTime(), 0)
+                self.assertLessEqual(fake.timer.remainingTime(), 60000)
         fake.scan_activity.assert_called_once_with()
         fake.refresh_limits.assert_called_once_with(scheduled=True)
         ns['threading'].Thread.assert_not_called()
 
-    def test_fixed_to_fixed_updates_model_from_actual_timer(self):
+    def test_fixed_to_fixed_updates_provider_deadline_with_safe_timer_checkpoint(self):
         ns, fake = self.fake_owner(auto=False)
         self.assertEqual(fake.model.codex.next_poll_at, NOW + 900)
         ns['action'](fake, 'iv3600')
-        self.assertEqual(fake.timer.remainingTime(), 3600000)
+        self.assertGreater(fake.timer.remainingTime(), 0)
+        self.assertLessEqual(fake.timer.remainingTime(), 60000)
         self.assertEqual(fake.model.codex.next_poll_at, NOW + 3600)
 
     def test_fixed_to_auto_restores_product_backoff_deadline(self):
