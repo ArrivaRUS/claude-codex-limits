@@ -145,3 +145,7 @@ Exact source a60319 принят независимыми CodeReviewer (producti
 ## 2026-10-08 — публикация и установка COMPACT-REFRESH
 
 v3.2.7 опубликована на source1078ddbe058196204265a0bc565ff591cb8ca45c, Latest=v3.2.7. Публичный DMG4b5a8ca3 скачан и совпал с принятым. Установлен binary978f1aec в /Applications; strict codesign/версия3.2.7/PID15393 подтверждены. Предыдущая3.2.6 сохранена для отката. Linux0.4.4 не менялся.
+
+## 2026-10-08 — Linux0.4.5
+
+Владелец запросил Linux-версию исправленного интерфейса3.2.7. Порт UI выполняется на existing Linux refresh/poll/auth:4ч,Autohighlight,compactfeedback,noannotation. ВыпускDEB linux-v0.4.5 --latest=false, macOS3.2.7Latest. План docs/linux-compact-refresh-plan.md; изолированныйLinuxCI и независимыйdesignreview обязательны.
