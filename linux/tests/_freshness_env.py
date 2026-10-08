@@ -17,10 +17,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ccl import common, limits, polling, sync, usage, vault
+from ccl import common, limits, polling, quota_refresh, sync, usage, vault
 from ccl.gui import fmt
 
 NOW = 1_800_000_000.0
@@ -76,22 +76,28 @@ class Canvas:
 
 
 def panel_helpers():
-    ns = dict(limits=limits, common=common, tr=common.tr, fmt=fmt, time=time, math=math,
-              NOTICE=19, CLAUDE_URL='fixture:claude', CODEX_URL='fixture:codex')
+    # Execute exact pure functions with fake drawing; never import the Qt app here.
+    ns = dict(limits=limits, common=common, tr=common.tr, fmt=fmt,
+              time=time, math=math, quota_refresh=quota_refresh, NOTICE=19, FEEDBACK_H=32,
+              CLAUDE_URL='fixture:claude', CODEX_URL='fixture:codex',
+              TEXT_MID='mid', AMBER='amber')
     return extract(LINUX / 'ccl/gui/panel.py', (
-        'limit_can_fix', 'limit_auth_badge', 'limit_paused_notice', 'limit_simple_stale_copy',
-        'limit_reset_text', 'limit_poll_failed', 'limit_retry_notice', 'limit_snapshot_notice',
+        'limit_can_fix', 'limit_auth_badge', 'limit_paused_notice',
+        'limit_reset_text', 'limit_poll_failed', 'limit_retry_notice', 'feedback_countdown', 'feedback_action', 'feedback_moment', 'feedback_copy',
         'limit_data_badge', 'adv_cards', 'adv_verdict', 'notice_h', 'shows_scoped_row'), ns)
 
 
 def simple_card(d, product='codex'):
     ns = panel_helpers()
     c = Canvas()
-    ns.update(c=c, m=SimpleNamespace(codex=d if product == 'codex' else None), hits=[], cards_top=58, card_h=172,
-              rect_tl=Rect, QRectF=Rect, Attr=Attr, gray=lambda *x: ('gray',) + x,
-              with_alpha=lambda col, alpha: (col, alpha), metric_color=lambda base, v: (base, v),
-              scoped_color=lambda v: ('scoped', v), BLUE='blue', PURPLE='purple', AMBER='amber',
-              TEXT_LO='low', TEXT_MID='mid', SCOPED_ROW_H=15)
+    ns.update(c=c, m=SimpleNamespace(codex=d if product == 'codex' else None, loaded=True,
+                                    pending_products=set()), hits=[], cards_top=58, card_h=184,
+              rect_tl=Rect, QRectF=Rect, Attr=Attr,
+              gray=lambda *x: ('gray',) + x, with_alpha=lambda col, alpha: (col, alpha),
+              metric_color=lambda base, v: (base, v), scoped_color=lambda v: ('scoped', v),
+              BLUE='blue', PURPLE='purple', AMBER='amber', TEXT_LO='low', TEXT_MID='mid',
+              SCOPED_ROW_H=15)
+    extract(LINUX / 'ccl/gui/panel.py', ('draw_feedback',), ns)
     tree = ast.parse((LINUX / 'ccl/gui/panel.py').read_text())
     outer = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'draw_simple')
     inner = next(n for n in outer.body if isinstance(n, ast.FunctionDef) and n.name == 'draw_card')
@@ -106,10 +112,31 @@ def tray_values(d, picks):
     return ns['values'](d, picks)
 
 
-def refresh_method():
-    return extract(LINUX / 'ccl/gui/app.py', ('refresh_limits',),
-                   dict(time=time, common=common, limits=limits, threading=SimpleNamespace(Thread=Mock(side_effect=AssertionError('worker forbidden')))),
+def app_methods(names):
+    return extract(LINUX / 'ccl/gui/app.py', names,
+                   dict(time=time, math=math, common=common, limits=limits, polling=polling,
+                        quota_refresh=quota_refresh, Qt=SimpleNamespace(PreciseTimer=0),
+                        panel=SimpleNamespace(poll_interval=lambda x: int(x)),
+                        threading=SimpleNamespace(Thread=Mock(side_effect=AssertionError('worker forbidden')))),
                    owner='TrayApp')
+
+
+def bind_owner(fake, ns):
+    """Bind public app seams to an inert owner; no constructor, workers or transport."""
+    if not hasattr(fake, 'refresh_states'):
+        fake.refresh_states = {p: quota_refresh.RefreshState(state.last_attempt)
+                               for p, state in fake.poll_states.items()}
+    if not hasattr(fake, 'timer'): fake.timer = RecordingTimer()
+    if not hasattr(fake, 'win'):
+        fake.win = SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock())
+    for name in ('scheduled_at', 'publish_auto_intervals', 'start_poll_timer'):
+        if name in ns and not hasattr(fake, name):
+            setattr(fake, name, MethodType(ns[name], fake))
+    return fake
+
+
+def refresh_method():
+    return app_methods(('refresh_limits', 'scheduled_at', 'publish_auto_intervals', 'start_poll_timer'))
 
 
 class OfflineCase(unittest.TestCase):
@@ -135,11 +162,11 @@ class OfflineCase(unittest.TestCase):
                             ('CODEX_SESSIONS', self.tmp.name)):
             p = patch.object(common, name, value); p.start(); self.addCleanup(p.stop)
         p = patch.object(limits.time, 'time', return_value=NOW); p.start(); self.addCleanup(p.stop)
+        p = patch.object(limits.time, 'monotonic', lambda: limits.time.time()); p.start(); self.addCleanup(p.stop)
 
 
 def publish_callbacks():
-    return extract(LINUX / 'ccl/gui/app.py', ('on_limits', 'publish_auto_intervals'),
-                   dict(time=time, common=common, limits=limits, polling=polling), owner='TrayApp')
+    return app_methods(('on_limits', 'publish_auto_intervals', 'scheduled_at', 'start_poll_timer'))
 
 
 class RecordingTimer:
@@ -151,11 +178,7 @@ class RecordingTimer:
 
 
 def interval_handlers():
-    ns = dict(time=time, math=math, common=common, limits=limits, polling=polling,
-              Qt=SimpleNamespace(PreciseTimer=0), panel=SimpleNamespace(poll_interval=lambda x: int(x)))
-    extract(LINUX / 'ccl/gui/app.py', ('action', 'start_poll_timer', 'publish_auto_intervals', 'refresh_limits'),
-            ns, owner='TrayApp')
-    ns['threading'] = SimpleNamespace(Thread=Mock(side_effect=AssertionError('unexpected worker')))
+    ns = app_methods(('action', 'start_poll_timer', 'publish_auto_intervals', 'refresh_limits', 'scheduled_at'))
     extract(LINUX / 'ccl/gui/app.py', ('toggle',), ns, owner='PanelWindow')
     ns['QCursor'] = SimpleNamespace(pos=lambda: (0, 0))
     return ns

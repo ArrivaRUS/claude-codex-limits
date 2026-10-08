@@ -41,11 +41,19 @@ if deb:
 
 import ccl.gui.app as A  # noqa: E402
 
+class InlineWorker:
+    def __init__(self, *, target, daemon): self.target = target
+    def start(self): self.target()
+
+A.threading.Thread = InlineWorker  # queued Qt signals deliver on the test's one thread
+A.time.time = lambda: 1_800_000_000.0
+A.time.monotonic = lambda: 10000.0
+
 qapp = QApplication(sys.argv)
 qapp.setStyle(style)
 app = A.TrayApp(qapp)
 iv = (app.model.interval, common.settings().get("interval"), app.timer.interval())
-if iv != (1800, 1800, 1800000):
+if iv[:2] != (1800, 1800) or not 0 < iv[2] <= 60000:
     print("INTERVAL %s" % (iv,))                          # issue #6: 1 minute must become 30 for good
 # Check real Settings controls and timer wiring without network or real transcripts.
 page = app.win.settings_page
@@ -58,15 +66,17 @@ if common.product_enabled("codex") or app.model.codex.present:
 page.products["codex"].setChecked(True)
 if not common.product_enabled("codex"):
     print("SUBSCRIPTION Codex did not turn on")
-for sec in (900, 1800, 3600):
+for sec in (900, 1800, 3600, 14400):
     app.action("iv%d" % sec)
-    if (app.model.interval, common.settings().get("interval"), app.timer.interval()) != (sec, sec, sec * 1000):
+    if ((app.model.interval, common.settings().get("interval")) != (sec, sec)
+            or not 0 < app.timer.interval() <= 60000
+            or app.scheduled_at("codex") != app.poll_states["codex"].last_attempt + sec):
         print("INTERVAL click failed", sec)
 app.action("iv0")
-if not common.settings().get("autoPoll") or app.timer.interval() != 60000 or common.settings().get("interval") != 3600:
+if not common.settings().get("autoPoll") or not 0 < app.timer.interval() <= 60000 or common.settings().get("interval") != 14400:
     print("AUTO enabling changed the saved fixed interval")
 app.action("iv1800")
-if common.settings().get("autoPoll") or app.timer.interval() != 1800000:
+if common.settings().get("autoPoll") or not 0 < app.timer.interval() <= 60000:
     print("AUTO fixed choice did not disable Auto")
 w = app.win
 w.anchor = QPoint(900, 900)

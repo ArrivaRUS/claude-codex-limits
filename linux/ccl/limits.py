@@ -19,13 +19,14 @@ import time
 import math
 
 from . import common
+from . import quota_refresh
 
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_UA = "claude-cli/2.1.81 (external, cli)"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"   # openai/codex login::CLIENT_ID
 CODEX_UA = "codex_cli_rs/0.20.0 (Linux; x86_64)"
 
-# auth states (only Claude uses anything but "ok")
+# Provider auth state is independent of snapshot age or network availability.
 OK, LOGGED_OUT, EXPIRED, READ_ERROR = "ok", "loggedOut", "expired", "readError"
 
 
@@ -52,6 +53,11 @@ class LimitData(object):
         self.from_cache = False
         self.poll_failed = False     # transient last-request status, not part of snapshot/cache
         self.next_poll_at = None
+        self.server_retry_at = None  # actual Retry-After deadline; None means unknown
+        self.http_status = None      # sanitized current-attempt metadata, never cached
+        self.failure_kind = None     # network/http/auth/credentials/invalid_response
+        self.refresh_in_flight = False
+        self.local_retry_at = 0
         self.api_fresh = False       # only successful live usage responses
         self.present = True          # False → product not set up on this machine
         self.auth = OK
@@ -98,6 +104,45 @@ def absent_limits():
     return data
 
 
+def _credential_failure(data, auth, message):
+    data.auth, data.error = auth, message
+    data.poll_failed = True
+    data.failure_kind = "credentials" if auth == READ_ERROR else "auth"
+    return data
+
+
+def _rotation_failure(data, outcome):
+    if outcome == "superseded":
+        data.error, data.failure_kind, data.poll_failed = "CLI credentials changed; retry", "credentials", True
+        return data
+    return _credential_failure(data, READ_ERROR, "credentials update unavailable")
+
+
+def _credential_block_complete(block, keys):
+    """Only a complete identity can prove that the CLI replaced a pending pair."""
+    return isinstance(block, dict) and all(
+        isinstance(block.get(key), str) and bool(block[key].strip()) for key in keys)
+
+
+def _http_failure(data, response, token_endpoint=False):
+    # Do not expose response bodies, headers, exception text or credentials to UI/cache.
+    body = response.json() if token_endpoint else None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        error = error.get("type")
+    failure = quota_refresh.http_failure(response.status, response.headers, time.time(),
+                                         token_endpoint=token_endpoint, oauth_error=error)
+    data.http_status, data.server_retry_at = failure.status, failure.retry_at
+    data.auth = EXPIRED if failure.authentication_required else OK
+    data.failure_kind = ("auth" if failure.authentication_required else
+                         "network" if not response.status else
+                         "invalid_response" if response.status == 200 else "http")
+    data.error = ("network unavailable" if not response.status else
+                  "invalid response" if response.status == 200 else "HTTP %d" % response.status)
+    data.poll_failed = True
+    return data
+
+
 def _num(v):
     if isinstance(v, bool):
         return None
@@ -129,25 +174,25 @@ def fetch_claude():
     st = common.state()
     path = common.CLAUDE_CREDENTIALS
     if not os.path.exists(path):
-        d.auth = LOGGED_OUT
-        return d
+        return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
     try:
         with open(path, "rb") as f:
             creds = json.loads(f.read().decode("utf-8"))
     except (OSError, ValueError):
-        d.auth = READ_ERROR
-        d.error = "credentials read failed"
-        return d
+        return _credential_failure(d, READ_ERROR, "credentials read failed")
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     if not isinstance(oauth, dict):
-        d.auth = LOGGED_OUT
-        return d
+        return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
 
     p = _PENDING.get("claude")
     if p is not None:
+        if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
+            return _rotation_failure(d, "pending")
         if oauth.get("refreshToken") == p["old"]:
-            _save_claude_tokens(path, p["old"], p["tok"], p["t"], creds)
-            _claude_apply_pair(oauth, p["tok"], p["t"])      # use the new pair even if the write failed again
+            outcome = _save_claude_tokens(path, p["old"], p["tok"], p["t"], creds)
+            if outcome != "saved":
+                return _rotation_failure(d, outcome)
+            _claude_apply_pair(oauth, p["tok"], p["t"])
         else:
             _PENDING.pop("claude", None)
 
@@ -166,8 +211,7 @@ def fetch_claude():
         rt = oauth.get("refreshToken") or ""
         if not rt:
             if not usable:
-                d.auth, d.error = EXPIRED, "no refresh token"
-                return d
+                return _credential_failure(d, EXPIRED, "no refresh token")
         else:
             fp = _fingerprint(rt)
             refused = st.get("deadRefresh") == fp
@@ -179,33 +223,32 @@ def fetch_claude():
                 tok = r.json() if r.status == 200 else None
                 if isinstance(tok, dict) and tok.get("access_token"):
                     at = tok["access_token"]
-                    _save_claude_tokens(path, rt, tok, time.time(), creds)
+                    outcome = _save_claude_tokens(path, rt, tok, time.time(), creds)
+                    if outcome != "saved":
+                        return _rotation_failure(d, outcome)
                     st.remove("deadRefresh")
                 else:
                     body = r.json()
                     err = body.get("error") if isinstance(body, dict) else None
                     if isinstance(err, dict):
                         err = err.get("type")
-                    if err == "invalid_grant" or r.status in (400, 401):
+                    if err == "invalid_grant" or r.status == 401:
                         st.set("deadRefresh", fp)
-                        refused = True
-                    elif not usable:
-                        d.auth, d.error = EXPIRED, "refresh failed (HTTP %d)" % r.status
-                        return d
+                    # Preserve the actual refresh failure, including a server deadline.
+                    # A timeout/429/5xx or generic 400 does not prove revoked credentials.
+                    return _http_failure(d, r, token_endpoint=True)
             if refused and not usable:
-                d.auth, d.error = EXPIRED, "sign-in expired"
-                return d
+                return _credential_failure(d, EXPIRED, "sign-in expired")
 
     r = common.http("https://api.anthropic.com/api/oauth/usage", "GET",
                     {"Authorization": "Bearer " + at, "User-Agent": CLAUDE_UA, "Accept": "application/json",
                      "anthropic-beta": "oauth-2025-04-20", "anthropic-version": "2023-06-01"})
     j = r.json() if r.status == 200 else None
     if not isinstance(j, dict):
-        if r.status == 401:
-            d.auth = EXPIRED
-        d.error = ("usage HTTP %d" % r.status) if r.status else (r.error or "network")
-        return d
+        return _http_failure(d, r)
     _apply_claude_usage(d, j)
+    if not quota_refresh.has_readings(d):
+        return _http_failure(d, r)
     d.as_of = time.time()
     d.api_fresh = True
     return d
@@ -213,7 +256,8 @@ def fetch_claude():
 
 # A refreshed pair that could not be written back yet (file unreadable mid-write, disk full…).
 # The server has already rotated the refresh token, so losing this pair would sign the CLI out:
-# it is kept in memory, used for readings, and the write is retried on every poll.
+# it is kept in memory and write-back is retried against the same credential identity.
+# An unreadable/missing current record never authorizes writing an older snapshot.
 _PENDING = {}
 
 
@@ -222,7 +266,7 @@ def _read_json_retry(path, tries=5):
         try:
             with open(path, "rb") as f:
                 return json.loads(f.read().decode("utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             if i + 1 < tries:
                 time.sleep(0.2)
     return None
@@ -236,22 +280,31 @@ def _claude_apply_pair(oauth, tok, t):
 
 
 def _save_claude_tokens(path, old_rt, tok, t, first):
-    """Write the rotated pair back — re-reading the file first so nothing the CLI wrote in the
-    meantime is lost (falling back to the copy read before the refresh), and only if the file
-    still holds the refresh token we just spent."""
+    """Re-read/merge only the expected pair. Return saved/pending/superseded.
+
+    `first` supplies identity only, never a replacement document. This is not an
+    atomic CAS with the external CLI: a writer after this read can still race replace.
+    """
+    initial = first.get("claudeAiOauth") if isinstance(first, dict) else None
+    access = initial.get("accessToken") if isinstance(initial, dict) else None
+    pending = _PENDING.get("claude")
+    if pending is not None and pending["old"] == old_rt:
+        access = pending.get("access", access)
+    _PENDING["claude"] = {"old": old_rt, "access": access, "tok": tok, "t": t}
     creds = _read_json_retry(path)
-    if not isinstance(creds, dict):
-        creds = first
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
-    if not isinstance(oauth, dict) or oauth.get("refreshToken") != old_rt:
+    if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
+        return "pending"               # missing/corrupt/unreadable: do not resurrect it
+    if oauth.get("refreshToken") != old_rt or oauth.get("accessToken") != access:
         _PENDING.pop("claude", None)     # the CLI refreshed on its own meanwhile — its pair wins
-        return
+        return "superseded"
     _claude_apply_pair(oauth, tok, t)
     try:
         _rewrite_json(path, creds)
         _PENDING.pop("claude", None)
+        return "saved"
     except OSError:
-        _PENDING["claude"] = {"old": old_rt, "tok": tok, "t": t}
+        return "pending"
 
 
 def _apply_claude_usage(d, j):
@@ -399,79 +452,108 @@ def _codex_apply_pair(root, tok):
 
 
 def _save_codex_tokens(old_rt, tok, first):
-    """Same rules as the Claude write-back: re-read, only over the refresh token we spent,
-    keep the pair in memory when the write fails."""
+    """Same guarded re-read/merge as Claude; never write a stale `first` document."""
+    initial = first.get("tokens") if isinstance(first, dict) else None
+    access = initial.get("access_token") if isinstance(initial, dict) else None
+    account = initial.get("account_id") if isinstance(initial, dict) else None
+    pending = _PENDING.get("codex")
+    if pending is not None and pending["old"] == old_rt:
+        access, account = pending.get("access", access), pending.get("account", account)
+    _PENDING["codex"] = {"old": old_rt, "access": access, "account": account, "tok": tok}
     root = _read_json_retry(common.CODEX_AUTH)
-    if not isinstance(root, dict):
-        root = first
-    if not (isinstance(root, dict) and isinstance(root.get("tokens"), dict)
-            and root["tokens"].get("refresh_token") == old_rt):
+    current = root.get("tokens") if isinstance(root, dict) else None
+    if not _credential_block_complete(current, ("access_token", "refresh_token", "account_id")):
+        return "pending"
+    if (current.get("refresh_token") != old_rt or current.get("access_token") != access
+            or current.get("account_id") != account):
         _PENDING.pop("codex", None)
-        return
+        return "superseded"
     _codex_apply_pair(root, tok)
     try:
         _rewrite_json(common.CODEX_AUTH, root)
         _PENDING.pop("codex", None)
+        return "saved"
     except OSError:
-        _PENDING["codex"] = {"old": old_rt, "tok": tok}
+        return "pending"
 
 
-def codex_access_token():
+def codex_access_token(result=None):
     """(access_token, account_id) from ~/.codex/auth.json, refreshed through the official
-    OpenAI token endpoint (and written back) if it has expired."""
+    OpenAI token endpoint (and written back) if it has expired.
+
+    Optional result receives sanitized failure metadata; token return shape is unchanged.
+    """
+    result = result if result is not None else LimitData()
     root = common.read_json(common.CODEX_AUTH)
     if not isinstance(root, dict):
+        _credential_failure(result, READ_ERROR if os.path.exists(common.CODEX_AUTH) else LOGGED_OUT,
+                            "CLI credentials unavailable")
         return None
     tokens = root.get("tokens")
     if not isinstance(tokens, dict):
+        _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     acc = tokens.get("account_id")
     p = _PENDING.get("codex")
     if p is not None:
+        if not _credential_block_complete(tokens, ("access_token", "refresh_token", "account_id")):
+            _rotation_failure(result, "pending")
+            return None
         if tokens.get("refresh_token") == p["old"]:
-            _save_codex_tokens(p["old"], p["tok"], root)
+            outcome = _save_codex_tokens(p["old"], p["tok"], root)
+            if outcome != "saved":
+                _rotation_failure(result, outcome)
+                return None
             _codex_apply_pair(root, p["tok"])
             tokens = root["tokens"]
         else:
             _PENDING.pop("codex", None)
     at = tokens.get("access_token")
     if not acc or not at:
+        _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     exp = _jwt_exp(at)
     if exp is not None and exp > time.time() + 60:
         return at, acc
     rt = tokens.get("refresh_token")
     if not rt:
+        _credential_failure(result, EXPIRED, "no refresh token")
         return None
     st = common.state()
     fp = _fingerprint(rt)
     if st.get("deadCodexRefresh") == fp:
+        _credential_failure(result, EXPIRED, "sign-in expired")
         return None
     r = common.http("https://auth.openai.com/oauth/token", "POST",
                     {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": CODEX_UA},
                     {"client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt})
     tok = r.json() if r.status == 200 else None
     if not isinstance(tok, dict) or not tok.get("access_token"):
-        if r.status in (400, 401):
+        _http_failure(result, r, token_endpoint=True)
+        if result.auth == EXPIRED:
             st.set("deadCodexRefresh", fp)
         return None
-    _save_codex_tokens(rt, tok, root)
+    outcome = _save_codex_tokens(rt, tok, root)
+    if outcome != "saved":
+        _rotation_failure(result, outcome)
+        return None
     return tok["access_token"], acc
 
 
 def codex_usage_live():
-    got = codex_access_token()
+    """Always return LimitData, including the reason a live attempt failed."""
+    d = LimitData()
+    got = codex_access_token(d)
     if not got:
-        return None
+        return d
     at, acc = got
     r = common.http("https://chatgpt.com/backend-api/wham/usage", "GET",
                     {"Authorization": "Bearer " + at, "chatgpt-account-id": acc, "User-Agent": CODEX_UA,
                      "originator": "codex_cli_rs", "Accept": "application/json"})
     obj = r.json() if r.status == 200 else None
     if not isinstance(obj, dict) or not isinstance(obj.get("rate_limit"), dict):
-        return None
+        return _http_failure(d, r)
     rl = obj["rate_limit"]
-    d = LimitData()
     if isinstance(rl.get("primary_window"), dict):
         codex_apply_window(rl["primary_window"], d, False)
     if isinstance(rl.get("secondary_window"), dict):
@@ -480,6 +562,8 @@ def codex_usage_live():
     rc = obj.get("rate_limit_reset_credits")
     if isinstance(rc, dict) and isinstance(rc.get("available_count"), int):
         d.reset_credits = rc["available_count"]
+    if not quota_refresh.has_readings(d):
+        return _http_failure(d, r)
     d.as_of = time.time()
     d.api_fresh = True
     return d
@@ -490,53 +574,68 @@ def fetch_codex(live=True):
         return absent_limits()
     if not os.path.isdir(common.CODEX_SESSIONS) and not os.path.exists(common.CODEX_AUTH):
         d = LimitData()
+        if live:
+            return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
         d.present = False                  # Codex isn't set up on this machine
         return d
+    attempt = None
     if live:
-        d = codex_usage_live()
-        if d is not None:
-            return d
+        attempt = codex_usage_live()
+        if attempt is not None and attempt.api_fresh:
+            return attempt
+        if attempt is None:                # compatibility with offline injected adapters
+            attempt = LimitData()
+            attempt.error, attempt.failure_kind = "live usage unavailable", "network"
+        attempt.poll_failed = True
     # offline / signed out: the freshest of the local rollout files and the last cached reading
-    best = codex_from_rollout()
-    best.present = True
-    cached = (common.read_json(common.CACHE_PATH, {}) or {}).get("codex")
-    if isinstance(cached, dict):
-        c = LimitData.from_dict(cached)
-        if (c.as_of or 0) > (best.as_of or 0):
-            best = c
-            best.present, best.from_cache = True, False
-    if best.as_of and time.time() - best.as_of > 2 * 3600:
-        best.stale = True
-    return best
+    try:
+        best = codex_from_rollout()
+        best.present = True
+        cache = common.read_json(common.CACHE_PATH, {})
+        cached = cache.get("codex") if isinstance(cache, dict) else None
+        if isinstance(cached, dict):
+            c = LimitData.from_dict(cached)
+            best = quota_refresh.select_snapshot(best, c)
+        if best.as_of and time.time() - best.as_of > 2 * 3600:
+            best.stale = True
+    except Exception:
+        if attempt is not None:
+            return attempt  # A broken fallback must not erase live auth/Retry-After.
+        raise
+    return quota_refresh.select_snapshot(attempt, best) if attempt is not None else best
 
 
 # ---- cache ---------------------------------------------------------------------------------
 
-def apply_cache(claude, codex):
-    """Restore last-known numbers behind an error flag; persist only genuinely good readings."""
-    claude, codex = selected_limits(claude, "claude"), selected_limits(codex, "codex")
+def apply_provider_cache(product, data, previous=None):
+    """Apply ONE accepted completion on the GUI thread, never in parallel workers.
+
+    Read/merge/write only this provider, so independent completions cannot write back
+    the other provider's stale captured snapshot. Call only after the ticket fence.
+    """
+    if product not in ("claude", "codex"):
+        raise ValueError("unknown quota provider")
+    data = selected_limits(data, product)
+    if not data.present:
+        return data
+    if previous is not None:
+        data = quota_refresh.select_snapshot(data, previous)
     cache = common.read_json(common.CACHE_PATH, {})
     if not isinstance(cache, dict):
         cache = {}
-    if claude.present and claude.error is not None and isinstance(cache.get("claude"), dict):
-        e, a = claude.error, claude.auth
-        claude = LimitData.from_dict(cache["claude"])
-        claude.error, claude.auth = e, a
-    if codex.present and codex.error is not None and isinstance(cache.get("codex"), dict):
-        e = codex.error
-        codex = LimitData.from_dict(cache["codex"])
-        codex.error = e
-    changed = False
-    if claude.present and claude.error is None and claude.auth == OK and not claude.from_cache:
-        cache["claude"] = claude.to_dict()
-        changed = True
-    if codex.present and codex.error is None and not codex.from_cache:
-        cache["codex"] = codex.to_dict()
-        changed = True
-    if changed:
+    cached = cache.get(product)
+    if isinstance(cached, dict):
+        data = quota_refresh.select_snapshot(data, LimitData.from_dict(cached))
+    if data.api_fresh and data.error is None and data.auth == OK and not data.from_cache:
+        cache[product] = data.to_dict()
         common.ensure_dirs()
         common.write_json(common.CACHE_PATH, cache)
-    return claude, codex
+    return data
+
+
+def apply_cache(claude, codex):
+    """Legacy serial caller; phase-2 workers must use main-thread per-provider apply."""
+    return apply_provider_cache("claude", claude), apply_provider_cache("codex", codex)
 
 
 SNAPSHOT_MAX_AGE = 14400
@@ -569,7 +668,7 @@ def is_stale(d, now=None):
 
 def with_poll_status(d, state, next_at):
     d.poll_failed = state.failed if state else False
-    d.next_poll_at = next_at if d.poll_failed else None
+    d.next_poll_at = next_at
     return d
 
 

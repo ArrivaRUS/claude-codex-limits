@@ -1,7 +1,7 @@
 """Claude Codex Limits — tray app for Astra Linux (Fly / KDE Plasma), PyQt5 from the OS repo.
 
 Click the tray icon → the panel (simple or Advanced view, as on the Mac). Right click → menu.
-Limits are polled every 15/30/60 minutes (30 by default); local logs are indexed and synced through the GitHub
+Limits are polled every 15/30/60/240 minutes (30 by default); local logs are indexed and synced through the GitHub
 gist every 10 minutes (the same code `ccl-sync push --auto` runs from the systemd timer).
 """
 
@@ -15,11 +15,11 @@ import threading
 import time
 
 from PyQt5.QtCore import QObject, QRectF, Qt, QTimer, QUrl, pyqtSignal
-from PyQt5.QtGui import QCursor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QPainter
+from PyQt5.QtGui import QCursor, QDesktopServices, QFont, QFontDatabase, QFontMetricsF, QGuiApplication, QKeySequence, QPainter
 from PyQt5.QtWidgets import (QAction, QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                             QMenu, QPushButton, QScrollArea, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
+                             QMenu, QPushButton, QScrollArea, QShortcut, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
 
-from .. import APP_VERSION, common, limits, sync, update, vault, usage, polling
+from .. import APP_VERSION, common, limits, sync, update, vault, usage, polling, quota_refresh
 from ..common import tr
 from . import fmt, paint, panel, trayicon
 
@@ -85,7 +85,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 
 
 class Bridge(QObject):
-    limits_done = pyqtSignal(object, object, int)
+    limits_done = pyqtSignal(object, object, object)  # provider, Ticket, LimitData
     logs_done = pyqtSignal(object, object)
     activity_done = pyqtSignal(object)
     login_code = pyqtSignal(object, object)
@@ -121,8 +121,94 @@ class PanelView(QWidget):
         super().__init__()
         self.win = win
         self.hits = []
+        self.controls = {}
         self.setMouseTracking(True)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.refresh_shortcut = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.refresh_shortcut.activated.connect(self.refresh_now)
+
+    def refresh_now(self):
+        if any(common.product_enabled(p) for p in ("claude", "codex")):
+            self.win.app.action("refresh")
+
+    def tooltip(self, hid):
+        m = self.win.app.model
+        if hid == "refresh":
+            return (tr("Обновить сейчас", "Refresh now") if
+                    any(common.product_enabled(p) for p in ("claude", "codex")) else panel.no_subscriptions())
+        if hid == "iv0":
+            return self.win.app.auto_summary()
+        if hid and hid.startswith("iv"):
+            return panel.interval_tooltip(m, int(hid[2:]))
+        if hid and hid.startswith("feedback:"):
+            product = hid.split(":", 1)[1]
+            return panel.feedback_copy(m, getattr(m, product), product)[3]
+        if hid and hid.startswith(("feedbackfix:", "feedbackretry:")):
+            product = hid.split(":", 1)[1]
+            return panel.feedback_copy(m, getattr(m, product), product)[3]
+        return ""
+
+    def sync_controls(self):
+        """Native keyboard/AX targets over the existing painted glyphs and pills."""
+        visible = set()
+        m = self.win.app.model
+        selected = panel.highlighted_intervals(m)
+        for hid, r in self.hits:
+            if hid != "refresh" and not hid.startswith(("iv", "feedbackfix:", "feedbackretry:", "feedback:")):
+                continue
+            visible.add(hid)
+            button = self.controls.get(hid)
+            if hid.startswith("feedback:"):
+                if button is None:
+                    button = QLabel(self)
+                    button.setAttribute(Qt.WA_TransparentForMouseEvents)
+                    self.controls[hid] = button
+                product = hid.split(":", 1)[1]
+                first, second, _, detail = panel.feedback_copy(m, getattr(m, product), product)
+                name = "Claude Code" if product == "claude" else "Codex"
+                button.setAccessibleName(name + " · " + " · ".join(s for s in (first, second) if s))
+                button.setAccessibleDescription(detail)
+                button.setGeometry(r.toAlignedRect())
+                button.show()
+                continue
+            if button is None:
+                button = QPushButton(self)
+                button.setFocusPolicy(Qt.StrongFocus)
+                button.setAutoDefault(True)
+                button.setCursor(Qt.PointingHandCursor)
+                button.setStyleSheet("QPushButton { background: transparent; border: 1px solid transparent; "
+                                    "border-radius: 6px; padding: 0; } "
+                                    "QPushButton:hover { background: rgba(255,255,255,0.06); } "
+                                    "QPushButton:focus { border-color: #6B9EF5; }")
+                action = hid
+                button.clicked.connect(lambda _checked=False, action=action: self.win.app.action(action))
+                self.controls[hid] = button
+            if hid == "refresh":
+                name = tr("Обновить сейчас", "Refresh now")
+                button.setEnabled(any(common.product_enabled(p) for p in ("claude", "codex")))
+                self.refresh_shortcut.setEnabled(button.isEnabled())
+            elif hid.startswith("iv"):
+                sec = int(hid[2:])
+                name = tr("Авто", "Auto") if sec == 0 else panel.interval_name(sec)
+                button.setCheckable(True)
+                button.setChecked(bool(common.settings().get("autoPoll")) if sec == 0 else sec in selected)
+            else:
+                name = (tr("Повторить", "Retry") if hid.startswith("feedbackretry:") else
+                        tr("Восстановить доступ", "Restore access"))
+                name += " · " + ("Claude Code" if hid.endswith(":claude") else "Codex")
+            button.setAccessibleName(name)
+            detail = self.tooltip(hid)
+            button.setAccessibleDescription(detail)
+            button.setToolTip(detail)
+            button.setGeometry(r.toAlignedRect())
+            button.show()
+        for hid, button in self.controls.items():
+            if hid not in visible:
+                button.hide()
+        ordered = [self.controls[hid] for hid, _ in sorted(self.hits, key=lambda hit: (hit[1].top(), hit[1].left()))
+                   if hid in visible and isinstance(self.controls[hid], QPushButton)]
+        for before, after in zip(ordered, ordered[1:]):
+            QWidget.setTabOrder(before, after)
 
     def content_height(self):
         m = self.win.app.model
@@ -137,6 +223,7 @@ class PanelView(QWidget):
         W, H = self.width(), self.height()
         self.hits = (panel.draw_advanced if common.settings().get("advanced") else panel.draw_simple)(c, W, H, m)
         p.end()
+        self.sync_controls()
 
     def hit(self, pos):
         for hid, r in self.hits:
@@ -146,13 +233,15 @@ class PanelView(QWidget):
 
     def mouseMoveEvent(self, e):
         hid = self.hit(e.localPos())
-        self.setCursor(Qt.PointingHandCursor if hid else Qt.ArrowCursor)
-        self.setToolTip(self.win.app.auto_summary() if hid == "iv0" else "")
+        self.setCursor(Qt.PointingHandCursor if hid and not hid.startswith("feedback:") else Qt.ArrowCursor)
+        self.setToolTip(self.tooltip(hid))
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.LeftButton:
             hid = self.hit(e.localPos())
-            if hid:
+            if hid == "refresh":
+                self.refresh_now()
+            elif hid and not hid.startswith("feedback:"):
                 self.win.app.action(hid)
 
 
@@ -636,6 +725,39 @@ class FixPage(QWidget):
         self.lay.setContentsMargins(16, 12, 16, 16)
         self.lay.setSpacing(8)
 
+    def build_access(self, product, auth):
+        """Explicit instructions only: no subprocess, browser or permissions request."""
+        _clear(self.lay)
+        back = QPushButton("‹ " + tr("Назад", "Back"))
+        back.setProperty("role", "link")
+        back.clicked.connect(lambda: self.win.show_page(0))
+        self.lay.addWidget(back)
+        title = "Claude Code" if product == "claude" else "Codex"
+        self.lay.addWidget(_label(title + " · " + tr("Восстановить доступ", "Restore access"), "title", True))
+        path = "~/.claude/.credentials.json" if product == "claude" else "~/.codex/auth.json"
+        if auth == limits.READ_ERROR:
+            message = tr("Не удалось прочитать или сохранить файл входа CLI. Проверьте, что CLI запускается от вашего "
+                         "пользователя, его файл доступен и на диске есть место:",
+                         "The CLI sign-in file could not be read or saved. Check that the CLI runs as your user, "
+                         "its file is accessible and the disk has free space:")
+            instruction = path
+        else:
+            message = (tr("Откройте терминал, запустите Claude Code и выполните /login:",
+                          "Open a terminal, start Claude Code and run /login:") if product == "claude" else
+                       tr("Откройте терминал и выполните вход в Codex CLI:",
+                          "Open a terminal and sign in to Codex CLI:"))
+            instruction = "claude → /login" if product == "claude" else "codex login"
+        self.lay.addWidget(_label(message, wrap=True))
+        command = _label(instruction, "cmd", True)
+        command.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        self.lay.addWidget(command)
+        self.lay.addWidget(_label(tr("После восстановления входа вернитесь сюда и повторите запрос.",
+                                    "After restoring access, return here and retry the request."), wrap=True))
+        retry = QPushButton(tr("Повторить", "Retry"))
+        retry.clicked.connect(lambda: (self.win.app.refresh_limits(product=product), self.win.show_page(0)))
+        self.lay.addWidget(retry)
+        self.lay.addStretch(1)
+
     def build(self, expired):
         # an expired login only needs `claude` → /login — unless the CLI isn't installed at all
         # (e.g. only the Claude desktop app, whose built-in Claude Code has its own sign-in)
@@ -803,11 +925,17 @@ class TrayApp(QObject):
         if not isinstance(saved, dict):
             saved = {}
         self.poll_states = {p: polling.PollState(saved.get(p)) for p in ("claude", "codex")}
+        retry_at = common.state().get("quotaServerRetryAt") or {}
+        retry_at = retry_at if isinstance(retry_at, dict) else {}
+        self.refresh_states = {p: quota_refresh.RefreshState(state.last_attempt, retry_at.get(p))
+                               for p, state in self.poll_states.items()}
+        for p, state in self.refresh_states.items():
+            state.set_enabled(common.product_enabled(p))
         self.publish_auto_intervals()
         self.activity_busy = False
         self.model.history.load()
         self.bridge = Bridge()
-        self.bridge.limits_done.connect(self.on_limits)
+        self.bridge.limits_done.connect(self.on_limits, Qt.QueuedConnection)
         self.bridge.logs_done.connect(self.on_logs)
         self.bridge.activity_done.connect(self.on_activity)
         self.bridge.login_code.connect(self.on_login_code)
@@ -830,7 +958,7 @@ class TrayApp(QObject):
         self.login_attempt = None
         self.logout_busy = False
         self.logout_error = None
-        self.sound_baseline = False
+        self.sound_baselines = {p: False for p in ("claude", "codex")}
 
         self.win = PanelWindow(self)
         self.tray = QSystemTrayIcon()
@@ -843,6 +971,9 @@ class TrayApp(QObject):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_tick)
         self.start_poll_timer()
+        self.feedback_timer = QTimer(self)
+        self.feedback_timer.timeout.connect(self.refresh_feedback)
+        self.feedback_timer.start(1000)
         self.activity_timer = QTimer(self)
         self.activity_timer.timeout.connect(self.scan_activity)
         self.activity_timer.start(120000)
@@ -954,7 +1085,8 @@ class TrayApp(QObject):
     def set_product_enabled(self, product, enabled):
         common.settings().set("monitor_" + product, enabled)
         self.selection_generation += 1
-        self.sound_baseline = False
+        self.refresh_states[product].set_enabled(enabled)
+        self.sound_baselines[product] = False
         self.model.claude = limits.selected_limits(self.model.claude, "claude")
         self.model.codex = limits.selected_limits(self.model.codex, "codex")
         self.load_local()
@@ -982,6 +1114,15 @@ class TrayApp(QObject):
         if hid == "refresh":
             self.refresh_limits()
             self.refresh_logs()
+        elif hid.startswith("feedbackretry:"):
+            product = hid.split(":", 1)[1]
+            if product in self.refresh_states:
+                self.refresh_limits(product=product)
+        elif hid.startswith("feedbackfix:"):
+            product = hid.split(":", 1)[1]
+            if product in self.refresh_states and common.product_enabled(product):
+                self.win.fix.build_access(product, getattr(self.model, product).auth)
+                self.win.show_page(2)
         elif hid == "settings":
             self.win.show_page(1)
         elif hid == "claudefix":
@@ -1029,52 +1170,78 @@ class TrayApp(QObject):
             except OSError:
                 pass
 
+    def scheduled_at(self, product, now=None):
+        now = time.time() if now is None else now
+        state = self.poll_states[product]
+        # Preserve PollState.due's clock-correction rule for the local anchor.
+        # This must never rebase the separate provider/server Retry-After deadline.
+        if state.last_attempt > now:
+            state.last_attempt = now
+        interval = state.interval if common.settings().get("autoPoll") else self.model.interval
+        return state.last_attempt + interval if state.last_attempt else 0
+
     def start_poll_timer(self):
-        auto = common.settings().get("autoPoll")
-        delay = self.model.interval
-        if auto:
-            delays = [s.next_delay(time.time()) for p, s in self.poll_states.items() if common.product_enabled(p)]
-            delay = 60 if self.busy_limits else min(delays, default=60)
-        self.timer.setSingleShot(bool(auto))
+        now = time.time()
+        monotonic_now = time.monotonic()
+        deadlines = [state.next_attempt(self.scheduled_at(p, now), now=now, monotonic_now=monotonic_now)
+                     for p, state in self.refresh_states.items()
+                     if state.enabled and state.flight is None]
+        # Recheck wall time at least once a minute; each provider owns its due time.
+        delay = min(60, max(0.01, min(deadlines) - now)) if deadlines else 60
+        self.timer.setSingleShot(True)
         self.timer.setTimerType(Qt.PreciseTimer)
-        self.timer.start(max(1, math.ceil(delay * 1000)))
+        # Qt5 takes a signed 32-bit millisecond interval. Checkpoint without shortening
+        # the provider deadline: admit() still checks the full (possibly huge) epoch.
+        self.timer.start(max(1, min(60000, math.ceil(delay * 1000))))
         self.publish_auto_intervals()
 
     def poll_tick(self):
         self.refresh_limits(scheduled=True)
-        if common.settings().get("autoPoll"):
-            self.start_poll_timer()
+        self.start_poll_timer()
+
+    def refresh_feedback(self):
+        if self.win.isVisible():
+            self.publish_auto_intervals()
 
     def publish_auto_intervals(self):
+        now, monotonic_now = time.time(), time.monotonic()
         self.model.auto_intervals = {p: state.interval for p, state in self.poll_states.items()}
+        self.model.pending_products = {p for p, state in self.refresh_states.items()
+                                       if state.enabled and state.flight is not None}
+        self.busy_limits = any(state.flight is not None for state in self.refresh_states.values())
         for p, state in self.poll_states.items():
-            remaining = self.timer.remainingTime() if hasattr(self, "timer") else -1
-            next_at = (state.last_attempt + state.interval if common.settings().get("autoPoll") else
-                       time.time() + remaining / 1000 if remaining >= 0 else None)
-            limits.with_poll_status(getattr(self.model, p), state, next_at)
+            refresh = self.refresh_states[p]
+            data = getattr(self.model, p)
+            refresh.update_clock(now, monotonic_now)
+            next_at = (refresh.next_attempt(self.scheduled_at(p, now), now=now, monotonic_now=monotonic_now)
+                       if refresh.enabled and refresh.flight is None else None)
+            limits.with_poll_status(data, state, next_at)
+            data.refresh_in_flight = refresh.flight is not None
+            data.local_retry_at = refresh.local_until
+            data.server_retry_at = refresh.server_until
         win = getattr(self, "win", None)
         if win is not None:
             win.view.update()
 
     def save_poll_states(self):
-        self.publish_auto_intervals()
-        if common.settings().get("autoPoll"):
-            self.start_poll_timer()
-        common.state().set("autoPollState", {p: state.saved() for p, state in self.poll_states.items()})
+        try:
+            common.state().update(autoPollState={p: state.saved() for p, state in self.poll_states.items()},
+                                  quotaServerRetryAt={p: state.server_until for p, state in self.refresh_states.items()
+                                                      if state.server_until is not None})
+        except (OSError, ValueError):
+            pass  # In-memory admission/scheduling must keep working if state cannot be saved.
+        self.start_poll_timer()
 
     def auto_summary(self):
         intro = tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч. Частота зависит от расхода.",
                    "Auto: 15 min → 30 min → 1 h → 4 h, depending on usage.")
-        if not common.settings().get("autoPoll"):
-            return intro
+        if not any(common.product_enabled(p) for p in ("claude", "codex")):
+            return panel.no_subscriptions()
         lines = [intro]
         for p, title in (("claude", "Claude Code"), ("codex", "Codex")):
             if common.product_enabled(p):
-                state = self.poll_states[p]
-                lines.append("%s: %s%s" % (title, fmt.fmt_span(state.interval / 3600),
-                             tr(" · пауза после ошибки", " · backing off after an error") if state.failed else ""))
-        if self.model.updated:
-            lines.append(tr("обновлено ", "updated ") + fmt.clock(self.model.updated))
+                interval = self.model.auto_intervals.get(p)
+                lines.append("%s → %s" % (title, panel.interval_name(interval)))
         return "\n".join(lines)
 
     def scan_activity(self):
@@ -1103,62 +1270,67 @@ class TrayApp(QObject):
         self.refresh_limits(scheduled=True)
 
     # -- workers --
-    def refresh_limits(self, scheduled=False):
-        if self.busy_limits:
-            return
+    def refresh_limits(self, scheduled=False, product=None):
         now = time.time()
-        products = [p for p in ("claude", "codex") if common.product_enabled(p)
-                    and (not common.settings().get("autoPoll") or self.poll_states[p].due(now, manual=not scheduled))]
-        if not products:
-            return
-        self.busy_limits = True
-        self.refresh_products = products
-        for p in products:
+        monotonic_now = time.monotonic()
+        requested = ("claude", "codex") if product is None else (product,)
+        for p in requested:
+            if p not in self.refresh_states:
+                continue
+            state = self.refresh_states[p]
+            state.set_enabled(common.product_enabled(p))
+            admission = state.admit("scheduled" if scheduled else "manual", now, self.scheduled_at(p, now),
+                                    monotonic_now=monotonic_now)
+            if admission.kind != "start":
+                continue
+            ticket = admission.ticket
             self.poll_states[p].begin(now)
-        self.save_poll_states()
-        previous = (self.model.claude, self.model.codex)
-        generation = self.selection_generation
+            self.publish_auto_intervals()
 
-        def one(fetch):
-            try:
-                return fetch()
-            except Exception as e:  # never let one product's failure blank the other
-                d = limits.LimitData()
-                d.error = str(e) or e.__class__.__name__
-                return d
+            def work(provider=p, request=ticket):
+                try:
+                    data = limits.fetch_claude() if provider == "claude" else limits.fetch_codex(live=True)
+                except Exception:
+                    # Exception text may contain paths/tokens from adapters. Never display it.
+                    data = limits.LimitData()
+                    data.error, data.failure_kind, data.poll_failed = "quota request failed", "network", True
+                self.bridge.limits_done.emit(provider, request, data)
 
-        def work():
-            claude = one(limits.fetch_claude) if "claude" in products else previous[0]
-            codex = one(lambda: limits.fetch_codex(live=True)) if "codex" in products else previous[1]
             try:
-                claude, codex = limits.apply_cache(claude, codex)
+                threading.Thread(target=work, daemon=True).start()
             except Exception:
-                pass
-            self.bridge.limits_done.emit(claude, codex, generation)
-        threading.Thread(target=work, daemon=True).start()
+                data = limits.LimitData()
+                data.error, data.failure_kind, data.poll_failed = "quota worker unavailable", "network", True
+                self.on_limits(p, ticket, data)
+        self.save_poll_states()
 
-    def on_limits(self, claude, codex, generation=None):
-        self.busy_limits = False
-        if generation is not None and generation != self.selection_generation:
-            for p in getattr(self, "refresh_products", []):
-                self.poll_states[p].begin(time.time())
-            if getattr(self, "poll_states", None):
-                self.save_poll_states()
-            self.refresh_limits(scheduled=True)
+    def on_limits(self, product, ticket, data):
+        state = self.refresh_states.get(product)
+        if state is None or state.flight != ticket or ticket is None:
             return
-        claude, codex = limits.selected_limits(claude, "claude"), limits.selected_limits(codex, "codex")
+        state.set_enabled(common.product_enabled(product))
+        accepted = state.complete(ticket, data.server_retry_at)
+        if not accepted:
+            self.save_poll_states()
+            return
+        previous = getattr(self.model, product)
+        data = quota_refresh.select_snapshot(data, previous)
+        try:
+            data = limits.apply_provider_cache(product, data, previous)
+        except Exception:
+            pass  # Cache persistence failure must not hide a successfully received live answer.
         m = self.model
-        m.claude, m.codex = claude, codex
+        setattr(m, product, data)
         m.loaded = True
-        m.updated = max((d.as_of for d in (claude, codex) if polling.number(d.as_of)), default=None)
-        for product, data in (("claude", claude), ("codex", codex)):
-            if product in self.refresh_products:
-                self.poll_states[product].observe(data, time.time())
-                limits.with_poll_status(data, self.poll_states[product], None)
-                m.history.record(data, product)
+        m.updated = max((d.as_of for d in (m.claude, m.codex) if polling.number(d.as_of)), default=None)
+        now = time.time()
+        self.scheduled_at(product, now)  # A rollback while the worker ran must not make live data look old.
+        self.poll_states[product].observe(data, now)
+        limits.with_poll_status(data, self.poll_states[product], None)
+        m.history.record(data, product)
         self.save_poll_states()
         self.update_sync_warning()           # «стоит с HH:mm» ages with the clock, not only with syncs
-        self.check_alarms(claude, codex)
+        self.check_alarms(product, data)
         self.update_tray()
         self.win.page0_changed()
 
@@ -1408,12 +1580,20 @@ class TrayApp(QObject):
             QTimer.singleShot(10000, self.restart)
 
     # -- reset / limit sounds (port of checkAlarms) --
-    def check_alarms(self, claude, codex):
+    def check_alarms(self, product, data):
+        # Only an accepted live result can establish this provider's startup baseline.
+        # Failed/fallback/other-provider results must neither seed nor compare it.
+        if (product not in self.sound_baselines or not data.api_fresh or not data.present
+                or data.error is not None or data.auth != limits.OK or data.from_cache or data.poll_failed):
+            return
+        absent = limits.absent_limits()
+        claude = data if product == "claude" else absent
+        codex = data if product == "codex" else absent
         st, ss = common.state(), common.settings()
-        events, upd = limits.detect_alarms(claude, codex, st.data, self.sound_baseline)
+        events, upd = limits.detect_alarms(claude, codex, st.data, self.sound_baselines[product])
         if upd:
             st.update(**upd)
-        self.sound_baseline = True
+            self.sound_baselines[product] = True
         resets = [e for e in events if e["kind"] == "reset"]
         reached = [e for e in events if e["kind"] == "reached"]
         if any(e["is5h"] for e in resets) and ss.get("sound5h"):

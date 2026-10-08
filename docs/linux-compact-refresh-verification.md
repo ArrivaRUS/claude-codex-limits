@@ -8,6 +8,58 @@ Existing Linux CI [37723616264](https://github.com/ArrivaRUS/claude-codex-limits
 
 ## Boundaries
 
-Scope includes existing accepted manual-refresh contract; DeveloperComplex handles provider admission/results and retry metadata, with CodeReviewer and SecurityAnalyst before runtime. Underlying Auto progression/endpoints/credential stores remain. CodeReviewer must confirm no security surface and exactCI isolation before execution. ExistingCI uses dedicated synthetic home, no network exceptloopback, nohostmounts/sessionbus/credentials, offscreenPyQt; fullsuite must have0skips. CI evidence/DEB will be downloaded for QA and independent design review. LiveALSE/KDE/Fly, userkeyring and actual remoteinstallation are not established by container tests. No realusercredentials/logs/API during tests.
+Scope includes existing accepted manual-refresh contract; DeveloperComplex handles provider admission/results and retry metadata, with CodeReviewer and SecurityAnalyst before runtime. Underlying Auto progression/endpoints/credential stores remain. CodeReviewer checks functional correctness and exactCI isolation; SecurityAnalyst reviews the changed auth/result boundaries before execution/release. ExistingCI uses dedicated synthetic home, no network exceptloopback, nohostmounts/sessionbus/credentials, offscreenPyQt; fullsuite must have0skips. CI evidence/DEB will be downloaded for QA and independent design review. LiveALSE/KDE/Fly, userkeyring and actual remoteinstallation are not established by container tests. No realusercredentials/logs/API during tests.
 
 Publication: linux-v0.4.5 with verifiedDEB, --latest=false. LatestmacOS remainsv3.2.7. No packageinstallation on thisMac is intended.
+
+## UI author handoff
+
+DesignEngineer completed boundedUI/version at fc794dc with AST/compileinmemory/diffcheck PASS, noexecution. Prebackend UI hashes: panelfab798c02bc228b718e2ff9cb9a3c42638b66603c353d39303e44e907f9dfb14; app11192fd868d94b24ae5f8d4d4e5844263dc15bbdf745b40d1cc001ed4e27ab69; version8f2d78cb13dbcb9e290b005a4daea7865d0003a6fcb2433abeda82153be00b6d. Authorclosed; app/panelownership handed sequentiallytoDeveloperComplex foracceptedmanualrefreshintegration. Thesehashesarenotfinalreleasefreeze.
+
+## Preliminary security snapshot
+
+Separate SecurityAnalyst assigned early phase1 review at immutable /private/tmp/ccl-linux-security-phase1-3d7cvude: quota859180264025132db4a5e773b21009a5d0884c702d7a89e93e5494171de677f8, limitsa27c98837e812d3479bda9da78d51dd94b11f4ae767bbfb7e2dd4032e7304679. App/testimplementationstillinprogress; thissnapshot cannotauthorizefinalCI orrelease. No runtimeexecuted.
+
+## Resume after quota interruption
+
+DeveloperComplex, Tester and SecurityAnalyst stopped on account usage limit before final freeze; partial source/tests remained in the working checkout. User explicitly requested continuation. All three resumed in the same approved models/roles; no model substitution. New runtime/CI still not executed.
+
+## Phase1 security findings
+
+Independent SecurityAnalyst found no new confirmedP1/P2 in phase1, but inheritedP2 credential reread fallback to first snapshot can resurrect deleted/overwrite newer CLI credentials. Assigned bounded fail-closed read/missing/corrupt protection and pending preservation toDeveloperComplex, synthetic tests toTester. Existing external CLI read–replace race cannot be claimed atomic without cooperation; final limitations must distinguish it. VerylargefiniteRetryAfter is accepted by puredeadlinecontract; GUI timer/countdown must remain bounded without shortening the realserverdeadline. FinalGUI/isolationreview still pending.
+
+## Production freeze 1
+
+DeveloperComplex FINAL completed UI integration/manual behavior and bounded credential reread fix. Source hashes: quota57c6d652, limits7becbbbb, app80177d9, panel761d04d (full in /private/tmp/ccl-linux-freeze-4qjo_pgx/manifest.json). Author staticPython3.7grammar/compileinmemory/ASTchecks PASS; no runtime. Independent CodeReviewer and SecurityAnalyst assigned thisimmutableproductionfreeze. Testeralignment stillpending; tests inthissnapshotarenotfinal. Remaining externalCLIread–replace window and memory-onlypending explicit incontract.
+
+## Final production security review — freeze1
+
+SecurityAnalyst (Astra/high) PASS on /private/tmp/ccl-linux-freeze-4qjo_pgx exact production hashes; no newP1/P2. Earlier fail-open credential-reread fallback closed, pendingidentity retained, newerpairwins. Perproviderflight/generation fence precedes model/cache/history, queuedmainthreadcompletion; retrydeadlinepersisted andQt timer rechecks atmost60s withboundeddate/countdownformatting. Newrecoveryactionsdisplayinstructions only; noimplicitlogin/rawsecretdataoutput.
+
+Explicitlimits: externalCLIread–replace race, RAM-onlypending lostonprocessdeath, deadlinepersistenceafterstatewritefailure notguaranteed; disabling doesnotcancelalreadyrunningtransport/tokenwriteback. ValidhugeRetryAfter intentionallyhonored. Staticreviewonly; finaltestisolation/runtime andvisual/packageacceptance pending.
+
+## Freeze1 code review findings
+
+Independent CodeReviewer found2P2: wall-clock rollback extends local30sguard and loses futurelast_attemptnormalization; shared startupalarmbaseline allows firstresponse of secondprovider tosound reset whileappwasoff. Assigned bounded monotonic/localclock handling and perproviderbaseline fix toDeveloperComplex, independent tests toTester. Freeze1notacceptedforrelease. Otherrequestedbehavior traced; SecurityPASS remains scopedtoreviewedauth/resultboundarypendingdelta.
+
+## Production freeze2
+
+Author completed bounded2P2fix: required injectedmonotonic time forlocalguard (restartrestore<=30s), wallfuturepollanchorcorrected, perproviderfresh startupalarmbaseline. quotae79f6a8ac2d5f390c1233709d6b03726447ec8334da8ef675fdfd4f0605d186a; app25d030ff08fbae5f48e512b34c3305597af31ca347c0cca6d8c08b6a09b8df3c. limits7becbbbb/panel761d04df/polling byteidenticalfreeze1. Immutable /private/tmp/ccl-linux-freeze-pd0jqga4. NarrowCode/Securitydelta reviewing; Testerfinalalignment pending; no runtime.
+
+Freeze2 independentSecuritydelta PASS: onlyquota/app productionchanged, monotoniclocalguard doesnotalterserverdeadline, fence/cache boundariespreserved, perproviderbaseline checked. PreviousauthPASS/limitationscarryforward. No runtime/testisolationacceptance claimed.
+
+Freeze2 CodeReviewer productionPASS: bothP2closed, no newP1/P2 in narrowdelta. ASTPython3.7 2/2 and exactsource/manifestchecks passed; unchangedauth/panelnotre-reviewed. Independentruntime/tests/GUI/packageacceptance stillpending.
+
+## Final test preparation
+
+Tester completed phase2: 43 manual-refresh tests plus legacy/UI fixture alignment. All40 test Python files passed static Python3.7 grammar and compile-in-memory checks; no project import/runtime. Final test snapshot /private/tmp/ccl-linux-freeze-c3ulwvck, review.diff SHA256 0c25282658dc14b5e6c014e62856cb159e52d38b8abdf63a7e461542d0aa489c. Independent isolation-only review assigned before CI.
+
+Tester found a further credential-reread edge case: empty current credential block was treated as superseded and discarded pending rotation. DeveloperComplex assigned narrow fail-closed correction, with existing regression expectations retained. Production freeze2 acceptance does not cover this pending delta.
+
+## Production freeze3
+
+Narrow credential-block fix completed: incomplete identity at initial read or write-back remains pending without write; complete changed pair wins. Independent SecurityAnalyst production security/correctness delta PASS. Only limits.py changed under linux/ccl from freeze2, SHA256 0f47d6663066de9690cab812dd8f127ab77635de1d47981197d0200a2a5f48d5; contract f0a0a889a87ae3916608faf44cf176aa99f394aaf2f1c6b87d6cf0358f5b6b67. Snapshot /private/tmp/ccl-linux-freeze-c08fgctf. Existing tests cover empty block and changed pair; partial-field type/whitespace variants are not separately exercised. This is a test-evidence limitation, no confirmed remaining production defect. Prior review boundaries carry forward; CI pending.
+
+## Runtime gate
+
+Independent CodeReviewer isolation-only PASS for final c08fgctf: all45 test/workflow/packaging entry files match; isolation digest8ffaf9d4821d6014b601c7142e291b033eb6d954a98cea302009add29e0f79cc. Authorized only existing no-network/no-mount synthetic-user GitHub CI with mandatory preflight. No local host runtime authorized or performed. Production freeze2 Code PASS plus freeze3 Security/correctness delta PASS complete the static gates.

@@ -8,9 +8,9 @@ import json
 import os
 import tempfile
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
-from ccl import common, limits, polling, usage
+from ccl import common, limits, polling, quota_refresh, usage
 
 try:
     from ccl.gui import app, panel
@@ -69,8 +69,8 @@ class TestAutoPolicy(unittest.TestCase):
                 self.assertTrue(state.failed)
                 self.assertEqual(state.interval, 1800)
                 self.assertFalse(state.local_activity([100100, 100200, 100300], 100400))
-                self.assertFalse(state.due(100900, manual=True))
-                self.assertTrue(state.due(101800, manual=True))
+                self.assertFalse(state.due(100900))
+                self.assertTrue(state.due(101800))
 
     def test_local_activity_wakes_sleeping_schedule_without_replaying_history(self):
         state = polling.PollState({"interval": 14400, "last_attempt": 100000})
@@ -83,18 +83,21 @@ class TestAutoPolicy(unittest.TestCase):
         self.assertTrue(state.due(100900))
         self.assertFalse(state.local_activity([100010, 100020, 100030], 200000))
 
-    def test_restart_manual_refresh_and_clock_change_preserve_floor(self):
+    def test_restart_and_clock_change_preserve_scheduled_due_time_with_separate_manual_admission(self):
         state = polling.PollState({"interval": 14400, "last_attempt": 100000})
         restored = polling.PollState(json.loads(json.dumps(state.saved())))
-        self.assertFalse(restored.due(100899, manual=True))
+        self.assertFalse(restored.due(100899))
         self.assertFalse(restored.due(101000))
-        self.assertTrue(restored.due(100900, manual=True))
+        self.assertFalse(restored.due(100900))
         self.assertTrue(restored.due(114400))
-        self.assertFalse(restored.due(99000))  # clock rollback
-        self.assertTrue(restored.due(99900, manual=True))
+        manual = quota_refresh.RefreshState(restored.last_attempt)
+        self.assertEqual(manual.admit("manual", 100899, monotonic_now=100899).kind, "start")
+        self.assertFalse(restored.due(99000))
+        self.assertFalse(restored.due(99900))
         restored.begin(200000)
         restored.observe(self.sample(1, 200000), 200030)
-        self.assertFalse(restored.due(200910, manual=True))  # request duration counts too
+        self.assertFalse(restored.due(200910))
+        self.assertTrue(restored.due(214430))
 
     def test_enabled_products_have_independent_schedules(self):
         claude = polling.PollState({"interval": 14400, "last_attempt": 100000})
@@ -118,6 +121,8 @@ class TestAutoIntegration(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        p = patch.object(app.time, "monotonic", lambda: app.time.time())
+        p.start(); self.addCleanup(p.stop)
         self.st = common.Store(os.path.join(self.tmp.name, "settings.json"), common.SETTINGS_DEFAULTS)
         self.st.set("autoPoll", True)
         for name, value in (("_settings", self.st), ("CACHE_PATH", os.path.join(self.tmp.name, "cache.json"))):
@@ -125,10 +130,15 @@ class TestAutoIntegration(unittest.TestCase):
             p.start(); self.addCleanup(p.stop)
 
     def fake_app(self):
-        return SimpleNamespace(busy_limits=False, selection_generation=1, model=panel.Model(), save_poll_states=Mock(),
+        fake = SimpleNamespace(busy_limits=False, selection_generation=1, model=panel.Model(), save_poll_states=Mock(),
                                poll_states={"claude": polling.PollState({"interval": 14400, "last_attempt": 100000}),
                                             "codex": polling.PollState({"interval": 900, "last_attempt": 100000})},
+                               win=SimpleNamespace(view=SimpleNamespace(update=Mock())),
                                bridge=SimpleNamespace(limits_done=SimpleNamespace(emit=Mock())))
+        fake.refresh_states = {p: quota_refresh.RefreshState(s.last_attempt) for p, s in fake.poll_states.items()}
+        for name in ("scheduled_at", "publish_auto_intervals"):
+            setattr(fake, name, MethodType(getattr(app.TrayApp, name), fake))
+        return fake
 
     def test_timer_fetches_only_due_product(self):
         fake = self.fake_app()
@@ -138,18 +148,26 @@ class TestAutoIntegration(unittest.TestCase):
              patch.object(limits, "fetch_codex", return_value=limits.LimitData()) as fetch:
             app.TrayApp.refresh_limits(fake, scheduled=True)
         fetch.assert_called_once_with(live=True)
-        self.assertEqual(fake.refresh_products, ["codex"])
+        self.assertIsNotNone(fake.refresh_states["codex"].flight)
+        self.assertIsNone(fake.refresh_states["claude"].flight)
         self.assertEqual(fake.poll_states["codex"].last_attempt, 100900)
         self.assertEqual(fake.poll_states["claude"].last_attempt, 100000)
 
-    def test_panel_timer_and_repeated_refresh_cannot_bypass_floor(self):
+    def test_scheduled_before_due_and_manual_after_local_guard_do_not_overlap(self):
         fake = self.fake_app()
+        queued = []
         with patch.object(app.time, "time", return_value=100899), \
-             patch.object(app.threading, "Thread", side_effect=AssertionError("no request before 15 minutes")):
+             patch.object(app.threading, "Thread", side_effect=lambda target, **kw: SimpleNamespace(start=lambda: queued.append(target))):
             app.TrayApp.refresh_limits(fake, scheduled=True)
+            self.assertEqual(queued, [])
+            self.assertFalse(fake.busy_limits)
             app.TrayApp.refresh_limits(fake)
-        self.assertFalse(fake.busy_limits)
-        fake.save_poll_states.assert_not_called()
+            self.assertEqual(len(queued), 2, "manual wrongly inherited the 900s floor")
+            app.TrayApp.refresh_limits(fake)
+            app.TrayApp.refresh_limits(fake, scheduled=True)
+            self.assertEqual(len(queued), 2, "repeated panel/timer action overlapped a worker")
+        self.assertEqual(fake.model.pending_products, {"claude", "codex"})
+        self.assertTrue(self.st.get("autoPoll"))
 
     def test_disabled_products_never_get_requested(self):
         self.st.update(monitor_claude=False, monitor_codex=False)

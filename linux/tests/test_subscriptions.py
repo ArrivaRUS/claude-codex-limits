@@ -14,7 +14,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from ccl import cli, common, limits, usage
+from ccl import cli, common, limits, quota_refresh, usage
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
@@ -127,11 +127,19 @@ class TestSubscriptions(unittest.TestCase):
         self.assertIn("claude", ix["days"], "retained data must not be mutated")
 
     @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
-    def test_late_refresh_is_discarded_and_rescheduled(self):
-        fake = SimpleNamespace(busy_limits=True, selection_generation=2, refresh_limits=Mock())
-        app.TrayApp.on_limits(fake, limits.LimitData(), limits.LimitData(), 1)
-        self.assertFalse(fake.busy_limits)
-        fake.refresh_limits.assert_called_once_with(scheduled=True)
+    def test_late_refresh_is_discarded_without_releasing_another_provider(self):
+        self.select(True, False)
+        refresh = quota_refresh.RefreshState()
+        ticket = refresh.admit("manual", 100000, monotonic_now=100000).ticket
+        refresh.set_enabled(False)
+        previous = limits.absent_limits()
+        fake = SimpleNamespace(model=SimpleNamespace(codex=previous), refresh_states={"codex": refresh},
+                               save_poll_states=Mock(), refresh_limits=Mock())
+        app.TrayApp.on_limits(fake, "codex", ticket, limits.LimitData())
+        self.assertIsNone(refresh.flight)
+        self.assertIs(fake.model.codex, previous)
+        fake.save_poll_states.assert_called_once_with()
+        fake.refresh_limits.assert_not_called()
 
     @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
     def test_remote_history_filtered_in_gui(self):
@@ -158,7 +166,6 @@ class TestSubscriptions(unittest.TestCase):
                 self.select(c, x)
                 cards = panel.adv_cards(m)
                 self.assertEqual([card["product"] for card in cards], [p for p, on in (("claude", c), ("codex", x)) if on])
-                self.assertFalse(panel.show_missing_product(cards))
                 for advanced in (False, True):
                     h = panel.advanced_height(m) if advanced else panel.simple_height(m)
                     for interval in panel.POLL_CHOICES:
@@ -173,10 +180,30 @@ class TestSubscriptions(unittest.TestCase):
                             painter.end()
                         self.assertTrue(qapp)
                         self.assertIn("settings", [hid for hid, _ in hits])
-                        self.assertEqual([hid for hid, _ in hits if hid.startswith("iv")], ["iv900", "iv1800", "iv3600", "iv0"])
+                        self.assertEqual([hid for hid, _ in hits if hid.startswith("iv")], ["iv900", "iv1800", "iv3600", "iv14400", "iv0"])
                         if not c:
                             self.assertFalse(any("claude.ai" in hid or hid == "claudefix" for hid, _ in hits))
-                        output = os.environ.get("CCL_PREVIEW_DIR")
-                        if output and interval == 900:
-                            os.makedirs(output, exist_ok=True)
-                            self.assertTrue(image.save(os.path.join(output, "%s-advanced-%s-claude-%s-codex-%s.png" % (lang, advanced, c, x))))
+                        # Representative bitmap fixtures live in test_linux_compact_refresh.
+
+    @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
+    def test_enabled_missing_has_placeholder_disabled_missing_has_no_reserved_card(self):
+        qapp = QApplication.instance() or QApplication([])
+        m = panel.Model()
+        m.loaded = True
+        m.claude.present = True
+        m.claude.session = 50
+        m.codex.present = False
+        for advanced in (False, True):
+            for enabled in (True, False):
+                with self.subTest(advanced=advanced, enabled_missing=enabled):
+                    self.select(True, enabled)
+                    h = panel.advanced_height(m) if advanced else panel.simple_height(m)
+                    image = QImage(panel.PANEL_W, int(h), QImage.Format_ARGB32)
+                    painter = QPainter(image)
+                    try:
+                        hits = (panel.draw_advanced if advanced else panel.draw_simple)(Canvas(painter), panel.PANEL_W, h, m)
+                    finally:
+                        painter.end()
+                    products = {hid.split(":", 1)[1] for hid, _ in hits if hid.startswith("feedback:")}
+                    self.assertEqual(products, {"claude", "codex"} if enabled else {"claude"})
+                    self.assertTrue(qapp)
