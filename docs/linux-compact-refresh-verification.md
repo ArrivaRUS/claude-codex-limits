@@ -63,3 +63,17 @@ Narrow credential-block fix completed: incomplete identity at initial read or wr
 ## Runtime gate
 
 Independent CodeReviewer isolation-only PASS for final c08fgctf: all45 test/workflow/packaging entry files match; isolation digest8ffaf9d4821d6014b601c7142e291b033eb6d954a98cea302009add29e0f79cc. Authorized only existing no-network/no-mount synthetic-user GitHub CI with mandatory preflight. No local host runtime authorized or performed. Production freeze2 Code PASS plus freeze3 Security/correctness delta PASS complete the static gates.
+
+## CI attempt1
+
+Source2d224e041d7b85a029dc1ccd723c8c595d09165e, run37728899968. Isolation preflight confirmed uid10001, synthetic/home/ccltest, loopback-onlynetwork, noDBus/credentialenv. Suite356 tests / 11failures / 1error / 0skips; noDEB produced. Failures include obsolete auth/footer copy expectations, floating-point cancellation tolerance and rollback synthetic-worker fixture. Tester assigned diagnosis and bounded corrections without masking production failures. Actual rendered PNG evidence downloaded to /private/tmp/ccl-linux-ci1-evidence and assigned independent visual review; this run is not a successful release gate.
+
+## CI1 diagnosis and test correction
+
+Tester traced all CI1 diagnostics to obsolete copy assertions or synthetic-clock setup, without production edits. Tests now verify new compact recovery ownership and unknown-time tooltip, allow1µs wall-projection rounding while retaining strict29.999/30s admission, and retain the original monotonic epoch in rollback setup. Test hashes: auth82635dbd9f9fe2f3b8af6e5df7555f519dc4045d5b4d103027c17e1ab01fcaeb; manual7765b8191169a23868b0ac59598aec70a629350c058fc37950d99441d8176a67. Narrow independent review assigned before rerun. Production exact2d224e0 remains unchanged.
+
+## CI1 delta review and visual findings
+
+CodeReviewer accepted test corrections and bounded candidate docs at zfnocjh7: test-delta/isolation/docs PASS, production unchanged2d224e0. Isolation digestb05f7a8e8a48292e40bbefd3469986e718660ab28d83c325d77fa1a77eda04c4. CI rerun not yet started because independent DesignReviewer found a new UI issue.
+
+DesignReviewer visually inspected40 currentPNG (26compact+14auth),7Linuxbaseline and2acceptedmacreferences: wholepanel/32ptfeedback/4h/Auto/forecastcomposition accepted, but overallFAIL: P2 recoverylink contrast4.29:1 on Advancedgray; P3 repeatedNotsetup inmissingfooter. Assigned boundedpanel fixes toDesignEngineer. AdditionalrepresentativePNG forfixedintervals,equal/differentAuto,local/serverwait,partialinflight,CodexonlySimple andnamedBreeze/Fusion assignedTester; existinginputsafetyboundariesretained. ActualnativeALSE/HiDPI/livekeyboard remainunverified.

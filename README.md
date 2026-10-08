@@ -19,7 +19,17 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
-## macOS 3.2.7: compact refresh
+## Linux 0.4.5: compact refresh candidate
+
+**Candidate; pending CI, QA and coordinator release.** The 0.4.5 instructions were checked against frozen source (freeze3); this is not runtime or package acceptance. macOS **3.2.7 remains Latest**. Earlier release sections below retain their historical behavior.
+
+With the required CLI signed in and the desired subscriptions enabled in Settings, open Simple or Advanced view. Use the small refresh icon beside Settings in the existing header; read compact request status and data time inside each provider card, with details in its tooltip.
+Choose **15 min / 30 min / 1 h / 4 h** for fixed polling, or **A** for Auto. Auto highlights A and the actual intervals of enabled providers together: different intervals highlight both segments; disabled providers do not contribute. With both subscriptions off, no interval is highlighted; A can remain selected if Auto is saved. There is no separate frequency label or **Pace from snapshot at…** annotation; forecasts and relevant access/data warnings remain.
+
+Under the candidate contract, manual refresh bypasses the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, and a failed provider can be retried on its own. Actual server Retry-After deadlines still apply. An unchanged live response counts as success; fallback retains the old reading time. Sign-in problems show guidance for the affected CLI without automatic login or permission prompts; macOS Keychain permits are not part of the Linux flow.
+After coordinator publication, use the DEB from **linux-v0.4.5**, which must not be Latest. [RU/EN candidate notes and installation steps](docs/linux-compact-refresh-release.md).
+
+## Release history — macOS 3.2.7: compact refresh
 
 [Download macOS 3.2.7](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.7).
 Click the refresh icon beside Settings (tooltip: **Refresh now**); status and actions fit inside each card, with times shown without seconds in its tooltip.
@@ -28,7 +38,7 @@ In Auto, **A** and the actual interval segments are highlighted together; differ
 There is no separate frequency label to the right of A. The **Pace from snapshot at…** line is removed; forecasts still use the reading time.
 Manual refresh, the 30-second guard and server retry deadlines keep their 3.2.6 behavior. [Release notes](docs/compact-refresh-release.md).
 
-## macOS 3.2.6: manual refresh
+## Release history — macOS 3.2.6: manual refresh
 
 [Download macOS 3.2.6](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.2.6).
 Released 2026-10-07. Linux remains at 0.4.4.
@@ -68,7 +78,7 @@ polling mode stays selected. Opening the panel in Auto still follows the schedul
 These quota controls are separate from **Retry Keychain access** in GitHub sync
 settings. See [RU/EN notes](docs/manual-refresh-release.md).
 
-## macOS 3.2.5: quiet GitHub Keychain access
+## Release history — macOS 3.2.5: quiet GitHub Keychain access
 
 Background GitHub Keychain access runs with system permission dialogs disabled,
 including after launch, wake and credential cleanup. If permission is
@@ -94,6 +104,8 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 
 ## Features
 
+Refresh and interval instructions cover macOS 3.2.7 and the **Linux 0.4.5 candidate**, pending CI/QA and release.
+
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
 - **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. A timestamped reading remains valid by age through 4 hours inclusive; a failed fetch alone does not invalidate it. Pace uses the reading time and checks each window separately. Expired readings keep cached percentages and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
@@ -107,9 +119,9 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 - **Click a card** to open the relevant limits page in your browser.
 - **Choose subscriptions.** Settings → “Collect and show” offers independent Claude Code and Codex switches in both panel views. Keep only Codex, or turn both off. Disabled products stop API polling and log indexing, disappear from the tray, panel and history, and are excluded from new sync uploads from this Mac. Existing local history is kept; re-enabling catches up from the logs. The choice is saved per computer.
 - **One or both** — if only Claude Code or only Codex is set up, the tray and popover collapse to a single row / single card.
-- **Opening the popover requests a fresh reading** with a fixed interval; Auto respects its schedule.
-- **Refresh interval** — macOS 3.2.6 and Linux 0.4.4 offer 15 minutes, 30 minutes, or 1 hour; the macOS 3.2.7 adds fixed 4 hours. The default is 30 minutes; saved 15-minute and 1-hour choices are preserved. Older 1/5-minute settings automatically switch to 30 minutes.
-- **Adaptive polling (A)** — opt in with the button beside the fixed intervals. Active usage returns polling to 15 minutes; quiet readings gradually extend the pause to 30 minutes, 1 hour, then 4 hours. Claude Code and Codex have independent schedules, persisted across restarts. In macOS 3.2.6 and Linux 0.4.4, Auto shows the current interval beside the blue-to-violet A button in both views: one value for equal intervals or one subscription, or product-specific values such as `Claude 15m · Codex 4h`; with both off, it reads `no subscriptions`. These versions show the last-update time in the A tooltip. The macOS 3.2.7 instead highlights A and the actual interval segments, with service mapping in the tooltip and no separate frequency label; when both subscriptions are off, no interval is highlighted. Auto is off by default; the fixed default remains 30 minutes.
+- **Refresh now** — the small icon beside Settings requests fresh limits without waiting for the local schedule or error backoff. Each provider has a 30-second guard and one request at a time; server Retry-After still applies. Status and data time fit inside each card.
+- **Refresh interval** — choose **15 minutes / 30 minutes / 1 hour / 4 hours**. The default is 30 minutes; saved supported choices are preserved, and old 1/5-minute settings migrate to 30 minutes.
+- **Adaptive polling (A)** — active usage returns polling to 15 minutes; quiet readings extend it to 30 minutes, 1 hour, then 4 hours, independently per provider. Auto highlights A and the actual intervals of enabled providers; different intervals highlight both segments. Tooltips map intervals to providers; there is no separate frequency label. With both subscriptions off, no interval is highlighted; A may remain selected. Auto is off by default.
 - **Sound alerts (optional)** — a cheerful chime when a 5h or weekly limit *resets*, and a sad shutdown‑style tone when **any** limit is *reached*, per‑model ones included; choose a sound per event in the in‑app settings (⚙).
 - **Automatic updates** — checks for new releases in the background (on launch + every 6 h); when one appears, a dot badges the tray icon and the ⚙ gear. In Settings, **What's new** shows the accumulated release notes for every version you skipped, and **Download** → live progress bar → **Install & Relaunch** takes you straight to the latest. No Sparkle, no notarization required.
 - **Bilingual (RU / EN)** — switch the whole interface between Russian and English in Settings; release notes load in the chosen language too. Russian by default.
@@ -230,14 +242,14 @@ Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages 
 
 ### Linux (Astra Linux)
 
-Earlier Linux versions were tested on Astra Linux SE 1.8 (KDE / Fly). The 0.4.2 UI change has not yet been tested on a live ALSE system; Linux CI uses Ubuntu 22.04. The port gives a tray icon with the same
+Linux **0.4.5 is a candidate**, pending CI/QA and release; live ALSE/ThinkPad installation is not confirmed. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.4.2_all.deb` from the [Linux 0.4.2](../../releases/tag/linux-v0.4.2) release.
+1. **After coordinator release**, download `claude-codex-limits_0.4.5_all.deb` from `linux-v0.4.5` in the [release list](../../releases). Linux is not Latest; Latest remains macOS 3.2.7.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.4.2_all.deb
+   sudo apt install ./claude-codex-limits_0.4.5_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -247,10 +259,14 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 ## Usage
 
+For macOS 3.2.7 and the **Linux 0.4.5 candidate**; Linux CI/QA and release remain pending. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
+
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
-- **Refresh** → request updated limits. In the 3.2.7 layout, click the icon beside Settings with the **Refresh now** tooltip; 3.2.6 uses the labeled header button.
-- **Interval buttons** (bottom) → 15 min / 30 min / 1 hour / **A** (Auto) in macOS 3.2.6 and Linux 0.4.4. The macOS 3.2.7 adds **4 hours**; clicking an interval selects fixed polling, and **A** selects Auto.
+- **Refresh now** → click the small icon beside Settings. Manual refresh bypasses the local schedule/error backoff, preserves the selected mode and respects each provider's 30-second guard, active request and server Retry-After. On Linux, opening the panel alone does not request fresh limits.
+- **Read each card's result** → providers finish independently. Unchanged live values count as success; fallback retains the old data time. Use **Retry** on the failed card once its wait ends; its tooltip separates data time from the next automatic attempt.
+- **Restore access on Linux** → follow the affected card's instructions: start `claude` and run `/login`, or run `codex login`. For file read/save errors, check that the CLI runs as your user, its credential file is accessible and disk space is available. Login and permissions are not requested automatically.
+- **Interval buttons** → **15 min / 30 min / 1 h / 4 h** selects fixed polling; **A** selects Auto. Auto highlights A and enabled providers' actual intervals together; different intervals highlight both, and both subscriptions off means no highlighted interval. No separate frequency or snapshot-pace annotation; forecasts remain.
 - **Power button** (bottom‑right) → quit.
 - **Right‑click** the tray icon → fallback menu (Refresh / Launch at login / Quit).
 
@@ -258,7 +274,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 Activity means an increase of at least 1 percentage point per 15 minutes in any comparable limit, measured over the time between readings. The first response establishes a baseline; limit window resets are not consumption. Local token logs are checked every 2 minutes without an API request: three distinct events with positive token usage in the past 15 minutes also restore 15-minute polling.
 
-In macOS 3.2.5 and Linux 0.4.4, opening the panel in Auto keeps the schedule; manual refresh waits at least 15 minutes after the previous response. Errors and cached responses extend the pause, and local activity or manual refresh cannot shorten that error backoff. The approved macOS 3.2.6 scenario above separates manual requests from this local schedule; Linux behavior is unchanged. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
+Opening the panel in Auto keeps its schedule. Errors and cached responses extend automatic polling's pause; local activity cannot shorten error backoff. **Refresh now** bypasses that local pause, subject to the provider's 30-second guard, active request and actual server retry deadline. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
 
 ## Build a release
 

@@ -1,6 +1,6 @@
 # LINUX-COMPACT · 2026-10-08
 
-Linux0.4.5 в работе; DesignEngineer, Tester и DeveloperComplex выполняют UI и принятый manualrefreshконтракт; первыйdraftTechWriter будет уточнён после итоговой реализации. Runtime/CI новой версии ещё не запускался. [План](linux-compact-refresh-plan.md), [приёмка](linux-compact-refresh-verification.md).
+Linux0.4.5: implementation at `2d224e041d7b85a029dc1ccd723c8c595d09165e`, independent production Code/Security and isolation gates passed. [CI37728899968](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/37728899968) completed with356tests/11failures/1error/0skips. Independent review accepted bounded test corrections; visual review requested a brighter recovery link and removal of duplicate missing-state text. Those UI fixes and supplementary screenshots are in progress before rerun. Package QA and publication remain pending. [План](linux-compact-refresh-plan.md), [приёмка](linux-compact-refresh-verification.md).
 
 # COMPACT-REFRESH · 2026-10-08
 
