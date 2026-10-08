@@ -1,3 +1,7 @@
+# LINUX-COMPACT · 2026-10-08
+
+Linux0.4.5 в работе; DesignEngineer, Tester и DeveloperComplex выполняют UI и принятый manualrefreshконтракт; первыйdraftTechWriter будет уточнён после итоговой реализации. Runtime/CI новой версии ещё не запускался. [План](linux-compact-refresh-plan.md), [приёмка](linux-compact-refresh-verification.md).
+
 # COMPACT-REFRESH · 2026-10-08
 
 COMPACT-REFRESH завершена: macOS 3.2.7 опубликована как Latest и установлена на этом Mac. Source `1078ddbe058196204265a0bc565ff591cb8ca45c`; независимые code/isolation/design PASS, packaged QA 5089 OK / 0 ошибок, визуально проверены 148 экранов. Публичный DMG SHA и установленный binary SHA совпали; strict codesign PASS, процесс PID15393 запущен. Linux остаётся 0.4.4. [Приёмка](compact-refresh-verification.md).

@@ -149,3 +149,5 @@ v3.2.7 опубликована на source1078ddbe058196204265a0bc565ff591cb8ca
 ## 2026-10-08 — Linux0.4.5
 
 Владелец запросил Linux-версию исправленного интерфейса3.2.7. Порт UI выполняется на existing Linux refresh/poll/auth:4ч,Autohighlight,compactfeedback,noannotation. ВыпускDEB linux-v0.4.5 --latest=false, macOS3.2.7Latest. План docs/linux-compact-refresh-plan.md; изолированныйLinuxCI и независимыйdesignreview обязательны.
+
+Linux0.4.5 scope refinement: discovered existingmanual900sfloor; portacceptedMANUAL-REFRESHcontract as well soLinuxanswers originaluserproblem. DeveloperComplex forconcurrency/result/retrymetadata; SecurityAnalystT2. Existingauthstores/endpointsandAutoalgorithm retained. App.py ownershipserializedafterDesignEngineer.

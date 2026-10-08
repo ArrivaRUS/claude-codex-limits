@@ -1,6 +1,6 @@
 # Бэклог
 
-- In progress, LINUX-COMPACT0.4.5: перенести compactUI, 4ч, A+interval и удаление snapshotnotice. План docs/linux-compact-refresh-plan.md.
+- In progress, LINUX-COMPACT0.4.5: перенести compactUI, 4ч, A+interval, удаление snapshotnotice и ручное обновление без900sfloor. План docs/linux-compact-refresh-plan.md.
 
 - Done, COMPACT-REFRESH 3.2.7: цельная панель, refresh/status внутри шапки/карточек, ручные 4ч и Auto + фактические интервалы, удаление справки о снимке. Code/isolation/design и packaged QA PASS; опубликована и установлена, публичный SHA и процесс проверены. Приёмка: docs/compact-refresh-verification.md.
 

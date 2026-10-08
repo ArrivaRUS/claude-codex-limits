@@ -4,7 +4,7 @@
 
 ## Актуальный статус · 2026-10-08
 
-- LINUX-COMPACT в работе: по запросу владельца переносим актуальный интерфейс3.2.7 в Linux0.4.5. [План](docs/linux-compact-refresh-plan.md). DEB-релиз разрешён; macOS остаётся Latest.
+- LINUX-COMPACT в работе: по запросу владельца переносим интерфейс3.2.7 и принятый сценарий ручного обновления в Linux0.4.5. [План](docs/linux-compact-refresh-plan.md). DEB-релиз разрешён; macOS остаётся Latest.
 
 - COMPACT-REFRESH завершена: macOS 3.2.7 опубликована как Latest и установлена на этом Mac. Source `1078ddbe058196204265a0bc565ff591cb8ca45c`; независимые code/isolation/design PASS, packaged QA 5089 OK / 0 ошибок, визуально проверены 148 экранов. Публичный DMG SHA и установленный binary SHA совпали; strict codesign PASS, процесс PID15393 запущен. Linux остаётся 0.4.4. [Приёмка](docs/compact-refresh-verification.md).
 
