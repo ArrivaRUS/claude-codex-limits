@@ -77,3 +77,15 @@ Tester traced all CI1 diagnostics to obsolete copy assertions or synthetic-clock
 CodeReviewer accepted test corrections and bounded candidate docs at zfnocjh7: test-delta/isolation/docs PASS, production unchanged2d224e0. Isolation digestb05f7a8e8a48292e40bbefd3469986e718660ab28d83c325d77fa1a77eda04c4. CI rerun not yet started because independent DesignReviewer found a new UI issue.
 
 DesignReviewer visually inspected40 currentPNG (26compact+14auth),7Linuxbaseline and2acceptedmacreferences: wholepanel/32ptfeedback/4h/Auto/forecastcomposition accepted, but overallFAIL: P2 recoverylink contrast4.29:1 on Advancedgray; P3 repeatedNotsetup inmissingfooter. Assigned boundedpanel fixes toDesignEngineer. AdditionalrepresentativePNG forfixedintervals,equal/differentAuto,local/serverwait,partialinflight,CodexonlySimple andnamedBreeze/Fusion assignedTester; existinginputsafetyboundariesretained. ActualnativeALSE/HiDPI/livekeyboard remainunverified.
+
+## Visual correction
+
+DesignEngineer changed only panel.py(+1/-3): footer actions now use existing LINK107,158,245 (calculated5.28:1 ongray43); missing footer retains Data— without repeatedNotsetup. NewpanelSHAee19fe2161120bc26b20d8d7833212236de97552aa3e25f13baeda265407bd09. Allotherfunctions/classes preserved by ASTcomparison; runtime/actualcontrast in newPNG stillpending.
+
+## Supplementary image fixtures
+
+Tester added30representativePNG scenarios in two existing UI test files: fixed15/60/240, equalAuto/30+60/swappedproviders,30sguard/90sRetryAfter,independentpartialcompletion,Codex-onlySimple; namedFusion/Breeze styles. Previousauto-ui tests produced QImage but didnot save it; now save through existingCCL_PREVIEW_DIR. Prior26compact retained, plannedtotal56new/currentcompact-auto images. Staticgrammar/compileinmemory and unique-name checks PASS; no runtime. Finalsnapshot s4o8lp5k assigned narrow CodeReviewer/isolation review beforeCI2.
+
+## CI2 gate
+
+Narrow CodeReviewer found missing LINK in extracted-function test namespace; Tester added only syntheticLINK='link', _freshness_env SHAde2e3cca1c351e02d1906752ad0167b545768dec51d7d82eef295ccfbc266d3f. Reviewer confirmed onlythisdelta vs s4o8lp5k and closedP2. Bounded functional + isolation PASS forCI2; same outerCIconditions.

@@ -95,7 +95,7 @@ def simple_card(d, product='codex'):
               rect_tl=Rect, QRectF=Rect, Attr=Attr,
               gray=lambda *x: ('gray',) + x, with_alpha=lambda col, alpha: (col, alpha),
               metric_color=lambda base, v: (base, v), scoped_color=lambda v: ('scoped', v),
-              BLUE='blue', PURPLE='purple', AMBER='amber', TEXT_LO='low', TEXT_MID='mid',
+              BLUE='blue', LINK='link', PURPLE='purple', AMBER='amber', TEXT_LO='low', TEXT_MID='mid',
               SCOPED_ROW_H=15)
     extract(LINUX / 'ccl/gui/panel.py', ('draw_feedback',), ns)
     tree = ast.parse((LINUX / 'ccl/gui/panel.py').read_text())

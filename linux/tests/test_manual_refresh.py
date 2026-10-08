@@ -229,7 +229,9 @@ class TestClockGuard(SyntheticCase):
                     result = state.admit("manual", wall, monotonic_now=10000 + elapsed)
                     if elapsed < 30:
                         self.assertEqual(result.kind, "local_wait")
-                        self.assertAlmostEqual(result.until - wall, 30 - elapsed)
+                        # Epoch floats near NOW have ~0.24us spacing. Allow 1us only
+                        # for the wall projection; admission at 29.999/30 stays exact.
+                        self.assertAlmostEqual(result.until - wall, 30 - elapsed, delta=1e-6)
                         self.assertIsNone(result.ticket)
                     else:
                         self.assertEqual(result.kind, "start")
@@ -893,10 +895,13 @@ class TestSyntheticApp(SyntheticCase):
                 self.assertEqual(self.owner.refresh_states["codex"].server_until, NOW + 7200)
 
     def test_rollback_during_worker_accepts_new_live_answer_and_keeps_real_guard(self):
-        self.elapsed = 10000
+        # setUp already published with monotonic=NOW; keep that epoch while
+        # advancing monotonic independently of the subsequent wall rollback.
+        self.elapsed = NOW
         self.patch(app.time, "monotonic", lambda: self.elapsed)
         self.owner.refresh_limits(product="codex")
-        self.now, self.elapsed = NOW - 3600, 10001
+        self.assertEqual(len(self.jobs), 1, "initial manual admission must queue the worker")
+        self.now, self.elapsed = NOW - 3600, NOW + 1
         self.fetches["codex"].return_value = snapshot(self.now, 48, live=True)
         self.finish(0)
         self.assertEqual(self.owner.poll_states["codex"].last_attempt, self.now)
@@ -905,10 +910,10 @@ class TestSyntheticApp(SyntheticCase):
         self.assertFalse(self.owner.model.codex.poll_failed)
         self.assertEqual(self.owner.model.codex.as_of, self.now)
         self.assertEqual(self.owner.model.codex.local_retry_at, self.now + 29)
-        self.now, self.elapsed = NOW - 3600 + 28, 10029
+        self.now, self.elapsed = NOW - 3600 + 28, NOW + 29
         self.owner.refresh_limits(product="codex")
         self.assertEqual(len(self.jobs), 1)
-        self.now, self.elapsed = NOW - 3600 + 29, 10030
+        self.now, self.elapsed = NOW - 3600 + 29, NOW + 30
         self.owner.refresh_limits(product="codex")
         self.assertEqual(len(self.jobs), 2)
 

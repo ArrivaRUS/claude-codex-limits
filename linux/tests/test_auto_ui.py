@@ -17,12 +17,14 @@ from ccl import common, limits, polling, quota_refresh, sync, usage, vault
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PyQt5.QtGui import QImage, QPainter
-    from PyQt5.QtWidgets import QApplication
+    from PyQt5.QtWidgets import QApplication, QStyleFactory
     from ccl.gui import app, panel
     from ccl.gui.paint import Canvas
     HAVE_QT = True
 except ImportError:
     HAVE_QT = False
+
+NOW = 1_800_000_000
 
 
 @unittest.skipUnless(HAVE_QT, "PyQt5 not installed: actual draw/runtime unverified")
@@ -34,6 +36,10 @@ class TestAutoUI(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        previous_style = self.qapp.style().objectName()
+        self.addCleanup(self.qapp.setStyle, previous_style)
+        # Every preview has an explicit style, including the existing compact set.
+        TestAutoUI.set_preview_style(self, "Fusion")
         p = patch.object(app.time, "monotonic", lambda: app.time.time())
         p.start(); self.addCleanup(p.stop)
         self.st = common.Store(os.path.join(self.tmp.name, "settings.json"), common.SETTINGS_DEFAULTS)
@@ -53,6 +59,37 @@ class TestAutoUI(unittest.TestCase):
                                    (subprocess, "Popen", forbidden), (subprocess, "run", forbidden)):
             p = patch.object(owner, name, value)
             p.start(); self.addCleanup(p.stop)
+
+    def set_preview_style(self, name):
+        available = {key.lower() for key in QStyleFactory.keys()}
+        self.assertIn(name.lower(), available, "requested CI preview style is unavailable")
+        self.qapp.setStyle(name)
+        self.assertEqual(self.qapp.style().objectName().lower(), name.lower())
+
+    def save_preview(self, image, case, lang, advanced, prefix="auto-ui"):
+        # Unittest previously discarded these QImages; CI already collects this path.
+        root = os.environ.get("CCL_PREVIEW_DIR")
+        if root:
+            real_root = os.path.realpath(root)
+            self.assertTrue(real_root.startswith(("/tmp/", "/private/tmp/")),
+                            "preview output must remain in the synthetic temporary directory")
+            os.makedirs(root, exist_ok=True)
+            style = self.qapp.style().objectName().lower()
+            self.assertIn(style, ("fusion", "breeze"))
+            name = "%s-%s-%s-%s-%s.png" % (prefix, style, case, lang, "advanced" if advanced else "simple")
+            self.assertTrue(image.save(os.path.join(root, name)), name)
+
+    def preview_model(self):
+        # Fixed coherent observations: these PNGs also contain valid pace/forecasts.
+        m = panel.Model()
+        m.loaded, m.updated, m.interval = True, NOW - 60, 3600
+        for product in ("claude", "codex"):
+            d = getattr(m, product)
+            d.present, d.api_fresh, d.as_of = True, True, NOW - 60
+            d.weekly, d.weekly_reset = 47, d.as_of + 84 * 3600
+            if product == "claude":
+                d.session, d.session_reset = 31, d.as_of + 2.5 * 3600
+        return m
 
     def model(self):
         m = panel.Model()
@@ -163,6 +200,41 @@ class TestAutoUI(unittest.TestCase):
                             self.assert_schedule(hits, texts, fills, {seconds} if any(enabled) else set())
                             self.assertTrue(any((r.x(), r.width(), r.height()) == (181, 30, 20) for r in fills))
                             self.assertEqual(self.st.get("interval"), seconds)
+
+    def test_representative_schedule_previews(self):
+        # Eight curated rows x RU/EN = 16 PNGs, not a style/view/state cross product.
+        # Fixed 15/60 use Simple; Fixed 240 and distinct 30/60 use Advanced.
+        cases = (
+            ("fixed-15", "Fusion", False, 900, {}),
+            ("fixed-60", "Fusion", False, 3600, {}),
+            ("fixed-240", "Fusion", True, 14400, {}),
+            ("auto-equal-30", "Fusion", False, None, {"claude": 1800, "codex": 1800}),
+            ("auto-claude30-codex60", "Fusion", True, None, {"claude": 1800, "codex": 3600}),
+            ("auto-claude60-codex30", "Fusion", True, None, {"claude": 3600, "codex": 1800}),
+            ("fixed-240", "Breeze", True, 14400, {}),
+            ("auto-claude60-codex30", "Breeze", True, None, {"claude": 3600, "codex": 1800}),
+        )
+        with patch.object(app.time, "time", return_value=NOW):
+            for case, style, advanced, fixed, intervals in cases:
+                self.set_preview_style(style)
+                for lang in ("ru", "en"):
+                    with self.subTest(case=case, style=style, lang=lang):
+                        self.st.update(lang=lang, autoPoll=fixed is None, interval=fixed or 14400,
+                                       monitor_claude=True, monitor_codex=True, advHistExpanded=False)
+                        m = self.preview_model()
+                        m.interval, m.auto_intervals = fixed or 14400, intervals
+                        image, hits, texts, fills = self.render(m, advanced)
+                        self.assert_schedule(hits, texts, fills, {fixed} if fixed else set(intervals.values()))
+                        auto_off = any(r.x() == 181 and r.width() == 30 and r.height() == 20 for r in fills)
+                        self.assertEqual(auto_off, fixed is not None)
+                        if fixed is None:
+                            for seconds in set(intervals.values()):
+                                tooltip = panel.interval_tooltip(m, seconds)
+                                self.assertEqual("Claude Code" in tooltip, intervals["claude"] == seconds)
+                                self.assertEqual("Codex" in tooltip, intervals["codex"] == seconds)
+                        if advanced:
+                            self.assertIn("94%", "\n".join(t[0] for t in texts))
+                        self.save_preview(image, case, lang, advanced)
 
     def fake_app(self):
         fake = SimpleNamespace(model=self.model(), activity_busy=False, busy_limits=False, selection_generation=1,

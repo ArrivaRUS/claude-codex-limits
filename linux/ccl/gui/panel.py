@@ -227,8 +227,6 @@ def feedback_copy(m, d, product):
         second, color = data, AMBER if limit_poll_failed(d) else TEXT_MID
     elif limit_poll_failed(d):
         first, second, color = tr("Сбой обновления", "Update failed"), data, AMBER
-    elif not d.present:
-        first, second, color = tr("Не настроен", "Not set up"), data, TEXT_MID
     else:
         first, second, color = data, "", TEXT_MID
     if d.api_fresh and not limit_poll_failed(d):
@@ -262,7 +260,7 @@ def draw_feedback(c, m, d, product, x, top, w, hits):
     c.text_c(fit(first, "regular", color, w), x, top + 2, 12)
     action, title = feedback_action(m, d, product)
     if action:
-        label = fit(title, "medium", BLUE, w - 8)
+        label = fit(title, "medium", LINK, w - 8)
         c.text_c(label, x + 4, top + 16, 14)
         hits.insert(0, (action, rect_tl(x, top + 8, min(w, label.width() + 8), 24)))
     elif second:

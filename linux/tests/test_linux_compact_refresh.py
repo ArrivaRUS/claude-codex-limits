@@ -11,7 +11,6 @@ else:
     import test_auto_ui as auto_tests
 
 import copy
-import os
 import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -33,6 +32,7 @@ class TestLinuxCompactRefresh(unittest.TestCase):
     assert_geometry = auto_tests.TestAutoUI.assert_geometry
     selected_intervals = auto_tests.TestAutoUI.selected_intervals
     assert_schedule = auto_tests.TestAutoUI.assert_schedule
+    set_preview_style = auto_tests.TestAutoUI.set_preview_style
 
     def setUp(self):
         auto_tests.TestAutoUI.setUp(self)
@@ -67,11 +67,7 @@ class TestLinuxCompactRefresh(unittest.TestCase):
         return m
 
     def save_preview(self, image, case, lang, advanced):
-        root = os.environ.get("CCL_PREVIEW_DIR")
-        if root:
-            os.makedirs(root, exist_ok=True)
-            name = "compact-%s-%s-%s.png" % (case, lang, "advanced" if advanced else "simple")
-            self.assertTrue(image.save(os.path.join(root, name)))
+        auto_tests.TestAutoUI.save_preview(self, image, case, lang, advanced, prefix="compact")
 
     def test_manual_four_hour_roundtrip_and_legacy_startup_migration(self):
         class StopBeforeWindow(Exception):
@@ -246,6 +242,87 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                     self.assertEqual(heights["both-fresh"], 318)
                     self.assertEqual(heights["claude-only"], 318)
                     self.assertEqual(heights["off"], 286)
+
+    def test_guard_server_partial_completion_and_codex_only_previews(self):
+        # Seven rows x RU/EN = 14 PNGs. Repeat only narrow Simple layouts in Breeze;
+        # the schedule preview set separately covers Breeze Advanced.
+        cases = (
+            ("local-guard-30s", "Fusion", False),
+            ("server-retry-after-90s", "Fusion", True),
+            ("claude-success-codex-pending", "Fusion", False),
+            ("codex-success-claude-pending", "Fusion", True),
+            ("codex-only", "Fusion", False),
+            ("local-guard-30s", "Breeze", False),
+            ("codex-only", "Breeze", False),
+        )
+        for case, style, advanced in cases:
+            self.set_preview_style(style)
+            for lang in ("ru", "en"):
+                with self.subTest(case=case, style=style, lang=lang):
+                    self.st.update(lang=lang, autoPoll=True, monitor_claude=case != "codex-only", monitor_codex=True)
+                    m = self.model()
+                    baseline_height = panel.advanced_height(m) if advanced else panel.simple_height(m)
+                    d = m.codex
+                    if case == "local-guard-30s":
+                        d.as_of, d.weekly_reset = NOW, NOW + 84 * 3600
+                        d.local_retry_at = NOW + 30
+                        d.next_poll_at = NOW + 14400
+                    elif case == "server-retry-after-90s":
+                        d.error, d.http_status, d.failure_kind = "HTTP 429", 429, "http"
+                        d.api_fresh, d.from_cache, d.poll_failed = False, True, True
+                        d.server_retry_at = quota_refresh.retry_after("90", NOW)
+                        d.next_poll_at = d.server_retry_at
+                        self.assertEqual(d.server_retry_at, NOW + 90)
+                    elif "-success-" in case:
+                        completed = "claude" if case.startswith("claude-") else "codex"
+                        pending = "codex" if completed == "claude" else "claude"
+                        m.pending_products = {pending}
+                        getattr(m, pending).refresh_in_flight = True
+                        finished = getattr(m, completed)
+                        finished.as_of, finished.weekly_reset = NOW, NOW + 84 * 3600
+                        if completed == "claude":
+                            finished.session_reset = NOW + 2.5 * 3600
+                    before = copy.deepcopy((vars(m.claude), vars(m.codex), m.pending_products))
+                    painted_words = []
+                    original_text = paint.Canvas.text
+                    def record_text(canvas, attr, *args, **kwargs):
+                        painted_words.append("".join(run.s for run in canvas._runs(attr)))
+                        return original_text(canvas, attr, *args, **kwargs)
+                    with patch.object(paint.Canvas, "text", record_text):
+                        image, hits, texts, fills = self.render(m, advanced)
+                    self.assertEqual((vars(m.claude), vars(m.codex), m.pending_products), before)
+                    self.assertEqual(image.height(), baseline_height, "request feedback added card height")
+                    self.assert_schedule(hits, texts, fills, {14400} if case == "codex-only" else {900, 14400})
+                    self.assert_feedback_inside_cards(m, hits, fills, texts)
+                    boxes = dict(hits)
+                    def footer_text(product):
+                        r = boxes["feedback:" + product]
+                        return [t[0] for t in texts if r.left() <= t[1] < r.right() and r.top() <= t[2] < r.bottom()]
+                    if case == "local-guard-30s":
+                        self.assertIn("Повтор через 30 с" if lang == "ru" else "Retry in 30 s", footer_text("codex"))
+                        self.assertTrue(any(t.startswith("Проверено " if lang == "ru" else "Checked ")
+                                            for t in footer_text("codex")))
+                        self.assertNotIn("feedbackretry:codex", boxes)
+                        self.assertIsNone(d.server_retry_at)
+                    elif case == "server-retry-after-90s":
+                        self.assertIn("Пауза сервиса · 2 мин" if lang == "ru" else "Service wait · 2 min", footer_text("codex"))
+                        self.assertNotIn("feedbackretry:codex", boxes)
+                        self.assertEqual(d.as_of, NOW - 60)
+                        detail = panel.feedback_copy(m, d, "codex")[3]
+                        self.assertIn("Сервис разрешит повтор через" if lang == "ru" else "Service allows retry in", detail)
+                        self.assertIn("HTTP 429", detail)
+                    elif "-success-" in case:
+                        self.assertIn("Обновляем…" if lang == "ru" else "Refreshing…", footer_text(pending))
+                        self.assertTrue(any(t.startswith("Проверено " if lang == "ru" else "Checked ")
+                                            for t in footer_text(completed)))
+                        self.assertNotIn("feedbackretry:" + pending, boxes)
+                        self.assertEqual(getattr(m, pending).as_of, NOW - 60)
+                        self.assertEqual(getattr(m, completed).as_of, NOW)
+                    else:
+                        self.assertEqual(set(hid for hid in boxes if hid.startswith("feedback:")), {"feedback:codex"})
+                        self.assertIn("47%", painted_words)
+                        self.assertEqual(image.height(), 318)
+                    self.save_preview(image, case, lang, advanced)
 
     def test_pending_publication_and_response_clear_without_real_worker(self):
         fake = auto_tests.TestAutoUI.fake_app(self)

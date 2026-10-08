@@ -91,8 +91,8 @@ class TestAuthCopy(OfflineAuthCase):
     def test_confirmed_claude_auth_is_only_recovery_case(self):
         for lang in ("ru", "en"):
             self.st.set("lang", lang)
-            badges = ("данные устарели", "нет входа", "вход истёк", "нет доступа") if lang == "ru" else (
-                "stale data", "signed out", "sign-in expired", "read failed")
+            badges = ("данные устарели", "нет входа", "вход истёк", "сбой доступа") if lang == "ru" else (
+                "stale data", "signed out", "sign-in expired", "access issue")
             for auth, badge in zip((limits.OK, limits.LOGGED_OUT, limits.EXPIRED, limits.READ_ERROR), badges):
                 self.assertEqual(helpers["limit_auth_badge"](auth), badge)
                 for product in ("claude", "codex"):
@@ -269,8 +269,12 @@ class TestAuthDraw(OfflineAuthCase):
                                 self.assertIsNone(m.claude.session)
                                 self.assertIsNone(m.claude.weekly)
                                 if advanced:
-                                    self.assertIn("Данные —" if lang == "ru" else "Data —", card_text)
+                                    self.assertIn("сбой доступа · —" if lang == "ru" else "access issue · —", card_text)
+                                    self.assertIn("Восстановить доступ" if lang == "ru" else "Restore access", card_text)
+                                    self.assertIn("feedbackfix:claude", dict(hits))
                                     detail = panel.feedback_copy(m, m.claude, "claude")[3]
+                                    self.assertIn("Данные —" if lang == "ru" else "Data —", detail)
+                                    self.assertNotIn("Снимок:" if lang == "ru" else "Snapshot:", detail)
                                     self.assertIn("темп не считаем" if lang == "ru" else "pace paused", detail)
                             if both:
                                 self.assertIn(CODEX_TARGET, dict(hits))
@@ -302,7 +306,13 @@ class TestAuthDraw(OfflineAuthCase):
                             self.assertLess(boxes["claudefix"].bottom(), codex_top)
                             self.assertGreaterEqual(boxes[CODEX_TARGET].center().y(), codex_top)
                         else:
-                            self.assertTrue(any("Как починить?" in text or "How to fix?" in text for text in claude_text))
+                            recovery = "Восстановить доступ" if lang == "ru" else "Restore access"
+                            self.assertIn(recovery, claude_text)
+                            self.assertNotIn(recovery, codex_text)
+                            self.assertIn("feedbackfix:claude", boxes)
+                            self.assertNotIn("feedbackfix:codex", boxes)
+                            self.assertTrue(boxes["feedback:claude"].contains(boxes["feedbackfix:claude"]))
+                            self.assertLessEqual(boxes["feedbackfix:claude"].right(), 180)
                             self.assertLessEqual(boxes["claudefix"].right(), 180)
                             self.assertGreaterEqual(boxes[CODEX_TARGET].left(), 180)
 
