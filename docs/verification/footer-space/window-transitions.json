@@ -1,0 +1,450 @@
+[
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "pending",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "guard",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "guard-expired-idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "server-wait",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": false,
+    "state": "server-expired-retry",
+    "window_height": 318,
+    "view_height": 318,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "pending",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "guard",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "guard-expired-idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "server-wait",
+    "window_height": 472,
+    "view_height": 472,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "ru",
+    "advanced": true,
+    "state": "server-expired-retry",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "pending",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "guard",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "guard-expired-idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "server-wait",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": false,
+    "state": "server-expired-retry",
+    "window_height": 318,
+    "view_height": 318,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "pending",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "guard",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "guard-expired-idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "server-wait",
+    "window_height": 472,
+    "view_height": 472,
+    "actions": []
+  },
+  {
+    "style": "Fusion",
+    "lang": "en",
+    "advanced": true,
+    "state": "server-expired-retry",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "pending",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "guard",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "guard-expired-idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "server-wait",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": false,
+    "state": "server-expired-retry",
+    "window_height": 318,
+    "view_height": 318,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "pending",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "guard",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "guard-expired-idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "server-wait",
+    "window_height": 472,
+    "view_height": 472,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "ru",
+    "advanced": true,
+    "state": "server-expired-retry",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "pending",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "guard",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "guard-expired-idle",
+    "window_height": 289,
+    "view_height": 289,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "server-wait",
+    "window_height": 302,
+    "view_height": 302,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": false,
+    "state": "server-expired-retry",
+    "window_height": 318,
+    "view_height": 318,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "pending",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "guard",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "guard-expired-idle",
+    "window_height": 456,
+    "view_height": 456,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "server-wait",
+    "window_height": 472,
+    "view_height": 472,
+    "actions": []
+  },
+  {
+    "style": "Breeze",
+    "lang": "en",
+    "advanced": true,
+    "state": "server-expired-retry",
+    "window_height": 488,
+    "view_height": 488,
+    "actions": [
+      "feedbackretry:codex"
+    ]
+  }
+]

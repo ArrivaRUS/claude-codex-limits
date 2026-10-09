@@ -1,0 +1,15 @@
+{
+  "result": "PASS",
+  "panel_sha256": "b364434440260b833722f27ff4738a77a03fe23315dc7d465097bc76e24896f3",
+  "app_sha256": "b00882aa621774cc8b74a4b47a18af9f20a93671ccce245f9356e30cbfa51a05",
+  "initial_review_pairs": 8,
+  "initial_review_png": 16,
+  "final_affected_png": 3,
+  "closed_finding": "Simple bottom glyph margin increased from 3–4 px to 6–7 px",
+  "final_simple_size": [
+    360,
+    289
+  ],
+  "reviewer": "footer_design_review",
+  "native_desktop_tested": false
+}

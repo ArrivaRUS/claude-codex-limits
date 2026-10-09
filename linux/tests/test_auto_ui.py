@@ -244,6 +244,7 @@ class TestAutoUI(unittest.TestCase):
                                win=SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock()),
                                load_local=Mock(), update_sync_warning=Mock(), check_alarms=Mock(), update_tray=Mock(),
                                refresh_logs=Mock(), start_poll_timer=Mock())
+        fake.win.page0_changed.side_effect = fake.win.view.update
         fake.model.history.record = Mock()
         fake.refresh_states = {p: quota_refresh.RefreshState(state.last_attempt) for p, state in fake.poll_states.items()}
         fake.start_poll_timer.side_effect = lambda: fake.publish_auto_intervals()

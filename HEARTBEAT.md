@@ -4,6 +4,10 @@
 
 ## Актуальный статус · 2026-10-09
 
+- Локальный патч local2 сокращает пустую область карточек: feedback reserve 0/16/32 px, Simple — общий необходимый максимум, Advanced — каждая карточка отдельно. Высота открытого окна обновляется через `page0_changed`; при пустом footer подсказка доступна на иконке продукта. База `db28943`, ветка `codex/compact-card-height`; Code/isolation и финальный design PASS (panel `b3644344…`, app `b00882aa…`); повторные 45 тестов PASS / 0 ошибок/пропусков. Обычный Simple 318→289 px (−29), Advanced 520→456 px (−64); нижний отступ Simple 6–7 px. Финальные 48 QWidget-переходов и пакетные проверки PASS, 39 файлов exact. Установлен локальный DEB `0.4.5+local20261009.2`: installer exit 0, 39 файлов SHA/mode/uid/gid exact, timer active; GUI PID 156126 жив через 3 с. APP_VERSION `0.4.5`; нового GitHub-релиза и push нет. [План и проверки](docs/footer-labels.md).
+
+## История local1 · 2026-10-09
+
 - Локальный UI-патч Linux 0.4.5: по запросу владельца убраны нижние «Проверено»/«Данные» и видимое время; сведения сохранены в подсказке. HEAD `b94f95d`, ветка `codex/compact-footer-labels`, SHA файла panel.py `2c8d52b8…`. Code/isolation/design и packaged QA PASS; focused suite 23 PASS / 0 ошибок/пропусков, 180 PNG. Локальный DEB установлен: dpkg exit 0, 39 файлов exact, timer active; GUI PID 96441 жив через 3 с. Подготовлен DEB `0.4.5+local20261009.1`, APP_VERSION `0.4.5`, без нового GitHub-релиза. [План и проверки](docs/footer-labels.md).
 
 ## История · 2026-10-08

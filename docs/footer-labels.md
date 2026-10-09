@@ -4,7 +4,50 @@
 «Данные» снизу в карточках лишние. Ветка `codex/compact-footer-labels`, исходный
 HEAD `b94f95d8d6c53ed6c8beba09b7575e21252e715a`.
 
-## План и критерии UI
+## Текущий статус local2
+
+Local2 установлен: пустой footer занимает 0 px, одна строка — 16 px,
+статус с действием — 32 px. Simple выравнивает карточки по максимуму,
+Advanced сжимает каждую отдельно; открытое окно меняет высоту через
+`page0_changed`. При пустом footer подсказка доступна на иконке продукта.
+База `db28943`, ветка `codex/compact-card-height`.
+
+Финальный panel SHA-256
+`b364434440260b833722f27ff4738a77a03fe23315dc7d465097bc76e24896f3`;
+app `b00882aa621774cc8b74a4b47a18af9f20a93671ccce245f9356e30cbfa51a05`.
+Code narrow review и test/runner constant delta — PASS по сообщению координатора.
+Повторный изолированный suite: **45 PASS, 0 failures/errors/skips**.
+Дизайн — PASS: 8 пар / 16 PNG для остальных участков и 3 финальных PNG
+после добавления 3 px Simple padding при пустом feedback. P2 закрыт:
+нижний отступ текста теперь 6–7 px. Обычный Simple 318→289 px (−29),
+Advanced 520→456 px (−64).
+
+[Suite](verification/footer-space/suite-result.json),
+[дизайн](verification/footer-space/design-review.json),
+[freeze](verification/footer-space/after-freeze.json).
+Финальные 48 actual Qt-переходов — PASS:
+Simple 289→302→302→289→302→318 px,
+Advanced 456→488→488→456→472→488 px.
+[Переходы окна](verification/footer-space/window-transitions.json).
+Пакетная проверка — PASS: 39 файлов exact, panel/app совпадают с принятыми
+SHA; scripts и modes сохранены. APP_VERSION `0.4.5`, Debian Version
+`0.4.5+local20261009.2`.
+DEB SHA-256 `f95722e993ead3b1a09d3ec7a90a22a94053e5515acc472b68c1a3d85e1ce920`.
+[Пакет](verification/footer-space/package-inspection.json).
+Установка координатором: installer exit 0 после polkit; dpkg
+`0.4.5+local20261009.2 install ok installed`; 39 установленных файлов
+SHA/mode/uid/gid exact, 0 mismatches; `ccl-sync.timer` active.
+Старый GUI PID 96441 завершён SIGTERM, новый PID 156126 через
+`/usr/bin/claude-codex-limits` жив спустя 3 с, exit code null.
+[Установленные файлы](verification/footer-space/installed-check.json),
+[старт процесса](verification/footer-space/app-start.json).
+Нового GitHub-релиза и push нет. Ручное подтверждение UI, native hover,
+успешный API-обмен/KWallet, пользовательские шрифты и sleep/wake не проверены.
+
+Предыдущий критерий сохранения размеров заменён запросом убрать пустые отступы.
+Проверки local1 ниже не доказывают готовность local2.
+
+## История local1: план и критерии UI
 
 - В Simple и Advanced, RU/EN, для Claude и Codex удалить из видимого footer
   строки «Проверено» / Checked и «Данные» / Data вместе со временем. Убрать время
@@ -17,7 +60,7 @@ HEAD `b94f95d8d6c53ed6c8beba09b7575e21252e715a`.
   ответа, детали ошибок и сроки повторного/автоматического запроса. Отсутствующая
   или будущая дата не превращается в текущую.
 
-## Изменения и проверка
+## История local1: изменения и проверка
 
 Реализация ограничена `linux/ccl/gui/panel.py`: общие `feedback_copy` и
 `draw_feedback`. Backend, APP_VERSION и интервалы не меняются. Подготовлен локальный DEB
@@ -29,7 +72,7 @@ HEAD `b94f95d8d6c53ed6c8beba09b7575e21252e715a`.
 текст, tooltip, сохранность состояния и hit-области действий. PASS; модули ccl/
 PyQt, credentials, keyring, API и пользовательские журналы не использованы.
 
-## Итог независимых проверок
+## История local1: итог независимых проверок
 
 Проверяемый файл `linux/ccl/gui/panel.py`: SHA-256
 `2c8d52b8cd1c5e85c40dc378e870fc99bdccb8bb7902de16148164450dd34df2`,
@@ -61,7 +104,7 @@ PyQt, credentials, keyring, API и пользовательские журнал
 [Advanced до](verification/footer-labels/before-advanced-ru.png) /
 [после](verification/footer-labels/after-advanced-ru.png).
 
-## Локальный патч и границы
+## История local1: установка и границы
 
 Локальная установка выполнена координатором командой
 `sh /tmp/ccl-footer-20261009/install-verified.sh`: exit 0 после polkit;
@@ -76,3 +119,30 @@ APP_VERSION `0.4.5` ожидаем: локальная метка находит
 относится к source `19440ee112f164b411bf4715d6fa65077a272c48`, не к этому патчу.
 Полный suite для нового патча не запускался. Реальные API/KWallet, успешный
 обмен, live hover, пользовательские шрифты и sleep/wake не проверены.
+
+## Убрать пустой резерв — 2026-10-09
+
+После установки локального патча владелец сообщил: «там пустого места теперь
+куча в карточках». Это меняет прежний критерий сохранения размеров; результаты
+выше относятся к предыдущей версии. База исправления — HEAD `db28943237d038f1fa9e4bb311c6a1c9f9b631f1`.
+
+Единый `feedback_height` задаёт 0 px для пустого footer, 16 px для одной строки
+и 32 px для состояния с действием. Simple выравнивает карточки по необходимому
+максимуму, Advanced сжимает каждую отдельно; уменьшается и высота панели.
+Статусы, действия, scoped/auth/missing rows и история сохраняются. В обычном
+состоянии подсказка доступна на существующей иконке продукта, а в отсутствующей
+Advanced-карточке — на узкой части строки названия. Остальная область карточки
+сохраняет прежний open/settings click. Первый этап не менял backend и `app.py`.
+
+Итоговая визуальная проверка — PASS, факты приведены в текущем статусе local2
+выше. Авторская AST-only матрица: 56 случаев sizing/copy/draw/hits PASS,
+дополнительные missing/scoped/off/partial-completion проверки PASS;
+сам автор реальный GUI и сборку не запускал.
+
+Независимое review обнаружило, что публикация feedback только перерисовывала
+панель: размер уже открытого окна оставался прежним при начале обновления и
+истечении ожидания. В `publish_auto_intervals` теперь используется существующий
+`page0_changed`: высота и положение обновляются только для видимой основной
+страницы, затем выполняется repaint. Этот путь вызывается и при публикации
+pending, и существующим секундным feedback tick; backend, запросы и таймеры
+не меняются. Независимый QA проверил 48 actual Qt transitions финального состояния — PASS.

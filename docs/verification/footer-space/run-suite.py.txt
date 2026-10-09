@@ -1,0 +1,172 @@
+import importlib.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import unittest
+
+
+def bitmap_matrix():
+    # Temporary QA artifact capture, using existing fixture guards and renderer.
+    import test_linux_compact_refresh as compact
+    from ccl import limits
+    records=[]
+    for style in ('Fusion','Breeze'):
+        for lang in ('ru','en'):
+            for advanced in (False,True):
+                for case in ('success','error','missing','inflight'):
+                    fixture=compact.TestLinuxCompactRefresh('test_refresh_is_small_header_icon_beside_settings')
+                    fixture.setUpClass()
+                    try:
+                        fixture.setUp()
+                        fixture.set_preview_style(style)
+                        fixture.st.update(lang=lang,monitor_claude=True,monitor_codex=True)
+                        m=fixture.model()
+                        if case=='error':
+                            m.codex.error='synthetic failure'
+                            m.codex.poll_failed=True
+                            m.codex.api_fresh=False
+                            m.codex.from_cache=True
+                            m.codex.next_poll_at=compact.NOW+1800
+                        elif case=='missing':
+                            m.codex=limits.absent_limits()
+                        elif case=='inflight':
+                            m.pending_products={'claude','codex'}
+                        image,hits,texts,fills=fixture.render(m,advanced)
+                        fixture.save_preview(image,'qa-'+case,lang,advanced)
+                        footers={}
+                        for product in ('claude','codex'):
+                            box=dict(hits)['feedback:'+product]
+                            painted=[t[0] for t in texts if box.left()<=t[1]<box.right() and box.top()<=t[2]<box.bottom()]
+                            copy=compact.panel.feedback_copy(m,getattr(m,product),product)
+                            footers[product]={'painted':painted,'first':copy[0],'second':copy[1],'tooltip':copy[3], 'as_of':getattr(m,product).as_of}
+                        records.append({'style':style,'lang':lang,'advanced':advanced,'case':case,'width':image.width(),'height':image.height(),'footers':footers,'actions':[h for h,_ in hits if h.startswith(('feedbackretry:','feedbackfix:'))], 'hits':[{"id":hid,"rect":[r.x(),r.y(),r.width(),r.height()]} for hid,r in hits], 'texts':[list(t) for t in texts], 'cards':[[r.x(),r.y(),r.width(),r.height()] for r in fills if r.top()>=58 and r.width() in (158,328,330) and r.height()>=40]})
+                    finally:
+                        fixture.doCleanups()
+    Path('/artifacts/bitmap-matrix.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+
+
+def window_transition_scenarios():
+    # Inert real Qt window: production view/place/page0_changed, no tray/settings/auth construction.
+    import test_linux_compact_refresh as compact
+    from types import MethodType
+    from unittest.mock import Mock, patch
+    from PyQt5.QtCore import QPoint
+    from PyQt5.QtWidgets import QWidget,QStackedWidget,QVBoxLayout
+    from ccl.gui import app,panel
+    from ccl import polling,quota_refresh,limits
+    records=[]
+    for style in ('Fusion','Breeze'):
+        for lang in ('ru','en'):
+            for advanced in (False,True):
+                fixture=compact.TestLinuxCompactRefresh('test_refresh_is_small_header_icon_beside_settings')
+                fixture.setUpClass()
+                win=None
+                try:
+                    fixture.setUp()
+                    fixture.set_preview_style(style)
+                    fixture.st.update(lang=lang,advanced=advanced,monitor_claude=True,monitor_codex=True)
+                    fake=compact.auto_tests.TestAutoUI.fake_app(fixture)
+                    fake.model=fixture.model()
+                    fake.action=Mock()
+                    fake.poll_states={p:polling.PollState({'interval':14400,'last_attempt':compact.NOW-14400}) for p in ('claude','codex')}
+                    fake.refresh_states={p:quota_refresh.RefreshState() for p in ('claude','codex')}
+                    win=QWidget()
+                    win.app=fake
+                    win.anchor=QPoint(400,400)
+                    win.setFixedWidth(panel.PANEL_W)
+                    win.stack=QStackedWidget(win)
+                    layout=QVBoxLayout(win)
+                    layout.setContentsMargins(0,0,0,0)
+                    layout.addWidget(win.stack)
+                    win.view=app.PanelView(win)
+                    win.stack.addWidget(win.view)
+                    for method in ('page_height','screen_rect','place','page0_changed'):
+                        setattr(win,method,MethodType(getattr(app.PanelWindow,method),win))
+                    fake.win=win
+                    def capture(state,now):
+                        with patch.object(app.time,'time',return_value=now),patch.object(app.time,'monotonic',return_value=now):
+                            fake.publish_auto_intervals()
+                            fixture.qapp.processEvents()
+                            win.view.repaint()
+                            fixture.qapp.processEvents()
+                            expected=win.view.content_height()
+                            assert win.height()==expected,(state,win.height(),expected)
+                            assert win.view.height()==expected,(state,win.view.height(),expected)
+                            for hid,rect in win.view.hits:
+                                assert rect.top()>=0 and rect.bottom()<=win.view.height(),(state,hid,rect)
+                                if hid.startswith(('feedbackretry:','feedbackfix:')):
+                                    button=win.view.controls[hid]
+                                    assert button.isVisible() and button.geometry().bottom()<win.view.height(),(state,hid)
+                                if hid.startswith('feedback:'):
+                                    assert win.view.tooltip(hid),hid
+                            row={'style':style,'lang':lang,'advanced':advanced,'state':state,'window_height':win.height(),'view_height':win.view.height(),'actions':[hid for hid,_ in win.view.hits if hid.startswith(('feedbackretry:','feedbackfix:'))]}
+                            records.append(row)
+                            return expected
+                    fake.publish_auto_intervals()
+                    win.place()
+                    win.show()
+                    fixture.qapp.processEvents()
+                    idle=capture('idle',compact.NOW)
+                    tickets={p:st.admit('manual',compact.NOW,monotonic_now=compact.NOW).ticket for p,st in fake.refresh_states.items()}
+                    pending=capture('pending',compact.NOW)
+                    assert pending==idle+(32 if advanced else 13)
+                    for p,st in fake.refresh_states.items():
+                        assert st.complete(tickets[p])
+                    guard=capture('guard',compact.NOW)
+                    assert guard==pending
+                    expired=capture('guard-expired-idle',compact.NOW+31)
+                    assert expired==idle
+                    fake.model.codex.error='HTTP 429 synthetic'
+                    fake.model.codex.http_status=429
+                    fake.model.codex.api_fresh=False
+                    fake.model.codex.poll_failed=True
+                    fake.model.codex.from_cache=True
+                    fake.refresh_states['codex'].server_until=compact.NOW+90
+                    wait=capture('server-wait',compact.NOW+31)
+                    assert wait==idle+(16 if advanced else 13)
+                    retry=capture('server-expired-retry',compact.NOW+91)
+                    assert retry==idle+(32 if advanced else 29)
+                    assert records[-1]['actions']==['feedbackretry:codex']
+                    assert records[-2]['actions']==[]
+                finally:
+                    if win is not None:
+                        win.close()
+                        win.deleteLater()
+                        fixture.qapp.processEvents()
+                    fixture.doCleanups()
+    Path('/artifacts/window-transitions.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+
+
+def main():
+    assert 'HOME' not in os.environ
+    assert Path.home()==Path('/home/astra')
+    assert list(Path.home().iterdir())==[]
+    assert list(Path('/run').iterdir())==[]
+    assert {name for _,name in socket.if_nameindex()}=={'lo'}
+    for name in ('DBUS_SESSION_BUS_ADDRESS','DBUS_SYSTEM_BUS_ADDRESS','DISPLAY','WAYLAND_DISPLAY','SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY'):
+        assert not os.environ.get(name),name
+    assert os.environ.get('QT_QPA_PLATFORM')=='offscreen'
+    assert importlib.util.find_spec('PyQt5') and importlib.util.find_spec('dbus')
+    from PyQt5.QtWidgets import QStyleFactory
+    styles=list(QStyleFactory.keys())
+    assert 'Breeze' in styles,styles
+    sources={str(p.relative_to('/work')):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('/work/linux').rglob('*.py')}
+    Path('/artifacts/previews').mkdir(exist_ok=True)
+    report={'preflight':'PASS','variant':os.environ['CCL_QA_VARIANT'],'base_commit':'db28943237d038f1fa9e4bb311c6a1c9f9b631f1','source_sha256':sources,'HOME':'absent','home':'empty tmpfs','run':'empty tmpfs','interfaces':['lo'],'Qt_styles':styles,'Qt_platform':'offscreen','native_desktop_tested':False}
+    print(json.dumps({k:v for k,v in report.items() if k!='source_sha256'}),flush=True)
+    sys.path.insert(0,'/work/linux/tests')
+    modules=('test_linux_compact_refresh','test_auto_ui','test_auth_hints','test_gui_layout','test_freshness_4h')
+    suite=unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in modules)
+    result=unittest.TextTestRunner(verbosity=2).run(suite)
+    report.update(modules=modules,tests=result.testsRun,failures=len(result.failures),errors=len(result.errors),skips=len(result.skipped),skip_reasons=result.skipped,expected_failures=len(result.expectedFailures),unexpected_successes=len(result.unexpectedSuccesses))
+    bitmap_matrix()
+    window_transition_scenarios()
+    report['png_count']=len(list(Path('/artifacts/previews').glob('*.png')))
+    Path('/artifacts/suite-result.json').write_text(json.dumps(report,indent=2)+'\n')
+    raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+
+if __name__=='__main__':
+    main()

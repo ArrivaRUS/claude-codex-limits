@@ -200,10 +200,11 @@ class TestAuthDraw(OfflineAuthCase):
             top = 58.0
             for card in panel.adv_cards(model):
                 if card["product"] == product:
-                    return [text for text, _, y, _ in texts if top <= y < top + panel.card_h(card)]
-                top += panel.card_h(card) + 5
+                    return [text for text, _, y, _ in texts if top <= y < top + panel.card_h(card, model)]
+                top += panel.card_h(card, model) + 5
             self.fail("missing product card")
-        return [text for text, x, y, _ in texts if 58 <= y < 242
+        card_bottom = 58 + 152 + (panel.simple_height(model) - panel.PANEL_H)
+        return [text for text, x, y, _ in texts if 58 <= y < card_bottom
                 and (not both or (x < 180 if product == "claude" else x >= 180))]
 
     def test_codex_stale_actual_copy_targets_and_percentages(self):
@@ -303,7 +304,7 @@ class TestAuthDraw(OfflineAuthCase):
                             self.assertIn("claude → /login", claude_text)
                             self.assertIn("данные устарели" if lang == "ru" else "stale data", codex_text)
                             claude_card = panel.adv_cards(m)[0]
-                            codex_top = 58 + panel.card_h(claude_card) + 5
+                            codex_top = 58 + panel.card_h(claude_card, m) + 5
                             self.assertLess(boxes["claudefix"].bottom(), codex_top)
                             self.assertGreaterEqual(boxes[CODEX_TARGET].center().y(), codex_top)
                         else:

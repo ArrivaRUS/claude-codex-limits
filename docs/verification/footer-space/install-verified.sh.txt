@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+DEB=/tmp/ccl-footer-space-20261009/qa/outputs/after/build/claude-codex-limits_0.4.5+local20261009.2_all.deb
+EXPECTED=f95722e993ead3b1a09d3ec7a90a22a94053e5515acc472b68c1a3d85e1ce920
+[ "$(sha256sum "$DEB" | cut -d ' ' -f 1)" = "$EXPECTED" ]
+[ "$(dpkg-deb -f "$DEB" Package)" = claude-codex-limits ]
+[ "$(dpkg-deb -f "$DEB" Version)" = 0.4.5+local20261009.2 ]
+TIMER_WAS_ACTIVE=0
+if systemctl --user is-active --quiet ccl-sync.timer; then
+    TIMER_WAS_ACTIVE=1
+fi
+restore_timer() {
+    systemctl --user daemon-reload
+    if [ "$TIMER_WAS_ACTIVE" = 1 ]; then
+        systemctl --user start ccl-sync.timer
+    fi
+}
+trap restore_timer EXIT
+if [ "$TIMER_WAS_ACTIVE" = 1 ]; then
+    systemctl --user stop ccl-sync.timer
+fi
+ATTEMPTS=0
+while :; do
+    SERVICE_STATE=$(systemctl --user show ccl-sync.service --property=ActiveState --property=SubState --property=MainPID)
+    ACTIVE_STATE=$(printf '%s\n' "$SERVICE_STATE" | sed -n 's/^ActiveState=//p')
+    MAIN_PID=$(printf '%s\n' "$SERVICE_STATE" | sed -n 's/^MainPID=//p')
+    case "$ACTIVE_STATE" in
+        inactive|failed)
+            [ "$MAIN_PID" = 0 ] && break
+            ;;
+        activating|active|deactivating) ;;
+        *) echo 'Unknown sync service state; package not changed.' >&2; exit 1 ;;
+    esac
+    ATTEMPTS=$((ATTEMPTS + 1))
+    [ "$ATTEMPTS" -le 30 ] || { echo 'Sync service still active; package not changed.' >&2; exit 1; }
+    sleep 1
+done
+timeout 120s pkexec /usr/bin/dpkg --install "$DEB"
+dpkg-query -W -f='${Package} ${Version} ${Status}\n' claude-codex-limits

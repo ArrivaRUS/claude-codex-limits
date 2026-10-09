@@ -83,7 +83,7 @@ def panel_helpers():
               TEXT_MID='mid', AMBER='amber')
     return extract(LINUX / 'ccl/gui/panel.py', (
         'limit_can_fix', 'limit_auth_badge', 'limit_paused_notice',
-        'limit_reset_text', 'limit_poll_failed', 'limit_retry_notice', 'feedback_countdown', 'feedback_action', 'feedback_moment', 'feedback_copy',
+        'limit_reset_text', 'limit_poll_failed', 'limit_retry_notice', 'feedback_countdown', 'feedback_action', 'feedback_moment', 'feedback_copy', 'feedback_height',
         'limit_data_badge', 'adv_cards', 'adv_verdict', 'notice_h', 'shows_scoped_row'), ns)
 
 
@@ -129,6 +129,8 @@ def bind_owner(fake, ns):
     if not hasattr(fake, 'timer'): fake.timer = RecordingTimer()
     if not hasattr(fake, 'win'):
         fake.win = SimpleNamespace(view=SimpleNamespace(update=Mock()), page0_changed=Mock())
+    if not hasattr(fake.win, 'page0_changed'):
+        fake.win.page0_changed = Mock(side_effect=fake.win.view.update)
     for name in ('scheduled_at', 'publish_auto_intervals', 'start_poll_timer'):
         if name in ns and not hasattr(fake, name):
             setattr(fake, name, MethodType(ns[name], fake))

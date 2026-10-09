@@ -1,0 +1,250 @@
+{
+  "result": "PASS",
+  "base_commit": "db28943237d038f1fa9e4bb311c6a1c9f9b631f1",
+  "APP_VERSION": "0.4.5",
+  "Debian_version": "0.4.5+local20261009.2",
+  "local_deb": "/tmp/ccl-footer-space-20261009/qa/outputs/after/build/claude-codex-limits_0.4.5+local20261009.2_all.deb",
+  "sha256": "f95722e993ead3b1a09d3ec7a90a22a94053e5515acc472b68c1a3d85e1ce920",
+  "file_count": 39,
+  "payload_exact_to_standard_build": true,
+  "source_exact": true,
+  "only_control_version_changed": true,
+  "maintainer_scripts_exact": true,
+  "installation_performed": false,
+  "manifest": {
+    "usr/bin/ccl-sync": {
+      "sha256": "aa8fd8d6f0eb9ae1bdcd5fbbe6ce4b9dc0b344c492ab40278325f15ed975c270",
+      "mode": "0o755",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/bin/claude-codex-limits": {
+      "sha256": "c732c89b6e1d3a284c4de9bf0ae62b9f58b5429f7d8920e0345f2894ea635a4b",
+      "mode": "0o755",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/lib/systemd/user/ccl-sync.service": {
+      "sha256": "270cd0591a693ad0fbaec4bf6d8867934b83e8443aba3f90657b068b10e8caff",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/lib/systemd/user/ccl-sync.timer": {
+      "sha256": "1ae9f0f852df1407f452f414444ac34104c49e356fffa610af3e43e9d13ee7dd",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/applications/claude-codex-limits.desktop": {
+      "sha256": "c8ce80347d74fcf030bdf04d6577a49f73fb2a1bd5cb43d1d646ff5da8f4de57",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/appicon.png": {
+      "sha256": "610529bdf84bb8993dc8c38d8124168845af98640a0d903876974268dcd646db",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/claude_128.png": {
+      "sha256": "b34b484026cd2dbcbbb3bcd560e16a4e9b5fbfd65392735490af128cb39482a1",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/codex_128.png": {
+      "sha256": "99c4819fbdbf3260fced3762d05cec26da630d40200f91749ebe2d2506ac66ee",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-celebrate.wav": {
+      "sha256": "c13de761c0f5259fd521acdf2d0e7848333c8241360c55c7350940e03d6286dc",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-chime.wav": {
+      "sha256": "9d705f7de7c15f345a0aa455cc2c756ce33a8a32389e963d6a598654c2da1611",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-coin.wav": {
+      "sha256": "268f6e2757abf8ae52e13b50e4a5162934c2c7da41b5218fc81ced23e6a7dab1",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-drop.wav": {
+      "sha256": "79a45184b1f3701e59951572a6344e3e08400c7d722cc57282fed9805f4f6ba3",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-fadeout.wav": {
+      "sha256": "b82e06b5c1b652fed39d7d3ed5024a92a3702241cff34bab447db6b86a78ac67",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-hop.wav": {
+      "sha256": "266e26f2e8e547da8204674f0179e4b761da4f6b2e73fcf004c172c041302f38",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-outage.wav": {
+      "sha256": "2846a43219584351ed78ada9faaeab5a1b63dc2f8e3afe6fbe04bed981b8d6f7",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-rise.wav": {
+      "sha256": "67e29c4cff18e849b87c4a6d654ea8e60088bd9de77d3c1cbd6cf84901d4b8f8",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-sunset.wav": {
+      "sha256": "2652ca469f7142ef242fb73ca2af085ba4442be31116612a66dc31edb3719bba",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/Resources/snd-victory.wav": {
+      "sha256": "1ca357154d19364eb84111fcc7a3105b4545667a84aeb63bed7dee06851eaa01",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/__init__.py": {
+      "sha256": "8f2d78cb13dbcb9e290b005a4daea7865d0003a6fcb2433abeda82153be00b6d",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/auth.py": {
+      "sha256": "48ee84cac854b7174eebd78446cb346199ffb2ff09f76801eb537838daef9d60",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/cli.py": {
+      "sha256": "718c727c8b28a8a2c22ef5eaeb2d8d2df43d3b5ed6a01c364738398a674f7825",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/common.py": {
+      "sha256": "69a1a9412e1cde454a6c7d74f11feea1912da681895f3fafc346c9a838ea5b8c",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/__init__.py": {
+      "sha256": "7047bfdc784540e79146ba753208e349579340d6930744ff4b99d2e232d74601",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/app.py": {
+      "sha256": "b00882aa621774cc8b74a4b47a18af9f20a93671ccce245f9356e30cbfa51a05",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/fmt.py": {
+      "sha256": "74201b83745eecd5fe83b5d7e0c99878130b16dbbec6fc0686bc0e1af32c7409",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/paint.py": {
+      "sha256": "5e5beec92d4b73c8b0c77b4ed9b59df1bedc4e92357017a475821c8ab168c62f",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/panel.py": {
+      "sha256": "b364434440260b833722f27ff4738a77a03fe23315dc7d465097bc76e24896f3",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/gui/trayicon.py": {
+      "sha256": "537bc162255c772d8ad2fb93a7fcfa81a2590173d66c63ebb318e5386c8d90bc",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/limits.py": {
+      "sha256": "0f47d6663066de9690cab812dd8f127ab77635de1d47981197d0200a2a5f48d5",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/polling.py": {
+      "sha256": "163c0c8f8433b41bea62bf98597291cdc78e50b576f69ba6fc3bdd8d1ee26c7c",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/quota_refresh.py": {
+      "sha256": "e79f6a8ac2d5f390c1233709d6b03726447ec8334da8ef675fdfd4f0605d186a",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/sync.py": {
+      "sha256": "63a8674557df6c1da06385c1d2e5c214a821deb5719b3b192c1a3d609a60772f",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/update.py": {
+      "sha256": "5665e430c2add7f64a00c92c512149c44fc512bd08a4d330aabe995631d4cdeb",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/usage.py": {
+      "sha256": "b6993109c6ad1ecf25e0b8236421f418891f60bc72a8d53a4a4cc2ea03a78416",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl/vault.py": {
+      "sha256": "96ae997f72d384a10c51d2667930ad9f6da2ac864b174b7120584a7c822e0fcc",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/ccl-sync": {
+      "sha256": "44c45c30a36338c02b702ab1839ef17f62242e3ed639143ac2ef6a9260a4b80f",
+      "mode": "0o755",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/claude-codex-limits/claude-codex-limits": {
+      "sha256": "b2b358fd7792423135b38443e0032a4ad8e8fa18c2af53c0c8e0781738a18100",
+      "mode": "0o755",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/doc/claude-codex-limits/copyright": {
+      "sha256": "8e61283c8d10bee2f14d773a5df0e5f8ebbfcb62770af4b5c64b21e036262c05",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    },
+    "usr/share/icons/hicolor/256x256/apps/claude-codex-limits.png": {
+      "sha256": "610529bdf84bb8993dc8c38d8124168845af98640a0d903876974268dcd646db",
+      "mode": "0o644",
+      "uid": 0,
+      "gid": 0
+    }
+  }
+}

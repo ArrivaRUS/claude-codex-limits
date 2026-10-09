@@ -1,0 +1,76 @@
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import time
+from datetime import datetime, timezone
+
+base = Path('/tmp/ccl-footer-space-20261009')
+inspection = json.loads((base / 'qa/outputs/after/package-inspection.json').read_text())
+expected_version = '0.4.5+local20261009.2'
+assert inspection['Debian_version'] == expected_version
+mismatches = []
+for name, expected in inspection['manifest'].items():
+    path = Path('/') / name
+    try:
+        stat = path.stat()
+        actual = dict(sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                      mode=oct(stat.st_mode & 0o7777), uid=stat.st_uid, gid=stat.st_gid)
+    except OSError as error:
+        mismatches.append(dict(path=name, error=str(error)))
+        continue
+    if actual != expected:
+        mismatches.append(dict(path=name, expected=expected, actual=actual))
+version = subprocess.check_output(['dpkg-query', '-W', '-f=${Version} ${Status}',
+                                   'claude-codex-limits'], text=True).strip()
+timer = subprocess.run(['systemctl', '--user', 'is-active', 'ccl-sync.timer'],
+                       capture_output=True, text=True)
+record = dict(checked_at=datetime.now(timezone.utc).isoformat(), version=version,
+              file_count=len(inspection['manifest']), mismatches=mismatches,
+              timer=timer.stdout.strip(), package_sha256=inspection['sha256'])
+(base / 'installed-check.json').write_text(json.dumps(record, indent=2) + '\n')
+assert not mismatches, 'Installed payload mismatch'
+assert version == expected_version + ' install ok installed', version
+assert timer.returncode == 0 and timer.stdout.strip() == 'active', 'Timer is not active'
+
+def gui_pids():
+    found = []
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            args = (proc / 'cmdline').read_bytes().split(b'\0')
+            if (proc.stat().st_uid == os.getuid() and len(args) > 1
+                    and args[1] == b'/usr/share/claude-codex-limits/claude-codex-limits'):
+                found.append(int(proc.name))
+        except (OSError, ProcessLookupError):
+            pass
+    return found
+
+old_pids = gui_pids()
+for pid in old_pids:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+deadline = time.monotonic() + 10
+while gui_pids() and time.monotonic() < deadline:
+    time.sleep(0.2)
+assert not gui_pids(), 'Previous GUI is still running'
+os.umask(0o077)
+with (base / 'app-start.log').open('ab') as log:
+    process = subprocess.Popen(['/usr/bin/claude-codex-limits'], stdin=subprocess.DEVNULL,
+                               stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+time.sleep(3)
+record = dict(started_at=datetime.now(timezone.utc).isoformat(), old_pids=old_pids,
+              pid=process.pid, entrypoint='/usr/bin/claude-codex-limits',
+              APP_VERSION='0.4.5', Debian_version=expected_version,
+              checked_after_seconds=3, exit_code=process.poll(),
+              native_ui_confirmation=False)
+(base / 'app-start.json').write_text(json.dumps(record, indent=2) + '\n')
+assert record['exit_code'] is None, 'GUI exited on startup; inspect private log locally'
+print(json.dumps(dict(installed_version=version, files_verified=len(inspection['manifest']),
+                     mismatches=len(mismatches), timer=timer.stdout.strip(),
+                     old_pids=old_pids, new_pid=process.pid, alive_after_seconds=3)))

@@ -141,7 +141,10 @@ def shows_scoped_row(d):
 def simple_height(m):
     prods = products(m)
     extra = SCOPED_ROW_H if any(shows_scoped_row(d) for d, *_ in prods) else 0
-    return PANEL_H + extra + (FEEDBACK_H if prods else 0)
+    feedback = max((feedback_height(m, d, product) for d, _, _, _, product in prods), default=0)
+    # Without feedback, give the final metric row a little room above the border.
+    bottom_pad = 3 if prods and not feedback else 0
+    return PANEL_H + extra + feedback + bottom_pad
 
 
 def products(m):
@@ -245,11 +248,21 @@ def feedback_copy(m, d, product):
     return first, second, color, "\n".join(detail)
 
 
-def draw_feedback(c, m, d, product, x, top, w, hits):
+def feedback_height(m, d, product):
+    """Reserve space only for visible feedback, shared by sizing and drawing."""
+    first, second, _, _ = feedback_copy(m, d, product)
+    return FEEDBACK_H if second else 16 if first else 0
+
+
+def draw_feedback(c, m, d, product, x, top, w, hits, tooltip_area=None):
     first, second, color, _ = feedback_copy(m, d, product)
-    area = rect_tl(x, top, w, FEEDBACK_H)
+    height = feedback_height(m, d, product)
+    area = rect_tl(x, top, w, height) if height else tooltip_area
     # Tooltip region precedes the whole-card link; actions get their own native hit.
-    hits.append(("feedback:" + product, area))
+    if area is not None:
+        hits.append(("feedback:" + product, area))
+    if not height:
+        return
     def fit(text, weight, ink, width):
         label = Attr(text, 10, weight, ink)
         if label.width() <= width:
@@ -308,7 +321,9 @@ def draw_simple(c, W, H, m):
         r = rect_tl(x, cards_top, w, card_h)
         c.round_fill(r, 14, gray(1, 0.04))
         c.round_stroke(r, 14, gray(1, 0.06), 1)
-        draw_feedback(c, m, d, product, x + 14, cards_top + card_h - FEEDBACK_H, w - 28, hits)
+        feedback = feedback_height(m, d, product)
+        draw_feedback(c, m, d, product, x + 14, cards_top + card_h - feedback, w - 28, hits,
+                      tooltip_area=rect_tl(x + 14, cards_top + 13, 18, 18))
         can_fix = limit_can_fix(product, d.auth)
         hits.append(("settings" if not d.present else "claudefix" if can_fix else "open:" + url, r))
         c.image(icon, rect_tl(x + 14, cards_top + 13, 18, 18))
@@ -584,12 +599,13 @@ def notice_h(card):
     return NOTICE if card["data"].present and card["data"].auth != limits.OK else 0
 
 
-def card_h(card):
+def card_h(card, m):
+    feedback = feedback_height(m, card["data"], card["product"])
     if not card["data"].present:
-        return PLACEHOLDER + FEEDBACK_H
+        return PLACEHOLDER + feedback
     rows = card["rows"]
     body = sum(row_h(r) for r in rows) + max(0, len(rows) - 1) if rows else PLACEHOLDER
-    return 38 + body + notice_h(card) + FEEDBACK_H
+    return 38 + body + notice_h(card) + feedback
 
 
 def hist_product(m, present):
@@ -615,7 +631,7 @@ def advanced_height(m):
         return simple_height(m)
     h = 94
     for cd in cards:
-        h += 5 + card_h(cd)
+        h += 5 + card_h(cd, m)
     h += 5 + hist_height(m, cards)
     return h + CREDIT_H
 
@@ -769,11 +785,15 @@ def draw_advanced(c, W, H, m):
             p.restore()
 
     for cd in cards:
-        ch = card_h(cd)
+        ch = card_h(cd, m)
         d = cd["data"]
         rect = rect_tl(ADV_CX, y, ADV_CW, ch)
         c.round_fill(rect, 14, gray(1, 0.04))
-        draw_feedback(c, m, d, cd["product"], ADV_IX, y + ch - FEEDBACK_H, ADV_IW, hits)
+        feedback = feedback_height(m, d, cd["product"])
+        tooltip_area = (rect_tl(ADV_IX, y + 10, 16, 16) if d.present else
+                        rect_tl(ADV_IX + 4, y + 10, 80, 20))
+        draw_feedback(c, m, d, cd["product"], ADV_IX, y + ch - feedback, ADV_IW, hits,
+                      tooltip_area=tooltip_area)
         if not d.present:
             p.save()
             pen = QPen(gray(1, 0.14), 1)

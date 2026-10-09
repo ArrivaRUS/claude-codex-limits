@@ -1221,7 +1221,8 @@ class TrayApp(QObject):
             data.server_retry_at = refresh.server_until
         win = getattr(self, "win", None)
         if win is not None:
-            win.view.update()
+            # Feedback can grow or disappear on admission and countdown expiry.
+            win.page0_changed()
 
     def save_poll_states(self):
         try:

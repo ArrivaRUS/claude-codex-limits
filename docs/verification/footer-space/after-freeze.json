@@ -1,0 +1,15 @@
+{
+  "base_commit": "db28943237d038f1fa9e4bb311c6a1c9f9b631f1",
+  "sha256": {
+    "linux/ccl/gui/panel.py": "b364434440260b833722f27ff4738a77a03fe23315dc7d465097bc76e24896f3",
+    "linux/ccl/gui/app.py": "b00882aa621774cc8b74a4b47a18af9f20a93671ccce245f9356e30cbfa51a05",
+    "linux/tests/test_linux_compact_refresh.py": "9fced427c6a20c6a87d7828c208d6846c0fffd27dc28bc6b6094b6027eda3353",
+    "linux/tests/test_auth_hints.py": "56e9bf2543c20ca41a86144f09a06f9d624a32e1ddca1ac7d32a3a58c9769294",
+    "linux/tests/_freshness_env.py": "fa672625020afdc16f1ea77a637b0ca7745ae8ea50a416cbcedccbd1944f9104",
+    "linux/tests/test_auto_ui.py": "3f0fa40fda0e53bc887ede8aee1a4e921164a49ecb56e6145152ed039f33e9f8",
+    "run-isolated.sh": "ade794b57c90221af70dae1a8f4c3f81b57cd95fd8ff2dc5cfffdb207e8d7f33",
+    "run-suite.py": "9e794df1b07a42127c391f680f919e978ed699c44b1b58e838874ce387a8e9ca",
+    "build-isolated.sh": "854dc0ec49c139cf268e91626d7b7edb7106823f8c9b2ab2be09ad11004d1d7a",
+    "build-package.sh": "9e49c5bcb737e885144cc65de9fa561e836c0c56887febb7d34a7e8679f9ceb4"
+  }
+}

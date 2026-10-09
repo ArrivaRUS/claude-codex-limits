@@ -1,0 +1,58 @@
+{
+  "result": "PASS",
+  "final_panel_sha256": "b364434440260b833722f27ff4738a77a03fe23315dc7d465097bc76e24896f3",
+  "matched_pairs": 32,
+  "tooltip_state_asof_exact": true,
+  "all_hit_regions_in_panel": true,
+  "feedback_action_regions_in_cards": true,
+  "height_summary": [
+    {
+      "case": "success",
+      "view": "simple",
+      "before": 318,
+      "after": 289
+    },
+    {
+      "case": "error",
+      "view": "simple",
+      "before": 318,
+      "after": 318
+    },
+    {
+      "case": "missing",
+      "view": "simple",
+      "before": 318,
+      "after": 289
+    },
+    {
+      "case": "inflight",
+      "view": "simple",
+      "before": 318,
+      "after": 302
+    },
+    {
+      "case": "success",
+      "view": "advanced",
+      "before": 520,
+      "after": 456
+    },
+    {
+      "case": "error",
+      "view": "advanced",
+      "before": 520,
+      "after": 488
+    },
+    {
+      "case": "missing",
+      "view": "advanced",
+      "before": 435,
+      "after": 371
+    },
+    {
+      "case": "inflight",
+      "view": "advanced",
+      "before": 520,
+      "after": 488
+    }
+  ]
+}

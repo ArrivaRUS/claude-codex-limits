@@ -139,6 +139,13 @@ class TestLinuxCompactRefresh(unittest.TestCase):
             self.assertLessEqual(footer.height(), 32)
             card = next((r for r in cards if r.contains(footer)), None)
             self.assertIsNotNone(card, hid)
+            first, second, _, _ = panel.feedback_copy(m, getattr(m, hid.split(":")[1]), hid.split(":")[1])
+            if not first and not second:
+                self.assertIn(footer.width(), (16, 18, 80), "idle tooltip uses an existing icon or missing-product name")
+                self.assertEqual(footer.height(), 20 if footer.width() == 80 else footer.width())
+                self.assertIn(footer.top() - card.top(), (10, 13))
+                continue
+            self.assertEqual(footer.height(), 32 if second else 16)
             self.assertEqual(footer.bottom(), card.bottom())
             lines = [t for t in texts if footer.top() <= t[2] < footer.bottom() and footer.left() <= t[1] < footer.right()]
             self.assertLessEqual(len(lines), 2, lines)
@@ -235,11 +242,11 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                             self.assertIn("Retry" if lang == "en" else "Повторить", [t[0] for t in texts])
                             self.assertIn("feedbackretry:codex", dict(hits))
                         self.save_preview(image, case, lang, advanced)
-                self.assertEqual(heights["both-fresh"], heights["both-pending"])
-                self.assertEqual(heights["both-fresh"], heights["both-error"])
+                self.assertEqual(heights["both-pending"], heights["both-fresh"] + (32 if advanced else 13))
+                self.assertEqual(heights["both-error"], heights["both-fresh"] + (32 if advanced else 29))
                 if not advanced:
-                    self.assertEqual(heights["both-fresh"], 318)
-                    self.assertEqual(heights["claude-only"], 318)
+                    self.assertEqual(heights["both-fresh"], 289)
+                    self.assertEqual(heights["claude-only"], 289)
                     self.assertEqual(heights["off"], 286)
 
     def test_guard_server_partial_completion_and_codex_only_previews(self):
@@ -290,7 +297,8 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                     with patch.object(paint.Canvas, "text", record_text):
                         image, hits, texts, fills = self.render(m, advanced)
                     self.assertEqual((vars(m.claude), vars(m.codex), m.pending_products), before)
-                    self.assertEqual(image.height(), baseline_height, "request feedback added card height")
+                    self.assertEqual(image.height(), baseline_height + (0 if case == "codex-only" else 16 if advanced else 13),
+                                     "one visible status line reserves 16 px; empty Simple keeps 3 px padding")
                     self.assert_schedule(hits, texts, fills, {14400} if case == "codex-only" else {900, 14400})
                     self.assert_feedback_inside_cards(m, hits, fills, texts)
                     boxes = dict(hits)
@@ -319,7 +327,7 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                     else:
                         self.assertEqual(set(hid for hid in boxes if hid.startswith("feedback:")), {"feedback:codex"})
                         self.assertIn("47%", painted_words)
-                        self.assertEqual(image.height(), 318)
+                        self.assertEqual(image.height(), 289)
                     self.save_preview(image, case, lang, advanced)
 
     def test_pending_publication_and_response_clear_without_real_worker(self):

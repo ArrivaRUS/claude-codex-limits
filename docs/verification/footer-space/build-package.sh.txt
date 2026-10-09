@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+mkdir -p /artifacts/build
+sh /work/linux/packaging/build-deb.sh /artifacts/build
+original=/artifacts/build/claude-codex-limits_0.4.5_all.deb
+local=/artifacts/build/claude-codex-limits_0.4.5+local20261009.2_all.deb
+dpkg-deb -R "$original" /tmp/ccl-repack
+sed -i 's/^Version: 0.4.5$/Version: 0.4.5+local20261009.2/' /tmp/ccl-repack/DEBIAN/control
+test "$(sed -n 's/^Version: //p' /tmp/ccl-repack/DEBIAN/control)" = 0.4.5+local20261009.2
+dpkg-deb --root-owner-group -Zxz --build /tmp/ccl-repack "$local"
+dpkg-deb -R "$local" /artifacts/package-extracted
+dpkg-deb -I "$local" > /artifacts/package-info.txt
+dpkg-deb -c "$local" > /artifacts/package-contents.txt
+sha256sum "$original" "$local" > /artifacts/package-sha256.txt
