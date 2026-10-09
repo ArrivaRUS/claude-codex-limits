@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+qa_root=/tmp/ccl-footer-20261009/qa
+variant=${1:?baseline or after required}
+case "$variant" in baseline|after) ;; *) exit 2;; esac
+source_dir="$qa_root/$variant"
+output_dir="$qa_root/outputs/$variant"
+test -f "$source_dir/linux/ccl/gui/panel.py"
+exec bwrap --unshare-user --unshare-net --unshare-pid --unshare-ipc --unshare-uts --die-with-parent --new-session --clearenv --cap-drop ALL --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --dir /etc --ro-bind /etc/passwd /etc/passwd --ro-bind /etc/group /etc/group --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/fonts /etc/fonts --ro-bind /etc/os-release /etc/os-release --tmpfs /home --dir /home/astra --tmpfs /tmp --tmpfs /run --proc /proc --dev /dev --tmpfs /dev/shm --dir /work --ro-bind "$source_dir/linux" /work/linux --ro-bind "$source_dir/Resources" /work/Resources --ro-bind "$source_dir/LICENSE" /work/LICENSE --dir /runner --ro-bind "$qa_root/build-package.sh" /runner/build-package.sh --bind "$output_dir" /artifacts --bind "$output_dir" /tmp/ccl-qa-artifacts --setenv PATH /usr/bin:/bin --setenv LANG C.UTF-8 --setenv QT_QPA_PLATFORM offscreen --setenv PYTHONDONTWRITEBYTECODE 1 --setenv CCL_PREVIEW_DIR /tmp/ccl-qa-artifacts/previews --setenv CCL_QA_VARIANT "$variant" --chdir /work /bin/sh /runner/build-package.sh

@@ -1,6 +1,10 @@
 # Рабочий гайд проекта
 
-## LINUX-COMPACT: Linux 0.4.5 опубликована и установлена на текущей Astra
+## Локальный UI-патч Linux · 2026-10-09
+
+В патче карточки Simple/Advanced, RU/EN больше не показывают нижние «Проверено»/«Данные» и время. При обычном состоянии нижняя область пуста; ошибки, ожидание, «Обновляем…», «Повторить» и «Восстановить доступ» сохраняются. Наведите указатель на нижнюю область карточки, чтобы прочитать время данных, полный timestamp и сроки повторов в подсказке. Предпосылки ручного обновления — действующий CLI-вход и включённая подписка — сохраняются. QA/design/пакетные проверки пройдены; локальный DEB установлен: dpkg exit 0, 39 файлов exact, timer active; GUI PID 96441 жив через 3 с. Подготовлен DEB `0.4.5+local20261009.1`, APP_VERSION `0.4.5`, без нового GitHub-релиза. [Проверки и ограничения](footer-labels.md).
+
+## История LINUX-COMPACT: Linux 0.4.5 опубликована и установлена на текущей Astra
 
 Опубликована [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5) на source `19440ee112f164b411bf4715d6fa65077a272c48`. [Приёмка](linux-compact-refresh-verification.md), [план](linux-compact-refresh-plan.md), [сценарий ручного обновления](manual-refresh-proposal.md), [UX](compact-refresh-ux.md), [RU/EN инструкция](linux-compact-refresh-release.md). Исторические факты macOS и прежних Linux-релизов ниже сохранены.
 

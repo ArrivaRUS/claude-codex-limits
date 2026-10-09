@@ -211,35 +211,35 @@ def feedback_copy(m, d, product):
         detail.append(tr("Защита от частых запросов: повтор через ", "Local request guard: retry in ")
                       + feedback_countdown(d.local_retry_at, now))
     if product in m.pending_products or d.refresh_in_flight:
-        first, second, color = tr("Обновляем…", "Refreshing…"), data, TEXT_MID
+        first, second, color = tr("Обновляем…", "Refreshing…"), "", TEXT_MID
     elif d.auth != limits.OK:
-        first, second, color = limit_auth_badge(d.auth), data, AMBER
+        first, second, color = limit_auth_badge(d.auth), "", AMBER
     elif server_wait:
         first = tr("Пауза сервиса · ", "Service wait · ") + feedback_countdown(d.server_retry_at, now)
-        second, color = data, AMBER
+        second, color = "", AMBER
     elif d.api_fresh and not limit_poll_failed(d):
-        first = tr("Проверено ", "Checked ") + (fmt.hhmm(d.as_of) if known else "—")
-        second = (tr("Повтор через ", "Retry in ") + feedback_countdown(d.local_retry_at, now)) if local_wait else data
-        color = TEXT_MID
+        first = (tr("Повтор через ", "Retry in ") + feedback_countdown(d.local_retry_at, now)) if local_wait else ""
+        second, color = "", TEXT_MID
     elif local_wait:
         first = (tr("Сбой · повтор ", "Failed · retry ") if limit_poll_failed(d) else
                  tr("Повтор через ", "Retry in ")) + feedback_countdown(d.local_retry_at, now)
-        second, color = data, AMBER if limit_poll_failed(d) else TEXT_MID
+        second, color = "", AMBER if limit_poll_failed(d) else TEXT_MID
     elif limit_poll_failed(d):
-        first, second, color = tr("Сбой обновления", "Update failed"), data, AMBER
+        first, second, color = tr("Сбой обновления", "Update failed"), "", AMBER
     else:
-        first, second, color = data, "", TEXT_MID
+        first, second, color = "", "", TEXT_MID
     if d.api_fresh and not limit_poll_failed(d):
+        detail.insert(0, tr("Проверено ", "Checked ") + (fmt.hhmm(d.as_of) if known else "—"))
         detail.append(tr("Получен свежий ответ; значения могли не измениться.",
                          "Live response received; values may be unchanged."))
     action, title = feedback_action(m, d, product, now)
     if action:
-        # The action occupies row two; keep the old data time visible in row one.
+        # The action occupies row two; timestamps remain in the tooltip.
         if action.startswith("feedbackretry:"):
             first = tr("Сбой", "Failed")
-        first += " · " + (fmt.hhmm(d.as_of) if known else "—")
         second = title
-    detail.insert(0, first)
+    if first:
+        detail.insert(0, first)
     if limits.is_stale(d):
         detail.append(tr("Данные устарели · темп не считаем", "Stale data · pace paused"))
     return first, second, color, "\n".join(detail)
@@ -257,7 +257,8 @@ def draw_feedback(c, m, d, product, x, top, w, hits):
         while text and Attr(text + "…", 10, weight, ink).width() > width:
             text = text[:-1]
         return Attr(text + "…", 10, weight, ink)
-    c.text_c(fit(first, "regular", color, w), x, top + 2, 12)
+    if first:
+        c.text_c(fit(first, "regular", color, w), x, top + 2, 12)
     action, title = feedback_action(m, d, product)
     if action:
         label = fit(title, "medium", LINK, w - 8)

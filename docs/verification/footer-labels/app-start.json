@@ -1,0 +1,12 @@
+{
+  "Debian_version": "0.4.5+local20261009.1",
+  "APP_VERSION": "0.4.5",
+  "previous_pids": [
+    4056
+  ],
+  "pid": 96441,
+  "checked_after_seconds": 3,
+  "exit_code": null,
+  "running": true,
+  "entrypoint": "/usr/bin/claude-codex-limits"
+}

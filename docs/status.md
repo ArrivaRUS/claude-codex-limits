@@ -1,4 +1,8 @@
-# LINUX-COMPACT · 2026-10-08
+# Локальный UI-патч Linux · 2026-10-09
+
+Убраны нижние «Проверено»/«Данные» и видимое время в карточках; сведения сохранены в подсказке, ошибки/ожидание/повтор/восстановление остаются. HEAD `b94f95d`, SHA файла panel.py `2c8d52b8…`; code/isolation/design и packaged QA PASS; focused suite 23 PASS / 0 ошибок/пропусков, 180 PNG. Локальный DEB установлен: dpkg exit 0, 39 файлов exact, timer active; GUI PID 96441 жив через 3 с. Подготовлен локальный DEB `0.4.5+local20261009.1`, APP_VERSION `0.4.5`. Нового GitHub-релиза нет; опубликованная `linux-v0.4.5` и её приёмка ниже относятся к исходникам 8 октября. [Локальный патч](footer-labels.md).
+
+# История LINUX-COMPACT · 2026-10-08
 
 Linux 0.4.5 опубликована: компактная панель, ручные 4ч, Auto с подсветкой действующих интервалов и независимое ручное обновление. Исходная ревизия `19440ee112f164b411bf4715d6fa65077a272c48`; CI 358 тестов без ошибок и пропусков, независимые code/security/isolation/design и packaged QA пройдены. Публичный DEB скачан обратно: SHA-256 совпал с принятым пакетом. Latest остаётся macOS 3.2.7. На текущей Astra обновлено 0.4.4 → 0.4.5: установка exit 0, dpkg `install ok installed`, 39 установленных файлов совпали с DEB по bytes/правам/владельцам. Штатный GUI PID 133128 жив через 3 секунды, timer активен. Новый ручной smoke 0.4.5 и успешный обмен не подтверждены. [Установка](alse-0.4.5-installation.md). [Релиз](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), [приёмка](linux-compact-refresh-verification.md).
 

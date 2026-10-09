@@ -108,7 +108,7 @@ class TestAuthCopy(OfflineAuthCase):
             d = reading("no-asof")
             model = SimpleNamespace(pending_products=set())
             first, second, color, detail = helpers["feedback_copy"](model, d, "codex")
-            self.assertEqual(first, "Данные —" if lang == "ru" else "Data —")
+            self.assertEqual(first, "")
             self.assertEqual(second, "")
             self.assertEqual(color, helpers["TEXT_MID"])
             self.assertIn("темп не считаем" if lang == "ru" else "pace paused", detail)
@@ -233,7 +233,8 @@ class TestAuthDraw(OfflineAuthCase):
                                 self.assertFalse(any("Темп по снимку от" in text or "Pace from snapshot at" in text for text in card_text))
                             else:
                                 first, second, _, detail = panel.feedback_copy(m, m.codex, "codex")
-                                self.assertIn(first, card_text)
+                                if first:
+                                    self.assertIn(first, card_text)
                                 if second:
                                     self.assertIn(second, card_text)
                                 self.assertIn("Данные " if lang == "ru" else "Data ", detail)
@@ -269,7 +270,7 @@ class TestAuthDraw(OfflineAuthCase):
                                 self.assertIsNone(m.claude.session)
                                 self.assertIsNone(m.claude.weekly)
                                 if advanced:
-                                    self.assertIn("сбой доступа · —" if lang == "ru" else "access issue · —", card_text)
+                                    self.assertIn("сбой доступа" if lang == "ru" else "access issue", card_text)
                                     self.assertIn("Восстановить доступ" if lang == "ru" else "Restore access", card_text)
                                     self.assertIn("feedbackfix:claude", dict(hits))
                                     detail = panel.feedback_copy(m, m.claude, "claude")[3]

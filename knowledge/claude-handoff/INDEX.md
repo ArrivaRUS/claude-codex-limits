@@ -6,6 +6,7 @@
 
 Ссылки `../../…` ведут в текущий checkout; в отдельной копии этой папки требуется оригинальный репозиторий.
 
+- [Локальный UI-патч 9 октября: нижние подписи карточек](../../docs/footer-labels.md).
 - [Установка Linux 0.4.5 на Astra](../../docs/alse-0.4.5-installation.md); [историческая проверка 0.4.4](../../docs/alse-0.4.4-verification.md).
 - [HEARTBEAT](../../HEARTBEAT.md), [статус](../../docs/status.md), [рабочий гайд](../../docs/project-guide.md).
 - [README RU](../../README.ru.md), [Linux README](../../linux/README.md).

@@ -1,0 +1,79 @@
+import importlib.util
+import hashlib
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+import unittest
+
+
+def bitmap_matrix():
+    # Temporary QA artifact capture, using existing fixture guards and renderer.
+    import test_linux_compact_refresh as compact
+    from ccl import limits
+    records=[]
+    for style in ('Fusion','Breeze'):
+        for lang in ('ru','en'):
+            for advanced in (False,True):
+                for case in ('success','error','missing','inflight'):
+                    fixture=compact.TestLinuxCompactRefresh('test_refresh_is_small_header_icon_beside_settings')
+                    fixture.setUpClass()
+                    try:
+                        fixture.setUp()
+                        fixture.set_preview_style(style)
+                        fixture.st.update(lang=lang,monitor_claude=True,monitor_codex=True)
+                        m=fixture.model()
+                        if case=='error':
+                            m.codex.error='synthetic failure'
+                            m.codex.poll_failed=True
+                            m.codex.api_fresh=False
+                            m.codex.from_cache=True
+                            m.codex.next_poll_at=compact.NOW+1800
+                        elif case=='missing':
+                            m.codex=limits.absent_limits()
+                        elif case=='inflight':
+                            m.pending_products={'claude','codex'}
+                        image,hits,texts,fills=fixture.render(m,advanced)
+                        fixture.save_preview(image,'qa-'+case,lang,advanced)
+                        footers={}
+                        for product in ('claude','codex'):
+                            box=dict(hits)['feedback:'+product]
+                            painted=[t[0] for t in texts if box.left()<=t[1]<box.right() and box.top()<=t[2]<box.bottom()]
+                            copy=compact.panel.feedback_copy(m,getattr(m,product),product)
+                            footers[product]={'painted':painted,'first':copy[0],'second':copy[1],'tooltip':copy[3], 'as_of':getattr(m,product).as_of}
+                        records.append({'style':style,'lang':lang,'advanced':advanced,'case':case,'width':image.width(),'height':image.height(),'footers':footers,'actions':[h for h,_ in hits if h.startswith('feedbackretry:')]})
+                    finally:
+                        fixture.doCleanups()
+    Path('/artifacts/bitmap-matrix.json').write_text(json.dumps(records,ensure_ascii=False,indent=2)+'\n')
+
+
+def main():
+    assert 'HOME' not in os.environ
+    assert Path.home()==Path('/home/astra')
+    assert list(Path.home().iterdir())==[]
+    assert list(Path('/run').iterdir())==[]
+    assert {name for _,name in socket.if_nameindex()}=={'lo'}
+    for name in ('DBUS_SESSION_BUS_ADDRESS','DBUS_SYSTEM_BUS_ADDRESS','DISPLAY','WAYLAND_DISPLAY','SSH_AUTH_SOCK','GH_TOKEN','GITHUB_TOKEN','OPENAI_API_KEY','ANTHROPIC_API_KEY'):
+        assert not os.environ.get(name),name
+    assert os.environ.get('QT_QPA_PLATFORM')=='offscreen'
+    assert importlib.util.find_spec('PyQt5') and importlib.util.find_spec('dbus')
+    from PyQt5.QtWidgets import QStyleFactory
+    styles=list(QStyleFactory.keys())
+    assert 'Breeze' in styles,styles
+    sources={str(p.relative_to('/work')):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('/work/linux').rglob('*.py')}
+    Path('/artifacts/previews').mkdir(exist_ok=True)
+    report={'preflight':'PASS','variant':os.environ['CCL_QA_VARIANT'],'base_commit':'b94f95d8d6c53ed6c8beba09b7575e21252e715a','source_sha256':sources,'HOME':'absent','home':'empty tmpfs','run':'empty tmpfs','interfaces':['lo'],'Qt_styles':styles,'Qt_platform':'offscreen','native_desktop_tested':False}
+    print(json.dumps({k:v for k,v in report.items() if k!='source_sha256'}),flush=True)
+    sys.path.insert(0,'/work/linux/tests')
+    modules=('test_linux_compact_refresh','test_auto_ui','test_auth_hints','test_gui_layout')
+    suite=unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromName(name) for name in modules)
+    result=unittest.TextTestRunner(verbosity=2).run(suite)
+    report.update(modules=modules,tests=result.testsRun,failures=len(result.failures),errors=len(result.errors),skips=len(result.skipped),skip_reasons=result.skipped,expected_failures=len(result.expectedFailures),unexpected_successes=len(result.unexpectedSuccesses))
+    bitmap_matrix()
+    report['png_count']=len(list(Path('/artifacts/previews').glob('*.png')))
+    Path('/artifacts/suite-result.json').write_text(json.dumps(report,indent=2)+'\n')
+    raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)
+
+if __name__=='__main__':
+    main()

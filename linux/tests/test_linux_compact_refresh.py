@@ -142,7 +142,6 @@ class TestLinuxCompactRefresh(unittest.TestCase):
             self.assertEqual(footer.bottom(), card.bottom())
             lines = [t for t in texts if footer.top() <= t[2] < footer.bottom() and footer.left() <= t[1] < footer.right()]
             self.assertLessEqual(len(lines), 2, lines)
-            self.assertTrue(lines, hid)
             for _, _, top, height, _ in lines:
                 self.assertLessEqual(top + height, footer.bottom())
 
@@ -231,7 +230,7 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                         if case == "both-pending":
                             self.assertEqual(sum(t[0] == ("Refreshing…" if lang == "en" else "Обновляем…") for t in texts), 2)
                         if case == "both-error":
-                            self.assertIn(("Failed · " if lang == "en" else "Сбой · ") + panel.fmt.hhmm(m.codex.as_of),
+                            self.assertIn("Failed" if lang == "en" else "Сбой",
                                           [t[0] for t in texts])
                             self.assertIn("Retry" if lang == "en" else "Повторить", [t[0] for t in texts])
                             self.assertIn("feedbackretry:codex", dict(hits))
@@ -300,8 +299,8 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                         return [t[0] for t in texts if r.left() <= t[1] < r.right() and r.top() <= t[2] < r.bottom()]
                     if case == "local-guard-30s":
                         self.assertIn("Повтор через 30 с" if lang == "ru" else "Retry in 30 s", footer_text("codex"))
-                        self.assertTrue(any(t.startswith("Проверено " if lang == "ru" else "Checked ")
-                                            for t in footer_text("codex")))
+                        self.assertFalse(any(t.startswith("Проверено " if lang == "ru" else "Checked ")
+                                             for t in footer_text("codex")))
                         self.assertNotIn("feedbackretry:codex", boxes)
                         self.assertIsNone(d.server_retry_at)
                     elif case == "server-retry-after-90s":
@@ -313,8 +312,7 @@ class TestLinuxCompactRefresh(unittest.TestCase):
                         self.assertIn("HTTP 429", detail)
                     elif "-success-" in case:
                         self.assertIn("Обновляем…" if lang == "ru" else "Refreshing…", footer_text(pending))
-                        self.assertTrue(any(t.startswith("Проверено " if lang == "ru" else "Checked ")
-                                            for t in footer_text(completed)))
+                        self.assertEqual(footer_text(completed), [])
                         self.assertNotIn("feedbackretry:" + pending, boxes)
                         self.assertEqual(getattr(m, pending).as_of, NOW - 60)
                         self.assertEqual(getattr(m, completed).as_of, NOW)
