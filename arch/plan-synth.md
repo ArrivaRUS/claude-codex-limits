@@ -3,7 +3,10 @@
 Дата: 2026-10-12. Заменяет v1 (`arch/plan-synth-v1.md` — дельты к плану #1). Входы: план #1 `arch/plan-claude.md` (база), план #2
 `arch/plan-codex.md`, челлендж Astra `arch/challenge-codex.md` (14 несостыковок), PRD `docs/prd-remote-limits.md` (G1, решения
 владельца 1–7), UX `design/remote-limits-ux.md` (G2b), код macOS 3.2.7 / Linux 0.4.5 (строки проверены заново). Решения Юрки по
-спорным пунктам применены без обсуждения. Статус: на T1 (security-analyst) → execution-pack.
+спорным пунктам применены без обсуждения. Статус: T1 пройден (`docs/security-remote-limits.md`, 0 blocker), execution-pack — `docs/plans.md`.
+Правки после T1 и замера (2026-10-12, вечер): риск 1 закрыт (`history` = 30 последних ревизий); `credential_write: never` по умолчанию на
+всех портах (П3-д); потолок чужого `retryUntil` 24 ч от `firstSeenAt` (П7); `organizationUuid` снят (П1-а); сквозная привязка идентичности
+(П2-в); теги машин `vps`/`macbook`/`thinkpad`.
 
 ## Итог
 
@@ -64,7 +67,7 @@ never` на машине с живым CLI, смена политики толь
 (у файлов без поля — `updated`). `accounts` ≤ 8 записей. `unattributedDays` — форма `days` (расход без известной идентичности).
 `captions` — `{label: {text ≤ 32, setAt}}`, побеждает поздний `setAt` (RL-2, Should). `machine.name` — санитизированный тег без ПДн (§F.1 п. 1).
 
-**Запись аккаунта.** `product` ∈ {claude, codex} (обяз.); `label` — 16 hex или `null` (+ `labelReason` ∈ {no_login, unreadable, no_gist});
+**Запись аккаунта.** `product` ∈ {claude, codex} (обяз.); `label` — 16 hex или `null` (+ `labelReason` ∈ {no_login, no_account_uuid, unreadable, no_gist});
 `status` ∈ {ok, stale, signed_out, expired, rate_limited, error} (обяз.); `expiredReason` ∈ {cli_refresh_pending, signin_required};
 `asOf` — время **успешного** ответа API, отсутствует до первого успеха **этого** аккаунта (C3/C4); `attemptAt` — время последней попытки
 (единственное имя поля; `lastAttemptAt` нигде не используется), `attemptKind` ∈ {auto, activity, manual, initial}; `windows.{session,weekly}`
@@ -90,7 +93,12 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
   (парсер извлекает только этот ключ; `emailAddress`, `displayName`, `organizationUuid` и прочие ключи объекта в структуры приложения
   не попадают — S3); Codex — `~/.codex/auth.json` → `tokens.account_id` (`id_token` не читается). Перечитывается **каждый проход**
   (`_read_json_retry`, 5×0,2 с). Не читается → `label: null`, `labelReason: unreadable`, статус `error`, **запроса нет** (B2 без метки
-  невозможна; план #1 §B). Файла/блока нет → `no_login` → `signed_out`, 0 запросов. Нет gist id → `no_gist`, опроса нет (P6).
+  невозможна; план #1 §B). Файла/блока нет → `no_login` → `signed_out`, 0 запросов. Нет gist id → `no_gist`, опроса нет (P6). Запасной источник `organizationUuid` **снят** (T1 П1-а: метка организации
+  общая для всех её членов): нет `accountUuid` → `label: null`, `labelReason: no_account_uuid`, запроса нет. `~/.claude.json` парсится с
+  пределом 8 МБ и `RecursionError` (П2-б).
+- **Сквозная привязка (T1 П2-в).** `localId` снимается тем же чтением файла входа, что и токен, и едет в `LimitData.account`; если после
+  запроса `localId` другой → результат отброшен как `identity_changed`, попытка потрачена; C3-fallback, попытки и `retryUntil` — только
+  внутри того же `localId`.
 - **Смена значения = смена аккаунта (A6).** Новая корзина истории; записи `cache.json`/`publisher-state.json` старого аккаунта для нового
   не используются (№3): до первого успеха — только статус попытки, без значений и `asOf`. Журнал: `label_changed`.
 - **Известное ограничение (№7).** `oauthAccount` — кэш профиля Claude Code; после смены аккаунта он может отставать от действующего
@@ -135,7 +143,7 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
       (status, asOf, retryUntil, класс ошибки).
 7. Собрать итоговый блок → `sync.write(session, file)`, если запись положена по правилу ниже (**PATCH №2** на due-тике; единственный PATCH
    на остальных). Журнал `publish` (changed/ok/failed, класс).
-8. Снять замок. Порядок замков: `quota` → `sync` (`open_cycle`/`write` берут `sync` коротко). `ccl-sync status` читает под неблокирующим
+8. Снять замок. Порядок замков: `quota` → `sync` (`open_cycle`/`write` берут `sync` с ожиданием ≤ 60 с, не пропуском — T1 П8-а). `ccl-sync status` читает под неблокирующим
    `sync` как сегодня. Внутри замка худший случай ≈ 90 с (GET 20 + PATCH 20 + 2 запроса ×15 + PATCH 20), типично < 5 с.
 
 **Правило записи (№11) — три отпечатка в `sync-state.json`:** `pushHash` = sha1(корневой `days`) — расход, пишется при изменении и
@@ -153,16 +161,17 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 перечитывает; `local_activity` применяет проход); раз в 60 с перечитывает `cache.json`/`state.json`/`publisher-state.json` и показывает
 «опрос ведёт издатель · следующая попытка HH:MM»; кнопка «Обновить» → `publisher.run_pass(manual=True)` в рабочем потоке (тот же замок);
 свои циклы синка трей гоняет с `allow_push=False` (`gui/app.py:1379`). Старый трей 0.4.5 на `:20` режима не знает → `install.sh --publisher`
-перезапускает запущенный трей (или печатает команду). На не-делегированных машинах рабочий поток трея берёт `file_lock("quota")` на время
+при живом трее отказывает с инструкцией остановить его (T1 П3-б, Т33). На не-делегированных машинах рабочий поток трея берёт `file_lock("quota")` на время
 `fetch + apply` (ожидание ≤ 10 с, иначе `poll_skipped busy`), попутно чинится порядок «сохранить попытку до старта воркера» (`:1226`, `:1305`).
 
 **Таймер** 5 мин (`OnUnitActiveSec=5min`, `OnBootSec=2min`): проверка без due — 0 запросов к провайдерам. **Установка (P2):**
 `sh linux/install.sh --publisher [--no-tray] [--name <tag>]` → `settings.json`: `publisher: true, autoPoll: true, credential_write: "never",
-machineName: <tag>` (без `--name` тегом стал бы hostname `ubuntu-s-4vcpu-8gb-nyc1` → для VPS `--name vps`); `XDG_RUNTIME_DIR=/run/user/$UID`
+machineName: <tag>` (теги владельца `vps` / `macbook` / `thinkpad`; дефолт — санитизированный hostname, у VPS это `ubuntu-s-4vcpu-8` → ставить `--name vps`); `XDG_RUNTIME_DIR=/run/user/$UID`
 при отсутствии; без autostart/.desktop при `--no-tray`; `.deb` не трогаем. **P6:** нет входа → 0 запросов; GET не прошёл → своё расписание,
 блок хранится локально. **Журнал O1** `publisher.jsonl`: `poll_attempt`, `poll_result`, `poll_skipped` (`not_due · fresh_remote ·
 remote_attempt · tie_break · retry_after · no_github · no_login · no_label · state_unsaved · publish_failed · token_policy · busy`),
-`token_refresh`, `publish`, `clock_skew` (секунды), `label_changed`; только перечислимые строки и числа; ротация > 1 МБ → старше 45 дней
+`token_refresh`, `publish`, `clock_skew` (секунды), `label_changed`, `identity_changed`, `remote_retry_capped`, `policy_forced_never`,
+`policy_violation`, `pending_rotation_lost`; только перечислимые строки и числа; файл 0600 через `O_APPEND|O_CREAT` (П6-а); ротация > 1 МБ → старше 45 дней
 отбросить. **`ccl-sync status` (O2):** на продукт — подпись, попытка/вид, успех, режим/интервал, следующая попытка, `retryUntil`, класс
 ошибки, счётчики 24 ч (запросы, 429, неудачные публикации), `clockSkew`; чужие аккаунты со свежестью.
 
@@ -177,14 +186,19 @@ content-generating (PATCH), 900 очков/мин при GET = 1, PATCH = 5 — 
 | Мак · Codex 4 ч | ≤ 150 | ≤ 156 | 144 + 6; 6 × 2 + 144 |
 | Сумма VPS + мак + ThinkPad (худший) | ≈ 34/ч | ≈ 50/ч | 1,7 % от 5000/ч; 10 % от 500/ч; пик тика 11 очков ≪ 900/мин |
 
-⚠️ Число запросов укладывается, но см. риск 1: каждая ревизия gist утяжеляет ответы `GET /gists/{id}` и PATCH (~1,2 КБ навсегда).
+Рост ответов ограничен: `history` в ответах `GET /gists/{id}`/PATCH — только 30 последних ревизий (замер Юрки 2026-10-12: 56 895 байт
+при трёх файлах), риск 1 снят.
 
 ## D. Координация B2 между машинами
 
 **`coordination.decide(now, mine, remote, my_id, tie_wait) → poll | skip(reason)`** — чистая; `mine = {label, interval I, last_attempt,
 server_until}`, `remote` = записи других машин с той же меткой `{machineId, asOf?, attemptAt?, status, retryUntil?, nextAt?, lastSeenAt}`.
 Все запасы 60 с рассчитаны на |skew| ≤ 60 с; время из будущего = возраст 0 (безопасная сторона).
-1. `retry_after`: `now < max(server_until, remote.retryUntil)` → пропуск (B6).
+1. `retry_after`: `now < max(server_until, remote_effective)` → пропуск (B6). Чужой дедлайн хранится **отдельно** от своего
+   (`remote_retry_until` + `firstSeenAt` на диске, не в `server_until`/`serverRetryAt`): `remote_effective = min(retryUntil,
+   firstSeenAt + 24 ч)` (T1 П7); повторные доставки, heartbeat и рестарты `firstSeenAt` не сдвигают; чужие записи с `lastSeenAt` старше
+   30 мин в подавлении не участвуют, но уже принятое ограничение действует до `remote_effective`. Чужие `asOf`/`attemptAt`/`nextAt`
+   > `now + 60 с` или несогласованные между собой → для B2 запись не свежая (для показа — возраст 0, V6).
 2. `remote_attempt` (№5, №10): есть чужая `attemptAt` с `now − attemptAt < 900 + 60` → пропуск (неудачная попытка тоже тратит бюджет).
 3. `fresh_remote`: максимальный чужой успешный `asOf` с `now − asOf < I + 60` → пропуск (B2).
 4. `tie_break` (№6): чужая `nextAt` в ±60 с от моего срока, `remote.lastSeenAt ≥ now − 900`, `remote.machineId < my_id` и
@@ -209,12 +223,19 @@ server_until}`, `remote` = записи других машин с той же �
 - восстановление (первый удачный GET после простоя) — **≤ 1 пара**;
 - замер G1: пары считаются по журналам обеих машин по метке; периоды с неудачными `publish`/GET в любом журнале помечаются «gist
   недоступен» и отчитываются отдельно.
-**B6.** `Retry-After` хранится полностью (> 24 ч не режется), публикуется как `retryUntil`, объединяется максимумом; backoff GitHub
+**B6.** Свой `Retry-After` хранится полностью (> 24 ч не режется, проверяется на конечность) и публикуется как `retryUntil`; чужой
+соблюдается не дольше 24 ч от `firstSeenAt` — затем событие `remote_retry_capped` и своё расписание (сервер при необходимости взведёт уже
+**свой** дедлайн без потолка); букву PRD B6 правит PM. Backoff GitHub
 (cap 1 ч, `sync.py:495`) к провайдерам не применяется; `quota_refresh.retry_after` без cap — как сегодня.
 
 ## E. Политика токенов (S1, S2) — №1
 
-Настройка `credential_write ∈ {never, guarded}`; `never` по умолчанию при `publisher: true` (VPS); `guarded` = сегодняшнее поведение Linux.
+Настройка `credential_write ∈ {never, guarded}`; **`never` — значение по умолчанию на всех портах** (VPS, Linux-трей, мак; T1 П3-д —
+решение Юрки, ждёт «да» владельца, планируется как принятое); `guarded` = сегодняшнее поведение Linux — явный opt-in только там, где
+CLI на машине не используется (строка в `status`); при `publisher: true` значение `guarded` игнорируется → `never` + событие
+`policy_forced_never` (П3-в). Политика читается один раз при старте процесса (издатель — oneshot; трей после смены перезапускается);
+процесс в `guarded` перед выходом делает одну попытку replay `_PENDING`, иначе `pending_rotation_lost` (П3-б). Запросы к провайдерам и
+`/oauth/token` — с `follow_redirects=False` (T1 §5).
 
 | Состояние | Условие (каждая попытка перечитывает файл входа) | Запросы | Публикуется |
 |---|---|---|---|
@@ -234,10 +255,10 @@ server_until}`, `remote` = записи других машин с той же �
 `pid + boot-id`, удаляется при `pop`): маркер с живым pid → отказ «ротация входа <продукт> не завершена; повторите после обновления входа
 CLI»; мёртвый pid → пара и так потеряна, маркер удаляется, смена проходит. `limits.py` читает политику в начале попытки под тем же замком
 → смена не попадает в середину попытки. Журнал: `token_refresh` только в guarded; на VPS `credentialWrite` = 0 (G2).
-**macOS (S2):** ключ defaults `credentialWrite ∈ {never, legacy}`: `never` → `codexAccessToken()` возвращает `expired/cli_refresh_pending`
-вместо refresh (сегодня `LimitsMonitor.swift:527–533` переписывает `auth.json` без перечитывания); у владельца на маке Codex CLI живой
-(remote-hands) → рекомендую `never`; публичное умолчание — `legacy` (поведение не меняется). Упрочнение legacy-записи (перечитать и
-сравнить) — Should, отдельно. Тексты читателя — UX 3a/3b; `limitCanFix` = false для чужих (урок 012).
+**macOS (S2):** ключ defaults `credentialWrite ∈ {never, legacy}`, **по умолчанию `never`** (П3-д): `codexAccessToken()` возвращает
+`expired/cli_refresh_pending` вместо refresh (сегодня `LimitsMonitor.swift:527–533` переписывает `auth.json` без перечитывания);
+`legacy` — явный opt-in, и в нём запись становится атомарной с перечитыванием/сравнением пары, guard политики — до POST и в функции
+записи (П3-а); `persistClaudeQuotaUpdate` при `never` не вызывается. Тексты читателя — UX 3a/3b; `limitCanFix` = false для чужих (урок 012).
 
 ## F. macOS — читатель и издатель
 
@@ -274,7 +295,8 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 4 точки рисования (подпись, строка источника, `limitCanFix`, свежесть), PNG-превью 7 состояний; `captions`/список N1 — C5.
 
 ### F.1 Решения по UX-спеке
-1. **Тег машины без ПДн** — `machineName` (mac: новый ключ defaults; Linux: `settings.machineName`), иначе первая DNS-метка; NFKD → ASCII,
+1. **Тег машины без ПДн** — `machineName` (mac: новый ключ defaults; Linux: `settings.machineName`; теги владельца `vps`/`macbook`/
+   `thinkpad`), иначе санитизированный hostname (первая DNS-метка); NFKD → ASCII,
    нижний регистр, `[a-z0-9-]`, ≤ 16; пусто → `mac`/`linux`; тест «MacBook Pro — Алекс» → `macbook-pro`; скан S3 на имя владельца.
 2. **Горизонт свежести** `snapshotHorizon(d)` = `source != nil ? max(0, freshUntil − asOf) : SNAPSHOT_MAX_AGE`, три точки (`metricIsStale`
    ~3097, `advVerdict` ~4254, `isStale`); тест Auto 4 ч / 3 ч 50 мин → не stale.
@@ -293,11 +315,14 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
    Тесты: детерминизм метки (один id → одна метка; два gist id → разные; та же локальная история переименовывается); проекция `days` и
    расхождение → «не указан»; **старый** `sync.merge()` на v1.1 = без блока; C7 hostile; скан S3 (email, `account_id`, `accountUuid`,
    `refresh`, `access_token`, `sk-`, `/home/`, `/Users/`); фикстура `~/.claude.json` с ПДн-ключами → в структурах только `accountUuid`.
-2. **A2 политика токенов.** Три guard-точки, `never`/`guarded`, маркер ротации, `set_credential_write()` под `quota`. Тесты: синтетические
+2. **A2 политика токенов.** Три guard-точки, `never` по умолчанию, маркер ротации, `set_credential_write()` под `quota`,
+   `policy_forced_never`, `LimitData.account` из того же чтения (П2-в), `follow_redirects=False` к провайдерам (T1 §5). Тесты: синтетические
    файлы входа (live/expiring/dead/absent/partial) при `common.http = no_network` → 0 запросов, верные статусы; guarded-регресс; отказ смены
    при маркере с живым pid, разрешение при мёртвом; политика читается под замком.
 3. **A3 ядро издателя + координация** (B1 плана #1 входит сюда: проход без `decide` невозможен). `sync.open_cycle()/write()`, три
-   отпечатка, `publisher.run_pass`, `coordination.decide`, `clockSkew`, журнал, `ccl-sync publisher`, хук в `cmd_push`. Тесты (фикс. часы,
+   отпечатка, `publisher.run_pass`, `coordination.decide`, `clockSkew`, журнал, `ccl-sync publisher`, хук в `cmd_push`,
+   `identity_changed` (П2-в), чужой дедлайн отдельно с потолком 24 ч от `firstSeenAt` (П7), пределы читателя Linux — `isfinite`, `raw_url`
+   ≤ 8 МиБ через `read(cap+1)`, ≤ 64 файлов / ≤ 64 МиБ / тело ≤ 16 МиБ, чистка `machine.*` (П5 в–е), ожидание `sync` ≤ 60 с (П8-а). Тесты (фикс. часы,
    `FakeGitHub` считает GET/PATCH и умеет ронять PATCH, фейковые провайдеры): порядок транспорта — PATCH с `attemptAt` **раньше** запроса к
    провайдеру; `publish_failed` → 0 запросов и `last_attempt` восстановлен; gist недоступен → запрос есть, блок уходит следующим проходом;
    B3 `OSError` → 0 запросов; due/not_due через перезапуск и «перезагрузку»; Retry-After > 24 ч сохранён; правило записи (расход < 570 с →
@@ -305,10 +330,11 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
    `fresh_remote`, `retry_after`, тай-брейк ждёт один раз и опрашивает при неизменной записи, мёртвый источник → без тай-брейка;
    skew > 60 → `clock_skew`; симулятор двух машин 24 ч при 15 мин и 4 ч → 0 пар в установившемся, ≤ 1 на событие, GET/PATCH в пределах
    таблицы §C; скан журнала на секреты.
-4. **A4 установка и статус.** `--publisher/--no-tray/--name`, таймер 5 мин, `XDG_RUNTIME_DIR`, перезапуск трея, `status` O2. Тест:
+4. **A4 установка и статус.** `--publisher/--no-tray/--name`, таймер 5 мин, `XDG_RUNTIME_DIR` (только при существующем каталоге), без
+   `.desktop` при `--no-tray` (П6-в), отказ при живом старом трее (П3-б), политика и путь state-каталога в `status` (П3-в, П8-б), `status` O2. Тест:
    install.sh во временном `HOME` с подменным `systemctl`; `test_deb` зелёный.
-5. **A5 выкатка на VPS.** Владелец: `ccl-sync login`; **гейт замера роста gist** (риск 1: `len(history)` и размер `GET /gists/{id}`
-   владельческого gist); 24 ч журнала → G1 (≥ 900 с, ≤ 10/сутки при простое), G2 (`credentialWrite` = 0), старые читатели суммируют расход.
+5. **A5 выкатка на VPS.** Владелец: `ccl-sync login`; проверка риска 1 (`history` ≤ 30 записей, ответ `GET /gists/{id}` ≤ 100 КБ);
+   ручные сверки Юрки по T1 §7 (`stat` файлов входа до/после суток, файл в gist глазами, journald без токена/email); 24 ч журнала → G1 (≥ 900 с, ≤ 10/сутки при простое), G2 (`credentialWrite` = 0), старые читатели суммируют расход.
 
 **Срез B — трей Linux.**
 6. **B1 трей `delegated` (№2)** + воркер под `quota` на не-делегированных машинах + порядок «сохранить до воркера». Тесты в стиле
@@ -317,14 +343,15 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 
 **Срез C — мак (сборка через remote-hands, установка — владелец).**
 8. **C1 merge v1.1 + резолвер** (+ `ReaderSyncState`, `lastSeenAt`, V5 с инжекцией `now`, в т. ч. 5/6/7; старый/новый файл → те же `days`;
-   hostile; один Codex на двух машинах → одна карточка; два → две).
+   hostile; один Codex на двух машинах → одна карточка; два → две; пределы читателя, константный URL клика, чистка строк — T1 П5 а/г/д/е, Т36).
 9. **C2 настройки, деньги, история (№13):** история по `acct`; выключенный локальный опрос Claude + чужие `asOf` → темп считается;
    селфтест 7108 переписан; `subscriptionUSD(tier)`; U2.
 10. **C3 UI:** подписи, строка источника, тексты V5, `limitCanFix(remote:)`, `snapshotHorizon`, плашка, строка меню; состояние 7 без
     карточек; PNG-превью; сверка Юркой в реальном приложении.
 11. **C4 издатель мака + B2 (№4):** `syncNow(mode:completion:)`, `.writeOnly`, попытка до запроса (селфтест с транспорт-ловушкой: PATCH
     с `attemptAt` зафиксирован **до** вызова `fetchCodex`; упавший PATCH → `fetchCodex` не вызван), `cache.json.accountId`, ключ
-    `credentialWrite`, `poll-log.jsonl`, `clockSkew`.
+    `credentialWrite` (`never` по умолчанию; guard до POST и в функции записи, атомарная запись в `legacy` — П3-а), чужой дедлайн с
+    потолком 24 ч (П7), `poll-log.jsonl`, `clockSkew`.
 12. **C5 подписи и список N1** (Should). 13. **C6 релиз:** документация, changelog, T3, 14-дневный замер G1–G4 по журналам обеих машин.
 
 ## Компоненты
@@ -347,15 +374,10 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 
 ## Риски и альтернативы
 
-1. **Рост gist с каждой ревизией (новое, P1, транспорт).** Проверено на публичном API 2026-10-12: `GET /gists/{id}` (и ответ PATCH той же
-   схемы) содержит `history` — запись на ревизию ≈ 1,2 КБ (внутри объект `user`); документированного предела нет; список `GET /gists`
-   `history` не несёт. v1 уже пишет ≤ 144 PATCH/сутки на машину; v1.1 — до 528/сутки на VPS → каждый ответ GET/PATCH тяжелеет на
-   ≈ 0,6 МБ/сутки; через 30 дней ≈ 18 МБ × ≈ 800 ответов/сутки на VPS. **Гейт в A5: замерить `len(history)` и размер ответа у
-   владельческого gist (он живёт с 2026-09-27).** Готовая мера (рекомендую внести в A3/C1 — читатели обоих портов и так переписываются):
-   чтение через `GET /gists?per_page=100` (без `history`; `files[].raw_url` содержит SHA ревизии → SHA не изменился = файл не качать)
-   + неавторизованный `raw_url` на изменившийся файл (уже путь усечённых файлов; проверка `public == false` — по элементу списка).
-   Ответ PATCH всё равно несёт `history` → если замер покажет > ~5 МБ, нужна процедура ротации gist (протокол v1.2; метки меняются по §B).
-   Решение — у Юрки/владельца (вопрос 4).
+1. **Рост gist с каждой ревизией — закрыт замером (Юрка, 2026-10-12).** `GET /gists/{id}` владельческого gist (создан 2026-09-27,
+   ≥ 144 PATCH/сутки) вернул `history` ровно из 30 последних ревизий (12:39Z…17:21Z), ответ 56 895 байт при файлах 8958 + 7285 + 136:
+   GitHub отдаёт только 30 записей, рост ограничен ≈ 30 × 1,2 КБ. Транспорт v1 не меняем; в A5 — проверка «`history` ≤ 30, ответ ≤ 100 КБ».
+   Запасная мера, если проверка когда-нибудь не пройдёт: чтение через `GET /gists` + `raw_url` (SHA ревизии как детектор) или ротация gist.
 2. `~/.claude.json` недокументирован, `oauthAccount` может лагать/переехать → `label: null` или прежняя метка на время лага; Could — профиль
    1/сутки в бюджете B1.
 3. Ключ из gist id vs секрет в манифесте — на T1; замена дешёвая (`accounts.label(id, key)` не меняется).
@@ -368,19 +390,19 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 9. Старый трей 0.4.5 на `:20` не знает `delegated` → до включения издателя его нужно перезапустить (A4 делает это сам).
 10. Атрибуция дня «первая индексация» приблизительна (PRD A6 принято); смена входа внутри дня даёт две корзины только по дням.
 11. Замер G1 при смене gist в окне 14 дней: метки меняются — сводить через `label_changed`.
-12. Мак `credentialWrite: never` замораживает Codex на маке, пока CLI не обновит вход — принятое следствие решения 5, но нужно «да» владельца.
+12. `credential_write: never` по умолчанию замораживает показания, пока CLI на машине не обновит вход (мак Codex, Linux-трей) — следствие
+    решения 5 и T1 П3-д; «да» владельца ожидается, планируется как принятое.
 
 ## Что нужно подтвердить / вопросы владельцу
 
-1. **PM → PRD:** решение 7 — заменить «≤ 3 событий/сутки» числами §D «Допуск»; C6 — «`lastSeenAt` входит в снимок, пишется по своему
-   10-мин сроку»; A5 — нет метки (`unreadable`/`no_gist`) → запроса нет. **UX:** строка 7 §4 и §12 — состояние 7 без значений (F.1 п. 5).
-2. **Владелец:** на маке политика Codex `credentialWrite: never` (данные Codex на маке замирают, пока Codex CLI там не обновит вход; CLI
-   владелец использует регулярно) — да/нет?
-3. **Владелец:** теги машин `vps` / `mac` / `thinkpad` (установка `--name vps`; имя мака санитизируется из `localizedName`).
-4. **Юрка/владелец (риск 1):** внести чтение через список + `raw_url` в срез A/C1 сейчас (рекомендую) или сначала замер в A5?
-5. **T1 (security-analyst):** ключ из gist id; парсер `~/.claude.json` с извлечением одного ключа; маркер ротации и смена политики под
-   замком; журнал O1 (`clock_skew`, `label_changed`); `Date`-заголовок как опора времени; неавторизованные `raw_url`; файловый бэкенд
-   токена GitHub на VPS; мак `credentialWrite` через defaults.
+1. **PM → PRD:** решение 7 — заменить «≤ 3 событий/сутки» числами §D «Допуск»; B6 — чужой `retryUntil` соблюдается ≤ 24 ч от
+   `firstSeenAt`, свой без потолка (T1 П7); C6 — «`lastSeenAt` входит в снимок, пишется по своему 10-мин сроку»; A5 — нет метки
+   (`no_account_uuid`/`unreadable`/`no_gist`) → запроса нет. **UX:** строка 7 §4 и §12 — состояние 7 без значений (F.1 п. 5).
+2. **Владелец:** «да» на `credential_write: never` по умолчанию на всех портах (T1 П3-д); планируется как принятое.
+3. **Владелец (T1):** П4-б — пересоздать gist после выкатки (имя владельца в истории ревизий старого; метки сменятся у всех машин);
+   П6-б — `chmod 700 ~/.codex` на VPS.
+4. **T1 → исполнение:** П2-в, П3-а/б/в/д, П4-а, П5 а–е, П7, §5 разнесены по вехам в `docs/plans.md`; test-plan — Tester
+   (`docs/test-plan-remote-limits.md`, Т1–Т36).
 
 ## Артефакты
 
