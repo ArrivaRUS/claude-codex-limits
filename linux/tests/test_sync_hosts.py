@@ -98,8 +98,9 @@ class TestTokenBoundary(env.SyncEnv):
     def test_transport_disables_redirects_for_authorized_requests(self):
         seen = []
 
-        def spy(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True):
-            seen.append((dict(headers or {}), follow_redirects))
+        def spy(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True,
+                max_body=None):
+            seen.append((dict(headers or {}), follow_redirects, max_body))
             return common.Resp(200, b"{}")
         saved = common.http
         common.http = spy
@@ -108,7 +109,17 @@ class TestTokenBoundary(env.SyncEnv):
             sync._transport("https://gist.githubusercontent.com/x", "GET", {"User-Agent": "u"}, None, 5)
         finally:
             common.http = saved
-        self.assertEqual([f for _h, f in seen], [False, True])
+        self.assertEqual([f for _h, f, _m in seen], [False, True])
+        # Contract v1.1 "Reader limits": API responses <= 16 MiB, raw_url <= 8 MiB.
+        mib = 1024 * 1024
+        self.assertLessEqual(sync.MAX_BODY, 16 * mib)
+        self.assertLessEqual(sync.MAX_MACHINE_BODY, 8 * mib)
+        api_cap, raw_cap = seen[0][2], seen[1][2]
+        for cap in (api_cap, raw_cap):
+            self.assertIs(type(cap), int, "max_body must be passed as an int")
+            self.assertGreater(cap, 0)
+        self.assertEqual(api_cap, sync.MAX_BODY)
+        self.assertEqual(raw_cap, sync.MAX_MACHINE_BODY)
 
     def test_302_on_authorized_gist_request_fails_cycle(self):
         self.sign_in()

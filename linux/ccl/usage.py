@@ -19,7 +19,7 @@ import math
 import os
 import time
 
-from . import common
+from . import accounts, common
 
 KEEP_DAYS = 45
 FIELDS = ("input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h", "turns")
@@ -70,16 +70,32 @@ def _id_hash(s):
 # ---- the index ----------------------------------------------------------------------------
 
 def new_index():
-    return {"v": INDEX_VERSION, "files": {}, "days": {}, "seen": {}}
+    return {"v": INDEX_VERSION, "files": {}, "days": {}, "seen": {}, "accountByDay": {}}
 
 
-def load_index():
+def _normalize_account_days(ix):
+    """Discard broken attribution only; existing token totals remain intact."""
+    old = ix.get("accountByDay")
+    clean = {}
+    if isinstance(old, dict):
+        for product, by_day in old.items():
+            if not isinstance(product, str) or not isinstance(by_day, dict):
+                continue
+            clean[product] = {day: owner for day, owner in by_day.items()
+                              if isinstance(day, str) and isinstance(owner, str)}
+    ix["accountByDay"] = clean
+    return old != clean
+
+
+def load_index(normalize_accounts=True):
     ix = common.read_json(common.USAGE_INDEX_PATH)
     if not isinstance(ix, dict) or ix.get("v") != INDEX_VERSION:
         return new_index()
     for k in ("files", "days", "seen"):
         if not isinstance(ix.get(k), dict):
             ix[k] = {}
+    if normalize_accounts:
+        _normalize_account_days(ix)
     return ix
 
 
@@ -95,7 +111,7 @@ def cutoff_day(now=None, keep=KEEP_DAYS):
 def prune(ix, now=None):
     """Forget days beyond the retention window so the index can't grow forever."""
     cut = cutoff_day(now)
-    changed = False
+    changed = _normalize_account_days(ix)
     for p in list(ix["days"].keys()):
         kept = {d: v for d, v in ix["days"][p].items() if d >= cut}
         if len(kept) != len(ix["days"][p]):
@@ -105,6 +121,11 @@ def prune(ix, now=None):
     if len(seen) != len(ix["seen"]):
         changed = True
     ix["seen"] = seen
+    for p, by_day in ix.get("accountByDay", {}).items():
+        kept = {d: v for d, v in by_day.items() if d >= cut}
+        if len(kept) != len(by_day):
+            changed = True
+        ix["accountByDay"][p] = kept
     return changed
 
 
@@ -124,7 +145,7 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
     codex_root = codex_root or common.CODEX_SESSIONS
     oldest = now - KEEP_DAYS * 86400
     seen = {d: set(v) for d, v in ix["seen"].items()}
-    changed = False
+    changed = _normalize_account_days(ix)
     alive = set()
 
     def recent(path):
@@ -135,9 +156,11 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
 
     roots = []
     jobs = []
+    local_ids = {}
     for product, root in (("claude", claude_root), ("codex", codex_root)):
         if not common.product_enabled(product):
             continue
+        local_ids[product], _ = accounts.read_local_id(product)
         roots.append(root)
         jobs += [(p, product) for p in _walk(root, lambda f: f.endswith(".jsonl")
                                           and (product == "claude" or f.startswith("rollout-")))]
@@ -147,7 +170,7 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
             continue
         if progress:
             progress(n, len(jobs), path)
-        if _scan_file(path, product, ix, seen):
+        if _scan_file(path, product, ix, seen, local_ids[product]):
             changed = True
     # marks of files that are gone (a pruned project, a deleted session) are dead weight
     for path in list(ix["files"].keys()):
@@ -158,7 +181,7 @@ def scan(ix, now=None, claude_root=None, codex_root=None, progress=None):
     return changed
 
 
-def _scan_file(path, product, ix, seen):
+def _scan_file(path, product, ix, seen, local_id=None):
     try:
         size = os.stat(path).st_size
     except OSError:
@@ -184,9 +207,9 @@ def _scan_file(path, product, ix, seen):
                 if end == 0:
                     continue
                 if product == "claude":
-                    _claude_lines(buf, end, ix, seen, st)
+                    _claude_lines(buf, end, ix, seen, st, local_id)
                 else:
-                    _codex_lines(buf, end, ix, st)
+                    _codex_lines(buf, end, ix, st, local_id)
                 consumed += end
                 buf = buf[end:]
     except OSError:
@@ -226,7 +249,15 @@ def mark_activity(ix, product, timestamp, tokens, now=None):
     activity[product] = sorted(recent)[-128:]
 
 
-def _claude_lines(data, end, ix, seen, st):
+def _attribute_day(ix, product, day, local_id):
+    """Keep the first day's identity; legacy days have no recoverable owner."""
+    # Check before adding usage: an existing day without attribution predates
+    # this field, so appending logs must never assign it the current login.
+    if isinstance(local_id, str) and day not in ix["days"].get(product, {}):
+        ix.setdefault("accountByDay", {}).setdefault(product, {}).setdefault(day, local_id)
+
+
+def _claude_lines(data, end, ix, seen, st, local_id=None):
     days = ix["days"]
     for line in _lines_with(data, end, (b'"usage"',)):
         try:
@@ -272,11 +303,12 @@ def _claude_lines(data, end, ix, seen, st):
         else:
             u["cacheWrite5m"] = _int(usage.get("cache_creation_input_tokens"))
         u["turns"] = 1
+        _attribute_day(ix, "claude", day, local_id)
         add_usage(days, "claude", day, model, u)
         mark_activity(ix, "claude", t, total_tokens(u))
 
 
-def _codex_lines(data, end, ix, st):
+def _codex_lines(data, end, ix, st, local_id=None):
     days = ix["days"]
     for line in _lines_with(data, end, (b'"token_count"', b'"turn_context"')):
         try:
@@ -309,7 +341,9 @@ def _codex_lines(data, end, ix, st):
         u["cacheWrite5m"] = _int(lu.get("cache_write_input_tokens"))
         u["output"] = _int(lu.get("output_tokens"))      # reasoning tokens are inside output
         u["turns"] = 1
-        add_usage(days, "codex", common.day_key(t), st["model"] or "?", u)
+        day = common.day_key(t)
+        _attribute_day(ix, "codex", day, local_id)
+        add_usage(days, "codex", day, st["model"] or "?", u)
         mark_activity(ix, "codex", t, total_tokens(u))
 
 
@@ -318,8 +352,9 @@ def refresh(blocking=True, progress=None):
     never scan at the same time. Returns (index, changed, fresh). When `blocking` is False and
     another process is scanning, returns the index as it is on disk with fresh=False."""
     with common.file_lock("usage-index", blocking=blocking) as held:
-        ix = load_index()
+        ix = load_index(normalize_accounts=False)
         if not held:
+            _normalize_account_days(ix)
             return ix, False, False
         changed = scan(ix, progress=progress)
         if prune(ix):

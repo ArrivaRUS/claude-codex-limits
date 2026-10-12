@@ -17,7 +17,9 @@ import socket
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HOME = os.path.expanduser("~")
@@ -36,6 +38,7 @@ HISTORY_PATH = os.path.join(STATE_DIR, "history.jsonl")
 CACHE_PATH = os.path.join(STATE_DIR, "cache.json")
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 
+CLAUDE_JSON = os.path.join(HOME, ".claude.json")
 CLAUDE_PROJECTS = os.path.join(HOME, ".claude", "projects")
 CLAUDE_CREDENTIALS = os.path.join(HOME, ".claude", ".credentials.json")
 CODEX_SESSIONS = os.path.join(HOME, ".codex", "sessions")
@@ -304,6 +307,16 @@ def machine_name():
     return n if n else socket.gethostname()
 
 
+def machine_tag():
+    """Short public tag from the configured name or the first hostname label."""
+    name = settings().get("machineName")
+    if not isinstance(name, str) or not name.strip():
+        name = socket.gethostname().split(".", 1)[0]
+    name = "".join(ch for ch in name if unicodedata.category(ch) not in ("Cc", "Cf"))
+    name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
+    return re.sub(r"[^a-z0-9-]+", "-", name).strip("-")[:16].rstrip("-") or "linux"
+
+
 def os_name():
     """"Astra Linux SE 1.8.5" — edition from os-release, exact build from /etc/astra_version."""
     rel = {}
@@ -416,21 +429,88 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True):
+RAW_REDIRECT_REFUSED = "gist raw redirect refused"
+
+
+def gist_raw_url(url):
+    """Only this HTTPS origin can serve untrusted gist machine bodies."""
+    if not isinstance(url, str) or not url.isascii() or any(ord(c) <= 32 or ord(c) == 127 for c in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return (url.startswith("https://gist.githubusercontent.com/")
+                and parts.netloc == "gist.githubusercontent.com" and not parts.fragment)
+    except ValueError:
+        return False
+
+
+class _RawRedirectRefused(Exception):
+    pass
+
+
+class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
+    """Close intermediate responses without draining their untrusted bodies."""
+    def __init__(self):
+        self.hops = 0
+
+    def http_error_302(self, req, fp, code, msg, headers):
+        fp.close()
+        location = headers.get("Location")
+        if (not isinstance(location, str) or any(ord(c) <= 32 or ord(c) == 127 for c in location)
+                or req.get_method() not in ("GET", "HEAD")):
+            raise _RawRedirectRefused()
+        try:
+            target = urllib.parse.urljoin(req.full_url, location)
+        except ValueError:
+            raise _RawRedirectRefused() from None
+        if self.hops >= 3 or not gist_raw_url(target):
+            raise _RawRedirectRefused()
+        self.hops += 1
+        redirected = urllib.request.Request(target, headers=dict(req.header_items()), method=req.get_method())
+        return self.parent.open(redirected, timeout=req.timeout)
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
+def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None):
+    """Optional max_body bounds response bytes, including HTTP error bodies."""
+    if max_body is not None and (type(max_body) is not int or max_body < 0):
+        raise ValueError("max_body must be a non-negative integer or None")
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     elif isinstance(body, str):
         body = body.encode("utf-8")
     try:
         req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-        opener = urllib.request.urlopen if follow_redirects else urllib.request.build_opener(_NoRedirect()).open
+        if not follow_redirects:
+            opener = urllib.request.build_opener(_NoRedirect()).open
+        elif gist_raw_url(url):
+            opener = urllib.request.build_opener(_GistRawRedirect()).open
+        else:
+            opener = urllib.request.urlopen
         with opener(req, timeout=timeout) as r:
-            return Resp(r.status, r.read(), {k.lower(): v for k, v in r.headers.items()})
+            data = r.read() if max_body is None else r.read(max_body + 1)
+            response_headers = {k.lower(): v for k, v in r.headers.items()}
+            if max_body is not None and len(data) > max_body:
+                return Resp(0, None, response_headers, "response body too large")
+            return Resp(r.status, data, response_headers)
+    except _RawRedirectRefused:
+        return Resp(0, error=RAW_REDIRECT_REFUSED)
     except urllib.error.HTTPError as e:
         try:
-            data = e.read()
+            if 300 <= e.code < 400:
+                e.close()
+                data = None
+            elif max_body is None:
+                data = e.read()
+            else:
+                with e:
+                    data = e.read(max_body + 1)
         except Exception:
             data = None
+        if max_body is not None and data is not None and len(data) > max_body:
+            return Resp(0, None, {k.lower(): v for k, v in (e.headers or {}).items()},
+                        "response body too large")
         return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()})
     except Exception as e:  # network down, DNS, TLS, timeout
         import socket

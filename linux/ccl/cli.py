@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-from . import APP_VERSION, common, sync, update, vault, usage
+from . import APP_VERSION, common, sync, update, vault, usage, accounts
 
 
 def _say(*a):
@@ -268,8 +268,9 @@ def cmd_status(_args):
     if isinstance(gist, dict) and isinstance(gist.get("files"), dict):
         machines = []
         import json
-        for name, f in sorted(gist["files"].items()):
-            if not (name.startswith("machine-") and name.endswith(".json")) or not isinstance(f, dict):
+        for name in sync._machine_files(gist["files"]):
+            f = gist["files"][name]
+            if not isinstance(f, dict):
                 continue
             try:
                 obj = json.loads(f.get("content") or "")
@@ -280,7 +281,8 @@ def cmd_status(_args):
             m = obj["machine"]
             if any(not isinstance(m.get(k, ""), str) for k in ("name", "os", "app")):
                 continue
-            machines.append((m.get("name") or "?", m.get("os", ""), m.get("app", ""),
+            machines.append((sync._machine_text(m.get("name"), "name") or "?",
+                             sync._machine_text(m.get("os"), "os"), sync._machine_text(m.get("app"), "app"),
                              common.parse_iso(obj.get("updated")), m.get("id") == common.machine_id()))
     if machines is None:
         machines = [(m["name"], m.get("os", ""), m.get("app", ""), m.get("updated"), False)
@@ -290,6 +292,8 @@ def cmd_status(_args):
     else:
         _say(common.tr("Машины в gist:", "Machines in the gist:"))
     for name, osn, app, upd, me in machines:
+        name = sync._machine_text(name, "name") or "?"
+        osn, app = sync._machine_text(osn, "os"), sync._machine_text(app, "app")
         _say("  • %s%s — %s%s" % (name, common.tr(" (эта)", " (this one)") if me else "",
                                   (osn + ", " + app + ", ") if osn else "",
                                   common.tr("обновлён ", "updated ") + _fmt_time(upd)))
@@ -342,7 +346,7 @@ def cmd_dump(args):
                 for k in usage.FIELDS:
                     tot[k] += u[k]
                 _say("  %-26s %10s %10s %14s %11s %11s %6d %9s" % (
-                    m[:26], _n(u["input"]), _n(u["output"]), _n(u["cacheRead"]), _n(u["cacheWrite5m"]),
+                    (accounts._text(m) or "?")[:26], _n(u["input"]), _n(u["output"]), _n(u["cacheRead"]), _n(u["cacheWrite5m"]),
                     _n(u["cacheWrite1h"]), u["turns"], ("%.2f" % c) if c is not None else "—"))
             if len(models) > 1:
                 _say("  %-26s %10s %10s %14s %11s %11s %6d %9s" % (

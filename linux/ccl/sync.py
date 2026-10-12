@@ -6,6 +6,7 @@ leaves the token store except in the Authorization header, and is never logged.
 """
 
 from contextlib import nullcontext
+from contextvars import ContextVar
 import hashlib
 import json
 import math
@@ -15,7 +16,7 @@ import threading
 import time
 import urllib.parse
 
-from . import APP_VERSION, common, vault, usage, auth
+from . import APP_VERSION, common, vault, usage, auth, accounts
 
 GITHUB_CLIENT_ID = "Ov23lipk8voUWUAr59qS"     # docs/sync-protocol.md → Client ID (public, no secret)
 MANIFEST = "ccl-sync.json"
@@ -29,6 +30,12 @@ UA = "ClaudeCodexLimits"
 API = "https://api.github.com"
 LOGIN_LOCK_TIMEOUT = 60.0   # test seam: deadline for sign-in/out serialization
 REVOKE_RECHECK_DELAY = 4.0
+MAX_BODY = 16 * 1024 * 1024
+MAX_MACHINE_BODY = 8 * 1024 * 1024
+MAX_MACHINE_FILES = 64
+MAX_TOTAL_BODY = 64 * 1024 * 1024
+_BODY_TOO_LARGE = "response body too large"
+_raw_cap = ContextVar("ccl_raw_cap", default=None)
 _sleep = time.sleep
 _first_attempt_at = None
 _login_lock = threading.RLock()
@@ -47,9 +54,15 @@ def my_file_name():
 # ---- GitHub API ---------------------------------------------------------------------------
 
 def _transport(url, method, headers, body, timeout):
+    authorized = any(k.lower() == "authorization" for k in headers)
+    # The five-argument transport seam stays compatible with offline adapters.
+    # Unauthenticated GETs are _raw; all API/OAuth responses use the outer cap.
+    cap = MAX_MACHINE_BODY if method == "GET" and not authorized else MAX_BODY
+    if method == "GET" and not authorized and _raw_cap.get() is not None:
+        cap = min(cap, _raw_cap.get())
     return common.http(url, method, headers, body, timeout,
-                       follow_redirects=not (any(k.lower() == "authorization" for k in headers)
-                                            or url.startswith("https://github.com/login/")))
+                       follow_redirects=not (authorized or url.startswith("https://github.com/login/")),
+                       max_body=cap)
 
 
 # Test seam: every request of this module (gist, /user, Device Flow) goes through `transport`
@@ -71,6 +84,13 @@ def _api_origin(url):
         return False
 
 
+def _bounded_response(response, cap):
+    """Enforce the same bound when a transport adapter returns a buffered body."""
+    if response.data is not None and len(response.data) > cap:
+        return common.Resp(0, headers=response.headers, error=_BODY_TOO_LARGE)
+    return response
+
+
 def gh(path, token, method="GET", body=None, timeout=20):
     url = API + path if path[:1] == "/" and path[:2] != "//" else path
     if not _api_origin(url):
@@ -79,12 +99,26 @@ def gh(path, token, method="GET", body=None, timeout=20):
          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": UA}
     if body is not None:
         h["Content-Type"] = "application/json"
-    return transport(url, method, h, body, timeout)
+    return _bounded_response(transport(url, method, h, body, timeout), MAX_BODY)
 
 
-def _raw(url):
+def _raw(url, cap=MAX_MACHINE_BODY):
     """Gist raw URLs carry their own secret path; never attach the OAuth token."""
-    return transport(url, "GET", {"User-Agent": UA}, None, 30)
+    if not common.gist_raw_url(url):
+        return common.Resp(0, error=common.RAW_REDIRECT_REFUSED)
+    cap = min(MAX_MACHINE_BODY, cap)
+    # Preserve the five-argument transport contract while carrying the current
+    # cycle's remaining budget through wrappers, independently across threads.
+    context = _raw_cap.set(cap)
+    try:
+        response = transport(url, "GET", {"User-Agent": UA}, None, 30)
+        # Any remaining 3xx is an unfollowed/refused raw transition, including
+        # statuses urllib does not handle (for example 300 or 305).
+        if 300 <= response.status < 400:
+            return common.Resp(0, headers=response.headers, error=common.RAW_REDIRECT_REFUSED)
+        return _bounded_response(response, cap)
+    finally:
+        _raw_cap.reset(context)
 
 
 def _form_result(url, fields):
@@ -338,7 +372,7 @@ def snapshot_hash(days):
 def machine_file(days, now=None):
     obj = {
         "schema": SCHEMA,
-        "machine": {"id": common.machine_id(), "name": common.machine_name(),
+        "machine": {"id": common.machine_id(), "name": common.machine_tag(),
                     "os": common.os_name(), "app": "linux " + APP_VERSION},
         "updated": common.iso_utc(now),
         "tz": common.local_tz_name(),
@@ -352,6 +386,27 @@ def manifest():
                       sort_keys=True, separators=(",", ":"))
 
 
+def _machine_files(files, limit=MAX_MACHINE_FILES):
+    return sorted(name for name in files if isinstance(name, str)
+                  and name.startswith("machine-") and name.endswith(".json"))[:limit]
+
+
+def _content_size(content):
+    if isinstance(content, (bytes, bytearray)):
+        return len(content)
+    if isinstance(content, str):
+        try:
+            return len(content.encode("utf-8"))
+        except UnicodeEncodeError:
+            pass
+    return None
+
+
+def _machine_text(value, key):
+    value = accounts._text(value, None if key == "name" else 64)
+    return (value[:16] if key == "name" else value) if value is not None else ""
+
+
 def merge(contents, my_id, now=None):
     """Other machines' files (name → JSON text) → {"machines": [...], "days": {...}}.
     Skips this machine's own id, other schemas, unparsable JSON, and files not updated in
@@ -359,9 +414,21 @@ def merge(contents, my_id, now=None):
     now = now or time.time()
     oldest = now - KEEP_DAYS * 86400
     machines, sources, seen = [], [], set()
-    for name in sorted(contents):
+    total = 0
+    for name in _machine_files(contents):
+        size = _content_size(contents[name])
+        if size is None:
+            continue
+        total += size
+        if total > MAX_TOTAL_BODY:
+            break
+        if size > MAX_MACHINE_BODY:
+            continue
         try:
-            obj = json.loads(contents[name])
+            text = contents[name]
+            if isinstance(text, (bytes, bytearray)):
+                text = text.decode("utf-8", "replace")
+            obj = json.loads(text)
         except (ValueError, TypeError, RecursionError):
             continue
         if not isinstance(obj, dict) or type(obj.get("schema")) is not int or obj["schema"] != SCHEMA:
@@ -370,7 +437,7 @@ def merge(contents, my_id, now=None):
         if not isinstance(m, dict):
             continue
         mid = m.get("id")
-        if (not isinstance(mid, str) or not mid or mid == my_id or mid in seen
+        if (accounts._text(mid) is None or not mid or mid == my_id or mid in seen
                 or name != "machine-%s.json" % mid):
             continue
         updated = common.parse_iso(obj.get("updated"))
@@ -379,21 +446,24 @@ def merge(contents, my_id, now=None):
         if updated is not None and updated < oldest:
             continue
         seen.add(mid)
-        metadata = {k: m[k] if isinstance(m.get(k), str) else "" for k in ("name", "os", "app")}
-        machines.append(dict(metadata, id=mid, name=metadata["name"] or "?", updated=updated,
-                             tz=obj["tz"] if isinstance(obj.get("tz"), str) else ""))
+        metadata = {k: _machine_text(m.get(k), k) for k in ("name", "os", "app")}
+        machine = dict(metadata, id=mid, name=metadata["name"] or "?", updated=updated,
+                       tz=accounts._text(obj.get("tz")) or "")
+        if any(k in obj for k in ("accounts", "unattributedDays", "captions", "lastSeenAt")):
+            machine.update(accounts.parse_block(obj))
+        machines.append(machine)
         days = obj.get("days")
         if not isinstance(days, dict):
             continue
         clean = {}
         for p, by_day in days.items():
-            if not isinstance(by_day, dict):
+            if accounts._text(p) is None or not isinstance(by_day, dict):
                 continue
             for d, by_model in by_day.items():
-                if not isinstance(by_model, dict):
+                if accounts._text(d) is None or not isinstance(by_model, dict):
                     continue
                 for model, v in by_model.items():
-                    if isinstance(v, dict):
+                    if accounts._text(model) is not None and isinstance(v, dict):
                         counts = {k: v.get(k, 0) for k in usage.FIELDS}
                         # Reject the whole model record; never convert unbounded ints to float.
                         if all(type(n) is int and 0 <= n <= usage.MAX_VALUE for n in counts.values()):
@@ -481,6 +551,8 @@ def _fail(st, res, msg):
 
 def status_text(r):
     """An HTTP answer for a human: 0 is a transport failure (no network, timeout), not a code."""
+    if r.error == _BODY_TOO_LARGE:
+        return common.tr("слишком большой ответ", "response body too large")
     if r.status == 403 and not _rate_limited(r):
         return common.tr("доступ запрещён (403)", "access denied (403)")
     return common.tr("ответ %d" % r.status, "HTTP %d" % r.status) if r.status else \
@@ -709,19 +781,59 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
 
         # read + merge everyone else
         contents = {}
-        for name, f in files.items():
-            if not (name.startswith("machine-") and name.endswith(".json")) or name == mine:
+        total = 0
+        size_error = None
+        selected = _machine_files(files, MAX_MACHINE_FILES + 1)
+        if len(selected) > MAX_MACHINE_FILES:
+            size_error = common.tr("Слишком большой ответ синхронизации (предел 64 файла)",
+                                   "Sync response too large (64 file limit)")
+        for name in selected[:MAX_MACHINE_FILES]:
+            f = files[name]
+            if name == mine or not isinstance(f, dict):
                 continue
+            if total >= MAX_TOTAL_BODY:
+                size_error = common.tr("Слишком большой ответ синхронизации (предел 64 МиБ)",
+                                       "Sync response too large (64 MiB limit)")
+                break
             text = f.get("content")
             if f.get("truncated") and f.get("raw_url"):
-                r = _raw(f["raw_url"])
+                cap = min(MAX_MACHINE_BODY, MAX_TOTAL_BODY - total)
+                r = _raw(f["raw_url"], cap=cap)
+                if r.error == common.RAW_REDIRECT_REFUSED:
+                    continue
+                if r.error == _BODY_TOO_LARGE:
+                    # Bounded reads consumed cap + 1 bytes even though Resp drops
+                    # the rejected body. Count them before considering the next file.
+                    total += cap + 1
+                    size_error = common.tr("Слишком большой файл синхронизации (предел 8 МиБ)",
+                                           "Sync file too large (8 MiB limit)")
+                    if total > MAX_TOTAL_BODY:
+                        size_error = common.tr("Слишком большой ответ синхронизации (предел 64 МиБ)",
+                                               "Sync response too large (64 MiB limit)")
+                        break
+                    continue
                 if r.status != 200 or not r.data:
                     if _rate_limited(r):
                         st.update(backoffUntil=_backoff_until(r))
                     _fail(st, res, "GET raw_url: " + status_text(r))
                     res.remote = load_remote()
                     return res
-                text = r.data.decode("utf-8", "replace")
+                # Keep bytes until JSON parsing, so the budget measures the wire
+                # body, not the length of replacement characters after decoding.
+                text = r.data
+            size = _content_size(text)
+            if size is None:
+                continue
+            total += size
+            if size > MAX_MACHINE_BODY:
+                size_error = common.tr("Слишком большой файл синхронизации (предел 8 МиБ)",
+                                       "Sync file too large (8 MiB limit)")
+            if total > MAX_TOTAL_BODY:
+                size_error = common.tr("Слишком большой ответ синхронизации (предел 64 МиБ)",
+                                       "Sync response too large (64 MiB limit)")
+                break
+            if size > MAX_MACHINE_BODY:
+                continue
             if text:
                 contents[name] = text
         remote = merge(contents, common.machine_id())
@@ -733,6 +845,8 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
         st.update(lastOkAt=time.time(), lastSync=None, lastError=None, lastErrorAt=None, backoffUntil=None)
         res.ok = True
         res.remote = remote
+        if size_error:
+            _fail(st, res, size_error)
         return res
 
 
