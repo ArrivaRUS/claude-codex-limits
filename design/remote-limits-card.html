@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote Limits Cards</title>
+<style>
+:root{
+  --bg:#141312; --panel1:#262321; --panel2:#171615; --card:rgba(255,255,255,.04); --stroke:rgba(255,255,255,.06);
+  --hi:rgba(255,255,255,.95); --mid:rgba(255,255,255,.5); --lo:rgba(255,255,255,.34);
+  --link:#6B9EF5; --amber:#FF9E2E; --blue:#388CFF; --purple:#C76BFA; --sev1:#FF9E0A; --sev2:#FF453B; --model:#3DD6B0;
+  --warn:#FF9E2E;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--hi);font:13px/1.3 -apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",Arial,sans-serif;padding:24px 16px 64px}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:14px;margin:36px 0 6px;color:#e9e4df}
+p.note{color:var(--mid);max-width:860px;margin:4px 0 14px;font-size:12.5px}
+.row{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+.cap{font-size:10.5px;color:var(--lo);margin:0 0 6px;letter-spacing:.04em}
+/* panel */
+.panel{width:360px;max-width:100%;border-radius:18px;background:linear-gradient(160deg,var(--panel1),var(--panel2));border:1px solid rgba(255,255,255,.08);position:relative;overflow:hidden;flex:none}
+.phead{height:58px;position:relative}
+.appicon{position:absolute;left:16px;top:14px;width:30px;height:30px;border-radius:8px;background:linear-gradient(140deg,#2a1f4f,#14122a);display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff;font-weight:700}
+.ptitle{position:absolute;left:56px;top:12px;font-size:16px;font-weight:600}
+.psub{position:absolute;left:56px;top:33px;font-size:11px;color:var(--mid)}
+.picons{position:absolute;right:16px;top:16px;color:var(--mid);font-size:15px;letter-spacing:10px}
+.grid{position:relative;margin:0 16px;display:grid;grid-template-columns:158px 158px;gap:12px}
+.wide{grid-column:1 / span 2}
+.foot{height:24px;margin:14px 16px 0;display:flex;align-items:center;gap:0}
+.pill{display:flex;background:rgba(255,255,255,.06);border-radius:8px;height:24px}
+.pill span{width:40px;text-align:center;line-height:24px;font-size:11px;color:var(--mid);font-weight:600}
+.pill span.on{background:rgba(255,255,255,.14);border-radius:6px;margin:2px 0;line-height:20px;color:#fff}
+.autoA{margin-left:5px;width:30px;height:20px;border-radius:10px;background:linear-gradient(135deg,#3479EF,#7968E8);color:#fff;font-size:12px;font-weight:600;text-align:center;line-height:20px}
+.power{margin-left:auto;width:24px;height:24px;border:2px solid var(--mid);border-radius:50%;transform:scale(.6)}
+.credit{border-top:1px solid rgba(255,255,255,.06);margin:10px 16px 0;padding:8px 0 10px;text-align:center;font-size:10px;color:var(--lo)}
+.credit b{color:var(--link);font-weight:500}
+/* simple card */
+.card{position:relative;width:158px;height:199px;border-radius:14px;background:var(--card);border:1px solid var(--stroke);flex:none}
+.card.w{width:328px}
+.ctitle{position:absolute;left:39px;top:14px;font-size:12.5px;font-weight:600;color:rgba(255,255,255,.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.picon{position:absolute;left:14px;top:13px;width:18px;height:18px;border-radius:5px}
+.picon.cl{background:#D97757}.picon.cx{background:linear-gradient(135deg,#6b8cff,#8a5cf6)}
+.arrow{position:absolute;right:10px;top:10px;font-size:10px;color:rgba(255,255,255,.22)}
+.ring{position:absolute;top:0;left:0}
+.pct{position:absolute;width:80px;text-align:center;font-size:15px;font-weight:600}
+.mpill{position:absolute;height:16px;line-height:15px;padding:0 8px;border-radius:8px;font-size:10px;font-weight:600}
+.rows{position:absolute;left:16px;right:14px;top:124px;font-size:10.5px}
+.rows div{display:flex;align-items:center;height:15px}
+.rows i{width:6px;height:6px;border-radius:50%;margin-right:5px;flex:none}
+.rows .n{color:var(--mid);flex:1}.rows .t{color:var(--lo);font-size:10px}
+.cfoot{position:absolute;left:14px;right:14px;bottom:0;height:32px}
+.l1,.l2{position:absolute;left:0;right:0;font-size:10px;white-space:nowrap;overflow:hidden}
+.l1{top:2px;color:var(--mid)}
+.l2{top:16px}
+.l2.mid{color:var(--mid)}.l2.amb{color:var(--amber)}.l2.lnk{color:var(--link);font-weight:500}
+.tag{position:absolute;left:0;top:-22px;font-size:10px;color:#e9e4df;background:#2b2a29;border-radius:4px;padding:1px 6px}
+.statecell{position:relative;padding-top:24px}
+.tip{width:300px;font-size:10.5px;color:#ddd;background:#2c2c2e;border:1px solid #444;border-radius:6px;padding:6px 8px;white-space:pre-line;margin-top:8px}
+/* advanced */
+.acard{width:330px;border-radius:14px;background:var(--card);border:1px solid var(--stroke);padding:9px 11px 0;position:relative}
+.ahead{display:flex;align-items:center;gap:7px;height:18px}
+.ahead .picon{position:static;width:16px;height:16px}
+.ahead .nm{font-size:13px;font-weight:600}
+.badge{height:16px;line-height:16px;padding:0 7px;border-radius:8px;font-size:9.5px;font-weight:600;letter-spacing:.02em}
+.badge.plan{background:rgba(255,255,255,.09);color:rgba(255,255,255,.6)}
+.badge.warn{background:rgba(255,158,46,.16);color:var(--warn);border:1px solid rgba(255,158,46,.42)}
+.mach{font-size:11px;color:var(--mid)}
+.arow{padding:9px 0 8px;border-bottom:1px solid rgba(255,255,255,.06)}
+.arow:last-of-type{border-bottom:0}
+.alab{display:flex;justify-content:space-between;font-size:10px;letter-spacing:.08em;color:var(--lo);font-weight:600}
+.alab b{font-size:17px;letter-spacing:0}
+.averd{font-size:13.5px;font-weight:600;margin:2px 0 6px}
+.bar{height:5px;border-radius:3px;background:rgba(255,255,255,.08);position:relative}
+.bar i{position:absolute;left:0;top:0;bottom:0;border-radius:3px}
+.ameta{font-size:10.5px;color:var(--mid);margin-top:5px}
+.afoot{height:32px;position:relative}
+.dim{filter:grayscale(1);opacity:.55}
+/* settings */
+.set{width:360px;max-width:100%;border-radius:18px;background:linear-gradient(160deg,var(--panel1),var(--panel2));padding:14px 16px 16px;flex:none}
+.scap{font-size:9.5px;font-weight:600;color:var(--lo);letter-spacing:.06em;margin:14px 2px 6px}
+.scard{border-radius:12px;background:var(--card);border:1px solid var(--stroke)}
+.srow{height:36px;display:flex;align-items:center;padding:0 14px;position:relative}
+.srow+.srow{border-top:1px solid rgba(255,255,255,.06)}
+.tog{width:34px;height:16px;border-radius:8px;background:#FF9E2E;position:relative;flex:none}
+.tog::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#fff}
+.tog.off{background:rgba(255,255,255,.16)}.tog.off::after{right:auto;left:2px}
+.acc{flex:1;min-width:0;margin-left:12px}
+.acc .a1{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acc .a2{font-size:10px;color:var(--lo)}
+.pen{width:24px;text-align:center;color:var(--mid);margin-right:8px}
+.edit{display:flex;align-items:center;background:#1e1e1f;border:2px solid #3a7bf0;border-radius:5px;height:20px;padding:0 5px;font-size:12.5px}
+.edit .cnt{margin-left:auto;font-size:10px;color:var(--lo)}
+.capsule{margin-left:auto;background:rgba(255,255,255,.08);border-radius:7px;height:24px;line-height:24px;padding:0 10px;font-size:11px;font-weight:500;max-width:200px}
+.hint{font-size:10.5px;color:var(--link);margin:6px 2px 0;height:14px}
+/* menu bar */
+.mb{background:#252525;border-radius:8px;padding:6px 14px;display:inline-flex;flex-direction:column;gap:2px;font:600 13px/1 -apple-system,BlinkMacSystemFont,sans-serif}
+.mb div{display:flex;align-items:center;gap:6px}
+.mb .ic{width:14px;height:14px;border-radius:3px}
+.faint{opacity:.4}
+@media (max-width:420px){ .grid{grid-template-columns:1fr 1fr} }
+</style>
+</head>
+<body>
+<h1>REMOTE-LIMITS · карточки аккаунтов (macOS, 360 pt)</h1>
+<p class="note">Макет к <code>design/remote-limits-ux.md</code>. Размеры в CSS px = pt. Шрифт — системный, ширины текста приблизительны: финальная проверка — реальный рендер (п. 13 приёмки). Мобильной версии нет: это окно меню-бара шириной 360 pt.</p>
+
+<h2>A. Simple · мак без Claude: Claude с VPS, Codex со входом на маке, второй Codex-аккаунт на VPS</h2>
+<p class="note">Три карточки → сетка 2 + 1 широкая (раздел 6). Высота каждой карточки 199 pt, как в 3.2.7 со строкой модели; новых строк в карточке нет — источник в строке 1 футера.</p>
+<div class="row">
+  <div class="panel" id="simplePanel">
+    <div class="phead"><div class="appicon">%</div><div class="ptitle">Лимиты</div><div class="psub">Claude Code · Codex</div><div class="picons">⚙ ↻</div></div>
+    <div class="grid" id="g1"></div>
+    <div class="foot"><div class="pill"><span class="on">15м</span><span>30м</span><span>1ч</span><span>4ч</span></div><div class="autoA">А</div><div class="power"></div></div>
+    <div class="credit">Claude Codex Limits 3.3.0 · by Alex Kovalev · <b>GitHub</b></div>
+  </div>
+  <div>
+    <div class="cap">ПОДСКАЗКА ФУТЕРА КАРТОЧКИ «Claude · vps»</div>
+    <div class="tip">Данные: 15:43 (vps)
+Расписание vps: Авто · 1 ч
+Следующая попытка vps: 16:43
+vps на связи: 15:52
+Темп и прогноз — от данных 15:43</div>
+    <div class="cap" style="margin-top:14px">ПОДСКАЗКА «А» (только локальный опрос)</div>
+    <div class="tip">Авто: Codex → 15 мин</div>
+    <div class="cap" style="margin-top:14px">ПОДСКАЗКА СТРОКИ МЕНЮ</div>
+    <div class="tip">Claude Max 20x · vps — данные с vps от 15:43
+Codex Pro · mac — данные 15:41</div>
+  </div>
+</div>
+
+<h2>B. Состояния 1–7 карточки без входа на этой машине · узкая Simple (158 pt), RU</h2>
+<p class="note">Значения видны всегда (C3); при не-«свежо» кольца и проценты серые, как у устаревшей локальной карточки; строки сброса остаются. Amber — только 3–5, ссылка — 6–7. Действий-кнопок нет, кроме перехода в настройки GitHub.</p>
+<div class="row" id="states"></div>
+
+<h2>C. Ручное «Обновить сейчас» и карточка со входом</h2>
+<div class="row" id="refresh"></div>
+
+<h2>D. Advanced · карточка Claude-аккаунта с VPS (330 pt)</h2>
+<p class="note">Заголовок: имя продукта + плашка плана из снимка + «· vps». Бейдж-предупреждение — из таблицы раздела 4, не «вход истёк». Строки «Темп по снимку» нет (снята в 3.2.7); время — в строке 1 футера.</p>
+<div class="row">
+  <div class="acard" id="adv1"></div>
+  <div class="acard" id="adv2"></div>
+</div>
+
+<h2>E. Настройки · новые и изменённые блоки</h2>
+<div class="row">
+  <div class="set">
+    <div class="scap" style="margin-top:0">ОПРАШИВАТЬ НА ЭТОМ КОМПЬЮТЕРЕ</div>
+    <div class="scard"><div class="srow" style="justify-content:space-between"><span style="font-size:12px">Claude Code</span><span class="tog off" style="margin-right:22px"></span><span style="font-size:12px">Codex</span><span class="tog"></span></div></div>
+    <div class="hint">Аккаунты с других компьютеров — после входа в GitHub ›</div>
+
+    <div class="scap">АККАУНТЫ</div>
+    <div class="scard">
+      <div class="srow"><span class="picon cl" style="position:static;width:16px;height:16px"></span><div class="acc"><div class="a1">Claude Max 20x · vps</div><div class="a2">Max 20x · vps · без входа здесь</div></div><span class="pen">✎</span><span class="tog"></span></div>
+      <div class="srow"><span class="picon cx" style="position:static;width:16px;height:16px"></span><div class="acc"><div class="edit">Мой Codex<span class="cnt">9/32</span></div></div><span class="pen" style="color:var(--link);font-size:10px;width:auto;margin:0 8px">Сбросить</span><span class="tog"></span></div>
+      <div class="srow"><span class="picon cx" style="position:static;width:16px;height:16px"></span><div class="acc"><div class="a1" style="color:var(--mid)">Codex Plus · vps</div><div class="a2">Plus · vps · без входа здесь</div></div><span class="pen">✎</span><span class="tog off"></span></div>
+      <div class="srow"><span class="picon cx" style="position:static;width:16px;height:16px;opacity:.5"></span><div class="acc"><div class="a1">Codex · аккаунт не указан</div><div class="a2">thinkpad</div></div><span class="tog"></span></div>
+    </div>
+
+    <div class="scap">В СТРОКЕ МЕНЮ</div>
+    <div class="scard">
+      <div class="srow"><span style="font-size:11px;color:var(--mid)">5ч · нед · <b style="color:#fff">Fable</b> / — · 5ч · <b style="color:#fff">нед</b> · Fable</span></div>
+      <div class="srow"><span style="font-size:13px">Codex</span><span class="capsule">По умолчанию · Мой Codex ⌄</span></div>
+    </div>
+    <div class="scap">ДРУГИЕ КОМПЬЮТЕРЫ · ЧЕРЕЗ GITHUB <span style="color:var(--mid);font-weight:400">· теперь и в Простом виде</span></div>
+    <div class="scard"><div class="srow"><span style="color:var(--mid)">GitHub ·</span>&nbsp;не выполнен вход<span style="margin-left:auto;color:var(--link);font-size:11px;font-weight:600">Войти</span></div></div>
+  </div>
+  <div>
+    <div class="cap">МЕНЮ КАПСУЛЫ (NSMenu)</div>
+    <div class="tip" style="width:220px">✓ По умолчанию (Мой Codex)
+   Мой Codex
+   Codex Plus · vps</div>
+    <div class="cap" style="margin-top:14px">СТРОКА МЕНЮ: СВЕЖО / СОСТОЯНИЕ 5</div>
+    <div class="row" style="gap:12px">
+      <div class="mb"><div><span class="ic" style="background:#D97757"></span><span style="color:#3DD6B0">46</span>/<span style="color:#FF9E0A">58</span>%</div><div><span class="ic" style="background:#7a6cf6"></span>43%</div></div>
+      <div class="mb"><div class="faint"><span class="ic" style="background:#D97757;opacity:1"></span>46/58%</div><div><span class="ic" style="background:#7a6cf6"></span>43%</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+function ring(cx,cy,r,p,col,dim){
+  const C=2*Math.PI*r, arc=.75*C, v=Math.max(0,Math.min(100,p||0))/100*arc;
+  const c = dim? 'rgba(255,255,255,.3)': col;
+  return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="6" stroke-linecap="round" stroke-dasharray="${arc} ${C}" transform="rotate(135 ${cx} ${cy})"/>`+
+         (p?`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${c}" stroke-width="6" stroke-linecap="round" stroke-dasharray="${v} ${C}" transform="rotate(135 ${cx} ${cy})"/>`:'');
+}
+function sev(p,base){return p>=90?'var(--sev2)':p>=50?'var(--sev1)':base}
+function card(o){
+  const w=o.wide?328:158, cx=w/2, dim=!!o.dim, dimS=dim||o.dimS;
+  const sCol=dimS?'rgba(255,255,255,.3)':sev(o.s,'var(--blue)'), wCol=dim?'rgba(255,255,255,.3)':sev(o.wk,'var(--purple)');
+  let h=`<div class="card${o.wide?' w':''}">`;
+  h+=`<span class="picon ${o.p}"></span><div class="ctitle" style="max-width:${w-67}px">${o.title}</div><span class="arrow">↗</span>`;
+  h+=`<svg class="ring" width="${w}" height="140">${ring(cx,84,38,o.wk,wCol,dim)}${ring(cx,84,26,o.s,sCol,dimS)}</svg>`;
+  h+=`<div class="pct" style="left:${cx-40}px;top:${84-20}px;color:${sCol}">${o.s==null?'—':o.s+'%'}</div>`;
+  h+=`<div class="pct" style="left:${cx-40}px;top:${84}px;color:${wCol}">${o.wk==null?'—':o.wk+'%'}</div>`;
+  if(o.m!=null) h+=`<div class="mpill" style="left:${cx-22}px;top:106px;color:${dim?'rgba(255,255,255,.3)':'var(--model)'};background:${dim?'rgba(255,255,255,.06)':'rgba(61,214,176,.16)'};border:1px solid ${dim?'transparent':'rgba(61,214,176,.42)'}">${o.m}%</div>`;
+  if(o.rc!=null) h+=`<div class="mpill" style="left:${cx-18}px;top:106px;color:var(--amber);background:rgba(255,255,255,.09)">↻ ${o.rc}</div>`;
+  h+=`<div class="rows"><div><i style="background:${sCol}"></i><span class="n">Сессия</span><span class="t">${o.sr||'17:13'}</span></div><div><i style="background:${wCol}"></i><span class="n">Неделя</span><span class="t">${o.wr||'пт, 15:13'}</span></div>`;
+  if(o.m!=null) h+=`<div><i style="background:${dim?'rgba(255,255,255,.3)':'var(--model)'}"></i><span class="n">Fable</span><span class="t">пт, 15:13</span></div>`;
+  h+=`</div><div class="cfoot"><div class="l1">${o.l1}</div>${o.l2?`<div class="l2 ${o.c||'mid'}">${o.l2}</div>`:''}</div></div>`;
+  return h;
+}
+const base={p:'cl',title:'Claude · vps',s:24,wk:58,m:46,l1:'Данные с vps от 15:43'};
+document.getElementById('g1').innerHTML=
+  card(base)+
+  card({p:'cx',title:'Codex · mac',s:31,wk:47,rc:2,l1:'Данные 15:41'})+
+  `<div class="wide">${card({p:'cx',wide:true,title:'Codex · vps',s:12,wk:20,rc:0,dim:true,l1:'Данные с vps от 14:58',l2:'Машина vps не на связи с 15:01',c:'amb'})}</div>`;
+const st=[
+ ['1 · свежо',{}],
+ ['2 · устарело',{dim:true,l1:'Данные с vps от 11:05',l2:'Данные устарели',c:'mid'}],
+ ['3a · вход истёк на vps',{dim:true,l1:'Данные с vps от 11:05',l2:'Обновите вход на vps',c:'amb'}],
+ ['3b · нет входа на vps',{dim:true,l1:'Данные с vps от 11:05',l2:'На vps нет входа',c:'amb'}],
+ ['4 · пауза сервиса',{l1:'Данные с vps от 15:43',l2:'Пауза сервиса до 16:30',c:'amb'}],
+ ['5 · vps не на связи',{dim:true,l1:'Данные с vps от 15:43',l2:'vps не на связи с 15:52',c:'amb'}],
+ ['6 · синк стоит',{dim:true,l1:'Данные с vps от 15:43',l2:'Синхронизация стоит ›',c:'lnk'}],
+ ['7 · нет входа в GitHub',{dim:true,l1:'Данные с vps от 15:43',l2:'Войдите в GitHub ›',c:'lnk'}],
+ ['сброс прошёл (V6)',{dimS:true,sr:'окно сброшено',l1:'Данные с vps от 10:00'}],
+ ['другой день, узко',{dim:true,l1:'С vps от 11.10 15:43',l2:'Данные устарели',c:'mid'}],
+ ['нет показаний',{s:null,wk:null,m:null,l1:'Нет данных с vps',l2:'Обновите вход на vps',c:'amb'}],
+];
+document.getElementById('states').innerHTML=st.map(([t,o])=>`<div class="statecell"><span class="tag" style="top:2px">${t}</span>${card(Object.assign({},base,o))}</div>`).join('');
+const rf=[
+ ['ручное: чтение gist',{l2:'Читаем GitHub…'}],
+ ['ручное: прочитано',{l2:'GitHub проверен 15:45'}],
+ ['повторно в 30 с',{l2:'Повтор через 12 с'}],
+ ['со входом: пол 900 с',{p:'cx',title:'Codex · mac, vps',m:null,rc:2,s:31,wk:47,l1:'Данные с vps от 15:43',l2:'Опрос можно с 15:58'}],
+];
+document.getElementById('refresh').innerHTML=rf.map(([t,o])=>`<div class="statecell"><span class="tag" style="top:2px">${t}</span>${card(Object.assign({},base,o))}</div>`).join('');
+function adv(el,o){
+  const rows=[['СЕССИЯ · 5 Ч',24,'var(--blue)','Хватит до сброса (прогноз 40%)','план 60% · −36 п. · 8%/ч · сброс 17:13'],
+              ['НЕДЕЛЯ · FABLE',46,'var(--model)','Хватит до сброса (прогноз 71%)','план 42,9% · +3,1 п. · 15,3%/день · сброс пт, 15:13'],
+              ['НЕДЕЛЯ · ВСЕ МОДЕЛИ',58,'var(--sev1)','Хватит до сброса (прогноз 88%)','план 42,9% · +15,1 п. · 19,3%/день · сброс пт, 15:13']];
+  let h=`<div class="ahead"><span class="picon cl"></span><span class="nm">Claude Code</span>${o.badge?`<span class="badge warn">${o.badge}</span>`:''}<span class="badge plan">Max 20x</span><span class="mach">· vps</span><span style="margin-left:auto;color:var(--lo);font-size:11px">↗</span></div>`;
+  h+=`<div class="${o.dim?'dim':''}">`+rows.map(r=>`<div class="arow"><div class="alab"><span>● ${r[0]}</span><b style="color:${r[2]}">${r[1]}%</b></div><div class="averd">${o.dim?'Темп не считаем':r[3]}</div><div class="bar"><i style="width:${r[1]}%;background:${r[2]}"></i></div><div class="ameta">${r[4]}</div></div>`).join('')+`</div>`;
+  h+=`<div class="afoot cfoot" style="left:11px;right:11px"><div class="l1">${o.l1}</div>${o.l2?`<div class="l2 ${o.c}">${o.l2}</div>`:''}</div>`;
+  el.innerHTML=h; el.style.paddingBottom='32px';
+}
+adv(document.getElementById('adv1'),{l1:'Данные с vps от 15:43'});
+adv(document.getElementById('adv2'),{dim:true,badge:'вход на vps',l1:'Данные с vps от 11:05',l2:'На машине vps нужно обновить вход Claude Code',c:'amb'});
+</script>
+</body>
+</html>
