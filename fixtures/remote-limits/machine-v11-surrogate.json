@@ -1,0 +1,55 @@
+{
+ "schema": 1,
+ "machine": {
+  "id": "fixturesurrogate",
+  "name": "\ud800ab",
+  "os": "OS\ud800",
+  "app": "linux\ud800"
+ },
+ "updated": "2026-10-12T10:00:00Z",
+ "tz": "\ud800",
+ "days": {
+  "claude": {
+   "2026-10-12": {
+    "claude-fable-5-1": {
+     "input": 7,
+     "output": 1,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 1
+    },
+    "model\ud800": {
+     "input": 100,
+     "output": 1,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 1
+    }
+   },
+   "2026-10-\ud800": {
+    "claude-fable-5-1": {
+     "input": 200,
+     "output": 1,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 1
+    }
+   }
+  },
+  "codex\ud800": {
+   "2026-10-12": {
+    "gpt-6-astra": {
+     "input": 300,
+     "output": 1,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 1
+    }
+   }
+  }
+ }
+}
