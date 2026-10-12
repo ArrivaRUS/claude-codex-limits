@@ -1,4 +1,4 @@
-# Usage sync protocol (v1)
+# Usage sync protocol (v1 · v1.1)
 
 How copies of Claude Codex Limits on different computers share **local usage** through one
 secret GitHub gist. This file is the contract for the macOS app (`Sources/LimitsMonitor.swift`)
@@ -14,6 +14,7 @@ to the shared file format require bumping `schema` and updating both sides.
   money in the Advanced view can cover every computer.
 - Only aggregates travel: counts per product → day → model. No prompts, no file paths, no project
   names, no session ids.
+- Since v1.1 a machine may also publish limit snapshots of its own signed-in accounts — see v1.1 below.
 
 ## Transport: one secret gist
 
@@ -56,6 +57,8 @@ to the shared file format require bumping `schema` and updating both sides.
   delta), so a lost or repeated write can't double‑count.
 - `schema` is the integer `1`; JSON boolean `true` is not a schema number. Readers apply the
   numeric checks described under *Read and merge*.
+- `machine.name`: v1.1 writers publish a sanitized machine tag `[a-z0-9-]{1,16}` (no personal names);
+  readers truncate to 16.
 
 ```json
 {
@@ -318,3 +321,184 @@ One GitHub OAuth App («Claude Codex Limits», Device Flow enabled) serves every
 is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secret.
 
 **Client ID: `Ov23lipk8voUWUAr59qS`** (OAuth App «Claude Codex Limits», owner ArrivaRUS, Device Flow enabled).
+
+## Usage sync protocol v1.1 — account limits (additive)
+
+**Why.** Only a machine signed in to an account can read its limits; v1.1 lets it publish them and attributes usage to accounts.
+
+### Compatibility
+
+- `schema` stays the integer `1`; the manifest is unchanged. Every v1.1 key is optional. Raising `schema` is
+  forbidden: v1 readers (macOS ≤ 3.2.7, Linux ≤ 0.4.5) would drop the whole file and lose its usage.
+- Linux `sync.merge()` (`linux/ccl/sync.py` 355–402) reads only `schema`, `machine.{id,name,os,app}`, `updated`, `tz`, `days`.
+- macOS `GitHubSync.merge` (`Sources/LimitsMonitor.swift` 2740–2775) reads the same keys via `as?`; others are never looked up.
+- The root `days` stays the whole machine's usage: per product it **equals** Σ `accounts[*].days` of that product +
+  `unattributedDays[product]`, a projection for v1 readers. A v1.1 reader sums **either** that split **or** the root.
+- Both ports test it: a v1.1 fixture through the **old** merge gives the same result as that fixture without v1.1 keys.
+
+### File shape
+
+```json
+{ "schema": 1, "machine": {"id": "5f0c…", "name": "vps", "os": "Ubuntu 26.04", "app": "linux 0.5.0"},
+  "updated": "2026-10-12T10:15:03Z", "tz": "Etc/UTC", "lastSeenAt": "2026-10-12T10:15:03Z",
+  "days": { "claude": { "2026-10-12": { "claude-fable-5-1": {"input": 1200, "output": 3400, "cacheRead": 900000,
+                                                            "cacheWrite5m": 0, "cacheWrite1h": 52000, "turns": 41} } },
+            "codex":  { "2026-10-10": { "gpt-6-astra": {"input": 1, "output": 1, "cacheRead": 0,
+                                                        "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1} } } },
+  "accounts": [
+    { "product": "claude", "label": "3f9a0c71b2d4e5f6", "plan": "max", "tier": "default_claude_max_20x",
+      "status": "ok", "asOf": "2026-10-12T10:15:02Z", "attemptAt": "2026-10-12T10:15:00Z", "attemptKind": "auto",
+      "windows": { "session": {"pct": 42.5, "resetAt": "2026-10-12T13:00:00Z"},
+                   "weekly":  {"pct": 61.0, "resetAt": "2026-10-15T07:00:00Z"} },
+      "models": [ {"name": "Fable 5.1", "pct": 70.2, "resetAt": "2026-10-15T07:00:00Z"} ],
+      "schedule": { "mode": "auto", "interval": 900, "nextAt": "2026-10-12T10:30:00Z", "backoff": false }, "retryUntil": null,
+      "days": { "2026-10-12": { "claude-fable-5-1": {"input": 1200, "output": 3400, "cacheRead": 900000,
+                                                     "cacheWrite5m": 0, "cacheWrite1h": 52000, "turns": 41} } } },
+    { "product": "codex", "label": "a1b2c3d4e5f60718", "plan": "pro", "status": "expired", "expiredReason": "cli_refresh_pending",
+      "asOf": "2026-10-12T06:40:11Z", "attemptAt": "2026-10-12T10:15:00Z", "attemptKind": "auto",
+      "windows": { "session": {"pct": 12.0, "resetAt": "2026-10-12T11:40:00Z"} }, "resetCredits": 2,
+      "schedule": { "mode": "auto", "interval": 3600, "nextAt": "2026-10-12T11:15:00Z", "backoff": true },
+      "days": { "2026-10-10": { "gpt-6-astra": {"input": 1, "output": 1, "cacheRead": 0,
+                                                "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1} } } }
+  ],
+  "unattributedDays": {},
+  "captions": { "3f9a0c71b2d4e5f6": { "text": "команда", "setAt": "2026-10-12T09:00:00Z" } } }
+```
+
+- `accounts[].days` has no product level (the record's `product` is it); `unattributedDays` has the full root `days`
+  shape. Counters follow v1 (six integers, 0…10^15).
+- **Day attribution.** The usage index stores `accountByDay[product][day]` = the local identity active when that day's
+  lines were first indexed; it never changes later. Days with no known identity go to `unattributedDays`.
+
+### Field rules
+
+| Field | Type | Bounds | Required |
+|---|---|---|---|
+| `lastSeenAt` | time | heartbeat, see *Write rules* | v1.1 writers: yes |
+| `accounts` | array of records | ≤ 8 records | no |
+| `unattributedDays` | object, root `days` shape | v1 counters | no |
+| `captions` | object `label → {text, setAt}` | ≤ 64 keys, key = 16 hex, `text` ≤ 32 chars | no (Should) |
+| `product` | string | `claude` · `codex` | yes |
+| `label` | string or `null` | 16 lowercase hex | yes (`null` allowed) |
+| `labelReason` | string | `no_login` · `no_account_uuid` · `unreadable` · `no_gist` | when `label` is `null` |
+| `status` | string | `ok` · `signed_out` · `expired` · `rate_limited` (writer holds its **own** `retryUntil` in the future, after 429 / Retry-After) · `error`; `stale` is reserved: v1.1 writers never set it, readers judge freshness from `asOf`/`schedule` (V4) | yes |
+| `expiredReason` | string | `cli_refresh_pending` · `signin_required` | with `expired` |
+| `plan`, `tier` | string | ≤ 64 chars | no |
+| `asOf` | time | last **successful** API response; absent until this account's first success | no |
+| `attemptAt` | time | last attempt; the only name (`lastAttemptAt` is not used) | no |
+| `attemptKind` | string | `auto` · `activity` · `manual` · `initial` | with `attemptAt` |
+| `windows.session`, `windows.weekly` | `{pct, resetAt}` | `pct` finite number 0…100, not boolean | no, each |
+| `models` | array of `{name, pct, resetAt}` | ≤ 8; `name` ≤ 48 chars | no |
+| `resetCredits` | integer | 0…1000 (Codex) | no |
+| `schedule` | `{mode, interval, nextAt, backoff}` | `mode` `auto`·`fixed`; `interval` 900·1800·3600·14400 s; `backoff` boolean | no |
+| `retryUntil` | time or `null` | the provider's deadline (429 / Retry-After) | no |
+| `days` (record) | day → model → counters | v1 counters | yes, may be `{}` |
+
+Size: ≤ 4 KB of metadata per record (without `days`); file ≤ 8 MiB; above 1 MB the API truncates it → `raw_url` (v1).
+No values are invented (no default zeros): without a login there is no reading, only a status. All times are ISO-8601
+UTC; strings are shown only as plain text.
+
+### Account label
+
+- **Local identity** (never leaves the machine): Claude — `~/.claude.json` → `oauthAccount.accountUuid` (the parser
+  extracts only this key; file limit 8 MB, excessive nesting rejected); Codex — `~/.codex/auth.json` → `tokens.account_id`
+  (`id_token` is not read). Re-read on **every** pass. `organizationUuid` is **not** a fallback: it is shared by all
+  members of an organization.
+- **Label** = `hex(HMAC_SHA256(K, "ccl-account-v1|" + product + "|" + localId))[:16]`, `K = SHA256("ccl-label-key-v1|" + gist_id)`.
+  `localId` is normalized (trimmed, lowercased) before HMAC so two machines give one label for one account.
+- The label is computed **only** when the block (or a log line) is built, under the gist id current at that moment. No
+  local store keeps labels: the usage index, caches and publisher state are keyed by `localId`.
+- No label → `label: null`, **no provider request**, no values: `no_login` (no login file/block) → `signed_out`;
+  `unreadable`, `no_account_uuid`, `no_gist` (no gist id) → `error`. Token rotation without a new `localId` keeps the label.
+- **Account change** = a new `localId`: new snapshots and usage go under the new label; earlier usage stays under the old
+  one; the old account's cached values are not reused. If `localId` differs after the request, the result is discarded.
+- **Known limitation.** `oauthAccount` is Claude Code's profile cache and may lag a newly signed-in account; the label
+  stays the old one during the lag.
+- **Gist switch** (convergence on the earliest gist, or the owner recreating it): every label changes at each machine's
+  next build after its own discovery — up to 24 h apart, so duplicate cards may appear for ≤ 1 day. Reader settings
+  keyed by label (hidden accounts, `captions`, menu account) fall back to defaults. Rare by design.
+
+### Write rules
+
+- A machine publishes only fresh API readings of **its own** accounts; other machines' records are never republished.
+- **Three fingerprints** (`sync-state.json`), each decides independently; if none is due, no PATCH:
+  1. `pushHash` = sha1(root `days`) — usage: on change and `now − pushedAt ≥ 570 s` (the v1 floor);
+  2. `metaHash` = sha1(`accounts` without `days` + `captions`) — attempt, result, schedule, `retryUntil`, status, label,
+     caption: on change, **no floor**;
+  3. `heartbeatAt` — `lastSeenAt`: when `now − heartbeatAt ≥ 600 s` in automatic mode.
+- Any PATCH writes the whole file (current `days`, `accounts`, `captions`, `lastSeenAt = updated = now`) and updates all
+  three. `lastSeenAt` is part of the snapshot but of no fingerprint. A heartbeat moves only `lastSeenAt` and `updated`:
+  never `asOf`, the attempt or the schedule; two non-due ticks within 600 s give 0 PATCH. `updated` moves on **every**
+  PATCH, heartbeat included: v1 readers drop files by its 45-day age, so the heartbeat keeps the machine alive for them too.
+- **Order on a polling tick** (publisher pass, Linux `file_lock("quota")` → `file_lock("sync")`, wait ≤ 60 s):
+  1. one validating `GET /gists/{id}` (`public == false`), merge other files, coordination decision (*Read rules*);
+  2. save the attempt locally first; if it can't be saved → no request;
+  3. **PATCH №1** with the new `attemptAt`. Any failure (non-2xx, network, 404) → restore the previous attempt time,
+     **no provider request**; the next tick retries;
+  4. provider request;
+  5. **PATCH №2** with the result (status, `asOf`, values, `retryUntil`, schedule).
+  Both PATCHes reuse the one GET within **120 s**; PATCH 404 clears the gist id and hash as in v1; no discovery in between.
+  If the GET fails, nothing is announced: the machine polls on its own schedule and publishes on the next good pass.
+- **Budget:** a polling tick ≤ 1 GET + 2 PATCH; any other tick 1 GET + ≤ 1 PATCH. VPS with both products at 15 min:
+  288 GET and ≤ 528 PATCH a day. Worst case for three machines ≈ 34 GET/h and ≈ 50 PATCH/h, i.e. 1.7 % of the core
+  5000/h and 10 % of the 500/h content-creating limit. Reads still happen every cycle, as in v1.
+
+### Read rules
+
+- **Validation (C7).** Records are validated one by one; a broken `accounts` block never affects the file's `days`
+  (v1 rules), and one bad record never stops the merge.
+  - No `status`, `product` missing or not `claude`/`codex` → record dropped; unknown `status` → `error`; `label` not 16 hex → `null`.
+  - `pct` not a finite number (string, boolean, NaN/Infinity) or outside 0…100 → that window dropped.
+  - Unparsable time → that field dropped; a broken `asOf` leaves the record without a reading.
+  - `models` > 8 → tail dropped. A string containing control/format characters (`Cc`/`Cf`) is dropped **whole** (never
+    cleaned); a string over its limit is dropped. This includes v1's `machine.name/os/app`: `os`/`app` over 64 are
+    dropped, `machine.name` is truncated to 16.
+  - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
+  - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
+- **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1):
+  - a body over 16 MiB, or a `raw_url` body over 8 MiB: reading stops at cap + 1 byte and that file is skipped like
+    invalid JSON in v1; the cycle goes on and the last-success time advances (Linux `_raw`/`common.http` take a body cap);
+  - more than 64 `machine-*.json` files: the first 64 by file name are taken, the rest ignored;
+  - more than 64 MiB in total: no further files are read; files already read are merged.
+- Grouping: one card per `(product, label)` across machines, own included; the latest successful `asOf` wins (a tie →
+  local). The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
+  product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the whole root usage of that product
+  goes to «account not specified» and that product's account `days` are **not** added — no double count.
+- A source machine is offline when its `lastSeenAt` is older than 30 min. Files without `lastSeenAt` fall back to
+  `updated`: they come from older writers without limit snapshots, so the offline card state does not apply to them.
+  Links on remote cards are product constants, never taken from the file.
+- **Trust in other machines' fields** — they may only **postpone** my polling, never make it more frequent than my Auto:
+  - another machine's `attemptAt` for my label younger than 900 + 60 s → skip (a failed attempt counts too);
+  - its successful `asOf` younger than my interval + 60 s → skip;
+  - its `retryUntil` is stored apart from my own deadline, with `firstSeenAt` on disk, and honoured until
+    `min(retryUntil, firstSeenAt + 24 h)`; repeats, heartbeats and restarts don't move `firstSeenAt`; then my own
+    schedule resumes (`remote_retry_capped`). My own Retry-After has no cap;
+  - `asOf`/`attemptAt`/`nextAt` more than 60 s in the future, or inconsistent with each other → not fresh for coordination
+    (display rules above still apply);
+  - records from a file whose `lastSeenAt` is older than 30 min suppress nothing (an accepted `retryUntil` still holds);
+  - tie: its `nextAt` within ±60 s of my due time, the source alive (`lastSeenAt` ≥ now − 15 min) and its `machine.id`
+    lower than mine → I skip once per `(machineId, nextAt)`, then poll;
+  - manual refresh: my own ≥ 900 s floor, ≥ 960 s after another machine's `attemptAt`, never before `retryUntil`.
+- **Clocks.** Skew = GitHub's `Date` header − local time. The 60 s margins assume |skew| ≤ 60 s; above that the machine
+  logs `clock_skew`, shows it in status, and no coordination guarantee is claimed (no auto-correction; use NTP).
+
+### Privacy
+
+- Only the fields above go into the file. **Never**: tokens or their fingerprints, `id_token`/JWT (`eyJ…`), `scopes`,
+  `refreshTokenExpiresAt`, `OPENAI_API_KEY`; email, names, `accountUuid`, `account_id`, `organizationUuid` or any UUID
+  other than `machine.id`; prompts, paths, project names, full hostnames; error texts (only the enumerated status).
+- `machine.name` is a sanitized tag (NFKD → ASCII, lowercase, `[a-z0-9-]`, ≤ 16; empty → `mac`/`linux`); the publisher
+  sets it explicitly (`--name vps`). Captions: no `Cc`/`Cf`, NFC, `@` and `/` refused on input. `tz` stays (v1).
+- A scan test checks published files and publisher logs by values with an allow-list of keys and enum values (so
+  `cli_refresh_pending` passes): email, `account_id`, `accountUuid`, `refresh`, `access_token`, `sk-`, `/home/`, `/Users/`.
+- Old revisions keep v1 `machine.name` values; only recreating the gist removes them (all labels then change).
+
+### Platform differences
+
+- **Linux headless publisher** (VPS, P0): `ccl-sync push --auto` on a 5-min systemd timer, both products, the order
+  above. `credential_write: never` by default: with an expired token it publishes `expired` + `cli_refresh_pending`
+  and the last values, without refreshing. A tray on the same machine runs `delegated` (no polling, `allow_push=False`).
+- **macOS** (P0): reader (one card per label, states from `lastSeenAt`/`retryUntil`/`asOf`) and publisher of its own
+  Codex account; coordination via `syncNow(mode:completion:)`, `.writeOnly` PATCH against a gist validated by a GET
+  ≤ 120 s ago; no completion within 60 s counts as a failed read. Cycles stay at 10 min plus a read before polling.
+- **Second queue:** the Linux tray as a v1.1 reader (account cards) and as a publish-only tray; Linux `reader_card_state` logging.
