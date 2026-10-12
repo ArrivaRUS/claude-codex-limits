@@ -46,7 +46,7 @@
 | 4 | `retryUntil > now` | `Пауза сервиса до 16:30` / `Service wait until 16:30`; срок неизвестен → `Пауза сервиса` / `Service wait` | amber | нет | `пауза` / `wait` |
 | 5 | файл источника в gist не обновлялся > 30 мин | `vps не на связи с 15:52` / `vps offline since 15:52` → `Машина vps не на связи с 15:52` / `vps has been offline since 15:52` | amber | нет | `нет связи` / `offline` |
 | 6 | читатель не синхронизируется (`syncWarning()` ≠ nil при входе в GitHub) | `Синхронизация стоит ›` / `Sync stalled ›` | `ADV_LINK` | → Настройки, блок GitHub | `нет синка` / `no sync` |
-| 7 | читатель не вошёл в GitHub (`off`) / доступ отозван (`revoked`); показаны данные из кэша | `Войдите в GitHub ›` / `Sign in to GitHub ›`; revoked → `Войдите в GitHub заново ›` / `Sign in to GitHub again ›` | `ADV_LINK` | → Настройки, блок GitHub | `нет синка` / `no sync` |
+| 7 | читатель не вошёл в GitHub (`off`) / доступ отозван (`revoked`); значений нет до первого успешного синка (кэш аккаунтов без входа привязан к GitHub-входу, решение архитектуры №14) | `Войдите в GitHub ›` / `Sign in to GitHub ›`; revoked → `Войдите в GitHub заново ›` / `Sign in to GitHub again ›` | `ADV_LINK` | → Настройки, блок GitHub | `нет синка` / `no sync` |
 
 В 3a/3b вместо «Claude Code» подставляется «Codex» для Codex-аккаунта. В Simple узкая форма, в широкой Simple и в Advanced — широкая. Клик по карточке без входа на этой машине всегда открывает страницу использования продукта в браузере (как у здоровой карточки), никогда не экран `claudefix`.
 
