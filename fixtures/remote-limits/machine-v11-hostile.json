@@ -1,0 +1,1108 @@
+{
+ "schema": 1,
+ "machine": {
+  "id": "fixturehostile",
+  "name": "evil\u001b[2J\u001b]0;pwned\u0007",
+  "os": "OS‮KO",
+  "app": "linux​9"
+ },
+ "updated": "2026-10-12T10:00:00Z",
+ "tz": "UTC",
+ "lastSeenAt": "garbage",
+ "days": {
+  "claude": {
+   "2026-10-12": {
+    "claude-fable-5-1": {
+     "input": 25,
+     "output": 3400,
+     "cacheRead": 900000,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 52000,
+     "turns": 41
+    }
+   }
+  },
+  "codex": {
+   "2026-10-10": {
+    "gpt-6-astra": {
+     "input": 1,
+     "output": 1,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 1
+    }
+   }
+  }
+ },
+ "accounts": [
+  {
+   "_case": "bad_pct_types",
+   "product": "claude",
+   "label": "3f3cddd81d01cbc1",
+   "status": "ok",
+   "asOf": "2026-10-12T09:00:00Z",
+   "windows": {
+    "session": {
+     "pct": "80",
+     "resetAt": "2026-10-12T13:00:00Z"
+    },
+    "weekly": {
+     "pct": true,
+     "resetAt": "2026-10-15T07:00:00Z"
+    }
+   },
+   "models": [
+    {
+     "name": "over",
+     "pct": 140,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "neg",
+     "pct": -1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "good",
+     "pct": 50,
+     "resetAt": "2026-10-15T07:00:00Z"
+    }
+   ],
+   "days": {
+    "2026-10-12": {
+     "claude-fable-5-1": {
+      "input": 10,
+      "output": 3400,
+      "cacheRead": 900000,
+      "cacheWrite5m": 0,
+      "cacheWrite1h": 52000,
+      "turns": 41
+     }
+    }
+   }
+  },
+  {
+   "product": "claude",
+   "label": "3f3cddd81d01cbc1",
+   "status": "ok",
+   "asOf": "2026-10-12T08:00:00Z",
+   "windows": {
+    "session": {
+     "pct": 10,
+     "resetAt": "2026-10-12T13:00:00Z"
+    }
+   },
+   "days": {},
+   "_case": "duplicate_older"
+  },
+  {
+   "_case": "unknown_status",
+   "product": "codex",
+   "label": "096a000501ef4d26",
+   "status": "pwned",
+   "days": {}
+  },
+  {
+   "_case": "no_product",
+   "label": "b2b80a9a754a3504",
+   "status": "ok",
+   "days": {}
+  },
+  {
+   "_case": "no_status",
+   "product": "codex",
+   "label": "1baf291a0b06bec3",
+   "days": {}
+  },
+  {
+   "_case": "bad_label",
+   "product": "codex",
+   "label": "NOT-A-HEX-LABEL!",
+   "status": "ok",
+   "days": {}
+  },
+  {
+   "_case": "bad_times",
+   "product": "codex",
+   "label": "0c6a3278daa4d3c7",
+   "status": "ok",
+   "asOf": "99999-01-01T00:00:00Z",
+   "attemptAt": "2026-13-45T00:00:00Z",
+   "retryUntil": "2026-10-12T10:00:00+99:00",
+   "windows": {
+    "session": {
+     "pct": 5,
+     "resetAt": "yesterday"
+    }
+   },
+   "days": {}
+  },
+  {
+   "_case": "long_and_control_strings",
+   "product": "codex",
+   "label": "b0664b3aae9d0ba6",
+   "status": "ok",
+   "plan": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp",
+   "tier": "max‮02x",
+   "expiredReason": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "models": [
+    {
+     "name": "m\u001b[31m",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "<img src=\"http://198.51.100.7/x\">",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    }
+   ],
+   "days": {}
+  },
+  {
+   "_case": "many_models",
+   "product": "codex",
+   "label": "0e76decc35b4f8e5",
+   "status": "ok",
+   "models": [
+    {
+     "name": "m0",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m1",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m2",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m3",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m4",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m5",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m6",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m7",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m8",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m9",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m10",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m11",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m12",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m13",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m14",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m15",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m16",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m17",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m18",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m19",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m20",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m21",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m22",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m23",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m24",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m25",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m26",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m27",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m28",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m29",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m30",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m31",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m32",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m33",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m34",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m35",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m36",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m37",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m38",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m39",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m40",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m41",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m42",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m43",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m44",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m45",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m46",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m47",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m48",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m49",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m50",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m51",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m52",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m53",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m54",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m55",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m56",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m57",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m58",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m59",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m60",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m61",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m62",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m63",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m64",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m65",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m66",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m67",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m68",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m69",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m70",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m71",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m72",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m73",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m74",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m75",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m76",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m77",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m78",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m79",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m80",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m81",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m82",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m83",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m84",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m85",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m86",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m87",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m88",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m89",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m90",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m91",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m92",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m93",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m94",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m95",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m96",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m97",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m98",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    },
+    {
+     "name": "m99",
+     "pct": 1,
+     "resetAt": "2026-10-15T07:00:00Z"
+    }
+   ],
+   "days": {}
+  },
+  {
+   "_case": "out_of_range_misc",
+   "product": "codex",
+   "label": "29c63ba48d6b4610",
+   "status": "ok",
+   "resetCredits": 5000,
+   "schedule": {
+    "mode": "turbo",
+    "interval": 1234,
+    "nextAt": "never",
+    "backoff": "yes"
+   },
+   "days": {}
+  },
+  "not-an-object",
+  42,
+  null
+ ],
+ "unattributedDays": {
+  "claude": "nope"
+ },
+ "captions": {
+  "0000000000000000": {
+   "text": "c0",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000001": {
+   "text": "c1",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000002": {
+   "text": "c2",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000003": {
+   "text": "c3",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000004": {
+   "text": "c4",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000005": {
+   "text": "c5",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000006": {
+   "text": "c6",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000007": {
+   "text": "c7",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000008": {
+   "text": "c8",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000009": {
+   "text": "c9",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000a": {
+   "text": "c10",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000b": {
+   "text": "c11",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000c": {
+   "text": "c12",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000d": {
+   "text": "c13",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000e": {
+   "text": "c14",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000000f": {
+   "text": "c15",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000010": {
+   "text": "c16",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000011": {
+   "text": "c17",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000012": {
+   "text": "c18",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000013": {
+   "text": "c19",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000014": {
+   "text": "c20",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000015": {
+   "text": "c21",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000016": {
+   "text": "c22",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000017": {
+   "text": "c23",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000018": {
+   "text": "c24",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000019": {
+   "text": "c25",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001a": {
+   "text": "c26",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001b": {
+   "text": "c27",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001c": {
+   "text": "c28",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001d": {
+   "text": "c29",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001e": {
+   "text": "c30",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000001f": {
+   "text": "c31",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000020": {
+   "text": "c32",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000021": {
+   "text": "c33",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000022": {
+   "text": "c34",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000023": {
+   "text": "c35",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000024": {
+   "text": "c36",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000025": {
+   "text": "c37",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000026": {
+   "text": "c38",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000027": {
+   "text": "c39",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000028": {
+   "text": "c40",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000029": {
+   "text": "c41",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002a": {
+   "text": "c42",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002b": {
+   "text": "c43",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002c": {
+   "text": "c44",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002d": {
+   "text": "c45",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002e": {
+   "text": "c46",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000002f": {
+   "text": "c47",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000030": {
+   "text": "c48",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000031": {
+   "text": "c49",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000032": {
+   "text": "c50",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000033": {
+   "text": "c51",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000034": {
+   "text": "c52",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000035": {
+   "text": "c53",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000036": {
+   "text": "c54",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000037": {
+   "text": "c55",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000038": {
+   "text": "c56",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000039": {
+   "text": "c57",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003a": {
+   "text": "c58",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003b": {
+   "text": "c59",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003c": {
+   "text": "c60",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003d": {
+   "text": "c61",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003e": {
+   "text": "c62",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000003f": {
+   "text": "c63",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000040": {
+   "text": "c64",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000041": {
+   "text": "c65",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000042": {
+   "text": "c66",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000043": {
+   "text": "c67",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000044": {
+   "text": "c68",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000045": {
+   "text": "c69",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000046": {
+   "text": "c70",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000047": {
+   "text": "c71",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000048": {
+   "text": "c72",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000049": {
+   "text": "c73",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004a": {
+   "text": "c74",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004b": {
+   "text": "c75",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004c": {
+   "text": "c76",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004d": {
+   "text": "c77",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004e": {
+   "text": "c78",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000004f": {
+   "text": "c79",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000050": {
+   "text": "c80",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000051": {
+   "text": "c81",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000052": {
+   "text": "c82",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000053": {
+   "text": "c83",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000054": {
+   "text": "c84",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000055": {
+   "text": "c85",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000056": {
+   "text": "c86",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000057": {
+   "text": "c87",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000058": {
+   "text": "c88",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000059": {
+   "text": "c89",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005a": {
+   "text": "c90",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005b": {
+   "text": "c91",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005c": {
+   "text": "c92",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005d": {
+   "text": "c93",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005e": {
+   "text": "c94",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "000000000000005f": {
+   "text": "c95",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000060": {
+   "text": "c96",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000061": {
+   "text": "c97",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000062": {
+   "text": "c98",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "0000000000000063": {
+   "text": "c99",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "NOTHEX": {
+   "text": "x",
+   "setAt": "2026-10-12T09:00:00Z"
+  },
+  "3f3cddd81d01cbc1": {
+   "text": "a\u0000b‮c",
+   "setAt": "2026-10-12T09:00:00Z"
+  }
+ }
+}

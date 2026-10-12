@@ -1,0 +1,101 @@
+{
+ "_about": "REMOTE-LIMITS label golden vectors (synth v2 §B). label = hex(HMAC_SHA256(K, 'ccl-account-v1|'+product+'|'+norm(localId)))[:16], K = SHA256('ccl-label-key-v1|'+gist_id); norm = strip + lower. Shared by Python and Swift.",
+ "vectors": [
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "claude",
+   "local_id": "3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70",
+   "label": "f4b718320ee15b3a"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "claude",
+   "local_id": "3B9D6C1E-8F42-4A7B-9C05-2E6F1D8A4B70",
+   "label": "f4b718320ee15b3a"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "claude",
+   "local_id": "  3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70\n",
+   "label": "f4b718320ee15b3a"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "claude",
+   "local_id": "c0dex000-1111-4222-8333-444455556666",
+   "label": "34155e94bf8f1c3c"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "codex",
+   "local_id": "3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70",
+   "label": "bed169a4dc4b1b00"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "codex",
+   "local_id": "3B9D6C1E-8F42-4A7B-9C05-2E6F1D8A4B70",
+   "label": "bed169a4dc4b1b00"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "codex",
+   "local_id": "  3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70\n",
+   "label": "bed169a4dc4b1b00"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000001",
+   "product": "codex",
+   "local_id": "c0dex000-1111-4222-8333-444455556666",
+   "label": "f683db167afc0b47"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "claude",
+   "local_id": "3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70",
+   "label": "4a8e85ff29da1b0e"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "claude",
+   "local_id": "3B9D6C1E-8F42-4A7B-9C05-2E6F1D8A4B70",
+   "label": "4a8e85ff29da1b0e"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "claude",
+   "local_id": "  3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70\n",
+   "label": "4a8e85ff29da1b0e"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "claude",
+   "local_id": "c0dex000-1111-4222-8333-444455556666",
+   "label": "ddd378a5f3b1b494"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "codex",
+   "local_id": "3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70",
+   "label": "7d203530b38135dd"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "codex",
+   "local_id": "3B9D6C1E-8F42-4A7B-9C05-2E6F1D8A4B70",
+   "label": "7d203530b38135dd"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "codex",
+   "local_id": "  3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70\n",
+   "label": "7d203530b38135dd"
+  },
+  {
+   "gist_id": "fixturegist0000000000000000000002",
+   "product": "codex",
+   "local_id": "c0dex000-1111-4222-8333-444455556666",
+   "label": "76b5edc112555730"
+  }
+ ]
+}

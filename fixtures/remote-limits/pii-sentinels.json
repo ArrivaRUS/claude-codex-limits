@@ -1,0 +1,29 @@
+{
+ "_about": "Synthetic PII sentinels for the S3 scan (A1-10, T12). Token-like sentinels are assembled at run time from parts so that secret scanners never see a literal.",
+ "email": "alex.fixture@example.invalid",
+ "fullName": "Alexei Fixturov",
+ "displayName": "AlexFixture",
+ "organizationName": "Fixture Org LLC",
+ "organizationUuid": "0f0f0f0f-aaaa-4bbb-8ccc-dddddddddddd",
+ "hostname": "alex-macbook-fixture.example.invalid",
+ "home": "/home/alexfixture",
+ "users": "/Users/alexfixture",
+ "token_parts": {
+  "accessToken": [
+   "sk-ant-oat01-",
+   "FIXTUREACCESSZZZZZZZZZZZZ"
+  ],
+  "refreshToken": [
+   "sk-ant-ort01-",
+   "FIXTUREREFRESHZZZZZZZZZZZ"
+  ],
+  "id_token": [
+   "eyJ",
+   "FIXTUREIDTOKENZZZZZZZZZZ"
+  ],
+  "OPENAI_API_KEY": [
+   "sk-",
+   "FIXTUREOPENAIKEYZZZZZZZZZ"
+  ]
+ }
+}

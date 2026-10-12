@@ -22,7 +22,8 @@ class TestRealFilesUntouched(unittest.TestCase):
     def test_module_paths_point_into_the_sandbox(self):
         home = os.path.expanduser("~")
         for name in ("CONFIG_DIR", "STATE_DIR", "TOKEN_FILE_PATH", "MACHINE_ID_PATH", "SYNC_STATE_PATH",
-                     "SYNC_REMOTE_PATH", "CLAUDE_PROJECTS", "CLAUDE_CREDENTIALS", "CODEX_SESSIONS", "CODEX_AUTH"):
+                     "SYNC_REMOTE_PATH", "CLAUDE_PROJECTS", "CLAUDE_CREDENTIALS", "CODEX_SESSIONS", "CODEX_AUTH",
+                     "CLAUDE_JSON"):
             path = getattr(common, name)
             self.assertTrue(path.startswith(_isolate.ROOT), (name, path))
             self.assertFalse(path.startswith(os.path.join(home, ".config")), name)

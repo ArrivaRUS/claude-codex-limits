@@ -59,5 +59,6 @@ sync.transport = no_network
 # Also protect helpers outside sync (updates, limits); tests may install their own fakes.
 common.http = no_network
 # XDG does not isolate the CLI credential and transcript paths.
-for name in ("CLAUDE_PROJECTS", "CLAUDE_CREDENTIALS", "CODEX_SESSIONS", "CODEX_AUTH"):
+# CLAUDE_JSON (~/.claude.json, REMOTE-LIMITS identity source) is redirected before it even exists.
+for name in ("CLAUDE_PROJECTS", "CLAUDE_CREDENTIALS", "CODEX_SESSIONS", "CODEX_AUTH", "CLAUDE_JSON"):
     setattr(common, name, os.path.join(ROOT, "cli", name.lower()))
