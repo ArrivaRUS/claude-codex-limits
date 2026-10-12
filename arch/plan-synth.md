@@ -1,86 +1,387 @@
-# REMOTE-LIMITS — синтез архитектуры (суд Юрки)
+# REMOTE-LIMITS — синтез архитектуры, версия 2 (самодостаточный план)
 
-Дата: 2026-10-12. Входы: `arch/plan-claude.md` (#1, Fable 5.1 @max), `arch/plan-codex.md` (#2, GPT-6 Astra @xhigh),
-PRD `docs/prd-remote-limits.md` (G1), UX `design/remote-limits-ux.md`. Статус: черновик синтеза → челлендж Astra → T1.
+Дата: 2026-10-12. Заменяет v1 (`arch/plan-synth-v1.md` — дельты к плану #1). Входы: план #1 `arch/plan-claude.md` (база), план #2
+`arch/plan-codex.md`, челлендж Astra `arch/challenge-codex.md` (14 несостыковок), PRD `docs/prd-remote-limits.md` (G1, решения
+владельца 1–7), UX `design/remote-limits-ux.md` (G2b), код macOS 3.2.7 / Linux 0.4.5 (строки проверены заново). Решения Юрки по
+спорным пунктам применены без обсуждения. Статус: на T1 (security-analyst) → execution-pack.
 
-## Рубрика (1–5)
+## Итог
 
-| Критерий | План #1 (Claude) | План #2 (Astra) |
+Один аддитивный блок `accounts` в `machine-<id>.json` (`schema: 1`), метка аккаунта = HMAC от **локальной** идентичности с ключом из id
+gist, считается только при сборке блока; все локальные хранилища живут под локальной идентичностью. На VPS — проход издателя внутри
+штатного `ccl-sync push --auto` (таймер 5 мин) под `file_lock("quota")`: GET gist → решение B2 → **PATCH попытки → запрос к провайдеру
+→ PATCH результата**; три отпечатка записи (расход с полом 10 мин · метаданные без пола · heartbeat раз в 10 мин). B2 — «чужая
+попытка моложе 960 с или чужой успех моложе I+60 с → пропуск», часы сверяются по заголовку `Date` GitHub. Токены: `credential_write:
+never` на машине с живым CLI, смена политики только под замком. На маке — чистый резолвер аккаунтов поверх `SyncRemoteCache`, два
+слота `claude`/`codex` как сегодня, B2 через `syncNow(completion:)`.
+
+## Закрытие 14 несостыковок челленджа (все закрыты; №7 — иначе, чем предлагала Astra)
+
+| № | Что изменено | Где |
 |---|---|---|
-| Корректность | 4 — пропустил, что при Auto 4 ч и неизменном расходе файл молчит часами, и V5 «не на связи» недоказуема | 5 — нашёл heartbeat-дыру, порядок guard до `_PENDING`, `lastAttemptAt` в правиле пропуска |
-| Простота | 5 — метка из локальных файлов, ключ из gist id, резолвер поверх двух слотов | 3 — ручной перенос 32-байтного ключа по SSH, профиль-запрос, владение опросом с арендой, дубль `days` |
-| Соответствие ограничениям | 5 — ни одного нового запроса к Anthropic, Auto не тронут | 3 — `/api/oauth/profile` к Anthropic (пусть 1/сутки), задержка bootstrap ≥ 900 с, ожидание при недоступной координации |
-| Риск | 4 — остаточная гонка B2 (окно ~10 с), `~/.claude.json` недокументирован | 3 — новый режим отказа «владелец молчит, остальные ждут без автозахвата», бремя распространения ключа |
-| Тестируемость | 5 — чистые `coordination.decide`, `resolveAccounts`, фикстуры | 4 — симулятор двух машин, но больше состояний (lease) |
+| 1 | Смена `credential_write` только под `file_lock("quota")` при отсутствии ротации в памяти любого процесса (маркер `rotation-pending-<p>` с pid); все запросы к провайдеру в любом процессе идут под тем же замком; guard и в `_save_*`/`_rewrite_json` | §E |
+| 2 | Трей в `delegated` не пишет `autoPollState`/`quotaServerRetryAt` вообще (и в `on_activity`): `save_poll_states` — no-op, `local_activity` применяет только проход; циклы синка трея `allow_push=False` | §C «Трей» |
+| 3 | `cache.json[p].accountId` и `publisher-state.json` под локальной идентичностью; C3-fallback только внутри того же аккаунта; для нового аккаунта до первого успеха значений нет | §B, §C шаг 6c, §F |
+| 4 | `GitHubSync.syncNow(mode:completion:)` с исходом `.read(generation, cache)/.failed/.skipped` через единый `defer`; продолжение B2 только из completion, `onChange` — только UI | §F «B2 на маке» |
+| 5 | Последовательность «PATCH `attemptAt` → запрос → PATCH результата» явно в проходе; одно имя `attemptAt`; отказ PATCH попытки → `poll_skipped publish_failed`, запроса нет; бюджет пересчитан | §C шаги 6–7, таблица бюджета |
+| 6 | Тай-брейк ждёт не больше одного тика на конкретную пару `(machineId, nextAt)`, только при живом источнике (`lastSeenAt` ≤ 15 мин); неизменная запись второй раз не задерживает | §D правило 4 |
+| 7 | Привязка к поколению `.credentials.json` снята; источник только `~/.claude.json → oauthAccount.accountUuid`, перечитывается каждый проход; смена значения = смена аккаунта; нет поля → `label: null`; лаг кэша после смены аккаунта — известное ограничение; `identity_unknown` не вводится (решение Юрки) | §B |
+| 8 | История/кэш/индекс под локальной `(product, localId)`; HMAC-метка только при сборке блока под текущий gist id; смена gist меняет метки у всех, ссылки читателей по меткам сбрасываются (редко, задокументировано) | §B |
+| 9 | Отдельные числа допуска: установившийся 0 · событие ≤ 1 пара · gist недоступен ≤ 1 пара на 15 мин простоя · восстановление ≤ 1; «≤ 3 событий/сутки» убрано; в замере G1 периоды недоступности помечаются | §D «Допуск» |
+| 10 | Запас 60 с и к `attemptAt` (960 с); опора времени — `Date` ответов GitHub, `clockSkew` в состоянии, > 60 с → `clock_skew` в журнал, status, гарантия B2 не заявляется | §D «Часы» |
+| 11 | Три отпечатка: `pushHash` (расход, пол 570 с) · `metaHash` (попытка/результат/подпись, без пола) · `heartbeatAt` (свой срок 600 с); бюджет 1 GET + ≤ 2 PATCH на due-тик, иначе 1 GET + ≤ 1 PATCH | §C «Правило записи» |
+| 12 | `RemoteAccount.machineLastSeenAt`, `SyncCachedMachine.lastSeenAt`, чистый `ReaderSyncState{phase, warning}` в аргументах резолвера; состояние 7 — без удалённых карточек | §F |
+| 13 | История темпа по ключу `acct` (локальный отпечаток для своих, метка для чужих); приём чужих `asOf` без guard `productEnabled`; дедуп по `(acct, t)` | §F «История» |
+| 14 | Обещание мгновенного возврата кэша снято; состояние 7 — без значений до первого успешного синка; UX-спек правится | §F.1 п. 5 |
 
-**Базовый план — #1.** Ниже — что заимствую из #2 и на каких предпосылках, что отбрасываю, и что остаётся
-развилкой для владельца (G4).
+## A. Контракт gist v1.1
 
-## Заимствования из #2 (с предпосылками)
+Файл `machine-<id>.json` — целый идемпотентный снимок; `schema` остаётся `1`; новые ключи необязательны, старые читатели их игнорируют.
 
-| # | Заимствование | Предпосылка / что меняется в базе |
-|---|---|---|
-| З1 | **Heartbeat `lastSeenAt`**: издатель пишет `lastSeenAt` раз в 10 мин даже без изменений (входит в хеш); V5 №5 «машина не на связи» = `lastSeenAt < now − 30 мин`, а не возраст `updated`. | PRD C6 дополняется разрешённой причиной записи «heartbeat раз в 10 мин» (правка PM). Цена: ≤ 144 PATCH/сутки на машину — в пределах GitHub. `asOf`/`nextAt` heartbeat не двигает. |
-| З2 | **`days` всегда внутри записи аккаунта** + корневой `days` = проекция суммы по продукту + `unattributedDays` (расход без метки). Читатель v1.1 берёт разбиение по аккаунтам, корень — только старые читатели; при расхождении проекции расход продукта идёт в «не указан». | Отказ от правила #1 «`days` в записи только при ≥ 2 метках» (два пути чтения). Цена — файл до ×2; предпосылка: лимит расширения ≤ 8 MiB и существующий путь `truncated`/`raw_url`. |
-| З3 | **`lastAttemptAt` в правиле пропуска B2**: неудачная попытка тоже тратит бюджет; пропуск, если по метке есть чужая попытка моложе 900 с ИЛИ успешный `asOf` моложе `I_мой + 60 с`. | Предпосылка #1: попытка публикуется сразу (PATCH без пола при изменении блока). |
-| З4 | **Guard `credential_write` и в `_save_*`/низкоуровневой записи**, не только перед POST token; запрет «горячего» переключения политики при незавершённой ротации (`_PENDING` непуст → ошибка, не новая ротация). | Дополняет §E плана #1. |
-| З5 | **Retry-After > 24 ч не обрезать**: хранить полностью, показывать в `status`; backoff GitHub (cap 1 ч, `sync.py:495`) к лимитам не применять. | Заменяет «24 ч, затем одна попытка» из #1. Безопаснее для главной цели (Anthropic). |
-| З6 | **Чистый Swift-код в новом файле `Sources/RemoteLimits.swift`** (DTO `RemoteAccount`, валидатор C7, merge v1.1, `resolveAccounts`), в `LimitsMonitor.swift` — только точки подключения. | Структура #1 сохраняется (резолвер кормит два слота; N карточек — C5), но код не раздувает 8.8k-файл. |
-| З7 | `SyncMachine` получает стабильный `id` и `lastSeenAt` (связь карточки с источником, liveness). | Нужно для З1 и V5. |
-| З8 | Трей: исправить порядок «сохранить попытку ДО старта воркера» и не глотать ошибку записи (`gui/app.py:1226`, `:1287`) — в срезе B2 (#1 тоже отметил). | — |
+```json
+{ "schema": 1, "machine": {"id": "5f0c…", "name": "vps", "os": "Ubuntu 26.04", "app": "linux 0.5.0"},
+  "updated": "2026-10-12T10:15:03Z", "tz": "Etc/UTC", "lastSeenAt": "2026-10-12T10:15:03Z",
+  "days": { "claude": { "2026-10-12": { "claude-fable-5-1": {"input": 1200, "output": 3400, "cacheRead": 900000,
+                                                            "cacheWrite5m": 0, "cacheWrite1h": 52000, "turns": 41} } },
+            "codex":  { "2026-10-10": { "gpt-6-astra": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1} } } },
+  "accounts": [
+    { "product": "claude", "label": "3f9a0c71b2d4e5f6", "plan": "max", "tier": "default_claude_max_20x",
+      "status": "ok", "asOf": "2026-10-12T10:15:02Z", "attemptAt": "2026-10-12T10:15:00Z", "attemptKind": "auto",
+      "windows": { "session": {"pct": 42.5, "resetAt": "2026-10-12T13:00:00Z"}, "weekly": {"pct": 61.0, "resetAt": "2026-10-15T07:00:00Z"} },
+      "models": [ {"name": "Fable 5.1", "pct": 70.2, "resetAt": "2026-10-15T07:00:00Z"} ],
+      "schedule": { "mode": "auto", "interval": 900, "nextAt": "2026-10-12T10:30:00Z", "backoff": false }, "retryUntil": null,
+      "days": { "2026-10-12": { "claude-fable-5-1": {"input": 1200, "output": 3400, "cacheRead": 900000, "cacheWrite5m": 0, "cacheWrite1h": 52000, "turns": 41} } } },
+    { "product": "codex", "label": "a1b2c3d4e5f60718", "plan": "pro", "status": "expired", "expiredReason": "cli_refresh_pending",
+      "asOf": "2026-10-12T06:40:11Z", "attemptAt": "2026-10-12T10:15:00Z", "attemptKind": "auto", "windows": {"session": {"pct": 12.0, "resetAt": "2026-10-12T11:40:00Z"}},
+      "resetCredits": 2, "schedule": { "mode": "auto", "interval": 3600, "nextAt": "2026-10-12T11:15:00Z", "backoff": true },
+      "days": { "2026-10-10": { "gpt-6-astra": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1} } } }
+  ],
+  "unattributedDays": {},
+  "captions": { "3f9a0c71b2d4e5f6": { "text": "команда", "setAt": "2026-10-12T09:00:00Z" } } }
+```
 
-## Отброшено из #2 (почему)
+**Верхний уровень.** `lastSeenAt` — heartbeat (PRD C6): писатель обновляет не чаще раза в 600 с; читатель: V5 №5 = `lastSeenAt < now − 30 мин`
+(у файлов без поля — `updated`). `accounts` ≤ 8 записей. `unattributedDays` — форма `days` (расход без известной идентичности).
+`captions` — `{label: {text ≤ 32, setAt}}`, побеждает поздний `setAt` (RL-2, Should). `machine.name` — санитизированный тег без ПДн (§F.1 п. 1).
 
-- **Случайный ключ с ручным переносом по SSH и `keyId`.** Угроза A2 — восстановить ID из метки. Прообраз — UUID v4
-  (122 бита случайности), неподбираем и с ключом из gist id; держатель содержимого gist и так знает его id. Ручной
-  перенос — бремя на 3 машины и невозможность автоподключения новой. Ключ `K = SHA256("ccl-label-key-v1|" + gist_id)`
-  — на подтверждение security-analyst (T1); замена дешёвая (интерфейс `label(id, key)` не меняется).
-- **`/api/oauth/profile` как основной источник метки Claude.** Лишний запрос к Anthropic (пусть 1/сутки) и задержка
-  bootstrap ≥ 900 с противоречат главной цели владельца. Основной источник — `~/.claude.json → oauthAccount.accountUuid`
-  (поле проверено на VPS), запасной `organizationUuid`; нет поля → `label: null` (группа «не указан»), профиль — Could.
-  Риск рассогласования кэша после смены аккаунта (Astra, issue #81231) снижаем привязкой: метка кэшируется вместе с
-  локальным отпечатком поколения `.credentials.json` (mtime+size+sha256 refreshToken-отпечатка — только локально);
-  поколение сменилось → перечитать `.claude.json`; если его `oauthAccount` старше смены — `label: null` до обновления.
-- **Единственный владелец опроса с подтверждённой передачей права (строгая B2).** Развилка G4 ниже.
-- **Общий исполнитель трея и CLI с `flock` по продукту «кто первый».** Берём `delegated` из #1: на машине с издателем
-  трей сам не опрашивает, кнопка запускает проход издателя. Проще, один код опроса, на VPS трея нет.
-- **Headless DEB** сейчас: VPS ставится из git (`install.sh --publisher --no-tray`); пакет — Could.
-- **Пер-строчная атрибуция расхода с несколькими бакетами в день.** PRD A6 принял приближение «день получает метку
-  первой индексации» (#1).
+**Запись аккаунта.** `product` ∈ {claude, codex} (обяз.); `label` — 16 hex или `null` (+ `labelReason` ∈ {no_login, unreadable, no_gist});
+`status` ∈ {ok, stale, signed_out, expired, rate_limited, error} (обяз.); `expiredReason` ∈ {cli_refresh_pending, signin_required};
+`asOf` — время **успешного** ответа API, отсутствует до первого успеха **этого** аккаунта (C3/C4); `attemptAt` — время последней попытки
+(единственное имя поля; `lastAttemptAt` нигде не используется), `attemptKind` ∈ {auto, activity, manual, initial}; `windows.{session,weekly}`
+= `{pct 0…100, resetAt}`; `models` ≤ 8 × `{name ≤ 48, pct, resetAt}`; `resetCredits` int 0…1000; `schedule` = `{mode ∈ {auto, fixed},
+interval ∈ {900, 1800, 3600, 14400}, nextAt, backoff bool}`; `retryUntil` ISO или `null`; `days` — **всегда** есть (может быть `{}`), форма как в v1,
+без уровня продукта. `plan`/`tier` ≤ 64. Лимиты: ≤ 4 КБ метаданных на запись (без `days`), файл ≤ 8 МиБ; > 1 МБ → API усекает → `raw_url` (путь v1).
 
-## Развилка для владельца (G4): координация B2 одного аккаунта на двух машинах
+**Правила.** (1) Корневой `days` = Σ `accounts[*].days` по продукту + `unattributedDays` — проекция для старых читателей (C1). Новый читатель
+берёт разбиение по аккаунтам; при расхождении проекции по продукту его корневой расход идёт в «не указан», двойного счёта нет.
+(2) Атрибуция дня (A6): индекс хранит `accountByDay[product][day] = localId` при первой индексации строк дня, потом не меняется;
+`null` → `unattributedDays`. (3) Запись — §C «Правило записи». (4) Валидация C7: `pct` не число/bool или вне 0…100 → окно отброшено;
+непарсимое время → поле отброшено (`asOf` битый → запись без показания); `label` не 16 hex → `null`; неизвестный `status` → `error`;
+нет `product`/`status` → запись отброшена; `models` > 8 → хвост отброшен; длинные строки отброшены; `asOf` в будущем > 5 мин → возраст 0,
+темп не считать (V6); битый блок не трогает приём `days`. (5) Публикуются только `api_fresh` показания своей машины; чужие записи не
+перепубликуются. (6) Совместимость по коду: Linux `sync.merge()` (`sync.py` 355–402) читает только `schema/machine/updated/tz/days`;
+macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; манифест не трогаем. Тест: фикстура v1.1 через **старый** merge = та же
+фикстура без блока. (7) Протокол v1.1 (`docs/sync-protocol.md`): проход издателя делает до двух PATCH после одного валидирующего GET в
+пределах 120 с; смена gist меняет метки (§B).
 
-У владельца общий аккаунт на двух машинах — только **Codex** (мак + VPS); Claude опрашивает один VPS. Значит B2
-касается только запросов к OpenAI, не к Anthropic.
+## B. Метка и локальная идентичность
 
-- **Вариант A (рекомендую) — «свежий снимок → пропуск»** (#1 + З3): чтение gist перед опросом, PATCH сразу после,
-  тай-брейк по `nextAt`/`machine.id`. Установившийся режим: 0 пар < 900 с. На событие сходимости (старт, смена входа,
-  падение интервала до 15 мин, недоступный gist, возврат машины) — ≤ 1 близкая пара на аккаунт, только если обе
-  машины решили в одном окне ≈ 10 с; верхняя оценка ≤ 3 событий/сутки. Замер G1 считает пары с пометкой события.
-- **Вариант B — единственный владелец опроса** (#2): 0 лишних запросов, но новое состояние «владение», протокол
-  передачи, и если владелец замолчал (VPS выключен), другая машина не подхватывает автоматически — нужно ручное
-  действие; при недоступном gist все, кроме владельца, ждут.
-- Рекомендация: **A**, с правом перейти на B, если 14-дневный замер покажет > 1 пары/сутки.
+- **Локальная идентичность `localId`** (никогда не покидает машину): Claude — `~/.claude.json` → `oauthAccount.accountUuid`
+  (парсер извлекает только этот ключ; `emailAddress`, `displayName`, `organizationUuid` и прочие ключи объекта в структуры приложения
+  не попадают — S3); Codex — `~/.codex/auth.json` → `tokens.account_id` (`id_token` не читается). Перечитывается **каждый проход**
+  (`_read_json_retry`, 5×0,2 с). Не читается → `label: null`, `labelReason: unreadable`, статус `error`, **запроса нет** (B2 без метки
+  невозможна; план #1 §B). Файла/блока нет → `no_login` → `signed_out`, 0 запросов. Нет gist id → `no_gist`, опроса нет (P6).
+- **Смена значения = смена аккаунта (A6).** Новая корзина истории; записи `cache.json`/`publisher-state.json` старого аккаунта для нового
+  не используются (№3): до первого успеха — только статус попытки, без значений и `asOf`. Журнал: `label_changed`.
+- **Известное ограничение (№7).** `oauthAccount` — кэш профиля Claude Code; после смены аккаунта он может отставать от действующего
+  токена (issue #81231) — метка на время лага прежняя. У владельца один Claude-аккаунт на машину → принято для первой поставки;
+  `GET /api/oauth/profile` остаётся Could; состояние `identity_unknown` не вводится.
+- **Метка.** `label = hex(HMAC_SHA256(K, "ccl-account-v1|" + product + "|" + localId))[:16]`, `K = SHA256("ccl-label-key-v1|" + gist_id)`.
+  Считается **только** при сборке блока и строки журнала под gist id, актуальным в этот момент (№8). Ни одно локальное хранилище меток не
+  содержит: `usage-index.json.accountByDay`, `cache.json[p].accountId`, `publisher-state.json[p].accountId`, mac `UsageIndex.accountByDay`
+  — все под `localId`. Для стороннего без gist прообраз (UUID v4) неподбираем; держатель содержимого gist и так знает его id (T1).
+- **Смена gist** (сход к самому раннему; только при одновременном создании двух gist): метки меняются у каждой машины при её следующей
+  сборке после собственного discovery (до 24 ч разброса → временные дубли карточек ≤ 1 суток). Читатели: `hiddenAccounts`,
+  `captions`, `menuAccount` ключуются меткой → при исчезновении метки сбрасываются к умолчаниям. Журналы несут метки → при сведении G1
+  смена видна по `label_changed`. Задокументировать в протоколе как редкое событие.
+- **Подпись по умолчанию** строит читатель: `<Продукт> <план> · <машины>` (тир `max_20x` → «Max 20x»); `captions` — Should.
 
-## Итоговая архитектура (дельты к `plan-claude.md`)
+## C. Headless-издатель на VPS
 
-- **Контракт v1.1** = §A плана #1 с З2 (запись аккаунта всегда с `days`, корень — проекция, `unattributedDays`),
-  З1 (`lastSeenAt` верхнего уровня), `attemptAt` обязателен при любой попытке (З3), `machine.name` — тег без ПДн
-  (§F.1 п. 1), подписи `captions` — Should. Лимиты: ≤ 8 записей, ≤ 4 КБ метаданных на запись, расширение ≤ 8 MiB.
-- **Метка**: §B плана #1 + привязка к поколению credentials (см. «Отброшено», п. 2).
-- **Издатель VPS**: §C плана #1 (таймер 5 мин, `publisher.py`, `accounts.py`, `coordination.py`, `delegated`-трей,
-  `install.sh --publisher --no-tray`, журнал O1, `XDG_RUNTIME_DIR`), heartbeat З1 в тот же PATCH-цикл.
-- **B2**: §D плана #1 + З3 + З5; удалённые показания не кормят `PollState.observe` (оба плана).
-- **Токены**: §E плана #1 + З4.
-- **macOS**: §F плана #1 с З6/З7; состояние 7 (вышли из GitHub) — без значений, непривязанный кэш не заводим
-  (§F.1 п. 5), UX-спек правится соответственно.
-- **Порядок сборки**: §G плана #1 без изменений (A1–A5 → B1–B3 → C1–C6); в A1 добавить фикстуры проекции `days`
-  (З2) и heartbeat (З1); в B1 — тест `lastAttemptAt` (З3); в A2 — тесты guard в `_save_*` (З4).
+**Модули.** `linux/ccl/publisher.py` (проход, чистое ядро с инжекцией часов/транспорта), `accounts.py` (идентичность, сборка/разбор/
+валидация блока, подписи), `coordination.py` (чистое `decide`), `sync.py` += `open_cycle()`/`write()` (расщепление `_sync_cycle` на
+чтение и запись; `accounts=` в файле), `limits.py` += guard §E, `cli.py` += `publisher --enable|--disable|--products|--mode|--now|--status`,
+`status` O2, `install.sh --publisher`. PyQt5 не импортируется; нормализация интервала переезжает из `gui/panel` в `polling.py`.
 
-## Что нужно подтвердить
+**Проход `publisher.run_pass(kind ∈ {auto, manual})`** (таймер 5 мин; каждый шаг — без человека):
+0. `usage.refresh()` (индекс + `activity`); прочитать `localId` обоих продуктов; настройки (`credential_write`, продукты).
+1. Нет входа в GitHub/отозван → `poll_skipped no_github` на продукт, выход (0 запросов; ранний выход в `cli.main` остаётся).
+2. `file_lock("quota")` (ожидание ≤ 30 с; занято → `pass_skipped busy`, выход).
+3. Под замком: перечитать `state.json` (`autoPollState`, `quotaServerRetryAt`) и `publisher-state.json`; применить `local_activity`
+   (**только здесь**, №2); `due` по `PollState.due(now, manual)` и `server_until`.
+4. `session = sync.open_cycle(auto=True)`: доступ → GET gist (`public == false`) → merge чужих в `sync-remote.json` → `clockSkew` из
+   заголовка `Date` (§D). Неудача → `session = None` (gist недоступен, P6).
+5. По каждому due-продукту решение в порядке: `no_login` → `no_label` → `retry_after` (локальный `server_until` ∪ чужие `retryUntil` моей
+   метки) → `token_policy` (§E, 0 запросов) → `coordination.decide` (§D: `remote_attempt` / `fresh_remote` / `tie_break` / `poll`).
+6. Если хотя бы один продукт решил `poll`:
+   a. **B3:** `begin(now)` → записать `state.json` и `publisher-state.json` (`attemptAt`, `attemptKind`, `attemptPublished: false`);
+      `OSError` → `poll_skipped state_unsaved`, запроса нет.
+   b. **Объявить попытку (№5):** при `session` — собрать блок с новым `attemptAt` → `sync.write(session, file)` = **PATCH №1** (метаданные,
+      пол обходится). Любая неудача (не-2xx, сеть, 404) → журнал `publish failed`, `poll_skipped publish_failed`, в `state.json` вернуть
+      прежний `last_attempt`, **запроса нет**; следующий тик повторит. При `session = None` объявления нет — запрос по собственному
+      расписанию в рамках B1 (исключение PRD B2, №9), блок уйдёт в первый удачный проход.
+   c. Журнал `poll_attempt` → `limits.fetch_claude()` / `fetch_codex(live=True)` (без изменений; guard §E внутри) → `PollState.observe` →
+      `apply_provider_cache(product, data, account=localId)` (№3) → журнал `poll_result` → сохранить `state.json` + `publisher-state.json`
+      (status, asOf, retryUntil, класс ошибки).
+7. Собрать итоговый блок → `sync.write(session, file)`, если запись положена по правилу ниже (**PATCH №2** на due-тике; единственный PATCH
+   на остальных). Журнал `publish` (changed/ok/failed, класс).
+8. Снять замок. Порядок замков: `quota` → `sync` (`open_cycle`/`write` берут `sync` коротко). `ccl-sync status` читает под неблокирующим
+   `sync` как сегодня. Внутри замка худший случай ≈ 90 с (GET 20 + PATCH 20 + 2 запроса ×15 + PATCH 20), типично < 5 с.
 
-1. Владелец: развилка G4 (A/B) и числовой допуск варианта A.
-2. Челлендж Astra: интерфейсы · модель данных (З2 vs §A) · инварианты (проекция `days`, heartbeat в хеше) · отказы.
-3. security-analyst T1: ключ из gist id; `~/.claude.json` как источник идентичности; политика `never`; тег машины;
-   журнал O1; файловый бэкенд токена GitHub на headless VPS.
-4. PM: правка PRD C6 (heartbeat как причина записи), V5 №5 через `lastSeenAt`, A4 — профиль не используется.
+**Правило записи (№11) — три отпечатка в `sync-state.json`:** `pushHash` = sha1(корневой `days`) — расход, пишется при изменении и
+`now − pushedAt ≥ 570 с` (пол как сегодня); `metaHash` = sha1(`accounts` без `days` + `captions`) — попытка/результат/расписание/`retryUntil`/
+статус/метка/подпись — пишется сразу; `heartbeatAt` — когда последний раз писался `lastSeenAt`, пишется при `now − heartbeatAt ≥ 600 с`.
+Любой PATCH пишет весь файл (свежие `days`, `accounts`, `captions`, `lastSeenAt = now`) и обновляет все три. `lastSeenAt` — часть снимка,
+но не часть отпечатков изменения (иначе каждая запись порождала бы следующую); формулировку PRD C6 «входит в хеш» уточнить как «входит
+в снимок, пишется по своему 10-мин сроку». Бюджет: due-тик ≤ 1 GET + 2 PATCH; остальные 1 GET + ≤ 1 PATCH.
+
+**`open_cycle()`/`write()`.** Один валидирующий GET на проход обслуживает до двух PATCH в пределах 120 с (протокол v1.1); PATCH 404 →
+сброс gist id/хеша как сегодня; `write()` discovery не делает. Расщепление `_sync_cycle` — вместо двух полных циклов плана #1 (риск 3).
+
+**Трей на машине с издателем (P3, №2).** При `settings.publisher = true` трей в режиме `delegated`: `refresh_limits` возвращает
+`delegated` для всех продуктов; трей **не пишет** `autoPollState`/`quotaServerRetryAt` (`save_poll_states` — no-op, `on_activity` только
+перечитывает; `local_activity` применяет проход); раз в 60 с перечитывает `cache.json`/`state.json`/`publisher-state.json` и показывает
+«опрос ведёт издатель · следующая попытка HH:MM»; кнопка «Обновить» → `publisher.run_pass(manual=True)` в рабочем потоке (тот же замок);
+свои циклы синка трей гоняет с `allow_push=False` (`gui/app.py:1379`). Старый трей 0.4.5 на `:20` режима не знает → `install.sh --publisher`
+перезапускает запущенный трей (или печатает команду). На не-делегированных машинах рабочий поток трея берёт `file_lock("quota")` на время
+`fetch + apply` (ожидание ≤ 10 с, иначе `poll_skipped busy`), попутно чинится порядок «сохранить попытку до старта воркера» (`:1226`, `:1305`).
+
+**Таймер** 5 мин (`OnUnitActiveSec=5min`, `OnBootSec=2min`): проверка без due — 0 запросов к провайдерам. **Установка (P2):**
+`sh linux/install.sh --publisher [--no-tray] [--name <tag>]` → `settings.json`: `publisher: true, autoPoll: true, credential_write: "never",
+machineName: <tag>` (без `--name` тегом стал бы hostname `ubuntu-s-4vcpu-8gb-nyc1` → для VPS `--name vps`); `XDG_RUNTIME_DIR=/run/user/$UID`
+при отсутствии; без autostart/.desktop при `--no-tray`; `.deb` не трогаем. **P6:** нет входа → 0 запросов; GET не прошёл → своё расписание,
+блок хранится локально. **Журнал O1** `publisher.jsonl`: `poll_attempt`, `poll_result`, `poll_skipped` (`not_due · fresh_remote ·
+remote_attempt · tie_break · retry_after · no_github · no_login · no_label · state_unsaved · publish_failed · token_policy · busy`),
+`token_refresh`, `publish`, `clock_skew` (секунды), `label_changed`; только перечислимые строки и числа; ротация > 1 МБ → старше 45 дней
+отбросить. **`ccl-sync status` (O2):** на продукт — подпись, попытка/вид, успех, режим/интервал, следующая попытка, `retryUntil`, класс
+ошибки, счётчики 24 ч (запросы, 429, неудачные публикации), `clockSkew`; чужие аккаунты со свежестью.
+
+**Бюджет запросов к GitHub в сутки** (одна учётка GitHub на все машины; лимиты: 5000/ч основной, ≤ 500/ч и ≤ 80/мин
+content-generating (PATCH), 900 очков/мин при GET = 1, PATCH = 5 — docs.github.com «Rate limits»):
+
+| Машина · режим | GET | PATCH (верхняя оценка) | Расчёт |
+|---|---|---|---|
+| VPS · Claude и Codex по 15 мин | 288 (12/ч) | ≤ 528 (≤ 22/ч), при совпадении тиков продуктов 336 | 288 тиков; 2 × 96 due-тиков × ≤ 2 PATCH + heartbeat ≤ 144 (только когда 10 мин без PATCH) |
+| VPS · оба по 4 ч | 288 | ≤ 168 (7/ч) | 2 × 6 × 2 + 144 |
+| Мак · Codex 15 мин | ≤ 240 (10/ч) | ≤ 336 (14/ч) | 144 циклов + 96 чтений перед опросом; 96 × 2 + 144 |
+| Мак · Codex 4 ч | ≤ 150 | ≤ 156 | 144 + 6; 6 × 2 + 144 |
+| Сумма VPS + мак + ThinkPad (худший) | ≈ 34/ч | ≈ 50/ч | 1,7 % от 5000/ч; 10 % от 500/ч; пик тика 11 очков ≪ 900/мин |
+
+⚠️ Число запросов укладывается, но см. риск 1: каждая ревизия gist утяжеляет ответы `GET /gists/{id}` и PATCH (~1,2 КБ навсегда).
+
+## D. Координация B2 между машинами
+
+**`coordination.decide(now, mine, remote, my_id, tie_wait) → poll | skip(reason)`** — чистая; `mine = {label, interval I, last_attempt,
+server_until}`, `remote` = записи других машин с той же меткой `{machineId, asOf?, attemptAt?, status, retryUntil?, nextAt?, lastSeenAt}`.
+Все запасы 60 с рассчитаны на |skew| ≤ 60 с; время из будущего = возраст 0 (безопасная сторона).
+1. `retry_after`: `now < max(server_until, remote.retryUntil)` → пропуск (B6).
+2. `remote_attempt` (№5, №10): есть чужая `attemptAt` с `now − attemptAt < 900 + 60` → пропуск (неудачная попытка тоже тратит бюджет).
+3. `fresh_remote`: максимальный чужой успешный `asOf` с `now − asOf < I + 60` → пропуск (B2).
+4. `tie_break` (№6): чужая `nextAt` в ±60 с от моего срока, `remote.lastSeenAt ≥ now − 900`, `remote.machineId < my_id` и
+   `(machineId, nextAt) ≠ tie_wait` → пропуск один раз, запомнить `tie_wait`; иначе → `poll` и очистить `tie_wait`.
+5. Иначе `poll`.
+**Ручное (решение владельца 1):** `PollState.due(manual=True)` (свои ≥ 900 с) + правила 1–2 (`now − чужой attemptAt ≥ 960`); иначе только
+чтение gist (защита 30 с) и «опрос можно с HH:MM» = max(свой `last_attempt` + 900, чужой `attemptAt` + 960, `retryUntil`).
+**Auto не кормим чужим (B5):** пропущенная машина не двигает `last_attempt`/интервал, перепроверяет каждый тик; чужие показания не идут в
+`observe`; чужие `asOf` — в историю темпа читателя (§F).
+**Часы (№10).** `clockSkew = Date(GitHub) − now` по каждому ответу GitHub (`Resp.headers["date"]` на Linux, `r.headers` на маке; RTT ≪ 60 с),
+хранится `clockSkew`/`clockSkewAt`; |skew| > 60 с → журнал `clock_skew`, `status` и подсказка карточки «часы расходятся с GitHub на N с —
+пол между машинами не гарантирован»; автокоррекции нет (NTP). Гарантия B2 заявляется только при |skew| ≤ 60 с на обеих машинах.
+**Окно гонки.** Пара возможна, только если обе машины прошли правила 1–4 внутри «окна решения» друг друга — GET → решение → PATCH попытки
+(типично 1–3 с, ≤ 40 с при таймаутах 20 с); после объявления другая сторона видит `attemptAt` при своём следующем GET (≤ 5 мин VPS,
+≤ 10 мин мак, либо при чтении перед собственным опросом). Сходимость: в установившемся режиме поздняя машина видит раннюю попытку
+(< 960 с) или успех (< I + 60) и молчит, пока ранняя жива; аккаунт опрашивается одной машиной по её Auto; машина ушла → её записи
+стареют → вторая подхватывает ≤ 1 тик после I + 60. При выровненных тиках тай-брейк разводит фазы на 5 мин один раз.
+**Допуск (№9) — числа в PRD, решение 7 (заменяют «≤ 3 событий/сутки»):**
+- установившийся режим, gist доступен обеим, |skew| ≤ 60 с — **0 пар < 900 с**;
+- событие сходимости (старт процесса, смена входа, падение Auto до 15 мин, выровненные тики) — **≤ 1 пара на аккаунт на событие**;
+- gist недоступен машине (GET не прошёл) — своё расписание в рамках B1, **≤ 1 пара на 15 мин простоя** на аккаунт (обе по 15 мин);
+- восстановление (первый удачный GET после простоя) — **≤ 1 пара**;
+- замер G1: пары считаются по журналам обеих машин по метке; периоды с неудачными `publish`/GET в любом журнале помечаются «gist
+  недоступен» и отчитываются отдельно.
+**B6.** `Retry-After` хранится полностью (> 24 ч не режется), публикуется как `retryUntil`, объединяется максимумом; backoff GitHub
+(cap 1 ч, `sync.py:495`) к провайдерам не применяется; `quota_refresh.retry_after` без cap — как сегодня.
+
+## E. Политика токенов (S1, S2) — №1
+
+Настройка `credential_write ∈ {never, guarded}`; `never` по умолчанию при `publisher: true` (VPS); `guarded` = сегодняшнее поведение Linux.
+
+| Состояние | Условие (каждая попытка перечитывает файл входа) | Запросы | Публикуется |
+|---|---|---|---|
+| live | access валиден ≥ 2 мин | usage 1 | `ok`, новый `asOf` |
+| expiring (never) | access истёк/< 2 мин, refresh есть (Claude: `refreshTokenExpiresAt > now`; Codex: `exp` JWT прошёл) | 0 | `expired` + `cli_refresh_pending`, прежние значения и `asOf` (C3) |
+| dead | Claude `refreshTokenExpiresAt ≤ now`, нет refresh, (guarded) отпечаток в `deadRefresh` | 0 | `expired` + `signin_required` |
+| signed_out | файла/блока нет | 0 | `signed_out`, значений нет (C4) |
+| read_error | не читается после 5×0,2 с | 0 | `error` (класс credentials), шаг Auto вверх |
+
+**Guard-точки:** (1) перед POST `/v1/oauth/token` (`limits.py` ~219) и `auth.openai.com/oauth/token` (~527); (2) **до** replay `_PENDING`
+(~187, ~497), потому что replay сам пишет файл; (3) внутри `_save_claude_tokens`/`_save_codex_tokens`/`_rewrite_json` → `refused`
+(глубокая защита). В `never` `_PENDING` не наполняется, `deadRefresh` не трогается; guarded-ветка не меняется.
+**Смена политики (№1):** только `ccl-sync publisher --enable|--disable` / `ccl-sync credentials --write never|guarded` →
+`common.set_credential_write()` под `file_lock("quota")` (ожидание ≤ 60 с). Замок доказывает, что ни в одном процессе нет попытки (и
+ротационного POST) в полёте: **каждый** запрос к провайдеру — под `quota` (проход; воркер трея; CLI). Несохранённая пара в памяти
+другого процесса видна через маркер `STATE_DIR/rotation-pending-<product>` (атомарно при установке `_PENDING[product]`, содержимое
+`pid + boot-id`, удаляется при `pop`): маркер с живым pid → отказ «ротация входа <продукт> не завершена; повторите после обновления входа
+CLI»; мёртвый pid → пара и так потеряна, маркер удаляется, смена проходит. `limits.py` читает политику в начале попытки под тем же замком
+→ смена не попадает в середину попытки. Журнал: `token_refresh` только в guarded; на VPS `credentialWrite` = 0 (G2).
+**macOS (S2):** ключ defaults `credentialWrite ∈ {never, legacy}`: `never` → `codexAccessToken()` возвращает `expired/cli_refresh_pending`
+вместо refresh (сегодня `LimitsMonitor.swift:527–533` переписывает `auth.json` без перечитывания); у владельца на маке Codex CLI живой
+(remote-hands) → рекомендую `never`; публичное умолчание — `legacy` (поведение не меняется). Упрочнение legacy-записи (перечитать и
+сравнить) — Should, отдельно. Тексты читателя — UX 3a/3b; `limitCanFix` = false для чужих (урок 012).
+
+## F. macOS — читатель и издатель
+
+**Модель (новый файл `Sources/RemoteLimits.swift`, в `LimitsMonitor.swift` — точки подключения).** `struct RemoteAccount: Codable`
+(поля §A + `machineId`, `machineName`, `machineLastSeenAt: Date?` из `lastSeenAt` файла, fallback `updated`); валидатор C7; `mergeV11`
+(`accounts` + `unattributedDays` + `captions`, старый `days` через существующий `merge`); `SyncCachedMachine` += `lastSeenAt: Date?`
+(optional → старые кэши декодируются); `SyncRemoteCache` += `accounts: [RemoteAccount]?`, `captions`, `unattributedDays`.
+`struct ReaderSyncState { phase: SyncPhase; warning: String? }` считается на main из `syncUIState()`/`syncWarning()` до вызова (№12).
+`resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache, hidden: Set<String>,
+menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — чистая: группировка по (product, label), где метка
+локального = HMAC(localId) под текущим gist id; V3 (max `asOf`, при равенстве локальный); V5 по таблице; порядок V2; расход без метки →
+группа V7 без карточки. `AccountView { product, label?, historyKey, caption, data: LimitData, isLocal, tier?, usageDays, machines }`;
+`LimitData.source: RemoteSource?` = `{machineId, machineName, asOf, attemptAt, nextAt, interval, mode, status, retryUntil, lastSeenAt, freshUntil}`.
+**V5:** 7 — `sync.phase ∈ {off, revoked, awaitingCode}` → удалённых `AccountView` **нет** (значений нет до первого успешного синка, №14;
+объяснение — строка пустого состояния UX §10 и ссылка §9 п. 2; у `revoked` остаётся оранжевый баннер); 6 — `sync.warning != nil`;
+5 — `machineLastSeenAt < now − 30 мин`; 3 — `expired`/`signed_out`; 4 — `retryUntil > now`; 2 — `now > freshUntil`; 1 — иначе.
+Приоритет 7 > 6 > 5 > 3 > 4 > 2 > 1; `freshUntil = (nextAt ?? asOf + interval) + 20 мин`; `snapshotHorizon` — F.1 п. 2.
+**История темпа (№13).** `UsageSample` += `acct` (ключ истории): локальный — `"l:" + sha256(product + "|" + localId)[:16]` (локальный
+отпечаток, не покидает машину, переживает смену gist), чужой — метка. `record(d, product:, acct:)` — локальные (guard локального опроса
+как сегодня); `recordRemote(product:, label:, sample)` из `mergeV11` **без** `productEnabled`, дедуп по `(acct, t)`; `samples`/`recentRate`
+по `(product, acct)`; строка файла получает поле `a`, старые строки без `a` → `acct = "l:legacy"` (уходят по сроку хранения).
+**Издатель мака (P5) и B2 (№4).** `machineFile` += блок Codex из `last.1` + `autoStates["codex"]` + `quotaStates` дедлайн + `localId` из
+`~/.codex/auth.json` + `accountByDay`; `cache.json[p].accountId` в `cacheQuotaCompletion` (№3). `GitHubSync.syncNow(force:, mode: .full |
+.writeOnly, completion: ((SyncOutcome) -> Void)?)`; `SyncOutcome = .read(generation: UInt64, cache: SyncRemoteCache) | .failed(reason) |
+.skipped(reason)`, доставляется на main из `syncBody` единым `defer` (каждый ранний `return` даёт `.failed`); `.writeOnly` — PATCH без GET
+против gist, валидированного чтением ≤ 120 с назад; `onChange` — только UI. `doRefresh(codex)`, когда мою метку публикует другая машина:
+допуск → `syncNow(completion)` → `coordination.decide` по кэшу из исхода (не по `_remote`) → `poll`: `begin` + `saveAutoStates` →
+`syncNow(force: true, mode: .writeOnly, completion)` = PATCH попытки → неудача → `publish_failed`, вернуть `lastAttempt`, запроса нет →
+успех → `fetchCodex` → `syncNow(force: true, mode: .writeOnly)` результата. `.failed` чтения → своё расписание (B1); нет completion за
+60 с (очередь занята) → как `.failed`. Журнал O1: `~/.claude-limits-monitor/poll-log.jsonl`. `clockSkew` из `Date` — как на Linux.
+**Настройки, деньги, UI** — как план #1 §F: `monitor_*` = «опрашивать на этом Маке», `hiddenAccounts`, `mergedUsageIndex` по
+`hiddenAccounts` (U2), аудит `productEnabled` (оставить в `fetchClaude`/`fetchCodex`/`UsageLogs.scan`/`snapshotJSON`/`record` — урок 013),
+селфтест ~7108 → «remote usage of a visible account survives a disabled local poll», `subscriptionUSD(tier:)`, `menuAccount` (V8),
+4 точки рисования (подпись, строка источника, `limitCanFix`, свежесть), PNG-превью 7 состояний; `captions`/список N1 — C5.
+
+### F.1 Решения по UX-спеке
+1. **Тег машины без ПДн** — `machineName` (mac: новый ключ defaults; Linux: `settings.machineName`), иначе первая DNS-метка; NFKD → ASCII,
+   нижний регистр, `[a-z0-9-]`, ≤ 16; пусто → `mac`/`linux`; тест «MacBook Pro — Алекс» → `macbook-pro`; скан S3 на имя владельца.
+2. **Горизонт свежести** `snapshotHorizon(d)` = `source != nil ? max(0, freshUntil − asOf) : SNAPSHOT_MAX_AGE`, три точки (`metricIsStale`
+   ~3097, `advVerdict` ~4254, `isStale`); тест Auto 4 ч / 3 ч 50 мин → не stale.
+3. **Клик по чужой карточке** — `limitCanFix(remote:)` = false, hit всегда `open:<url>`; тест: `expired` с VPS → нет `claudefix`.
+4. **Плашка плана** — `AdvCard.tier` из `AccountView`; общий `planLabel`; локальный `claudeTier` к чужому не применяется ($100 у `max_5x`).
+5. **Состояние 7 (№14).** Кэш снимков — в `sync-remote.json` под привязкой `authEpoch/authUserID`; `off`/`revoked` → удалённые карточки не
+   показываются и значений нет; после входа карточки появляются **после первого успешного синка** (новый epoch удаляет кэш —
+   `LimitsMonitor.swift:2230–2235`, это штатно); непривязанного кэша нет (межаккаунтная утечка). Править UX: строка 7 таблицы §4
+   («показаны данные из кэша» снять) и последнее предложение §12.
+
+## G. Порядок сборки (по зависимостям; тесты офлайн, без реальных учёток/API — уроки 006/011)
+
+**Срез A — сервер (проверяется журналом VPS).**
+1. **A1 контракт + идентичность.** `accounts.py` (чтение `localId` с извлечением одного ключа, метка, блок, подписи, `unattributedDays`),
+   `usage.py` `accountByDay`, `common.machine_tag()`, `docs/sync-protocol.md` v1.1, фикстуры `machine-v11.json` / `-hostile` / `-v10`.
+   Тесты: детерминизм метки (один id → одна метка; два gist id → разные; та же локальная история переименовывается); проекция `days` и
+   расхождение → «не указан»; **старый** `sync.merge()` на v1.1 = без блока; C7 hostile; скан S3 (email, `account_id`, `accountUuid`,
+   `refresh`, `access_token`, `sk-`, `/home/`, `/Users/`); фикстура `~/.claude.json` с ПДн-ключами → в структурах только `accountUuid`.
+2. **A2 политика токенов.** Три guard-точки, `never`/`guarded`, маркер ротации, `set_credential_write()` под `quota`. Тесты: синтетические
+   файлы входа (live/expiring/dead/absent/partial) при `common.http = no_network` → 0 запросов, верные статусы; guarded-регресс; отказ смены
+   при маркере с живым pid, разрешение при мёртвом; политика читается под замком.
+3. **A3 ядро издателя + координация** (B1 плана #1 входит сюда: проход без `decide` невозможен). `sync.open_cycle()/write()`, три
+   отпечатка, `publisher.run_pass`, `coordination.decide`, `clockSkew`, журнал, `ccl-sync publisher`, хук в `cmd_push`. Тесты (фикс. часы,
+   `FakeGitHub` считает GET/PATCH и умеет ронять PATCH, фейковые провайдеры): порядок транспорта — PATCH с `attemptAt` **раньше** запроса к
+   провайдеру; `publish_failed` → 0 запросов и `last_attempt` восстановлен; gist недоступен → запрос есть, блок уходит следующим проходом;
+   B3 `OSError` → 0 запросов; due/not_due через перезапуск и «перезагрузку»; Retry-After > 24 ч сохранён; правило записи (расход < 570 с →
+   нет PATCH; метаданные → PATCH; heartbeat на 600 с; due-тик ≤ 2 PATCH); `decide`: чужая попытка 959 с → пропуск, 961 с → опрос,
+   `fresh_remote`, `retry_after`, тай-брейк ждёт один раз и опрашивает при неизменной записи, мёртвый источник → без тай-брейка;
+   skew > 60 → `clock_skew`; симулятор двух машин 24 ч при 15 мин и 4 ч → 0 пар в установившемся, ≤ 1 на событие, GET/PATCH в пределах
+   таблицы §C; скан журнала на секреты.
+4. **A4 установка и статус.** `--publisher/--no-tray/--name`, таймер 5 мин, `XDG_RUNTIME_DIR`, перезапуск трея, `status` O2. Тест:
+   install.sh во временном `HOME` с подменным `systemctl`; `test_deb` зелёный.
+5. **A5 выкатка на VPS.** Владелец: `ccl-sync login`; **гейт замера роста gist** (риск 1: `len(history)` и размер `GET /gists/{id}`
+   владельческого gist); 24 ч журнала → G1 (≥ 900 с, ≤ 10/сутки при простое), G2 (`credentialWrite` = 0), старые читатели суммируют расход.
+
+**Срез B — трей Linux.**
+6. **B1 трей `delegated` (№2)** + воркер под `quota` на не-делегированных машинах + порядок «сохранить до воркера». Тесты в стиле
+   `test_auto_ui`: 2 ч трей + таймер → ≤ 1 запрос/15 мин; `on_activity` в `delegated` не меняет `state.json` (mtime); циклы синка без PATCH.
+7. **B2 Linux-трей publish-only** (вторая очередь, тот же `accounts.build`).
+
+**Срез C — мак (сборка через remote-hands, установка — владелец).**
+8. **C1 merge v1.1 + резолвер** (+ `ReaderSyncState`, `lastSeenAt`, V5 с инжекцией `now`, в т. ч. 5/6/7; старый/новый файл → те же `days`;
+   hostile; один Codex на двух машинах → одна карточка; два → две).
+9. **C2 настройки, деньги, история (№13):** история по `acct`; выключенный локальный опрос Claude + чужие `asOf` → темп считается;
+   селфтест 7108 переписан; `subscriptionUSD(tier)`; U2.
+10. **C3 UI:** подписи, строка источника, тексты V5, `limitCanFix(remote:)`, `snapshotHorizon`, плашка, строка меню; состояние 7 без
+    карточек; PNG-превью; сверка Юркой в реальном приложении.
+11. **C4 издатель мака + B2 (№4):** `syncNow(mode:completion:)`, `.writeOnly`, попытка до запроса (селфтест с транспорт-ловушкой: PATCH
+    с `attemptAt` зафиксирован **до** вызова `fetchCodex`; упавший PATCH → `fetchCodex` не вызван), `cache.json.accountId`, ключ
+    `credentialWrite`, `poll-log.jsonl`, `clockSkew`.
+12. **C5 подписи и список N1** (Should). 13. **C6 релиз:** документация, changelog, T3, 14-дневный замер G1–G4 по журналам обеих машин.
+
+## Компоненты
+
+| Компонент | Ответственность | Зависит от | Тест |
+|---|---|---|---|
+| `linux/ccl/accounts.py` | `localId` (один ключ), метка под gist id, блок `accounts`/`unattributedDays`/`captions`, подпись | `common`, `usage` | pure, фикстуры, скан S3 |
+| `linux/ccl/publisher.py` | проход: due → open_cycle → decide → B3 → PATCH попытки → fetch → observe → cache → PATCH результата → журнал | `polling`, `limits`, `sync`, `accounts`, `coordination` | фикс. часы, `FakeGitHub`, фейковые файлы входа, порядок транспорта |
+| `linux/ccl/coordination.py` | чистое `decide` (retry_after / remote_attempt / fresh_remote / tie_break), окно ручного | — | симулятор двух машин, граничные 959/961 с |
+| `linux/ccl/sync.py` (+`open_cycle`/`write`, `accounts=`) | один GET → до двух PATCH, три отпечатка, `clockSkew`, разбор чужих блоков в `sync-remote.json` | `accounts` | `test_sync_merge` расширить, `FakeGitHub` |
+| `linux/ccl/limits.py` (+guard, `account=`) | политика `credential_write` в трёх точках, маркер ротации, кэш под `accountId` | `common.settings` | синтетические файлы, `no_network`, маркер/pid |
+| `linux/ccl/usage.py` (+`accountByDay`) | владелец дня при первой индексации | `accounts` | смена входа внутри дня → две корзины |
+| `linux/ccl/cli.py`, `install.sh` | `publisher`/`credentials` подкоманды, `--publisher/--no-tray/--name`, таймер 5 мин, `status` O2 | `publisher` | install в tmp HOME, CLI-тесты |
+| `linux/ccl/gui/app.py` (`delegated`) | трей без записей состояния, перечитывание, кнопка → проход, воркер под `quota` | `publisher` | `test_auto_ui`-стиль, mtime `state.json` |
+| Swift `RemoteLimits.swift` | `RemoteAccount`, C7, `mergeV11`, `ReaderSyncState`, `resolveAccounts` V1–V7 | `SyncRemoteCache` | селфтест с `now`, фикстуры |
+| Swift `GitHubSync` (+`syncNow(mode:completion:)`) | исход цикла, `.writeOnly`, блок Codex, `clockSkew` | `GitHubAuth` | транспорт-ловушка, порядок PATCH→fetch |
+| Swift `UsageHistory` (+`acct`) | история по аккаунту, приём чужих `asOf` | резолвер | pace при выключенном локальном опросе |
+| Swift settings/money/draw/menu | N1–N3, U2–U3, подпись, источник, V5, `canFix`, плашка, V8, состояние 7 | резолвер | селфтест 7108 (переписан), PNG + сверка |
+| `machineTag()` (оба порта) | тег без ПДн | settings/hostName | санитизация, скан имени владельца |
+
+## Риски и альтернативы
+
+1. **Рост gist с каждой ревизией (новое, P1, транспорт).** Проверено на публичном API 2026-10-12: `GET /gists/{id}` (и ответ PATCH той же
+   схемы) содержит `history` — запись на ревизию ≈ 1,2 КБ (внутри объект `user`); документированного предела нет; список `GET /gists`
+   `history` не несёт. v1 уже пишет ≤ 144 PATCH/сутки на машину; v1.1 — до 528/сутки на VPS → каждый ответ GET/PATCH тяжелеет на
+   ≈ 0,6 МБ/сутки; через 30 дней ≈ 18 МБ × ≈ 800 ответов/сутки на VPS. **Гейт в A5: замерить `len(history)` и размер ответа у
+   владельческого gist (он живёт с 2026-09-27).** Готовая мера (рекомендую внести в A3/C1 — читатели обоих портов и так переписываются):
+   чтение через `GET /gists?per_page=100` (без `history`; `files[].raw_url` содержит SHA ревизии → SHA не изменился = файл не качать)
+   + неавторизованный `raw_url` на изменившийся файл (уже путь усечённых файлов; проверка `public == false` — по элементу списка).
+   Ответ PATCH всё равно несёт `history` → если замер покажет > ~5 МБ, нужна процедура ротации gist (протокол v1.2; метки меняются по §B).
+   Решение — у Юрки/владельца (вопрос 4).
+2. `~/.claude.json` недокументирован, `oauthAccount` может лагать/переехать → `label: null` или прежняя метка на время лага; Could — профиль
+   1/сутки в бюджете B1.
+3. Ключ из gist id vs секрет в манифесте — на T1; замена дешёвая (`accounts.label(id, key)` не меняется).
+4. Два PATCH после одного GET в пределах 120 с: gist мог стать публичным/исчезнуть между ними — 404 обрабатывается, переключение в
+   публичный внутри окна — тот же класс, что сегодняшний зазор GET→PATCH.
+5. `LimitsMonitor.swift`: `source` касается нескольких draw-функций; только аддитивные правки, PNG-превью и сверка Юркой обязательны.
+6. Расхождение часов > 60 с → гарантия не заявляется, видно в status/журнале; лечится NTP на VPS и маке.
+7. Тай-брейк добавляет ≤ 5 мин задержки один раз на выравнивание тиков; при смерти младшего id вторая машина опрашивает через тик.
+8. Маркер ротации с мёртвым pid после падения процесса — пара уже потеряна, смена политики разрешена; задокументировать в T1.
+9. Старый трей 0.4.5 на `:20` не знает `delegated` → до включения издателя его нужно перезапустить (A4 делает это сам).
+10. Атрибуция дня «первая индексация» приблизительна (PRD A6 принято); смена входа внутри дня даёт две корзины только по дням.
+11. Замер G1 при смене gist в окне 14 дней: метки меняются — сводить через `label_changed`.
+12. Мак `credentialWrite: never` замораживает Codex на маке, пока CLI не обновит вход — принятое следствие решения 5, но нужно «да» владельца.
+
+## Что нужно подтвердить / вопросы владельцу
+
+1. **PM → PRD:** решение 7 — заменить «≤ 3 событий/сутки» числами §D «Допуск»; C6 — «`lastSeenAt` входит в снимок, пишется по своему
+   10-мин сроку»; A5 — нет метки (`unreadable`/`no_gist`) → запроса нет. **UX:** строка 7 §4 и §12 — состояние 7 без значений (F.1 п. 5).
+2. **Владелец:** на маке политика Codex `credentialWrite: never` (данные Codex на маке замирают, пока Codex CLI там не обновит вход; CLI
+   владелец использует регулярно) — да/нет?
+3. **Владелец:** теги машин `vps` / `mac` / `thinkpad` (установка `--name vps`; имя мака санитизируется из `localizedName`).
+4. **Юрка/владелец (риск 1):** внести чтение через список + `raw_url` в срез A/C1 сейчас (рекомендую) или сначала замер в A5?
+5. **T1 (security-analyst):** ключ из gist id; парсер `~/.claude.json` с извлечением одного ключа; маркер ротации и смена политики под
+   замком; журнал O1 (`clock_skew`, `label_changed`); `Date`-заголовок как опора времени; неавторизованные `raw_url`; файловый бэкенд
+   токена GitHub на VPS; мак `credentialWrite` через defaults.
+
+## Артефакты
+
+- `/home/yurka/VibeCoding2/2026_06_UsageLimits/arch/plan-synth.md` (этот файл, v2) · `/home/yurka/VibeCoding2/2026_06_UsageLimits/arch/plan-synth-v1.md` (прежний синтез).
