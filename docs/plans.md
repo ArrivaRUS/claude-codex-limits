@@ -1,3 +1,181 @@
+# REMOTE-LIMITS · 2026-10-12
+
+> Источник правды исполнения (скилл execution-pack). Канонические входы: PRD [prd-remote-limits.md](prd-remote-limits.md) (G1, решения владельца 1–7), UX [../design/remote-limits-ux.md](../design/remote-limits-ux.md) (G2b), архитектура [../arch/plan-synth.md](../arch/plan-synth.md) v2 (G4; челлендж Astra 14/14 закрыт), модель угроз T1 [security-remote-limits.md](security-remote-limits.md) (вердикт «можно дальше» при включении П2-в, П3-а/б/в/д, П4-а, П5 а–е, П7, §5). База кода `c950fb1` (macOS 3.2.7, Linux 0.4.5). Тест-план пишет Tester отдельно — [test-plan-remote-limits.md](test-plan-remote-limits.md) (строки Т1–Т36 из T1 §6 и проверки §G synth v2); здесь он не дублируется. Живой статус — [status.md](status.md). Обновлено: 2026-10-12.
+
+## Допущения
+
+1. Решения владельца 1–7 PRD приняты. PM правит PRD до кода: решение 7 — допуск B2 по synth v2 §D (установившийся режим 0 пар · ≤ 1 на событие сходимости · ≤ 1 на 15 мин простоя gist · ≤ 1 на восстановление; «≤ 3 событий/сутки» снято); B6 — чужой `retryUntil` соблюдается не дольше 24 ч от `firstSeenAt`, свой — без потолка (T1 П7); C6 — `lastSeenAt` входит в снимок и пишется по своему 10-мин сроку; A5 — нет метки → запроса нет. UX: строка 7 §4 и §12 — состояние 7 без значений до первого успешного синка.
+2. `credential_write: never` — значение по умолчанию на **всех** портах (T1 П3-д); `guarded` (Linux) / `legacy` (мак) — явный opt-in только там, где CLI на машине не используется. Ждёт «да» владельца, планируется как принятое.
+3. Теги машин `vps` / `macbook` / `thinkpad` (настройка `machineName`; дефолт — санитизированный hostname, `[a-z0-9-]{1,16}`).
+4. Рост ответа gist снят замером 2026-10-12: `GET /gists/{id}` отдаёт только 30 последних ревизий в `history` (56 895 байт при трёх файлах); транспорт v1 не меняется; в A5 — простая проверка.
+5. Все тесты офлайн (уроки 006/011): временные `XDG_*` до импорта `ccl` (`linux/tests/_isolate.py`), `common.http`/`sync.transport` — запрещающие заглушки, часы инжектированы; реальные файлы входа, keyring, gist и API не используются; `/usr/bin/security` не вызывается.
+6. Сборка и селфтесты macOS — на маке владельца через remote-hands (`tools/remote/codex-job.sh macbook ccl --write`, только Юрка); у Codex на маке нет сети, `git pull` и установка в `/Applications` — владелец.
+7. Linux-трей как полноценный читатель/издатель — вторая очередь (решение владельца 6): B2 может идти после среза C без влияния на мак.
+8. Граница UID на VPS принята как в v1 (агенты того же пользователя могут править настройки и код); журнал O1 того же UID — не доказательство для G2, поэтому Юрка сверяет `stat` файлов входа руками (A5, T1 §7).
+
+## Команды валидации (допущения: имена новых модулей/фикстур задаёт Tester в test-plan)
+
+```sh
+cd /home/yurka/VibeCoding2/2026_06_UsageLimits
+# Linux: модули фичи test_rl_*.py (имена — по test-plan; изоляция — _isolate внутри теста; Qt/dpkg-тесты вне CI пропускаются)
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s linux/tests -p 'test_rl_*.py' -v
+# Linux: весь набор локально
+QT_QPA_PLATFORM=offscreen PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s linux/tests -p 'test_*.py' -v
+# Linux: эталон — Ubuntu CI .github/workflows/linux.yml (контейнер --network none, учётка ccltest) → 0 ошибок, 0 пропусков
+QT_QPA_PLATFORM=offscreen CCL_PREVIEW_DIR=/tmp/ccl-previews PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 linux/tests/_ci_offline.py
+# Установщик (A4): временный HOME + подменный systemctl в PATH (каталог подмены создаёт Tester)
+HOME=$(mktemp -d) PATH="$PWD/linux/tests/fakebin:$PATH" sh linux/install.sh --publisher --no-tray --name vps
+# macOS (на маке через remote-hands): сборка + офлайн-селфтесты
+bash build.sh && APP="dist/Claude Codex Limits.app/Contents/MacOS/ClaudeCodexLimits" \
+  && "$APP" --sync-selftest && "$APP" --subscriptions-selftest && "$APP" --auth-selftest
+# (новые проверки фичи живут в существующих --sync-selftest / --subscriptions-selftest, как в test-plan; нового флага нет)
+```
+
+## Порядок вех
+
+| ID | Веха | Зависит от | Статус |
+|---|---|---|---|
+| A0 | Протокол v1.1, test-plan и правки PRD/UX зафиксированы до кода | synth v2, T1 | [~] |
+| A1 | Контракт + идентичность + тег: `accounts.py`, `accountByDay`, фикстуры | A0 | [ ] |
+| A2 | Политика токенов `never` по умолчанию, маркер ротации, guard в записи, без редиректов | A1 | [ ] |
+| A3 | Ядро издателя: проход, `open_cycle`/`write`, три отпечатка, `coordination.decide`, `clockSkew`, журнал O1, пределы читателя Linux | A2 | [ ] |
+| A4 | Установка `--publisher/--no-tray/--name`, таймер 5 мин, `status` O2, отказ при старом трее | A3 | [ ] |
+| A5 | Выкатка на VPS, 24 ч журнала, ручные сверки Юрки (G1/G2), проверка `history` ≤ 30 | A4, владелец | [ ] |
+| B1 | Трей `delegated`: без записей состояния, воркер под `quota`, кнопка → проход | A3 | [ ] |
+| B2 | Linux-трей publish-only (вторая очередь) | B1, C1 | [ ] |
+| C1 | macOS: merge v1.1, `RemoteAccount`, `ReaderSyncState`, `resolveAccounts`, пределы читателя | A1 | [ ] |
+| C2 | macOS: настройки N1–N3, деньги U3, история по `acct` | C1 | [ ] |
+| C3 | macOS: UI карточек, состояния V5, строка меню, тег, превью 7 состояний | C2, UX | [ ] |
+| C4 | macOS: издатель мака, B2 через `syncNow(completion)`, `credentialWrite: never`, poll-log | C3, A5 | [ ] |
+| C5 | Подписи `captions` и список N1 (Should) | C4 | [ ] |
+| C6 | Релиз: документация, changelog, T3, 14-дневный замер G1–G4 | C4 (C5 по готовности) | [ ] |
+
+Stop-and-Fix: падение валидации любой вехи останавливает переход к следующей; баг, вернувшийся > 2 раз, — долг процесса (CLAUDE.md HQ, правило 2), урок в `.patches/`.
+
+## A0 — протокол и test-plan до кода `[~]`
+
+Зависит от: synth v2, T1. Файлы: `docs/sync-protocol.md` (раздел v1.1: пример JSON, правила C1–C7, три отпечатка записи, `lastSeenAt`, `attemptAt`, два PATCH после одного валидирующего GET в пределах 120 с, пределы читателя C7 (≤ 64 файлов, ≤ 64 МиБ, тело ≤ 16 МиБ, `isfinite`, чистка строк), смена gist и метки), `docs/test-plan-remote-limits.md` (Tester), правки PRD (решение 7, B6, C6, A5) и UX (строка 7 §4, §12).
+Готово, когда: протокол, test-plan и правки PRD/UX закоммичены **до** первого изменения кода (как `f311c4e` в UI-Auto); Юрка сверил каждую строку Т1–Т36 с вехой ниже.
+Валидация: `git log --oneline -- docs/test-plan-remote-limits.md docs/sync-protocol.md` показывает коммит раньше любого коммита этой фичи в `linux/ccl` и `Sources`.
+T1: документы; правки PRD B6 (П7) и S1 (П3-д).
+
+## A1 — контракт и идентичность `[ ]`
+
+Зависит от: A0. Файлы: `linux/ccl/accounts.py` (новый), `linux/ccl/usage.py` (`accountByDay`), `linux/ccl/common.py` (`machine_tag()`, `http(max_body=)`), `linux/ccl/sync.py` (разбор блока у читателя, пределы, `_raw` с пределом тела), `linux/tests/fixtures/machine-v11.json`, `machine-v11-hostile.json`, `machine-v10.json`, `sanitize-vectors.json`, фикстура `~/.claude.json` с синтетическими ПДн.
+Задачи: чтение `localId` одним парсером, извлекающим **только** `oauthAccount.accountUuid` / `tokens.account_id` (предел 8 МБ, `RecursionError`; `OPENAI_API_KEY` и `id_token` не читаются) — П2-б; `organizationUuid` не используется → `label: null`, `labelReason: no_account_uuid` — П1-а; метка HMAC под gist id **только при сборке блока**, UUID нормализован (нижний регистр, strip) — П1-б; `accountByDay[product][day]` при первой индексации; сборка блока: `accounts[*].days` + корневая проекция + `unattributedDays`; `captions`/`models[].name` — NFC, без `Cc`/`Cf`, ≤ 32/≤ 48, в подписи нет `@` и `/` — П4-в; `machine_tag()` `[a-z0-9-]{1,16}` из `machineName`, иначе санитизированный hostname (тег владельца для мака — `macbook`) — П4-а; валидация C7 с `isfinite`; пределы Linux-читателя: `raw_url` через `read(cap+1)` ≤ 8 МиБ, ≤ 64 файлов `machine-*`, ≤ 64 МиБ суммарно, тело любого ответа ≤ 16 МиБ, чистка `machine.name/os/app` (`Cc`/`Cf`, ≤ 64) — П5 в/г/д/е (тест-план A1-13/A1-14).
+Готово, когда: старый `sync.merge()` на `machine-v11.json` даёт те же суммы, что на том же файле без блока; скан S3 файла машины чист; фикстура с ПДн-ключами не оставляет email/имя/организацию ни в одной структуре, журнале и `status`; hostile-фикстура и 9 МиБ `raw_url` не роняют читателя.
+Валидация: `test_rl_contract.py` (A1-01…A1-14) — Т1–Т3; Т4 в редакции Юрки (`accountUuid` перечитывается каждый проход: изменился → новая метка, отсутствует → `null`, ротация токена без смены → метка та же); Т5, Т6, Т12–Т15, Т18, Т19, Т30; `test_sync_merge.py` расширен.
+T1: П1-а, П1-б, П2-б, П4-а, П4-в (писатель), П5 в/г/д/е (Linux-читатель).
+
+## A2 — политика токенов `[ ]`
+
+Зависит от: A1. Файлы: `linux/ccl/limits.py` (guard в трёх точках, `LimitData.account`, `follow_redirects=False`), `linux/ccl/common.py` (`credential_write`, `set_credential_write()`, маркер `rotation-pending-<p>`), `linux/ccl/cli.py` (`credentials --write never|guarded`).
+Задачи: `never` по умолчанию, `guarded` — opt-in со строкой в `status` (П3-д); при `publisher: true` `guarded` игнорируется → `policy_forced_never` (П3-в); политика читается в начале **каждой** попытки под `file_lock("quota")` — CLI, издатель и трей одинаково (единое правило Юрки; A2-09 по нему, не «при старте процесса»); guard до POST `/oauth/token`, до replay `_PENDING`, в `_save_*`/`_rewrite_json` → `policy_violation`, результат `error/credentials` (П3-б.4); смена политики только под `file_lock("quota")`, отказ при маркере с живым pid; процесс `guarded` перед выходом делает одну попытку replay, иначе `pending_rotation_lost` (П3-б.2); идентичность снимается тем же чтением, что и токен, едет в `LimitData.account` (П2-в); в `never` `_PENDING` не создаётся, `deadRefresh` не трогается (П3-г); провайдеры и `/oauth/token` без редиректов (§5).
+Готово, когда: синтетические файлы входа во всех состояниях (live/expiring/dead/absent/partial/mid-write) при `never` не меняют байты и mtime, POST token = 0, `oauth/usage` только в live; guarded-регресс зелёный.
+Валидация: `test_rl_tokens.py` — Т7–Т10 (Т9 в редакции единого правила), Т33 (часть переключения), Т35; существующие `test_limits.py`, `test_manual_refresh.py` зелёные без изменений.
+T1: П2-в (привязка в `LimitData`), П3-б, П3-в, П3-г, П3-д, §5.
+
+## A3 — ядро издателя и координация `[ ]`
+
+Зависит от: A2. Файлы: `linux/ccl/publisher.py` (новый), `linux/ccl/coordination.py` (новый), `linux/ccl/sync.py` (`open_cycle()`/`write()`, три отпечатка, `accounts=`, `clockSkew`, пределы чтения), `linux/ccl/cli.py` (`publisher --enable|--disable|--products|--mode|--now|--status`, хук в `cmd_push`), `linux/ccl/polling.py` (нормализация интервала), журнал `~/.local/state/claude-codex-limits/publisher.jsonl`.
+Задачи: проход synth v2 §C шаги 0–8 (PATCH попытки → запрос → PATCH результата; `publish_failed` → запроса нет, `last_attempt` восстановлен; gist недоступен → своё расписание, блок уходит следующим проходом); `decide` §D (правила 1–5, запасы 60 с, тай-брейк ≤ 1 тик на пару); чужой `retryUntil` отдельно от своего: `remote_retry_until` + `firstSeenAt` на диске, `effective = min(retryUntil, firstSeenAt + 24 ч)`, событие `remote_retry_capped`; чужие `asOf`/`attemptAt`/`nextAt` > `now + 60 с` или несогласованные → для B2 не свежие (П7); `identity_changed` при смене `localId` за время запроса — результат отброшен, попытка потрачена; `cache.json`/`publisher-state.json` по `localId` (П2-в); время прохода ограничено (пределы разбора — A1); `open_cycle` берёт `sync` **блокирующе с ожиданием ≤ 60 с**, не пропуском как `busy`; истекло → как недоступный gist по P6 (П8-а, A3-19); `quota` занят → `pass_skipped busy`; журнал 0600 через `O_APPEND|O_CREAT`, атомарная ротация, `run_pass` ловит всё и пишет класс события (П6-а); `clockSkew` из заголовка `Date`.
+Готово, когда: `FakeGitHub` фиксирует PATCH с `attemptAt` раньше запроса к провайдеру; симулятор двух машин 24 ч при 15 мин и 4 ч — 0 пар в установившемся режиме, ≤ 1 на событие, GET/PATCH в пределах таблицы synth §C; инварианты И1–И4 (T1 П7) держатся на fuzz чужих файлов.
+Валидация: `test_rl_coordination.py`, `test_rl_publisher.py`, `test_rl_sim.py` (A3-01…A3-21) — Т21, Т23–Т25, Т27, Т29, Т31–Т34; Т24/Т32 в редакции A3-20(c)/(d) (чужой ввод только откладывает; при мусорных/будущих чужих полях ≥ 1 запрос за `max(I, 24 ч)`; heartbeat меняет только `lastSeenAt`); тесты §G A3 synth v2.
+T1: П2-в, П6-а, П7, П8-а.
+
+## A4 — установка и статус `[ ]`
+
+Зависит от: A3. Файлы: `linux/install.sh` (`--publisher`, `--no-tray`, `--name <tag>`), юнит таймера `OnUnitActiveSec=5min`/`OnBootSec=2min`, `linux/ccl/cli.py` (`status` O2).
+Задачи: `settings.json` = `{publisher: true, autoPoll: true, credential_write: "never", machineName: <tag>}`; `XDG_RUNTIME_DIR` экспортируется только при существующем каталоге; `--no-tray` не создаёт `.desktop`/autostart (П6-в); при запущенном процессе трея пользователя установка **отказывает** (проверка процесса), печатает команду остановки, перезапуск не делает (П3-б.3, A4-02; решение Юрки); `status` печатает действующую политику и путь state-каталога (П3-в, П8-б), счётчики 24 ч (запросы, 429, неудачные публикации), `clockSkew`; токен/email/тексты исключений — нигде (П6).
+Готово, когда: установка во временном `HOME` с подменным `systemctl` даёт ожидаемые юнит и настройки; `test_deb` зелёный.
+Валидация: Т20, Т22, Т28, Т33 (часть install); `test_deb.py`.
+T1: П3-б.3, П3-в (status), П6-б/в, П8-б.
+
+## A5 — выкатка на VPS и 24 ч журнала `[ ]`
+
+Зависит от: A4; владелец (`ccl-sync login` на VPS, остановка старого трея на `:20`, решение П4-б). Файлы: кода нет; журнал O1 и `status` на VPS; запись результата в `status.md`.
+Задачи: `sh linux/install.sh --publisher --no-tray --name vps`; через ≤ 15 мин файл VPS в gist с блоком; 24 ч журнала; проверка риска 1 (`history` ≤ 30, ответ `GET /gists/{id}` ≤ 100 КБ); ручные сверки Юрки по T1 §7: `stat -c '%y %s' ~/.claude/.credentials.json ~/.codex/auth.json` до/после суток против `credentialWrite=0` в O1, файл машины в gist глазами (нет имени/хоста/UUID кроме `machine.id`), `journalctl --user -u ccl-sync` без токена/email.
+Готово, когда: G1 — все пары по аккаунту ≥ 900 с, ≤ 10 запросов/сутки при простое; G2 — 0 записей в файлы входа, 0 повторных входов; старые читатели (мак 3.2.7) продолжают суммировать расход.
+Валидация: журнал O1 за 24 ч (сведение по метке), `ccl-sync status`, проверки выше.
+T1: §7 ручные проверки 1–5; П4-б (решение владельца о пересоздании gist — метки сменятся у всех машин).
+
+## B1 — трей на машине с издателем `[ ]`
+
+Зависит от: A3. Файлы: `linux/ccl/gui/app.py` (`delegated` в `refresh_limits`, `save_poll_states` no-op, `on_activity` без записи, воркер под `file_lock("quota")`, `refresh_logs` с `allow_push=False`), `linux/ccl/quota_refresh.py` (вид допуска `delegated`).
+Задачи: при `settings.publisher` трей не пишет `autoPollState`/`quotaServerRetryAt`, раз в 60 с перечитывает `cache.json`/`state.json`/`publisher-state.json`, кнопка → `publisher.run_pass(manual=True)`; второй клик → `in_flight`, воркер не стартует (П8-в); на не-делегированных машинах воркер держит `quota` на время fetch + apply, попытка сохраняется **до** `Thread.start`, ошибка записи = запроса нет; `never` по умолчанию действует и здесь (П3-д).
+Готово, когда: 2 ч виртуального времени трей + таймер с кликами каждые 10 с → ≤ 1 запрос на аккаунт за любые 15 мин; `state.json` в `delegated` треем не меняется (mtime).
+Валидация: Т26, Т33 (часть трея); `test_auto_ui.py`-стиль (Qt при наличии, в CI обязателен).
+T1: П3-д, П8-в.
+
+## B2 — Linux-трей publish-only (вторая очередь) `[ ]`
+
+Зависит от: B1, C1 (контракт стабилен). Файлы: `linux/ccl/gui/app.py`, `gui/paint.py`/`gui/panel.py` (текст из снимка только `PlainText`/`drawText` — П5-б).
+Готово, когда: трей без издателя публикует блок своих локальных аккаунтов из `cache.json` + `autoPollState`; фикстура с HTML не вызывает загрузки.
+Валидация: Т17; `test_usage_sync.py` расширен.
+T1: П5-б.
+
+## C1 — macOS: merge v1.1 и резолвер `[ ]`
+
+Зависит от: A1 (контракт и фикстуры общие). Файлы: `Sources/RemoteLimits.swift` (новый: `RemoteAccount`, валидатор C7, `mergeV11`, `ReaderSyncState`, `resolveAccounts`), `Sources/LimitsMonitor.swift` (`SyncCachedMachine.lastSeenAt`, `SyncRemoteCache.accounts/captions/unattributedDays`, `LimitData.source`; проверки — в существующем `--sync-selftest`, `now` явный).
+Задачи: V3/V5/V2 чистой функцией с инжекцией `now`; состояние 7 → удалённых `AccountView` нет; пределы читателя (тело ≤ 16 МиБ, ≤ 64 файлов, ≤ 64 МиБ, `raw_url` ≤ 8 МиБ — П5-д), чистка строк `machine.*`/подписей/моделей (П5-е, П4-в), даты с годом 99999/`+99:00`/дробной частью 10⁶ знаков отбрасываются (Т36); проекция З2 — либо `accounts[].days`, либо корень, никогда оба.
+Готово, когда: старый/новый файл → одинаковые `days`; hostile-фикстура не роняет приложение; один Codex на двух машинах → одна карточка, два → две; таблица V5 воспроизводится фикстурами 1–7.
+Валидация: `bash build.sh && "$APP" --sync-selftest` (C1-01…C1-08); Т15 (Swift), Т19, Т30 (Swift), Т36.
+T1: П4-в (читатель), П5-д, П5-е.
+
+## C2 — macOS: настройки, деньги, история `[ ]`
+
+Зависит от: C1. Файлы: `Sources/LimitsMonitor.swift` (`monitor_*` → «опрашивать на этом Маке», `hiddenAccounts`, `menuAccount`, `mergedUsageIndex` по `hiddenAccounts`, `subscriptionUSD(tier:)`, `UsageHistory` с ключом `acct`, селфтест ~7108 переписан).
+Задачи: история по `acct` (локальный отпечаток / метка), `recordRemote` без `productEnabled`, дедуп `(acct, t)`; аудит `productEnabled` по synth §F (оставить в `fetchClaude`/`fetchCodex`/`UsageLogs.scan`/`snapshotJSON`/`record` — урок 013); событие `reader_card_state` в `~/.claude-limits-monitor/poll-log.jsonl` при каждом успешном синке — по каждому видимому аккаунту: метка, состояние V5, возраст показания, без ПДн (PRD §5, под замер G3/G4; решение Юрки; Linux-читатель — вторая очередь).
+Готово, когда: выключенный локальный опрос Claude + чужие `asOf` → темп считается и карточка Claude с VPS видна; 0 чтений Keychain по Claude; `$200` у `max_20x` с VPS без «оценки»; после синка в журнале по строке `reader_card_state` на видимый аккаунт.
+Валидация: `"$APP" --subscriptions-selftest` (C2-01…C2-07, переписанный 7108); строки `reader_card_state` проходят сканер ПДн/секретов (A1-10).
+T1: П2-в (ключ истории по идентичности); журнал читателя без ПДн (S5).
+
+## C3 — macOS: UI карточек и строка меню `[ ]`
+
+Зависит от: C2; UX-спек с правкой строки 7. Файлы: `Sources/LimitsMonitor.swift` (подпись и тег `machineName` в defaults с санитизацией, строка источника, тексты V5 RU/EN, `limitCanFix(remote:)`, `snapshotHorizon`, плашка плана, `menuAccount`, настройки «Опрашивать на этом компьютере» / «Аккаунты» / ссылка V10, PNG-превью 7 состояний).
+Задачи: клик по чужой карточке — только константный URL продукта, поле снимка в URL не попадает (П5-а); бейдж Advanced из таблицы V5, не `limitAuthBadge`; `machine.name` мака → тег, у владельца `macbook` (П4-а, Т13); при рендере — то же событие `reader_card_state` (состояние на экране = строка журнала); тексты V5 — по UX-спеке с правкой строки 7 (состояние 7 без значений, правит Юрка).
+Готово, когда: PNG 7 состояний × RU/EN × узкая/широкая Simple × Advanced совпадают с UX-спекой по чеклисту; Юрка сверил в реальном приложении (remote-hands, скилл visual-verify); ни в одном состоянии нет `claude login`/`claudefix`/бейджа «вход истёк».
+Валидация: `"$APP" --subscriptions-selftest` (C3-01…C3-11, PNG детерминированные, `now` фиксирован), Т13, Т16; состояние на PNG = `reader_card_state` в журнале; визуальная сверка Юрки.
+T1: П4-а (мак), П5-а.
+
+## C4 — macOS: издатель мака и B2 `[ ]`
+
+Зависит от: C3; A5 (VPS публикует — иначе B2 на маке нечем проверить вживую). Файлы: `Sources/LimitsMonitor.swift` (`GitHubSync.syncNow(force:mode:completion:)`, `SyncOutcome`, `.writeOnly`, `machineFile` += блок Codex, `cacheQuotaCompletion` с `accountId`, `doRefresh` с продолжением из completion, `clockSkew`), `Sources/QuotaRefresh.swift`, `codexAccessToken()` (политика), `~/.claude-limits-monitor/poll-log.jsonl`.
+Задачи: ключ defaults `credentialWrite` — `never` по умолчанию, guard до POST и в функции записи, в `legacy` запись атомарна с перечитыванием/сравнением пары, `persistClaudeQuotaUpdate` при `never` не вызывается (П3-а, П3-д); чужой дедлайн отдельно от `serverRetryAt` с потолком 24 ч от `firstSeenAt` (П7); PATCH попытки до `fetchCodex`, упавший PATCH → запроса нет; `.failed` чтения / нет completion за 60 с → своё расписание (B1).
+Готово, когда: селфтест с транспорт-ловушкой фиксирует порядок PATCH(`attemptAt`) → `fetchCodex` → PATCH(результат); при свежей чужой попытке `fetchCodex` не вызывается; файл мака в gist содержит блок Codex с меткой; `auth.json` при `never` не тронут.
+Валидация: `"$APP" --sync-selftest` (C4-01…, `decide-vectors.json` общие с A3-01), `"$APP" --auth-selftest`; Т11, Т23–Т25 (Swift), Т31–Т32 (Swift), Т35 (`noRedirects` уже есть — регресс).
+T1: П3-а, П3-д, П7, §5 (регресс).
+
+## C5 — подписи и список аккаунтов (Should) `[ ]`
+
+Зависит от: C4. Файлы: `Sources/LimitsMonitor.swift` (блок «Аккаунты», правка подписи ≤ 32 с чисткой, `captions` в `machineFile`), `linux/ccl/accounts.py` (merge подписей по `setAt`).
+Готово, когда: подпись, заданная на маке, видна на всех машинах после цикла; ввод с `@`, `/`, управляющими символами отклонён (П4-в).
+Валидация: Т14; `"$APP" --subscriptions-selftest`.
+T1: П4-в.
+
+## C6 — релиз и проверка гипотезы `[ ]`
+
+Зависит от: C4 (C5 по готовности). Файлы: документация (TechWriter), changelog, финал `docs/sync-protocol.md`, release notes.
+Задачи: T3 ИБ-чек релиза (security-gate); решения владельца: П4-б — пересоздание gist (имя в истории ревизий старого), П6-б — `chmod 700 ~/.codex`; PR ⛔ → выкладка macOS (`bash build.sh`, `scripts/make-dmg.sh`) и Linux `linux-v…` (`sh linux/packaging/release.sh`, `--latest=false`); smoke на установленной сборке; напоминание в `HQ/now.md` на день выкладки + 14.
+Готово, когда: 14-дневный замер G1–G4 по журналам обеих машин сведён PM-ом (G1/G2 — O1 издателей, G3/G4 — `reader_card_state` мака + O1); решения при недоборе из PRD §8 применены или не понадобились.
+Валидация: полный Linux CI 0 ошибок / 0 пропусков; все селфтесты Swift; packaged QA; скан секретов перед коммитами.
+T1: П4-б, П6-б, T3.
+
+## Куда легли требования T1
+
+| T1 | Веха |
+|---|---|
+| П1-а (`organizationUuid` снят), П1-б (метка при публикации), П2-б (один ключ, предел 8 МБ), П4-а (тег Linux), П4-в (чистка у писателя), П5 в/г/д/е (пределы и чистка у Linux-читателя — A1-13/A1-14) | A1 |
+| П2-в (идентичность в `LimitData`), П3-б (порядок переключения, guard в записи; политика — в начале каждой попытки под замком), П3-в (`policy_forced_never`), П3-г, П3-д (`never` по умолчанию), §5 (редиректы) | A2 |
+| П2-в (кэш/состояние по идентичности, `identity_changed`), П6-а (журнал), П7 (чужой дедлайн отдельно, потолок 24 ч), П8-а (ожидание `sync` ≤ 60 с блокирующе) | A3 |
+| П3-б.3 (отказ при старом трее), П3-в (`status`), П6-б/в, П8-б (путь state-каталога) | A4 |
+| §7 ручные проверки 1–5, П4-б (решение владельца) | A5, C6 |
+| П3-д (трей), П8-в (повторные клики) | B1 |
+| П5-б (PlainText в трее) | B2 |
+| П4-в (читатель), П5-д/е, Т36 | C1 |
+| П4-а (тег мака), П5-а (константный URL клика) | C3 |
+| П3-а (атомарная запись `auth.json`, guard), П3-д (мак), П7 (мак) | C4 |
+
 > LINUX-COMPACT 0.4.5 завершена и опубликована 2026-10-08. [План](linux-compact-refresh-plan.md), [проверки](linux-compact-refresh-verification.md). macOS 3.2.7 остаётся Latest.
 
 # MANUAL-REFRESH · 2026-10-07

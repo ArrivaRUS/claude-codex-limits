@@ -6,7 +6,8 @@
 спорным пунктам применены без обсуждения. Статус: T1 пройден (`docs/security-remote-limits.md`, 0 blocker), execution-pack — `docs/plans.md`.
 Правки после T1 и замера (2026-10-12, вечер): риск 1 закрыт (`history` = 30 последних ревизий); `credential_write: never` по умолчанию на
 всех портах (П3-д); потолок чужого `retryUntil` 24 ч от `firstSeenAt` (П7); `organizationUuid` снят (П1-а); сквозная привязка идентичности
-(П2-в); теги машин `vps`/`macbook`/`thinkpad`.
+(П2-в); теги машин `vps`/`macbook`/`thinkpad`; по расхождениям тест-плана (§6, решения Юрки): единая политика в начале каждой попытки
+под замком, Т4 без привязки к поколению, отказ установки при живом трее, ожидание `sync` ≤ 60 с, пределы читателя в C7, `reader_card_state`.
 
 ## Итог
 
@@ -81,7 +82,9 @@ interval ∈ {900, 1800, 3600, 14400}, nextAt, backoff bool}`; `retryUntil` ISO 
 `null` → `unattributedDays`. (3) Запись — §C «Правило записи». (4) Валидация C7: `pct` не число/bool или вне 0…100 → окно отброшено;
 непарсимое время → поле отброшено (`asOf` битый → запись без показания); `label` не 16 hex → `null`; неизвестный `status` → `error`;
 нет `product`/`status` → запись отброшена; `models` > 8 → хвост отброшен; длинные строки отброшены; `asOf` в будущем > 5 мин → возраст 0,
-темп не считать (V6); битый блок не трогает приём `days`. (5) Публикуются только `api_fresh` показания своей машины; чужие записи не
+темп не считать (V6); битый блок не трогает приём `days`. **Пределы читателя** (T1 Т18/Т30, оба порта): ≤ 64 файлов `machine-*.json` на gist, суммарно
+≤ 64 МиБ, тело одного ответа ≤ 16 МиБ — чтение прерывается на cap+1 (`raw_url` ≤ 8 МиБ), Linux `_raw`/`common.http` получают предел
+тела; числа — `isfinite` (NaN/inf → отброс); управляющие символы (`Cc`/`Cf`) в строке → строка отброшена, включая `machine.name/os/app`. (5) Публикуются только `api_fresh` показания своей машины; чужие записи не
 перепубликуются. (6) Совместимость по коду: Linux `sync.merge()` (`sync.py` 355–402) читает только `schema/machine/updated/tz/days`;
 macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; манифест не трогаем. Тест: фикстура v1.1 через **старый** merge = та же
 фикстура без блока. (7) Протокол v1.1 (`docs/sync-protocol.md`): проход издателя делает до двух PATCH после одного валидирующего GET в
@@ -92,7 +95,8 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 - **Локальная идентичность `localId`** (никогда не покидает машину): Claude — `~/.claude.json` → `oauthAccount.accountUuid`
   (парсер извлекает только этот ключ; `emailAddress`, `displayName`, `organizationUuid` и прочие ключи объекта в структуры приложения
   не попадают — S3); Codex — `~/.codex/auth.json` → `tokens.account_id` (`id_token` не читается). Перечитывается **каждый проход**
-  (`_read_json_retry`, 5×0,2 с). Не читается → `label: null`, `labelReason: unreadable`, статус `error`, **запроса нет** (B2 без метки
+  (`_read_json_retry`, 5×0,2 с): значение изменилось → новая метка; поля нет → `null`; ротация access/refresh без смены `accountUuid`
+  метку не меняет (Т4 в редакции Юрки; привязки к поколению входа нет). Не читается → `label: null`, `labelReason: unreadable`, статус `error`, **запроса нет** (B2 без метки
   невозможна; план #1 §B). Файла/блока нет → `no_login` → `signed_out`, 0 запросов. Нет gist id → `no_gist`, опроса нет (P6). Запасной источник `organizationUuid` **снят** (T1 П1-а: метка организации
   общая для всех её членов): нет `accountUuid` → `label: null`, `labelReason: no_account_uuid`, запроса нет. `~/.claude.json` парсится с
   пределом 8 МБ и `RecursionError` (П2-б).
@@ -127,8 +131,9 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 2. `file_lock("quota")` (ожидание ≤ 30 с; занято → `pass_skipped busy`, выход).
 3. Под замком: перечитать `state.json` (`autoPollState`, `quotaServerRetryAt`) и `publisher-state.json`; применить `local_activity`
    (**только здесь**, №2); `due` по `PollState.due(now, manual)` и `server_until`.
-4. `session = sync.open_cycle(auto=True)`: доступ → GET gist (`public == false`) → merge чужих в `sync-remote.json` → `clockSkew` из
-   заголовка `Date` (§D). Неудача → `session = None` (gist недоступен, P6).
+4. `session = sync.open_cycle(auto=True)`: `file_lock("sync")` **блокирующе, ожидание ≤ 60 с** (не пропуск `busy`; истекло → как
+   недоступный gist — T1 П8-а/Т27) → доступ → GET gist (`public == false`) → merge чужих в `sync-remote.json` → `clockSkew` из заголовка
+   `Date` (§D). Неудача → `session = None` (gist недоступен, P6).
 5. По каждому due-продукту решение в порядке: `no_login` → `no_label` → `retry_after` (локальный `server_until` ∪ чужие `retryUntil` моей
    метки) → `token_policy` (§E, 0 запросов) → `coordination.decide` (§D: `remote_attempt` / `fresh_remote` / `tie_break` / `poll`).
 6. Если хотя бы один продукт решил `poll`:
@@ -149,7 +154,9 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 **Правило записи (№11) — три отпечатка в `sync-state.json`:** `pushHash` = sha1(корневой `days`) — расход, пишется при изменении и
 `now − pushedAt ≥ 570 с` (пол как сегодня); `metaHash` = sha1(`accounts` без `days` + `captions`) — попытка/результат/расписание/`retryUntil`/
 статус/метка/подпись — пишется сразу; `heartbeatAt` — когда последний раз писался `lastSeenAt`, пишется при `now − heartbeatAt ≥ 600 с`.
-Любой PATCH пишет весь файл (свежие `days`, `accounts`, `captions`, `lastSeenAt = now`) и обновляет все три. `lastSeenAt` — часть снимка,
+Любой PATCH пишет весь файл (свежие `days`, `accounts`, `captions`, `lastSeenAt = now`) и обновляет все три. Heartbeat-PATCH меняет в
+файле только `lastSeenAt` (не `asOf`, попытку, интервал, наблюдения Auto); самоподдерживающейся записи нет — два не-due тика подряд в
+600 с дают 0 PATCH (тест-план A3-14). `lastSeenAt` — часть снимка,
 но не часть отпечатков изменения (иначе каждая запись порождала бы следующую); формулировку PRD C6 «входит в хеш» уточнить как «входит
 в снимок, пишется по своему 10-мин сроку». Бюджет: due-тик ≤ 1 GET + 2 PATCH; остальные 1 GET + ≤ 1 PATCH.
 
@@ -161,7 +168,7 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 перечитывает; `local_activity` применяет проход); раз в 60 с перечитывает `cache.json`/`state.json`/`publisher-state.json` и показывает
 «опрос ведёт издатель · следующая попытка HH:MM»; кнопка «Обновить» → `publisher.run_pass(manual=True)` в рабочем потоке (тот же замок);
 свои циклы синка трей гоняет с `allow_push=False` (`gui/app.py:1379`). Старый трей 0.4.5 на `:20` режима не знает → `install.sh --publisher`
-при живом трее отказывает с инструкцией остановить его (T1 П3-б, Т33). На не-делегированных машинах рабочий поток трея берёт `file_lock("quota")` на время
+проверяет процесс трея пользователя и при живом **отказывает**, печатая команду остановки; перезапуск не делает (T1 П3-б, Т33; решение Юрки). На не-делегированных машинах рабочий поток трея берёт `file_lock("quota")` на время
 `fetch + apply` (ожидание ≤ 10 с, иначе `poll_skipped busy`), попутно чинится порядок «сохранить попытку до старта воркера» (`:1226`, `:1305`).
 
 **Таймер** 5 мин (`OnUnitActiveSec=5min`, `OnBootSec=2min`): проверка без due — 0 запросов к провайдерам. **Установка (P2):**
@@ -222,7 +229,10 @@ server_until}`, `remote` = записи других машин с той же �
 - gist недоступен машине (GET не прошёл) — своё расписание в рамках B1, **≤ 1 пара на 15 мин простоя** на аккаунт (обе по 15 мин);
 - восстановление (первый удачный GET после простоя) — **≤ 1 пара**;
 - замер G1: пары считаются по журналам обеих машин по метке; периоды с неудачными `publish`/GET в любом журнале помечаются «gist
-  недоступен» и отчитываются отдельно.
+  недоступен» и отчитываются отдельно;
+- инварианты T1 И1–И4 в редакции тест-плана A3-20(c)/(d) (Т24/Т32): чужой ввод только откладывает мой опрос и никогда не учащает его
+  сверх моего Auto; при мусорных/будущих чужих полях — ≥ 1 запрос за `max(I, 24 ч)`; требования «≥ 1 запрос в сутки при любом чужом
+  вводе» нет — здоровый сосед подавляет законно.
 **B6.** Свой `Retry-After` хранится полностью (> 24 ч не режется, проверяется на конечность) и публикуется как `retryUntil`; чужой
 соблюдается не дольше 24 ч от `firstSeenAt` — затем событие `remote_retry_capped` и своё расписание (сервер при необходимости взведёт уже
 **свой** дедлайн без потолка); букву PRD B6 правит PM. Backoff GitHub
@@ -233,9 +243,10 @@ server_until}`, `remote` = записи других машин с той же �
 Настройка `credential_write ∈ {never, guarded}`; **`never` — значение по умолчанию на всех портах** (VPS, Linux-трей, мак; T1 П3-д —
 решение Юрки, ждёт «да» владельца, планируется как принятое); `guarded` = сегодняшнее поведение Linux — явный opt-in только там, где
 CLI на машине не используется (строка в `status`); при `publisher: true` значение `guarded` игнорируется → `never` + событие
-`policy_forced_never` (П3-в). Политика читается один раз при старте процесса (издатель — oneshot; трей после смены перезапускается);
-процесс в `guarded` перед выходом делает одну попытку replay `_PENDING`, иначе `pending_rotation_lost` (П3-б). Запросы к провайдерам и
-`/oauth/token` — с `follow_redirects=False` (T1 §5).
+`policy_forced_never` (П3-в). **Единое правило (решение Юрки по тест-плану §6 п. 1):** политика читается в начале **каждой** попытки
+под `file_lock("quota")` — CLI, издатель и трей одинаково; смена политики — под тем же замком при пустом `_PENDING` и без маркера
+ротации (абзац «Смена политики» ниже); процесс в `guarded` при штатном выходе делает одну попытку replay `_PENDING`, иначе
+`pending_rotation_lost` (П3-б). Запросы к провайдерам и `/oauth/token` — с `follow_redirects=False` (T1 §5).
 
 | Состояние | Условие (каждая попытка перечитывает файл входа) | Запросы | Публикуется |
 |---|---|---|---|
@@ -288,7 +299,9 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 допуск → `syncNow(completion)` → `coordination.decide` по кэшу из исхода (не по `_remote`) → `poll`: `begin` + `saveAutoStates` →
 `syncNow(force: true, mode: .writeOnly, completion)` = PATCH попытки → неудача → `publish_failed`, вернуть `lastAttempt`, запроса нет →
 успех → `fetchCodex` → `syncNow(force: true, mode: .writeOnly)` результата. `.failed` чтения → своё расписание (B1); нет completion за
-60 с (очередь занята) → как `.failed`. Журнал O1: `~/.claude-limits-monitor/poll-log.jsonl`. `clockSkew` из `Date` — как на Linux.
+60 с (очередь занята) → как `.failed`. Журнал O1: `~/.claude-limits-monitor/poll-log.jsonl` + событие `reader_card_state` (PRD §5: метка, состояние V5, возраст показания по
+каждому видимому аккаунту, без ПДн) при каждом успешном синке и рендере — под замер G3/G4 (C2/C3); Linux-читатель — вторая очередь.
+`clockSkew` из `Date` — как на Linux.
 **Настройки, деньги, UI** — как план #1 §F: `monitor_*` = «опрашивать на этом Маке», `hiddenAccounts`, `mergedUsageIndex` по
 `hiddenAccounts` (U2), аудит `productEnabled` (оставить в `fetchClaude`/`fetchCodex`/`UsageLogs.scan`/`snapshotJSON`/`record` — урок 013),
 селфтест ~7108 → «remote usage of a visible account survives a disabled local poll», `subscriptionUSD(tier:)`, `menuAccount` (V8),
