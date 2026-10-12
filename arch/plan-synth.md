@@ -6,7 +6,7 @@
 спорным пунктам применены без обсуждения. Статус: T1 пройден (`docs/security-remote-limits.md`, 0 blocker), execution-pack — `docs/plans.md`.
 Правки после T1 и замера (2026-10-12, вечер): риск 1 закрыт (`history` = 30 последних ревизий); `credential_write: never` по умолчанию на
 всех портах (П3-д); потолок чужого `retryUntil` 24 ч от `firstSeenAt` (П7); `organizationUuid` снят (П1-а); сквозная привязка идентичности
-(П2-в); теги машин `vps`/`macbook`/`thinkpad`; по расхождениям тест-плана (§6, решения Юрки): единая политика в начале каждой попытки
+(П2-в); теги машин `vps`/`macbook`/`alse`; по расхождениям тест-плана (§6, решения Юрки): единая политика в начале каждой попытки
 под замком, Т4 без привязки к поколению, отказ установки при живом трее, ожидание `sync` ≤ 60 с, пределы читателя в C7, `reader_card_state`.
 
 ## Итог
@@ -173,7 +173,7 @@ macOS `GitHubSync.merge` (2740–2775) — то же через `as?`; мани�
 
 **Таймер** 5 мин (`OnUnitActiveSec=5min`, `OnBootSec=2min`): проверка без due — 0 запросов к провайдерам. **Установка (P2):**
 `sh linux/install.sh --publisher [--no-tray] [--name <tag>]` → `settings.json`: `publisher: true, autoPoll: true, credential_write: "never",
-machineName: <tag>` (теги владельца `vps` / `macbook` / `thinkpad`; дефолт — санитизированный hostname, у VPS это `ubuntu-s-4vcpu-8` → ставить `--name vps`); `XDG_RUNTIME_DIR=/run/user/$UID`
+machineName: <tag>` (теги владельца `vps` / `macbook` / `alse`; дефолт — санитизированный hostname, у VPS это `ubuntu-s-4vcpu-8` → ставить `--name vps`); `XDG_RUNTIME_DIR=/run/user/$UID`
 при отсутствии; без autostart/.desktop при `--no-tray`; `.deb` не трогаем. **P6:** нет входа → 0 запросов; GET не прошёл → своё расписание,
 блок хранится локально. **Журнал O1** `publisher.jsonl`: `poll_attempt`, `poll_result`, `poll_skipped` (`not_due · fresh_remote ·
 remote_attempt · tie_break · retry_after · no_github · no_login · no_label · state_unsaved · publish_failed · token_policy · busy`),
@@ -309,7 +309,7 @@ menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]` — 
 
 ### F.1 Решения по UX-спеке
 1. **Тег машины без ПДн** — `machineName` (mac: новый ключ defaults; Linux: `settings.machineName`; теги владельца `vps`/`macbook`/
-   `thinkpad`), иначе санитизированный hostname (первая DNS-метка); NFKD → ASCII,
+   `alse`), иначе санитизированный hostname (первая DNS-метка); NFKD → ASCII,
    нижний регистр, `[a-z0-9-]`, ≤ 16; пусто → `mac`/`linux`; тест «MacBook Pro — Алекс» → `macbook-pro`; скан S3 на имя владельца.
 2. **Горизонт свежести** `snapshotHorizon(d)` = `source != nil ? max(0, freshUntil − asOf) : SNAPSHOT_MAX_AGE`, три точки (`metricIsStale`
    ~3097, `advVerdict` ~4254, `isStale`); тест Auto 4 ч / 3 ч 50 мин → не stale.
