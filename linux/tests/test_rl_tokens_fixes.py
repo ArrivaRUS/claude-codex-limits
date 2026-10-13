@@ -31,6 +31,24 @@ Contract fixed by the tester for this cycle (Юрка's decisions in plans.md §
          result is NOT LOGGED_OUT. (A2-11 in test_rl_tokens.py was changed accordingly.)
   m7     `ccl-sync credentials --write guarded` with `publisher: true` → the output names the effective policy `never` and
          that the publisher overrides guarded.
+
+Fix cycle 2 (docs/review-remote-limits-a2-r2.md MR2-1, mr2-2…mr2-4, nr2-5; docs/security-remote-limits-a2-t2-r2.md
+R2-1…R2-5, probes P5–P7; docs/plans.md §A2 «Ревью A2-2»). Test-plan IDs A2-19…A2-23. Written BEFORE the fix on be198ba.
+  R2-1   guarded: the completeness predicate checked before POST /oauth/token is the one checked before writing. Codex
+         account_id / access_token blank after strip, Claude accessToken missing/blank with a refreshToken → LOGGED_OUT,
+         0 POST, no marker, no _PENDING, login file untouched, on every attempt. (д) never: a blank account_id is not sent
+         in `chatgpt-account-id` either → LOGGED_OUT, no request.
+  R2-3   Claude: a 200 token response with a complete pair and a non-finite / non-numeric / non-positive `expires_in`
+         is saved with the default lifetime 28800 s (expiresAt = int ms); no exception, no _PENDING, no marker.
+  R2-2   set_credential_write() refused by a LIVE foreign marker (readable, same boot, pid alive) → the text asks to wait
+         for the next attempt and does not advise deleting the marker or stopping the tray/publisher (negated forms —
+         «не удаляйте», «do not stop» — are allowed). An unreadable marker (A2-16) and a marker whose pid is held by
+         another user's process (kill → EPERM: pid reused, death not proven) keep the path + «delete» advice.
+         Both texts still name the rotation (ротац|rotation — A2-04(b), A2-13).
+  R2-4   (Юрка's decision) a 200 token response with access_token only is accepted: the new access + the OLD refresh
+         from the file are saved, the attempt is ok, the next attempt does not POST (access is fresh). Claude and Codex.
+  R2-5   after the marker is written, OSError from removing the own marker (superseded paths) or from the Store write
+         (state.json after save / dead-refresh mark) does not escape fetch_* / codex_access_token.
 Run: python3 -m unittest linux/tests/test_rl_tokens_fixes.py -v   (from PROJECT_ROOT)
 """
 
@@ -518,6 +536,398 @@ class TestA218PublisherWriteGuardedOutput(FixBase):
         self.assertRegex(text, r"\bguarded\b")
         self.assertNotRegex(text, FORCED)
         self.assertEqual(common.credential_write(), "guarded")
+
+
+# ======================================================================================================================
+# Fix cycle 2 — A2-19…A2-23 (docs/review-remote-limits-a2-r2.md, docs/security-remote-limits-a2-t2-r2.md §4–§5)
+# ======================================================================================================================
+NEGATION = re.compile(r"(?i)\bnot\b|n't\b|\bnever\b|\bне\b|\bни\b|\bбез\b|\bno\b")
+DELETE_ADVICE = re.compile(r"(?i)\b(?:delete|remove|rm|unlink)\b|удали(?:те)?\b|удалить")
+STOP_ADVICE = re.compile(r"(?i)\b(?:stop|close|quit|kill|exit|terminate)\b|останови(?:те)?\b|остановить|"
+                         r"закройте|закрыть|закрой\b|выйдите|завершите|завершить")
+WAIT = re.compile(r"(?i)\bwait|дожд|подожд|next attempt|следующ")
+
+
+def advises(text, pattern):
+    """True if `pattern` occurs as advice: not negated within its own clause («не удаляйте», «do not stop … or delete»)."""
+    for m in pattern.finditer(text):
+        start = max(text.rfind(c, 0, m.start()) for c in ".;:!?,\n") + 1
+        if not NEGATION.search(text[max(start, m.start() - 60):m.start()]):
+            return True
+    return False
+
+
+def token_body(raw_expires_in=None, **fields):
+    """Raw JSON body of a /oauth/token response; `raw_expires_in` is spliced in verbatim (NaN, 1e400 … are JSON that
+    json.loads accepts but json.dumps would not produce)."""
+    text = json.dumps(fields)
+    if raw_expires_in is not None:
+        text = text[:-1] + (", " if fields else "") + '"expires_in": ' + raw_expires_in + "}"
+    return text.encode("utf-8")
+
+
+class Cycle2Base(FixBase):
+    def edit_login(self, product, edit):
+        """Rewrite the synthetic login file through `edit(block)` (block = claudeAiOauth / tokens)."""
+        path = self.cred_path(product)
+        obj = t.load(path)
+        edit(obj["claudeAiOauth" if product == "claude" else "tokens"])
+        self.write_file(path, json.dumps(obj, indent=2))
+
+    def oauth_block(self, product):
+        return t.load(self.cred_path(product))["claudeAiOauth" if product == "claude" else "tokens"]
+
+    def no_trace_left(self, product, where):
+        self.assertEqual(limits._PENDING, {}, "%s: пары в памяти нет" % where)
+        self.assertEqual(t.markers(product), [], "%s: маркера нет" % where)
+
+
+# ---- A2-19 (R2-1/MR2-1) guarded: login that cannot be written back → no POST ------------------------------------------
+class TestA219CompleteLoginBeforePost(Cycle2Base):
+    CODEX_BLANK = (("account_id", ""), ("account_id", "   "), ("account_id", "\t\n"), ("access_token", "   "),
+                   ("access_token", ""))
+    CODEX_EXP = (("expired", NOW - 60), ("expiring_in_grace", NOW + 30))
+    CLAUDE_BLANK = (("accessToken", t.MISSING), ("accessToken", ""), ("accessToken", "   "))
+
+    @staticmethod
+    def setter(field, value):
+        def edit(block):
+            if value is t.MISSING:
+                block.pop(field, None)
+            else:
+                block[field] = value
+        return edit
+
+    def check_no_post(self, product, run, name, where):
+        before = self.snap_cred()
+        for attempt in (1, 2):
+            d = self.guard(run, "%s попытка %d" % (where, attempt))
+            self.assertEqual(self.trap.posts(), [], "%s: вход нельзя дописать → POST /oauth/token не делается" % where)
+            self.assertEqual(self.trap.usage(), [], "%s: usage с неполным входом не уходит" % where)
+            self.assertEqual(d.auth, limits.LOGGED_OUT, "%s/%s: неполный вход = loggedOut" % (where, name))
+            self.assertFalse(d.api_fresh)
+            self.no_trace_left(product, where)
+        self.assert_untouched(before, where)
+        st = common.state()
+        st.reload()
+        self.assertFalse(st.has(t.DEAD_KEY[product]), "%s: refresh не помечен мёртвым" % where)
+
+    def test_codex_blank_identity_spends_no_refresh_token(self):
+        """Red now (`   `, `\\t\\n` id, `   ` access): 1 POST, the rotated pair is stuck in _PENDING forever (probe P7)."""
+        for field, value in self.CODEX_BLANK:
+            for exp_name, exp in self.CODEX_EXP:
+                for name, run in self.calls("codex"):
+                    where = "codex %s=%r %s %s" % (field, value, exp_name, name)
+                    with self.subTest(field=field, value=value, exp=exp_name, call=name):
+                        self.reset_round()
+                        self.set_policy("guarded")
+                        self.codex_auth("expiring", exp=exp)
+                        self.edit_login("codex", self.setter(field, value))
+                        self.check_no_post("codex", run, name, where)
+
+    def test_claude_without_access_token_spends_no_refresh_token(self):
+        """Red now: `not at` sends a refreshToken-only login to POST; the save then needs accessToken → pending forever."""
+        for field, value in self.CLAUDE_BLANK:
+            for state in ("expiring", "expiring_soon"):
+                where = "claude %s=%s %s" % (field, "нет" if value is t.MISSING else repr(value), state)
+                with self.subTest(value="missing" if value is t.MISSING else value, state=state):
+                    self.reset_round()
+                    self.set_policy("guarded")
+                    self.claude_creds(state)
+                    self.edit_login("claude", self.setter(field, value))
+                    self.check_no_post("claude", limits.fetch_claude, "fetch_claude", where)
+
+    def test_blank_account_in_never_is_signed_out(self):
+        """Red now (review (д)): in never a blank id goes to `chatgpt-account-id` as is (401 would read as EXPIRED)."""
+        for value in ("   ", "\t\n"):
+            with self.subTest(value=value):
+                self.reset_round()
+                self.set_policy(None)
+                self.codex_auth("live", account=value)
+                before = self.snap_cred()
+                d = self.guard(lambda: limits.fetch_codex(live=True), "never fetch_codex")
+                self.assertEqual(self.trap.calls, [], "пустой id в заголовок не уходит, запросов нет")
+                self.assertEqual(d.auth, limits.LOGGED_OUT)
+                self.assert_untouched(before, "never blank id")
+
+    def test_complete_login_still_rotates(self):
+        """Green guard: a complete login (id with edge spaces too — A2-17) still rotates once and is saved."""
+        cases = (("codex", t.CODEX_ACCT), ("codex", "  " + t.CODEX_ACCT + " "), ("claude", None))
+        for product, account in cases:
+            with self.subTest(product=product, account=account):
+                self.reset_round()
+                self.set_policy("guarded")
+                if product == "codex":
+                    self.codex_auth("expiring", account=account)
+                else:
+                    self.claude_creds("expiring")
+                d = self.guard(lambda: self.attempt(product), product)
+                self.assertEqual(len(self.trap.posts()), 1)
+                self.assertTrue(d.api_fresh)
+                rt = self.oauth_block(product)["refreshToken" if product == "claude" else "refresh_token"]
+                self.assertEqual(rt, t.rotated(product)["refresh_token"], "пара дописана")
+                if product == "codex":
+                    self.assertEqual(self.oauth_block("codex")["account_id"], account, "id в файле не тронут")
+                self.no_trace_left(product, product)
+
+
+# ---- A2-20 (R2-3/mr2-4) Claude: garbage expires_in does not make a good pair unsaveable --------------------------------
+class TestA220ExpiresInGarbage(Cycle2Base):
+    BAD = ('"abc"', "[]", "{}", "NaN", "Infinity", "-Infinity", "1e400", "-5", '"NaN"', '"Infinity"')
+    DEFAULTED = ("null", "0", None)     # None = no expires_in field; already 28800 today (green guard)
+    DEFAULT = 28800
+
+    def run_pair(self, raw):
+        self.reset_round()
+        self.set_policy("guarded")
+        self.claude_creds("expiring")
+        self.trap.overrides[t.CLAUDE_TOKEN] = common.Resp(
+            200, token_body(raw, access_token="fixture-rotated-access", refresh_token="fixture-rotated-refresh"), {})
+        t0 = time.time()
+        d = self.guard(limits.fetch_claude, "fetch_claude expires_in=%s" % raw)
+        where = "expires_in=%s" % raw
+        self.assertEqual(len(self.trap.posts()), 1, where)
+        oauth = self.oauth_block("claude")
+        self.assertEqual(oauth["accessToken"], "fixture-rotated-access", "%s: пара сохранена" % where)
+        self.assertEqual(oauth["refreshToken"], "fixture-rotated-refresh", "%s: пара сохранена" % where)
+        exp = oauth.get("expiresAt")
+        self.assertTrue(isinstance(exp, int) and not isinstance(exp, bool), "%s: expiresAt — целое (мс)" % where)
+        self.assertLessEqual(abs(exp - (t0 + self.DEFAULT) * 1000), 5000,
+                             "%s: срок по умолчанию 28800 с (получено %r)" % (where, exp))
+        self.no_trace_left("claude", where)
+        self.assertTrue(d.api_fresh, "%s: значения новой парой" % where)
+        self.trap.calls.clear()
+        self.guard(limits.fetch_claude, "fetch_claude повтор")
+        self.assertEqual(self.trap.posts(), [], "%s: следующая попытка без POST (access свежий)" % where)
+
+    def test_garbage_expires_in_still_saves_pair(self):
+        """Red now: float()/int() raise out of fetch_claude after POST (probe P6), or a negative value saves a past expiry."""
+        for raw in self.BAD:
+            with self.subTest(expires_in=raw):
+                self.run_pair(raw)
+
+    def test_absent_or_zero_expires_in_defaults(self):
+        """Green guard: null / 0 / no field → 28800 s, as before."""
+        for raw in self.DEFAULTED:
+            with self.subTest(expires_in=raw):
+                self.run_pair(raw)
+
+
+# ---- A2-21 (R2-2/mr2-3) live foreign marker: wait, do not delete/stop; unreadable/reused: path + delete ---------------
+class TestA221RefusalTexts(Cycle2Base):
+    def refusal(self):
+        refused = self.refused_error()
+        with self.assertRaises(refused) as cm:
+            common.set_credential_write("never")
+        code, text = self.run_cli(["credentials", "--write", "never"])
+        self.assertNotEqual(code, 0, "CLI: отказ")
+        self.assertNotRegex(text, NO_TRACE)
+        self.assertEqual(self.settings_on_disk().get("credential_write"), "guarded", "смена отклонена")
+        return str(cm.exception), text
+
+    def test_live_marker_says_wait_not_delete(self):
+        """Red now: «stop the tray/publisher processes, then delete these marker files» — following it loses B's pair."""
+        proc, child = self.pending_child(hold=True)
+        self.assertEqual(len(t.markers("claude")), 1, "предусловие: маркер живого B")
+        for where, msg in zip(("исключение", "CLI"), self.refusal()):
+            with self.subTest(where=where):
+                self.assertFalse(advises(msg, DELETE_ADVICE), "%s: живой маркер — не советовать удалить: %r" % (where, msg))
+                self.assertFalse(advises(msg, STOP_ADVICE),
+                                 "%s: живой маркер — не советовать остановить трей/издатель: %r" % (where, msg))
+                self.assertRegex(msg, WAIT, "%s: смысл «идёт обновление входа, дождитесь следующей попытки»" % where)
+                self.assertNotRegex(msg, RELOGIN)
+        self.assertEqual(len(t.markers("claude")), 1, "живой маркер не тронут")
+        self.end_child(proc, child["pid"])
+
+    def test_marker_of_reused_pid_names_path_and_delete(self):
+        """Green guard: the marker's pid is now another user's process (kill → EPERM: reused, death not proven) →
+        fail-closed with the path and «delete» (same as an unreadable marker, A2-16)."""
+        if ROOT:
+            self.skipTest("root: kill(1, 0) не даёт EPERM")
+        try:
+            os.kill(1, 0)
+        except PermissionError:
+            pass
+        except OSError:
+            self.skipTest("pid 1 недоступен в этой среде")
+        else:
+            self.skipTest("pid 1 принадлежит этому пользователю (контейнер)")
+        proc, child = self.pending_child(hold=True)
+        found = t.markers("claude")
+        self.assertEqual(len(found), 1, "предусловие: маркер B")
+        marker = json.loads(t.read_bytes(found[0]).decode("utf-8"))
+        if not (isinstance(marker, dict) and type(marker.get("pid")) is int):
+            self.fail("contract: маркер — JSON с целым pid")
+        marker["pid"] = 1
+        self.write_file(found[0], json.dumps(marker))
+        for where, msg in zip(("исключение", "CLI"), self.refusal()):
+            with self.subTest(where=where):
+                self.assertIn(found[0], msg, "%s: путь к маркеру" % where)
+                self.assertRegex(msg, RECOVERY, "%s: «удалите»" % where)
+                self.assertNotRegex(msg, RELOGIN)
+        self.assertTrue(os.path.lexists(found[0]), "fail-closed: маркер не удалён сам")
+        self.end_child(proc, child["pid"])
+
+
+# ---- A2-22 (R2-4/mr2-2, Юрка's decision) 200 with access_token only: new access + old refresh ---------------------------
+class TestA222AccessOnlyResponse(Cycle2Base):
+    def bodies(self, product):
+        if product == "claude":
+            return (("access+expires_in", {"access_token": "fixture-rotated-access", "expires_in": 28800}),)
+        access = t.jwt(NOW + 7200, "rotated")
+        return (("access", {"access_token": access}),
+                ("access+id_token", {"access_token": access, "id_token": t.jwt(NOW + 7200, "id")}))
+
+    def test_access_only_keeps_old_refresh(self):
+        """Red now: an access-only 200 is invalid_response, nothing is written, every attempt POSTs again (probe P5)."""
+        for product in ("claude", "codex"):
+            for label, body in self.bodies(product):
+                where = "%s %s" % (product, label)
+                with self.subTest(product=product, body=label):
+                    self.reset_round()
+                    self.set_policy("guarded")
+                    self.creds(product, "expiring")
+                    old = self.oauth_block(product)
+                    rt_key, at_key = (("refreshToken", "accessToken") if product == "claude"
+                                      else ("refresh_token", "access_token"))
+                    self.trap.overrides[t.TOKEN[product]] = common.Resp(200, json.dumps(body).encode(), {})
+                    t0 = time.time()
+                    d = self.guard(lambda: self.attempt(product), where)
+                    self.assertEqual(len(self.trap.posts()), 1, where)
+                    self.assertEqual(d.auth, limits.OK, where)
+                    self.assertIsNone(d.failure_kind, where)
+                    self.assertTrue(d.api_fresh, "%s: значения новым access" % where)
+                    block = self.oauth_block(product)
+                    self.assertEqual(block[at_key], body["access_token"], "%s: новый access записан" % where)
+                    self.assertEqual(block[rt_key], old[rt_key], "%s: старый refresh сохранён" % where)
+                    if product == "claude":
+                        self.assertLessEqual(abs(block["expiresAt"] - (t0 + 28800) * 1000), 5000)
+                    else:
+                        self.assertEqual(block["account_id"], old["account_id"])
+                        if "id_token" in body:
+                            self.assertEqual(block["id_token"], body["id_token"])
+                    self.no_trace_left(product, where)
+                    st = common.state()
+                    st.reload()
+                    self.assertFalse(st.has(t.DEAD_KEY[product]), "%s: refresh не мёртв" % where)
+                    self.trap.calls.clear()
+                    d2 = self.guard(lambda: self.attempt(product), where + " повтор")
+                    self.assertEqual(self.trap.posts(), [], "%s: следующая попытка без POST" % where)
+                    self.assertTrue(d2.api_fresh)
+
+
+# ---- A2-23 (R2-5/nr2-5) OSError after a written marker does not escape ------------------------------------------------
+class TestA223NoExceptionAfterMarker(Cycle2Base):
+    @contextlib.contextmanager
+    def marker_unlink_fails(self):
+        real = os.unlink
+        state_dir = os.path.abspath(common.STATE_DIR)
+
+        def unlink(path, *a, **kw):
+            p = os.path.abspath(os.fsdecode(path))
+            if os.path.dirname(p) == state_dir and t.MARKER_NAME.match(os.path.basename(p)):
+                raise PermissionError(errno.EACCES, "Permission denied", p)
+            return real(path, *a, **kw)
+        with mock.patch("os.unlink", unlink):
+            yield
+
+    @contextlib.contextmanager
+    def store_write_fails_after_post(self, product):
+        """mkstemp for state.json fails once the token POST has gone out (the marker is already written)."""
+        import tempfile
+        real = tempfile.mkstemp
+        state_dir, prefix = os.path.abspath(common.STATE_DIR), "." + os.path.basename(common.STATE_PATH) + "."
+        armed = []
+
+        def mkstemp(*a, **kw):
+            if armed and os.path.abspath(kw.get("dir") or "") == state_dir and (kw.get("prefix") or "") == prefix:
+                raise PermissionError(errno.EACCES, "Permission denied", state_dir)
+            return real(*a, **kw)
+
+        def on_call(call):
+            if call.url == t.TOKEN[product]:
+                armed.append(True)
+        self.trap.on_call = on_call
+        with mock.patch("tempfile.mkstemp", mkstemp):
+            yield
+
+    def entry_points(self, product):
+        """Like calls(), but codex_access_token may return a token here (the CLI's own pair is live)."""
+        if product == "claude":
+            return (("fetch_claude", limits.fetch_claude),)
+
+        def token():
+            res = limits.LimitData()
+            got = limits.codex_access_token(res)
+            if got:
+                res.api_fresh = True    # a usable token is the success of this entry point
+            return res
+        return (("codex_access_token", token), ("codex_usage_live", limits.codex_usage_live),
+                ("fetch_codex", lambda: limits.fetch_codex(live=True)))
+
+    def relogin(self, product):
+        if product == "claude":
+            self.claude_creds("live", access="fixture-access-relogin", refresh="fixture-refresh-relogin")
+        else:
+            self.codex_auth("live", refresh="fixture-codex-refresh-relogin")
+
+    def check(self, product, run, name, where):
+        d = self.guard(run, where)
+        self.assertIsInstance(d, limits.LimitData, where)
+        self.assertTrue(d.api_fresh or d.poll_failed, "%s: значения или ошибка" % where)
+        block = self.oauth_block(product)
+        rt = block["refreshToken" if product == "claude" else "refresh_token"]
+        self.assertTrue(isinstance(rt, str) and rt, "%s: файл входа цел" % where)
+
+    def test_replay_superseded_marker_unlink_fails(self):
+        """Red now: remove_rotation_marker in the replay branch (CLI re-logged) raises PermissionError out of fetch_*."""
+        for product in ("claude", "codex"):
+            for name, run in self.entry_points(product):
+                where = "%s replay-superseded %s" % (product, name)
+                with self.subTest(product=product, call=name):
+                    self.reset_round()
+                    self.make_pending(product)
+                    self.relogin(product)
+                    with self.marker_unlink_fails():
+                        self.check(product, run, name, where)
+
+    def test_save_superseded_marker_unlink_fails(self):
+        """Red now: the CLI refreshes while our POST is in flight → superseded → remove_rotation_marker raises."""
+        for product in ("claude", "codex"):
+            for name, run in self.entry_points(product):
+                where = "%s save-superseded %s" % (product, name)
+                with self.subTest(product=product, call=name):
+                    self.reset_round()
+                    self.set_policy("guarded")
+                    self.creds(product, "expiring")
+
+                    def cli_refreshes(call, product=product):
+                        if call.url == t.TOKEN[product]:
+                            self.relogin(product)
+                    self.trap.on_call = cli_refreshes
+                    with self.marker_unlink_fails():
+                        self.check(product, run, name, where)
+                    self.assertEqual(len(self.trap.posts()), 1, where)
+
+    def test_store_write_fails_after_marker(self):
+        """Red now: Store.update (state.json) after a saved pair (Claude) or after a refused refresh (dead mark) raises
+        PermissionError out of fetch_*."""
+        cases = [("claude", "saved", None), ("claude", "invalid_grant", 400), ("claude", "401", 401),
+                 ("codex", "401", 401)]
+        for product, label, status in cases:
+            for name, run in self.entry_points(product):
+                where = "%s store-%s %s" % (product, label, name)
+                with self.subTest(product=product, case=label, call=name):
+                    self.reset_round()
+                    self.set_policy("guarded")
+                    self.creds(product, "expiring")
+                    common.state().set("claudeTier", "default_claude_max_20x")
+                    if status is not None:
+                        body = json.dumps({"error": "invalid_grant"}).encode()
+                        self.trap.overrides[t.TOKEN[product]] = common.Resp(status, body, {})
+                    with self.store_write_fails_after_post(product):
+                        self.check(product, run, name, where)
+                    self.assertEqual(len(self.trap.posts()), 1, where)
 
 
 if __name__ == "__main__":
