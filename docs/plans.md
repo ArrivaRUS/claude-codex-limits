@@ -59,7 +59,7 @@ Stop-and-Fix: падение валидации любой вехи остана
 Валидация: `git log --oneline -- docs/test-plan-remote-limits.md docs/sync-protocol.md` показывает коммит раньше любого коммита этой фичи в `linux/ccl` и `Sources`.
 T1: документы; правки PRD B6 (П7) и S1 (П3-д).
 
-## A1 — контракт и идентичность `[ ]`
+## A1 — контракт и идентичность `[x]` (2026-10-13, `4a53ebf`)
 
 Зависит от: A0. Файлы: `linux/ccl/accounts.py` (новый), `linux/ccl/usage.py` (`accountByDay`), `linux/ccl/common.py` (`machine_tag()`, `http(max_body=)`), `linux/ccl/sync.py` (разбор блока у читателя, пределы, `_raw` с пределом тела), `linux/tests/fixtures/machine-v11.json`, `machine-v11-hostile.json`, `machine-v10.json`, `sanitize-vectors.json`, фикстура `~/.claude.json` с синтетическими ПДн.
 Задачи: чтение `localId` одним парсером, извлекающим **только** `oauthAccount.accountUuid` / `tokens.account_id` (предел 8 МБ, `RecursionError`; `OPENAI_API_KEY` и `id_token` не читаются) — П2-б; `organizationUuid` не используется → `label: null`, `labelReason: no_account_uuid` — П1-а; метка HMAC под gist id **только при сборке блока**, UUID нормализован (нижний регистр, strip) — П1-б; `accountByDay[product][day]` при первой индексации; сборка блока: `accounts[*].days` + корневая проекция + `unattributedDays`; `captions`/`models[].name` — NFC, без `Cc`/`Cf`, ≤ 32/≤ 48, в подписи нет `@` и `/` — П4-в; `machine_tag()` `[a-z0-9-]{1,16}` из `machineName`, иначе санитизированный hostname (тег владельца для мака — `macbook`) — П4-а; валидация C7 с `isfinite`; пределы Linux-читателя: `raw_url` через `read(cap+1)` ≤ 8 МиБ, ≤ 64 файлов `machine-*`, ≤ 64 МиБ суммарно, тело любого ответа ≤ 16 МиБ, чистка `machine.name/os/app` (`Cc`/`Cf`, ≤ 64) — П5 в/г/д/е (тест-план A1-13/A1-14).
