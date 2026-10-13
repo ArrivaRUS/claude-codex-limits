@@ -213,7 +213,14 @@ def cmd_credentials(args):
         _say(common.tr("Смена политики токенов отклонена; дождитесь завершения попытки или ротации: ",
                        "Token policy change refused; wait for the attempt or rotation to finish: ") + str(e))
         return 1
-    _say(common.tr("Настройка записи токенов сохранена: ", "Token write setting saved: ") + args.write)
+    except OSError:
+        _say(common.tr("Не удалось сохранить настройку записи токенов; проверьте права доступа к настройкам и каталогу состояния.",
+                       "Could not save the token write setting; check access permissions for settings and the state directory."))
+        return 1
+    policy_note = (common.tr(" (издатель: guarded игнорируется, действует never)",
+                             " (publisher: guarded ignored; effective policy: never)")
+                   if args.write == "guarded" and common.settings().get("publisher") is True else "")
+    _say(common.tr("Настройка записи токенов сохранена: ", "Token write setting saved: ") + args.write + policy_note)
     return 0
 
 

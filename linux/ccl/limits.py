@@ -50,7 +50,12 @@ def _credential_attempt(policy=None):
         return
     lock = (contextlib.nullcontext(True) if common.lock_held_by_thread("quota")
             else common.file_lock("quota", timeout=60))
-    with lock as held:
+    with contextlib.ExitStack() as stack:
+        try:
+            held = stack.enter_context(lock)
+        except OSError:
+            # Only acquisition failures belong here, not errors inside the attempt.
+            raise common.CredentialPolicyRefused("quota unavailable; retry later") from None
         if not held:
             raise common.CredentialPolicyRefused("quota is busy; retry after the current attempt")
         _ATTEMPT.policy = common.credential_write() if policy is None else policy
@@ -69,7 +74,11 @@ def _write_allowed(product=None):
 
 
 def _quota_busy(data):
-    return _credential_failure(data, READ_ERROR, "quota is busy; retry later")
+    data.auth, data.expired_reason = OK, None
+    data.error = "quota is busy or unavailable; retry later"
+    data.failure_kind, data.poll_failed, data.api_fresh = "busy", True, False
+    data._signed_out_no_values = False
+    return data
 
 
 class Scoped(object):
@@ -97,7 +106,7 @@ class LimitData(object):
         self.next_poll_at = None
         self.server_retry_at = None  # actual Retry-After deadline; None means unknown
         self.http_status = None      # sanitized current-attempt metadata, never cached
-        self.failure_kind = None     # network/http/auth/credentials/invalid_response
+        self.failure_kind = None     # network/http/auth/credentials/invalid_response/busy
         self.refresh_in_flight = False
         self.local_retry_at = 0
         self.api_fresh = False       # only successful live usage responses
@@ -194,6 +203,16 @@ def _rotation_failure(data, outcome):
         data.error, data.failure_kind, data.poll_failed = "CLI credentials changed; retry", "credentials", True
         return data
     return _credential_failure(data, READ_ERROR, "credentials update unavailable")
+
+
+def _prepare_rotation(product, data):
+    """A marker failure must not spend a single-use refresh token."""
+    try:
+        common.write_rotation_marker(product)
+        return True
+    except (OSError, ValueError):
+        _rotation_failure(data, "pending")
+        return False
 
 
 def _credential_block_complete(block, keys):
@@ -317,19 +336,23 @@ def _fetch_claude():
             fp = _fingerprint(rt)
             refused = st.get("deadRefresh") == fp
             if not refused:
+                if not _prepare_rotation("claude", d):
+                    return d
                 r = common.http("https://api.anthropic.com/v1/oauth/token", "POST",
                                 {"Content-Type": "application/json", "User-Agent": CLAUDE_UA,
                                  "Accept": "application/json"},
                                 {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLAUDE_CLIENT_ID},
                                 follow_redirects=False, max_body=PROVIDER_MAX_BODY)
                 tok = r.json() if r.status == 200 else None
-                if isinstance(tok, dict) and tok.get("access_token"):
+                if _credential_block_complete(tok, ("access_token", "refresh_token")):
                     at = tok["access_token"]
                     outcome = _save_claude_tokens(path, rt, tok, time.time(), creds)
                     if outcome != "saved":
                         return _rotation_failure(d, outcome)
                     st.remove("deadRefresh")
                 else:
+                    with contextlib.suppress(OSError):
+                        common.remove_rotation_marker("claude")
                     body = r.json()
                     err = body.get("error") if isinstance(body, dict) else None
                     if isinstance(err, dict):
@@ -441,7 +464,7 @@ def _save_claude_tokens_guarded(path, old_rt, tok, t, first):
         access = pending.get("access", access)
     _PENDING["claude"] = {"old": old_rt, "access": access, "tok": tok, "t": t,
                           "policy": _ATTEMPT.policy, "path": path}
-    common.write_rotation_marker("claude")
+    # The token request reserved the marker; replay must not rewrite it after rotation.
     creds = _read_json_retry(path)
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
@@ -624,7 +647,7 @@ def _save_codex_tokens_guarded(old_rt, tok, first):
         access, account = pending.get("access", access), pending.get("account", account)
     _PENDING["codex"] = {"old": old_rt, "access": access, "account": account, "tok": tok,
                          "policy": _ATTEMPT.policy}
-    common.write_rotation_marker("codex")
+    # The token request reserved the marker; replay must not rewrite it after rotation.
     root = _read_json_retry(common.CODEX_AUTH)
     current = root.get("tokens") if isinstance(root, dict) else None
     if not _credential_block_complete(current, ("access_token", "refresh_token", "account_id")):
@@ -675,10 +698,11 @@ def _codex_access_token(result):
         _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     acc = tokens.get("account_id")
-    acc = acc.strip().lower() if isinstance(acc, str) else None
-    if acc is not None and re.fullmatch(r"[0-9a-z-]{8,64}", acc) is None:
-        acc = None
-    result.account = acc or None
+    # The provider needs the original id; normalization applies only to the local label.
+    normalized_acc = acc.strip().lower() if isinstance(acc, str) else None
+    if normalized_acc is not None and re.fullmatch(r"[0-9a-z-]{8,64}", normalized_acc) is None:
+        normalized_acc = None
+    result.account = normalized_acc or None
     result._cli_refresh_available = bool(tokens.get("refresh_token"))
     p = _PENDING.get("codex") if _ATTEMPT.policy == "guarded" else None
     if p is not None:
@@ -696,7 +720,7 @@ def _codex_access_token(result):
             common.remove_rotation_marker("codex")
             _PENDING.pop("codex", None)
     at = tokens.get("access_token")
-    if not acc or not at:
+    if not isinstance(acc, str) or not acc or not at:
         _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     exp = _jwt_exp(at)
@@ -715,12 +739,16 @@ def _codex_access_token(result):
     if st.get("deadCodexRefresh") == fp:
         _credential_failure(result, EXPIRED, "sign-in expired")
         return None
+    if not _prepare_rotation("codex", result):
+        return None
     r = common.http("https://auth.openai.com/oauth/token", "POST",
                     {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": CODEX_UA},
                     {"client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt},
                     follow_redirects=False, max_body=PROVIDER_MAX_BODY)
     tok = r.json() if r.status == 200 else None
-    if not isinstance(tok, dict) or not tok.get("access_token"):
+    if not _credential_block_complete(tok, ("access_token", "refresh_token")):
+        with contextlib.suppress(OSError):
+            common.remove_rotation_marker("codex")
         _http_failure(result, r, token_endpoint=True)
         if result.auth == EXPIRED:
             st.set("deadCodexRefresh", fp)

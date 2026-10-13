@@ -14,6 +14,7 @@ import json
 import os
 import re
 import socket
+import stat
 import tempfile
 import threading
 import time
@@ -299,13 +300,15 @@ def credential_write():
 def _rotation_marker_path(product):
     if product not in ("claude", "codex"):
         raise ValueError("unknown rotation product")
-    return os.path.join(STATE_DIR, "rotation-pending-" + product)
+    return os.path.join(STATE_DIR, "rotation-pending-%s-%d" % (product, os.getpid()))
 
 
 def _rotation_read(path):
     """Small metadata reads use os.*, independently of CLI credential file readers."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("rotation metadata is not a regular file")
         data = os.read(fd, 4097)
         if len(data) > 4096:
             raise ValueError("rotation metadata too large")
@@ -322,12 +325,13 @@ def _rotation_boot_id():
 
 
 def write_rotation_marker(product):
-    """Atomically expose a pending in-memory pair; never put credentials on disk here."""
+    """Durably reserve this process's rotation BEFORE POST; store no credentials."""
     path = _rotation_marker_path(product)
     data = json.dumps({"pid": os.getpid(), "boot_id": _rotation_boot_id()}).encode("ascii")
     os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-    tmp = path + "." + os.urandom(16).hex() + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    tmp = os.path.join(STATE_DIR, "." + os.path.basename(path) + "." + os.urandom(16).hex() + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    published = False
     try:
         try:
             remaining = memoryview(data)
@@ -340,13 +344,20 @@ def write_rotation_marker(product):
         finally:
             os.close(fd)
         os.replace(tmp, path)
+        published = True
         directory_fd = os.open(STATE_DIR, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+    except (OSError, ValueError):
+        # Even a failure after rename must abort POST. Cleanup cannot mask that failure.
+        if published:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        raise
     finally:
-        with contextlib.suppress(FileNotFoundError):
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
 
 
@@ -355,10 +366,10 @@ def remove_rotation_marker(product):
         os.unlink(_rotation_marker_path(product))
 
 
-def rotation_marker_live(product):
-    """Under quota: remove proven-dead markers; uncertainty blocks a policy change."""
+def _rotation_marker_live(path):
+    """Under quota: trust metadata, never infer liveness from the filename alone."""
     try:
-        raw = _rotation_read(_rotation_marker_path(product))
+        raw = _rotation_read(path)
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
@@ -376,10 +387,32 @@ def rotation_marker_live(product):
                 pass
             else:
                 return True
-        remove_rotation_marker(product)
+        # Only this scan may remove another process's marker, after proving it dead.
+        os.unlink(path)
         return False
     except (OSError, ValueError, OverflowError, RecursionError):
         return True
+
+
+def _rotation_marker_blockers(product):
+    _rotation_marker_path(product)  # validate the product before constructing a prefix
+    prefix = "rotation-pending-" + product
+    try:
+        names = os.listdir(STATE_DIR)
+    except FileNotFoundError:
+        return []
+    # Include legacy markers and malformed suffixes; hidden atomic temp files are not markers.
+    paths = sorted(os.path.join(STATE_DIR, name) for name in names
+                   if name == prefix or name.startswith(prefix + "-"))
+    return [path for path in paths if _rotation_marker_live(path)]
+
+
+def rotation_marker_live(product):
+    """Inspect every product marker, cleaning dead owners even if another is live."""
+    try:
+        return bool(_rotation_marker_blockers(product))
+    except OSError:
+        return True  # an unreadable directory cannot prove the absence of pending owners
 
 
 def set_credential_write(value):
@@ -392,9 +425,19 @@ def set_credential_write(value):
         if not held:
             raise CredentialPolicyRefused("quota is busy; retry after the current attempt")
         from . import limits
-        live = [product for product in ("claude", "codex") if rotation_marker_live(product)]
-        if limits._PENDING or live:
-            raise CredentialPolicyRefused("credential rotation is unfinished; retry after CLI sign-in refresh")
+        try:
+            live = [path for product in ("claude", "codex")
+                    for path in _rotation_marker_blockers(product)]
+        except OSError:
+            raise CredentialPolicyRefused(
+                "cannot inspect credential rotation markers in %s; check directory access permissions" % STATE_DIR
+            ) from None
+        if live:
+            raise CredentialPolicyRefused(
+                "credential rotation is unfinished or its marker is unreadable: %s; "
+                "stop the tray/publisher processes, then delete these marker files" % ", ".join(live))
+        if limits._PENDING:
+            raise CredentialPolicyRefused("credential rotation is unfinished; wait for the pending pair to be saved")
         settings().set("credential_write", value)
 
 
