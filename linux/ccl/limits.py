@@ -221,6 +221,13 @@ def _credential_block_complete(block, keys):
         isinstance(block.get(key), str) and bool(block[key].strip()) for key in keys)
 
 
+def _token_response_usable(tok):
+    """A missing/empty refresh keeps the current one; a supplied one must be valid."""
+    return (_credential_block_complete(tok, ("access_token",))
+            and (tok.get("refresh_token") in (None, "")
+                 or _credential_block_complete(tok, ("refresh_token",))))
+
+
 def _http_failure(data, response, token_endpoint=False):
     # Do not expose response bodies, headers, exception text or credentials to UI/cache.
     body = response.json() if token_endpoint else None
@@ -308,9 +315,12 @@ def _fetch_claude():
                 return _rotation_failure(d, outcome)
             _claude_apply_pair(oauth, p["tok"], p["t"])
         else:
-            common.remove_rotation_marker("claude")
+            with contextlib.suppress(OSError):
+                common.remove_rotation_marker("claude")
             _PENDING.pop("claude", None)
 
+    if oauth.get("refreshToken") and not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
+        return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
     d.plan = oauth.get("subscriptionType")
     tier = oauth.get("rateLimitTier")
     if tier and st.get("claudeTier") != tier:
@@ -344,12 +354,13 @@ def _fetch_claude():
                                 {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLAUDE_CLIENT_ID},
                                 follow_redirects=False, max_body=PROVIDER_MAX_BODY)
                 tok = r.json() if r.status == 200 else None
-                if _credential_block_complete(tok, ("access_token", "refresh_token")):
+                if _token_response_usable(tok):
                     at = tok["access_token"]
                     outcome = _save_claude_tokens(path, rt, tok, time.time(), creds)
                     if outcome != "saved":
                         return _rotation_failure(d, outcome)
-                    st.remove("deadRefresh")
+                    with contextlib.suppress(OSError):
+                        st.remove("deadRefresh")
                 else:
                     with contextlib.suppress(OSError):
                         common.remove_rotation_marker("claude")
@@ -358,7 +369,8 @@ def _fetch_claude():
                     if isinstance(err, dict):
                         err = err.get("type")
                     if err == "invalid_grant" or r.status == 401:
-                        st.set("deadRefresh", fp)
+                        with contextlib.suppress(OSError):
+                            st.set("deadRefresh", fp)
                     # Preserve the actual refresh failure, including a server deadline.
                     # A timeout/429/5xx or generic 400 does not prove revoked credentials.
                     return _http_failure(d, r, token_endpoint=True)
@@ -438,7 +450,12 @@ def _claude_apply_pair(oauth, tok, t):
     oauth["accessToken"] = tok["access_token"]
     if tok.get("refresh_token"):
         oauth["refreshToken"] = tok["refresh_token"]
-    oauth["expiresAt"] = int((t + float(tok.get("expires_in") or 28800)) * 1000)
+    lifetime = tok.get("expires_in")
+    # Validate before arithmetic: malformed expiry must not strand a rotated pair.
+    if (isinstance(lifetime, bool) or not isinstance(lifetime, (int, float))
+            or not 0 < lifetime <= 1e9):
+        lifetime = 28800
+    oauth["expiresAt"] = int((t + lifetime) * 1000)
 
 
 def _save_claude_tokens(path, old_rt, tok, t, first):
@@ -470,13 +487,15 @@ def _save_claude_tokens_guarded(path, old_rt, tok, t, first):
     if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
         return "pending"               # missing/corrupt/unreadable: do not resurrect it
     if oauth.get("refreshToken") != old_rt or oauth.get("accessToken") != access:
-        common.remove_rotation_marker("claude")
+        with contextlib.suppress(OSError):
+            common.remove_rotation_marker("claude")
         _PENDING.pop("claude", None)     # the CLI refreshed on its own meanwhile — its pair wins
         return "superseded"
     _claude_apply_pair(oauth, tok, t)
     try:
         _rewrite_json(path, creds)
-        common.remove_rotation_marker("claude")
+        with contextlib.suppress(OSError):
+            common.remove_rotation_marker("claude")
         _PENDING.pop("claude", None)
         return "saved"
     except OSError:
@@ -654,13 +673,15 @@ def _save_codex_tokens_guarded(old_rt, tok, first):
         return "pending"
     if (current.get("refresh_token") != old_rt or current.get("access_token") != access
             or current.get("account_id") != account):
-        common.remove_rotation_marker("codex")
+        with contextlib.suppress(OSError):
+            common.remove_rotation_marker("codex")
         _PENDING.pop("codex", None)
         return "superseded"
     _codex_apply_pair(root, tok)
     try:
         _rewrite_json(common.CODEX_AUTH, root)
-        common.remove_rotation_marker("codex")
+        with contextlib.suppress(OSError):
+            common.remove_rotation_marker("codex")
         _PENDING.pop("codex", None)
         return "saved"
     except OSError:
@@ -717,10 +738,11 @@ def _codex_access_token(result):
             _codex_apply_pair(root, p["tok"])
             tokens = root["tokens"]
         else:
-            common.remove_rotation_marker("codex")
+            with contextlib.suppress(OSError):
+                common.remove_rotation_marker("codex")
             _PENDING.pop("codex", None)
     at = tokens.get("access_token")
-    if not isinstance(acc, str) or not acc or not at:
+    if not _credential_block_complete(tokens, ("access_token", "account_id")):
         _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     exp = _jwt_exp(at)
@@ -734,6 +756,9 @@ def _codex_access_token(result):
     if not rt:
         _credential_failure(result, EXPIRED, "no refresh token")
         return None
+    if not _credential_block_complete(tokens, ("access_token", "refresh_token", "account_id")):
+        _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
+        return None
     st = common.state()
     fp = _fingerprint(rt)
     if st.get("deadCodexRefresh") == fp:
@@ -746,12 +771,13 @@ def _codex_access_token(result):
                     {"client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt},
                     follow_redirects=False, max_body=PROVIDER_MAX_BODY)
     tok = r.json() if r.status == 200 else None
-    if not _credential_block_complete(tok, ("access_token", "refresh_token")):
+    if not _token_response_usable(tok):
         with contextlib.suppress(OSError):
             common.remove_rotation_marker("codex")
         _http_failure(result, r, token_endpoint=True)
         if result.auth == EXPIRED:
-            st.set("deadCodexRefresh", fp)
+            with contextlib.suppress(OSError):
+                st.set("deadCodexRefresh", fp)
         return None
     outcome = _save_codex_tokens(rt, tok, root)
     if outcome != "saved":

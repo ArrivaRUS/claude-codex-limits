@@ -366,35 +366,39 @@ def remove_rotation_marker(product):
         os.unlink(_rotation_marker_path(product))
 
 
-def _rotation_marker_live(path):
-    """Under quota: trust metadata, never infer liveness from the filename alone."""
+def _rotation_marker_status(path):
+    """Under quota: return live, unknown, or None after proving no pending owner."""
     try:
         raw = _rotation_read(path)
     except FileNotFoundError:
-        return False
+        return None
     except (OSError, ValueError):
-        return True
+        return "unknown"
     try:
         marker = json.loads(raw)
         if (not isinstance(marker, dict) or type(marker.get("pid")) is not int
                 or marker["pid"] <= 0 or not isinstance(marker.get("boot_id"), str)
                 or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", marker["boot_id"])):
-            return True
+            return "unknown"
         if marker["boot_id"] == _rotation_boot_id():
             try:
                 os.kill(marker["pid"], 0)
             except ProcessLookupError:
                 pass
             else:
-                return True
+                return "live"
         # Only this scan may remove another process's marker, after proving it dead.
         os.unlink(path)
-        return False
+        return None
     except (OSError, ValueError, OverflowError, RecursionError):
-        return True
+        return "unknown"
 
 
-def _rotation_marker_blockers(product):
+def _rotation_marker_live(path):
+    return _rotation_marker_status(path) is not None
+
+
+def _rotation_marker_statuses(product):
     _rotation_marker_path(product)  # validate the product before constructing a prefix
     prefix = "rotation-pending-" + product
     try:
@@ -404,7 +408,11 @@ def _rotation_marker_blockers(product):
     # Include legacy markers and malformed suffixes; hidden atomic temp files are not markers.
     paths = sorted(os.path.join(STATE_DIR, name) for name in names
                    if name == prefix or name.startswith(prefix + "-"))
-    return [path for path in paths if _rotation_marker_live(path)]
+    return [(path, _rotation_marker_status(path)) for path in paths]
+
+
+def _rotation_marker_blockers(product):
+    return [path for path, status in _rotation_marker_statuses(product) if status is not None]
 
 
 def rotation_marker_live(product):
@@ -426,16 +434,24 @@ def set_credential_write(value):
             raise CredentialPolicyRefused("quota is busy; retry after the current attempt")
         from . import limits
         try:
-            live = [path for product in ("claude", "codex")
-                    for path in _rotation_marker_blockers(product)]
+            markers = [item for product in ("claude", "codex")
+                       for item in _rotation_marker_statuses(product)]
         except OSError:
             raise CredentialPolicyRefused(
                 "cannot inspect credential rotation markers in %s; check directory access permissions" % STATE_DIR
             ) from None
+        live = [path for path, status in markers if status == "live"]
+        unknown = [path for path, status in markers if status == "unknown"]
+        messages = []
         if live:
-            raise CredentialPolicyRefused(
-                "credential rotation is unfinished or its marker is unreadable: %s; "
-                "stop the tray/publisher processes, then delete these marker files" % ", ".join(live))
+            messages.append("credential rotation is in progress: %s; wait for the next attempt, do not stop the tray/publisher or delete the marker" % ", ".join(live))
+        if unknown:
+            messages.append(
+                "credential rotation marker owners could not be verified: %s; " % ", ".join(unknown)
+                + ("after the live rotations finish, " if live else "")
+                + "stop the tray/publisher processes, then delete only these unverified marker files")
+        if messages:
+            raise CredentialPolicyRefused(". ".join(messages))
         if limits._PENDING:
             raise CredentialPolicyRefused("credential rotation is unfinished; wait for the pending pair to be saved")
         settings().set("credential_write", value)
