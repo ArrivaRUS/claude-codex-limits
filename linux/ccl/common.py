@@ -106,9 +106,12 @@ def lock_held_by_thread(name):
 def file_lock(name, blocking=True, timeout=None):
     """Advisory lock shared by every process of the app (tray, timer, manual CLI).
     Yields True when held, False when `blocking=False` and someone else holds it."""
-    ensure_dirs()
     path = os.path.join(STATE_DIR, name + ".lock")
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except FileNotFoundError:
+        ensure_dirs()
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     held = False
     try:
         if blocking and timeout is None:
@@ -248,6 +251,151 @@ def settings():
     if _settings is None:
         _settings = Store(SETTINGS_PATH, SETTINGS_DEFAULTS)
     return _settings
+
+
+class CredentialPolicyRefused(Exception):
+    """The token policy cannot change while a quota attempt or rotation is pending."""
+
+
+def credential_policy_event(ev, *, product=None, policy=None):
+    """Append an O1 policy event using only enumerated, credential-free fields.
+
+    Logging failure must not turn an effective `never` policy into permission to write.
+    """
+    if ev not in ("policy_forced_never", "policy_violation", "pending_rotation_lost"):
+        raise ValueError("unknown credential policy event")
+    if product not in (None, "claude", "codex") or policy not in (None, "never", "guarded"):
+        raise ValueError("unknown credential policy event field")
+    record = {"ev": ev, "ts": iso_utc()}
+    if product is not None:
+        record["product"] = product
+    if policy is not None:
+        record["policy"] = policy
+    data = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
+    try:
+        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(STATE_DIR, "publisher.jsonl"),
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            return os.write(fd, data) == len(data)
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
+def credential_write():
+    """Read the effective token policy afresh; callers pin it for their quota attempt."""
+    current = read_json(SETTINGS_PATH, {})
+    if not isinstance(current, dict) or current.get("credential_write") != "guarded":
+        return "never"
+    if current.get("publisher") is True:
+        credential_policy_event("policy_forced_never", policy="never")
+        return "never"
+    return "guarded"
+
+
+def _rotation_marker_path(product):
+    if product not in ("claude", "codex"):
+        raise ValueError("unknown rotation product")
+    return os.path.join(STATE_DIR, "rotation-pending-" + product)
+
+
+def _rotation_read(path):
+    """Small metadata reads use os.*, independently of CLI credential file readers."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        data = os.read(fd, 4097)
+        if len(data) > 4096:
+            raise ValueError("rotation metadata too large")
+        return data.decode("ascii").strip()
+    finally:
+        os.close(fd)
+
+
+def _rotation_boot_id():
+    boot = _rotation_read("/proc/sys/kernel/random/boot_id")
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", boot):
+        raise ValueError("invalid boot id")
+    return boot
+
+
+def write_rotation_marker(product):
+    """Atomically expose a pending in-memory pair; never put credentials on disk here."""
+    path = _rotation_marker_path(product)
+    data = json.dumps({"pid": os.getpid(), "boot_id": _rotation_boot_id()}).encode("ascii")
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    tmp = path + "." + os.urandom(16).hex() + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        try:
+            remaining = memoryview(data)
+            while remaining:
+                written = os.write(fd, remaining)
+                if written <= 0:
+                    raise OSError("rotation marker write failed")
+                remaining = remaining[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+        directory_fd = os.open(STATE_DIR, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+
+
+def remove_rotation_marker(product):
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(_rotation_marker_path(product))
+
+
+def rotation_marker_live(product):
+    """Under quota: remove proven-dead markers; uncertainty blocks a policy change."""
+    try:
+        raw = _rotation_read(_rotation_marker_path(product))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    try:
+        marker = json.loads(raw)
+        if (not isinstance(marker, dict) or type(marker.get("pid")) is not int
+                or marker["pid"] <= 0 or not isinstance(marker.get("boot_id"), str)
+                or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", marker["boot_id"])):
+            return True
+        if marker["boot_id"] == _rotation_boot_id():
+            try:
+                os.kill(marker["pid"], 0)
+            except ProcessLookupError:
+                pass
+            else:
+                return True
+        remove_rotation_marker(product)
+        return False
+    except (OSError, ValueError, OverflowError, RecursionError):
+        return True
+
+
+def set_credential_write(value):
+    """Change policy only between quota attempts and with no pending rotated pair."""
+    if value not in ("never", "guarded"):
+        raise ValueError("credential_write must be never or guarded")
+    lock = (contextlib.nullcontext(True) if lock_held_by_thread("quota")
+            else file_lock("quota", timeout=60))
+    with lock as held:
+        if not held:
+            raise CredentialPolicyRefused("quota is busy; retry after the current attempt")
+        from . import limits
+        live = [product for product in ("claude", "codex") if rotation_marker_live(product)]
+        if limits._PENDING or live:
+            raise CredentialPolicyRefused("credential rotation is unfinished; retry after CLI sign-in refresh")
+        settings().set("credential_write", value)
 
 
 def state():

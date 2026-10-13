@@ -3,6 +3,7 @@
     ccl-sync login      sign in to GitHub (Device Flow: prints a code and a link, waits)
     ccl-sync logout     forget the token (the gist stays)
     ccl-sync status     who is signed in, the gist, which machines are in it and when they reported
+    ccl-sync credentials --write never|guarded   set the token write policy
     ccl-sync push       one pass: index the local logs, write this machine's file, read the others
     ccl-sync dump       per-day, per-model summary of the local logs (to check the numbers)
     ccl-sync update     install the newest Linux version from the repository's main branch
@@ -205,6 +206,17 @@ def _timer_status():
     return common.tr("не установлен (см. linux/install.sh)", "not installed (see linux/install.sh)")
 
 
+def cmd_credentials(args):
+    try:
+        common.set_credential_write(args.write)
+    except common.CredentialPolicyRefused as e:
+        _say(common.tr("Смена политики токенов отклонена; дождитесь завершения попытки или ротации: ",
+                       "Token policy change refused; wait for the attempt or rotation to finish: ") + str(e))
+        return 1
+    _say(common.tr("Настройка записи токенов сохранена: ", "Token write setting saved: ") + args.write)
+    return 0
+
+
 def cmd_status(_args):
     st = sync.sync_state()
     token, backend, gist = None, None, None
@@ -224,6 +236,12 @@ def cmd_status(_args):
     _say("Claude Codex Limits (linux %s)" % APP_VERSION)
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
         common.machine_name(), common.os_name(), common.machine_id()))
+    policy = common.credential_write()
+    settings = common.settings()
+    settings.reload()
+    policy_note = (common.tr(" (издатель: принудительно never)", " (publisher: forced never)")
+                   if policy == "never" and settings.get("publisher") is True else "")
+    _say(common.tr("Политика токенов: ", "Token policy: ") + policy + policy_note)
     if pending:
         _say(sync._delete_pending_text())
         _say(common.tr("Повторить выход: ccl-sync logout", "Retry sign-out: ccl-sync logout"))
@@ -403,6 +421,9 @@ def main(argv=None):
     p.add_argument("--force", action="store_true", help=common.tr("войти заново", "sign in again"))
     sub.add_parser("logout", help=common.tr("выйти из GitHub", "sign out of GitHub"))
     sub.add_parser("status", help=common.tr("состояние синхронизации", "sync status"))
+    p = sub.add_parser("credentials", help=common.tr("политика записи токенов", "token write policy"))
+    p.add_argument("--write", choices=["never", "guarded"], required=True,
+                   help=common.tr("разрешить или запретить запись токенов", "allow or forbid token writes"))
     p = sub.add_parser("push", help=common.tr("один проход: индекс → gist", "one pass: index → gist"))
     p.add_argument("--force", action="store_true", help=common.tr("записать даже без изменений", "write even if unchanged"))
     p.add_argument("--auto", action="store_true", help=common.tr("режим таймера (не чаще раза в 10 мин)",
@@ -427,4 +448,4 @@ def main(argv=None):
         return 0
     common.ensure_dirs()
     return {"login": cmd_login, "logout": cmd_logout, "status": cmd_status,
-            "push": cmd_push, "dump": cmd_dump, "update": cmd_update}[args.cmd](args)
+            "credentials": cmd_credentials, "push": cmd_push, "dump": cmd_dump, "update": cmd_update}[args.cmd](args)

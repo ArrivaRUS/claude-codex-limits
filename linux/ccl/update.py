@@ -212,7 +212,7 @@ def fetch_deb():
         ver, url = st.get("updateAvailable"), st.get("updateDebUrl")
         if not (ver and url):
             raise RuntimeError(common.tr("Установлена последняя версия.", "You're up to date."))
-    r = common.http(url, headers=UA, timeout=120)
+    r = common.http(url, headers=UA, timeout=120, max_body=MAX_DEB)
     if r.status != 200 or not r.data:
         raise RuntimeError(common.tr("Не удалось скачать пакет", "Download failed")
                            + (" (HTTP %d)" % r.status if r.status else ""))
@@ -235,7 +235,7 @@ def apply():
     common.ensure_dirs()
     tmp = tempfile.mkdtemp(prefix="update-", dir=common.STATE_DIR)
     try:
-        r = common.http(TARBALL_URL, headers=UA, timeout=120)
+        r = common.http(TARBALL_URL, headers=UA, timeout=120, max_body=MAX_TARBALL)
         if r.status != 200 or not r.data:
             raise RuntimeError(common.tr("Не удалось скачать обновление", "Download failed")
                                + (" (HTTP %d)" % r.status if r.status else ""))

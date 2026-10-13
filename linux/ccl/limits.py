@@ -12,22 +12,64 @@ already refused is never sent again (its fingerprint is remembered, like `deadRe
 """
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
+import re
 import time
 import math
+import threading
 
 from . import common
 from . import quota_refresh
+from . import accounts
 
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 CLAUDE_UA = "claude-cli/2.1.81 (external, cli)"
 CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"   # openai/codex login::CLIENT_ID
 CODEX_UA = "codex_cli_rs/0.20.0 (Linux; x86_64)"
+PROVIDER_MAX_BODY = 16 * 1024 * 1024
 
 # Provider auth state is independent of snapshot age or network availability.
 OK, LOGGED_OUT, EXPIRED, READ_ERROR = "ok", "loggedOut", "expired", "readError"
+
+
+_ATTEMPT = threading.local()
+
+
+@contextlib.contextmanager
+def _credential_attempt(policy=None):
+    """Pin one policy under quota, including nested token/save calls in this thread.
+
+    An explicit policy is only used to finish a pair already rotated by this process.
+    """
+    current = getattr(_ATTEMPT, "policy", None)
+    if current is not None:
+        yield current
+        return
+    lock = (contextlib.nullcontext(True) if common.lock_held_by_thread("quota")
+            else common.file_lock("quota", timeout=60))
+    with lock as held:
+        if not held:
+            raise common.CredentialPolicyRefused("quota is busy; retry after the current attempt")
+        _ATTEMPT.policy = common.credential_write() if policy is None else policy
+        try:
+            yield _ATTEMPT.policy
+        finally:
+            del _ATTEMPT.policy
+
+
+def _write_allowed(product=None):
+    """Called only inside an attempt; never re-read settings halfway through it."""
+    if _ATTEMPT.policy == "guarded":
+        return True
+    common.credential_policy_event("policy_violation", product=product, policy="never")
+    return False
+
+
+def _quota_busy(data):
+    return _credential_failure(data, READ_ERROR, "quota is busy; retry later")
 
 
 class Scoped(object):
@@ -61,12 +103,16 @@ class LimitData(object):
         self.api_fresh = False       # only successful live usage responses
         self.present = True          # False → product not set up on this machine
         self.auth = OK
+        self.expired_reason = None
+        self.account = None          # local identity captured before provider I/O
+        self._cli_refresh_available = False
+        self._signed_out_no_values = False
 
     def to_dict(self):
         m = {}
         for k, key in (("session", "session"), ("weekly", "weekly"), ("session_reset", "sReset"),
                        ("weekly_reset", "wReset"), ("plan", "plan"), ("reset_credits", "resetCredits"),
-                       ("as_of", "asOf")):
+                       ("as_of", "asOf"), ("expired_reason", "expiredReason")):
             v = getattr(self, k)
             if v is not None:
                 m[key] = v
@@ -85,6 +131,8 @@ class LimitData(object):
         d.session, d.weekly = m.get("session"), m.get("weekly")
         d.session_reset, d.weekly_reset = m.get("sReset"), m.get("wReset")
         d.plan, d.reset_credits, d.as_of = m.get("plan"), m.get("resetCredits"), m.get("asOf")
+        if m.get("expiredReason") in ("cli_refresh_pending", "signin_required"):
+            d.expired_reason = m["expiredReason"]
         s = m.get("scoped")
         if isinstance(s, dict) and s.get("name") and s.get("percent") is not None:
             d.scoped = Scoped(s["name"], s["percent"], s.get("reset"), s.get("severity"))
@@ -106,9 +154,39 @@ def absent_limits():
 
 def _credential_failure(data, auth, message):
     data.auth, data.error = auth, message
+    data.expired_reason = "signin_required" if auth == EXPIRED else None
+    data._signed_out_no_values = (auth == LOGGED_OUT
+                                  and getattr(_ATTEMPT, "policy", None) == "never")
     data.poll_failed = True
     data.failure_kind = "credentials" if auth == READ_ERROR else "auth"
     return data
+
+
+def _cli_expired(data):
+    """Read-only attempts leave renewal to the CLI, without marking refresh dead."""
+    _credential_failure(data, EXPIRED, "CLI credentials expired")
+    if data._cli_refresh_available:
+        data.expired_reason = "cli_refresh_pending"
+    return data
+
+
+def _read_login(path, data):
+    """Read an initial CLI snapshot; retry partial writes independently of save-back."""
+    for attempt in range(5):
+        try:
+            with open(path, "rb") as stream:
+                root = json.loads(stream.read().decode("utf-8"))
+            if not isinstance(root, dict):
+                raise ValueError("invalid credentials shape")
+            return root
+        except FileNotFoundError:
+            _credential_failure(data, LOGGED_OUT, "CLI sign-in required")
+            return None
+        except (OSError, ValueError, RecursionError):
+            if attempt < 4:
+                time.sleep(0.2)
+    _credential_failure(data, READ_ERROR, "credentials read failed")
+    return None
 
 
 def _rotation_failure(data, outcome):
@@ -134,6 +212,11 @@ def _http_failure(data, response, token_endpoint=False):
                                          token_endpoint=token_endpoint, oauth_error=error)
     data.http_status, data.server_retry_at = failure.status, failure.retry_at
     data.auth = EXPIRED if failure.authentication_required else OK
+    data.expired_reason = None
+    if failure.authentication_required:
+        data.expired_reason = ("cli_refresh_pending" if not token_endpoint
+                               and getattr(_ATTEMPT, "policy", None) == "never"
+                               and data._cli_refresh_available else "signin_required")
     data.failure_kind = ("auth" if failure.authentication_required else
                          "network" if not response.status else
                          "invalid_response" if response.status == 200 else "http")
@@ -158,6 +241,13 @@ def _fingerprint(s):
 
 def _rewrite_json(path, obj):
     """Atomic rewrite keeping the file's permission bits (0600 at most)."""
+    with _credential_attempt():
+        if not _write_allowed():
+            raise common.CredentialPolicyRefused("credential writing is disabled")
+        _rewrite_json_guarded(path, obj)
+
+
+def _rewrite_json_guarded(path, obj):
     try:
         mode = os.stat(path).st_mode & 0o777
     except OSError:
@@ -168,23 +258,28 @@ def _rewrite_json(path, obj):
 # ---- Claude Code ---------------------------------------------------------------------------
 
 def fetch_claude():
+    try:
+        with _credential_attempt():
+            return _fetch_claude()
+    except common.CredentialPolicyRefused:
+        return _quota_busy(LimitData())
+
+
+def _fetch_claude():
     if not common.product_enabled("claude"):
         return absent_limits()
     d = LimitData()
     st = common.state()
     path = common.CLAUDE_CREDENTIALS
-    if not os.path.exists(path):
-        return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
-    try:
-        with open(path, "rb") as f:
-            creds = json.loads(f.read().decode("utf-8"))
-    except (OSError, ValueError):
-        return _credential_failure(d, READ_ERROR, "credentials read failed")
-    oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+    creds = _read_login(path, d)
+    if creds is None:
+        return d
+    oauth = creds.get("claudeAiOauth")
     if not isinstance(oauth, dict):
         return _credential_failure(d, LOGGED_OUT, "CLI sign-in required")
+    d.account, _ = accounts.read_local_id("claude")
 
-    p = _PENDING.get("claude")
+    p = _PENDING.get("claude") if _ATTEMPT.policy == "guarded" else None
     if p is not None:
         if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
             return _rotation_failure(d, "pending")
@@ -194,6 +289,7 @@ def fetch_claude():
                 return _rotation_failure(d, outcome)
             _claude_apply_pair(oauth, p["tok"], p["t"])
         else:
+            common.remove_rotation_marker("claude")
             _PENDING.pop("claude", None)
 
     d.plan = oauth.get("subscriptionType")
@@ -203,10 +299,15 @@ def fetch_claude():
     at = oauth.get("accessToken") or ""
     exp = _num(oauth.get("expiresAt")) or 0.0
     now_ms = time.time() * 1000
+    refresh_exp = _num(oauth.get("refreshTokenExpiresAt"))
+    d._cli_refresh_available = bool(oauth.get("refreshToken")) and (
+        refresh_exp is None or refresh_exp > now_ms)
 
     # A token that expires in under two minutes is treated as spent — a reading started now
     # could outlive it. `usable`: is there still something to ask with if the refresh fails?
     if not at or exp - now_ms < 120000:
+        if _ATTEMPT.policy != "guarded":
+            return _cli_expired(d)
         usable = bool(at) and exp > now_ms
         rt = oauth.get("refreshToken") or ""
         if not rt:
@@ -219,7 +320,8 @@ def fetch_claude():
                 r = common.http("https://api.anthropic.com/v1/oauth/token", "POST",
                                 {"Content-Type": "application/json", "User-Agent": CLAUDE_UA,
                                  "Accept": "application/json"},
-                                {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLAUDE_CLIENT_ID})
+                                {"grant_type": "refresh_token", "refresh_token": rt, "client_id": CLAUDE_CLIENT_ID},
+                                follow_redirects=False, max_body=PROVIDER_MAX_BODY)
                 tok = r.json() if r.status == 200 else None
                 if isinstance(tok, dict) and tok.get("access_token"):
                     at = tok["access_token"]
@@ -242,7 +344,8 @@ def fetch_claude():
 
     r = common.http("https://api.anthropic.com/api/oauth/usage", "GET",
                     {"Authorization": "Bearer " + at, "User-Agent": CLAUDE_UA, "Accept": "application/json",
-                     "anthropic-beta": "oauth-2025-04-20", "anthropic-version": "2023-06-01"})
+                     "anthropic-beta": "oauth-2025-04-20", "anthropic-version": "2023-06-01"},
+                    follow_redirects=False, max_body=PROVIDER_MAX_BODY)
     j = r.json() if r.status == 200 else None
     if not isinstance(j, dict):
         return _http_failure(d, r)
@@ -259,6 +362,42 @@ def fetch_claude():
 # it is kept in memory and write-back is retried against the same credential identity.
 # An unreadable/missing current record never authorizes writing an older snapshot.
 _PENDING = {}
+
+
+def flush_pending():
+    """At graceful exit, try each rotated pair once under its original policy.
+
+    Only entries produced by a guarded save authorize finishing a rotation after
+    settings changed. No token endpoint is called, and stale documents never win.
+    """
+    try:
+        with _credential_attempt(policy="guarded"):
+            for product, pending in list(_PENDING.items()):
+                outcome = "pending"
+                try:
+                    if pending.get("policy") == "guarded":
+                        if product == "claude":
+                            outcome = _save_claude_tokens(
+                                pending.get("path", common.CLAUDE_CREDENTIALS),
+                                pending["old"], pending["tok"], pending["t"], {})
+                        elif product == "codex":
+                            outcome = _save_codex_tokens(pending["old"], pending["tok"], {})
+                except (OSError, ValueError, KeyError, TypeError):
+                    # Sanitized event below: never log token-bearing exception text.
+                    pass
+                finally:
+                    if outcome not in ("saved", "superseded"):
+                        common.credential_policy_event("pending_rotation_lost", product=product)
+                    try:
+                        common.remove_rotation_marker(product)
+                    except OSError:
+                        common.credential_policy_event("pending_rotation_lost", product=product)
+                    finally:
+                        _PENDING.pop(product, None)
+    except (common.CredentialPolicyRefused, OSError):
+        # Quota may be busy or inaccessible: never discard a worker's pair unlocked.
+        for product in list(_PENDING):
+            common.credential_policy_event("pending_rotation_lost", product=product)
 
 
 def _read_json_retry(path, tries=5):
@@ -280,27 +419,41 @@ def _claude_apply_pair(oauth, tok, t):
 
 
 def _save_claude_tokens(path, old_rt, tok, t, first):
-    """Re-read/merge only the expected pair. Return saved/pending/superseded.
+    """Re-read/merge only the expected pair. Return saved/pending/superseded/refused.
 
     `first` supplies identity only, never a replacement document. This is not an
     atomic CAS with the external CLI: a writer after this read can still race replace.
     """
+    try:
+        with _credential_attempt():
+            if not _write_allowed("claude"):
+                return "refused"
+            return _save_claude_tokens_guarded(path, old_rt, tok, t, first)
+    except common.CredentialPolicyRefused:
+        return "refused"
+
+
+def _save_claude_tokens_guarded(path, old_rt, tok, t, first):
     initial = first.get("claudeAiOauth") if isinstance(first, dict) else None
     access = initial.get("accessToken") if isinstance(initial, dict) else None
     pending = _PENDING.get("claude")
     if pending is not None and pending["old"] == old_rt:
         access = pending.get("access", access)
-    _PENDING["claude"] = {"old": old_rt, "access": access, "tok": tok, "t": t}
+    _PENDING["claude"] = {"old": old_rt, "access": access, "tok": tok, "t": t,
+                          "policy": _ATTEMPT.policy, "path": path}
+    common.write_rotation_marker("claude")
     creds = _read_json_retry(path)
     oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
     if not _credential_block_complete(oauth, ("accessToken", "refreshToken")):
         return "pending"               # missing/corrupt/unreadable: do not resurrect it
     if oauth.get("refreshToken") != old_rt or oauth.get("accessToken") != access:
+        common.remove_rotation_marker("claude")
         _PENDING.pop("claude", None)     # the CLI refreshed on its own meanwhile — its pair wins
         return "superseded"
     _claude_apply_pair(oauth, tok, t)
     try:
         _rewrite_json(path, creds)
+        common.remove_rotation_marker("claude")
         _PENDING.pop("claude", None)
         return "saved"
     except OSError:
@@ -453,24 +606,38 @@ def _codex_apply_pair(root, tok):
 
 def _save_codex_tokens(old_rt, tok, first):
     """Same guarded re-read/merge as Claude; never write a stale `first` document."""
+    try:
+        with _credential_attempt():
+            if not _write_allowed("codex"):
+                return "refused"
+            return _save_codex_tokens_guarded(old_rt, tok, first)
+    except common.CredentialPolicyRefused:
+        return "refused"
+
+
+def _save_codex_tokens_guarded(old_rt, tok, first):
     initial = first.get("tokens") if isinstance(first, dict) else None
     access = initial.get("access_token") if isinstance(initial, dict) else None
     account = initial.get("account_id") if isinstance(initial, dict) else None
     pending = _PENDING.get("codex")
     if pending is not None and pending["old"] == old_rt:
         access, account = pending.get("access", access), pending.get("account", account)
-    _PENDING["codex"] = {"old": old_rt, "access": access, "account": account, "tok": tok}
+    _PENDING["codex"] = {"old": old_rt, "access": access, "account": account, "tok": tok,
+                         "policy": _ATTEMPT.policy}
+    common.write_rotation_marker("codex")
     root = _read_json_retry(common.CODEX_AUTH)
     current = root.get("tokens") if isinstance(root, dict) else None
     if not _credential_block_complete(current, ("access_token", "refresh_token", "account_id")):
         return "pending"
     if (current.get("refresh_token") != old_rt or current.get("access_token") != access
             or current.get("account_id") != account):
+        common.remove_rotation_marker("codex")
         _PENDING.pop("codex", None)
         return "superseded"
     _codex_apply_pair(root, tok)
     try:
         _rewrite_json(common.CODEX_AUTH, root)
+        common.remove_rotation_marker("codex")
         _PENDING.pop("codex", None)
         return "saved"
     except OSError:
@@ -484,17 +651,36 @@ def codex_access_token(result=None):
     Optional result receives sanitized failure metadata; token return shape is unchanged.
     """
     result = result if result is not None else LimitData()
-    root = common.read_json(common.CODEX_AUTH)
-    if not isinstance(root, dict):
-        _credential_failure(result, READ_ERROR if os.path.exists(common.CODEX_AUTH) else LOGGED_OUT,
-                            "CLI credentials unavailable")
+    try:
+        with _credential_attempt():
+            return _codex_access_token(result)
+    except common.CredentialPolicyRefused:
+        _quota_busy(result)
+        return None
+
+
+def _codex_access_token(result):
+    if _ATTEMPT.policy == "guarded":
+        root = common.read_json(common.CODEX_AUTH)
+        if not isinstance(root, dict):
+            _credential_failure(result, READ_ERROR if os.path.exists(common.CODEX_AUTH) else LOGGED_OUT,
+                                "CLI credentials unavailable")
+            return None
+    else:
+        root = _read_login(common.CODEX_AUTH, result)
+    if root is None:
         return None
     tokens = root.get("tokens")
     if not isinstance(tokens, dict):
         _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     acc = tokens.get("account_id")
-    p = _PENDING.get("codex")
+    acc = acc.strip().lower() if isinstance(acc, str) else None
+    if acc is not None and re.fullmatch(r"[0-9a-z-]{8,64}", acc) is None:
+        acc = None
+    result.account = acc or None
+    result._cli_refresh_available = bool(tokens.get("refresh_token"))
+    p = _PENDING.get("codex") if _ATTEMPT.policy == "guarded" else None
     if p is not None:
         if not _credential_block_complete(tokens, ("access_token", "refresh_token", "account_id")):
             _rotation_failure(result, "pending")
@@ -507,14 +693,19 @@ def codex_access_token(result=None):
             _codex_apply_pair(root, p["tok"])
             tokens = root["tokens"]
         else:
+            common.remove_rotation_marker("codex")
             _PENDING.pop("codex", None)
     at = tokens.get("access_token")
     if not acc or not at:
         _credential_failure(result, LOGGED_OUT, "CLI sign-in required")
         return None
     exp = _jwt_exp(at)
-    if exp is not None and exp > time.time() + 60:
+    grace = 60 if _ATTEMPT.policy == "guarded" else 0
+    if exp is not None and exp > time.time() + grace:
         return at, acc
+    if _ATTEMPT.policy != "guarded":
+        _cli_expired(result)
+        return None
     rt = tokens.get("refresh_token")
     if not rt:
         _credential_failure(result, EXPIRED, "no refresh token")
@@ -526,7 +717,8 @@ def codex_access_token(result=None):
         return None
     r = common.http("https://auth.openai.com/oauth/token", "POST",
                     {"Content-Type": "application/json", "Accept": "application/json", "User-Agent": CODEX_UA},
-                    {"client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt})
+                    {"client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt},
+                    follow_redirects=False, max_body=PROVIDER_MAX_BODY)
     tok = r.json() if r.status == 200 else None
     if not isinstance(tok, dict) or not tok.get("access_token"):
         _http_failure(result, r, token_endpoint=True)
@@ -542,6 +734,14 @@ def codex_access_token(result=None):
 
 def codex_usage_live():
     """Always return LimitData, including the reason a live attempt failed."""
+    try:
+        with _credential_attempt():
+            return _codex_usage_live()
+    except common.CredentialPolicyRefused:
+        return _quota_busy(LimitData())
+
+
+def _codex_usage_live():
     d = LimitData()
     got = codex_access_token(d)
     if not got:
@@ -549,7 +749,8 @@ def codex_usage_live():
     at, acc = got
     r = common.http("https://chatgpt.com/backend-api/wham/usage", "GET",
                     {"Authorization": "Bearer " + at, "chatgpt-account-id": acc, "User-Agent": CODEX_UA,
-                     "originator": "codex_cli_rs", "Accept": "application/json"})
+                     "originator": "codex_cli_rs", "Accept": "application/json"},
+                    follow_redirects=False, max_body=PROVIDER_MAX_BODY)
     obj = r.json() if r.status == 200 else None
     if not isinstance(obj, dict) or not isinstance(obj.get("rate_limit"), dict):
         return _http_failure(d, r)
@@ -570,6 +771,16 @@ def codex_usage_live():
 
 
 def fetch_codex(live=True):
+    if not live:
+        return _fetch_codex(live=False)
+    try:
+        with _credential_attempt():
+            return _fetch_codex(live=True)
+    except common.CredentialPolicyRefused:
+        return _quota_busy(LimitData())
+
+
+def _fetch_codex(live=True):
     if not common.product_enabled("codex"):
         return absent_limits()
     if not os.path.isdir(common.CODEX_SESSIONS) and not os.path.exists(common.CODEX_AUTH):
@@ -583,6 +794,8 @@ def fetch_codex(live=True):
         attempt = codex_usage_live()
         if attempt is not None and attempt.api_fresh:
             return attempt
+        if attempt is not None and attempt._signed_out_no_values:
+            return attempt  # signed out must not resurrect an old account's readings
         if attempt is None:                # compatibility with offline injected adapters
             attempt = LimitData()
             attempt.error, attempt.failure_kind = "live usage unavailable", "network"
@@ -617,6 +830,8 @@ def apply_provider_cache(product, data, previous=None):
         raise ValueError("unknown quota provider")
     data = selected_limits(data, product)
     if not data.present:
+        return data
+    if data._signed_out_no_values:
         return data
     if previous is not None:
         data = quota_refresh.select_snapshot(data, previous)
