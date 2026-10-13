@@ -88,6 +88,8 @@ class SyntheticCase(unittest.TestCase):
         self.patch(common, "write_atomic", forbidden)
         self.patch(common, "http", forbidden)
         self.patch(limits, "_PENDING", {})
+        p = patch.object(common, "credential_write", lambda: "guarded", create=True); p.start(); self.addCleanup(p.stop)  # A2-06: explicit guarded opt-in
+        self.patch(__import__("ccl.accounts", fromlist=["read_local_id"]), "read_local_id", lambda product: (None, "no_login"))  # A2 П2-в: no ~/.claude.json here
         self.patch(limits.time, "time", lambda: self.now)
         self.patch(limits.time, "monotonic", lambda: self.now)
         self.patch(limits.time, "sleep", forbidden)
