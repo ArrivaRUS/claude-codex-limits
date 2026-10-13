@@ -16,6 +16,8 @@ see the A2 note in the test-plan):
       rotation marker names a live pid (message mentions the rotation: «ротац…» / «rotation»); a dead-pid marker is removed.
   rotation marker: <STATE_DIR>/rotation-pending-<product>, written when limits._PENDING[product] is set, removed on pop
       (content pid + boot-id is the implementation's; tests create markers only through the real rotation path).
+      Fix cycle N2: one marker per process, <STATE_DIR>/rotation-pending-<product>-<pid>; the helpers here (`markers()`)
+      accept both namings, the per-process name itself is pinned in test_rl_tokens_fixes.py (A2-13).
   limits — every attempt (fetch_claude, codex_access_token/codex_usage_live, fetch_codex(live=True)) reads the policy
       from settings.json at its start while file_lock("quota") is held (taken by the attempt itself unless this thread
       already holds it — never a nested blocking flock); every provider request and /oauth/token POST runs under it.
@@ -24,7 +26,8 @@ see the A2 note in the test-plan):
       `policy_violation`; `_rotation_failure(data, "refused")` → failure_kind "credentials".
   LimitData.expired_reason ∈ {None, "cli_refresh_pending", "signin_required"} (contract key `expiredReason`, synth §E table).
   LimitData.account — normalized local id (`oauthAccount.accountUuid` / `tokens.account_id`) captured with the token,
-      before the provider request (П2-в); None when unknown.
+      before the provider request (П2-в); None when unknown. Fix cycle m5/N7: Codex `chatgpt-account-id` = the raw
+      tokens.account_id from auth.json (not the normalized one) — A2-11 changed accordingly.
   limits.flush_pending() — graceful exit of a guarded process: one replay of each non-empty _PENDING under the old
       policy, otherwise O1 `pending_rotation_lost` (П3-б.2).
   O1: <STATE_DIR>/publisher.jsonl, one JSON object per line, event name under "ev" (plan-claude O1; "event" accepted).
@@ -81,6 +84,7 @@ POLICY_LINE = re.compile(r"(?im)^.*(политика токенов|token policy
 U_A = "3b9d6c1e-8f42-4a7b-9c05-2e6f1d8a4b70"
 U_B = "7e1f2a3b-4c5d-4e6f-8a9b-0c1d2e3f4a5b"
 CODEX_ACCT = "acct-fixture-0001-aaaa"
+CODEX_ACCT_RAW = "ACCT-Fixture-0001-aaaa"   # same account as stored by a CLI that keeps case; normalizes to CODEX_ACCT
 MISSING = object()
 
 
@@ -150,8 +154,27 @@ def quota_locked():
         os.close(fd)
 
 
+MARKER_NAME = re.compile(r"^rotation-pending-(claude|codex)(?:-([0-9]+))?$")
+
+
 def marker_path(product):
+    """Legacy single-marker name (A2 before the fix cycle); kept for reference only."""
     return os.path.join(common.STATE_DIR, "rotation-pending-" + product)
+
+
+def markers(product):
+    """Every rotation marker of `product`, whatever the naming: legacy `rotation-pending-<p>` or per-process
+    `rotation-pending-<p>-<pid>` (fix cycle N2). Temporary `*.tmp` files are not markers."""
+    try:
+        names = os.listdir(common.STATE_DIR)
+    except FileNotFoundError:
+        return []
+    out = []
+    for n in names:
+        m = MARKER_NAME.match(n)
+        if m and m.group(1) == product:
+            out.append(os.path.join(common.STATE_DIR, n))
+    return sorted(out)
 
 
 class Trap(object):
@@ -326,8 +349,9 @@ class Base(rl.RLEnv):
         del self.sleeps[:]
         limits._PENDING.clear()
         for p in ("claude", "codex"):
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(marker_path(p))
+            for path in markers(p):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(path)
         common.state().remove("deadRefresh", "deadCodexRefresh")
         with contextlib.suppress(FileNotFoundError):
             os.unlink(common.CACHE_PATH)
@@ -451,7 +475,7 @@ class TestA201NeverStates(Base):
         st.reload()
         self.assertFalse(st.has(DEAD_KEY[product]), "never: %s не трогается" % DEAD_KEY[product])
         self.assertEqual(limits._PENDING, {}, "never: _PENDING не создаётся")
-        self.assertFalse(os.path.exists(marker_path(product)), "never: маркер ротации не создаётся")
+        self.assertEqual(markers(product), [], "never: маркер ротации не создаётся")
 
     def test_claude_states_never(self):
         for state, expected in self.CLAUDE:
@@ -551,7 +575,7 @@ class TestA202SaveGuard(Base):
                     st = common.state()
                     st.reload()
                     self.assertEqual(st.get(DEAD_KEY[product]), "fixture-dead-fp", "%s не меняется" % DEAD_KEY[product])
-                    self.assertFalse(os.path.exists(marker_path(product)), "never: маркер не создаётся")
+                    self.assertEqual(markers(product), [], "never: маркер не создаётся")
                     if not preset:
                         self.assertNotIn(product, limits._PENDING, "never: _PENDING не наполняется")
 
@@ -601,7 +625,7 @@ class TestA203NoReplayInNever(Base):
                 self.assertEqual(set(limits._PENDING) - {product}, set(), "_PENDING не наполняется")
                 if product in limits._PENDING:
                     self.assertIs(limits._PENDING[product], entry, "запись _PENDING не подменена новой парой")
-                self.assertFalse(os.path.exists(marker_path(product)))
+                self.assertEqual(markers(product), [])
 
 
 # ---- A2-04 set_credential_write(): busy lock, live marker, dead marker -------------------------------------------------
@@ -637,21 +661,21 @@ class TestA204SetCredentialWrite(Base):
         """Red now: contract — no marker is written when _PENDING is set; set_credential_write absent."""
         refused = self.refused_error()
         self.make_pending("claude")
-        self.assertTrue(os.path.exists(marker_path("claude")),
-                        "contract: маркер rotation-pending-claude не создан при установке _PENDING")
+        self.assertTrue(markers("claude"), "contract: маркер rotation-pending-claude не создан при установке _PENDING")
         with self.assertRaises(refused) as cm:
             common.set_credential_write("never")
         self.assertRegex(str(cm.exception), ROTATION, "текст отказа — про незавершённую ротацию")
         self.assertEqual(self.settings_on_disk().get("credential_write"), "guarded")
-        self.assertTrue(os.path.exists(marker_path("claude")), "живой маркер не удаляется")
+        self.assertTrue(markers("claude"), "живой маркер не удаляется")
 
     def test_marker_from_previous_boot_is_dead_even_with_live_pid(self):
         """Red now: contract — no marker / set_credential_write. Юрка 2026-10-13: live pid + boot-id of a previous boot =
         reused pid → the marker is dead: removed, the change passes."""
         self.need_common("set_credential_write")
         self.make_pending("claude")
-        path = marker_path("claude")
-        self.assertTrue(os.path.exists(path), "contract: маркер rotation-pending-claude не создан при установке _PENDING")
+        found = markers("claude")
+        self.assertEqual(len(found), 1, "contract: ровно один маркер rotation-pending-claude после установки _PENDING")
+        path = found[0]
         with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
             boot = f.read().strip()
         content = read_bytes(path).decode("utf-8")
@@ -705,10 +729,9 @@ class TestA204SetCredentialWrite(Base):
         self.assertTrue(report["pending"], "предусловие: guarded-ротация в дочернем процессе оставила _PENDING")
         with self.assertRaises(ProcessLookupError):
             os.kill(report["pid"], 0)
-        self.assertTrue(os.path.exists(marker_path("claude")),
-                        "contract: упавший guarded-процесс не оставил маркер rotation-pending-claude")
+        self.assertTrue(markers("claude"), "contract: упавший guarded-процесс не оставил маркер rotation-pending-claude")
         common.set_credential_write("never")
-        self.assertFalse(os.path.exists(marker_path("claude")), "маркер с мёртвым pid удалён")
+        self.assertEqual(markers("claude"), [], "маркер с мёртвым pid удалён")
         self.assertEqual(self.settings_on_disk().get("credential_write"), "never", "смена прошла")
 
 
@@ -809,7 +832,7 @@ class TestA207PendingOnExit(Base):
                 else:
                     self.assertEqual(block[key_rt], rotated(product)["refresh_token"], "дописана именно ротированная пара")
                 self.assertNotIn(product, limits._PENDING)
-                self.assertFalse(os.path.exists(marker_path(product)), "маркер снят на выходе")
+                self.assertEqual(markers(product), [], "маркер снят на выходе")
 
     def test_exit_with_unreadable_file_logs_lost_and_leaves_file(self):
         """Red now: contract — limits.flush_pending absent."""
@@ -823,7 +846,7 @@ class TestA207PendingOnExit(Base):
                 limits.flush_pending()
                 self.assert_untouched(before, "flush_pending/%s" % product)
                 self.assertIn("pending_rotation_lost", self.o1_events())
-                self.assertFalse(os.path.exists(marker_path(product)))
+                self.assertEqual(markers(product), [])
 
 
 # ---- A2-08 (Т35, T2-r2 R1) no redirects with a Bearer token, bounded bodies ----------------------------------------------
@@ -1080,9 +1103,10 @@ class TestA211AccountInLimitData(Base):
         return v
 
     def test_codex_account_from_the_token_read(self):
-        """Red now: contract — LimitData.account absent."""
+        """Fix cycle m5/N7 (Юрка 2026-10-13) changes the contract: `chatgpt-account-id` carries tokens.account_id exactly as
+        in auth.json (no strip/lower); LimitData.account is the normalized id. Red until the fix: the header is normalized."""
         self.set_policy(None)
-        self.codex_auth("live", account=CODEX_ACCT)
+        self.codex_auth("live", account=CODEX_ACCT_RAW)
         real_open = builtins.open
         auth = os.path.abspath(common.CODEX_AUTH)
         reads = []
@@ -1098,8 +1122,9 @@ class TestA211AccountInLimitData(Base):
         self.trap.on_call = swap
         with mock.patch("builtins.open", spy):
             d = limits.fetch_codex(live=True)
-        self.assertEqual(self.account(d), CODEX_ACCT, "идентичность того же чтения, что и токен")
-        self.assertEqual(self.trap.usage()[0].headers.get("chatgpt-account-id"), CODEX_ACCT)
+        self.assertEqual(self.account(d), CODEX_ACCT, "идентичность того же чтения, что и токен (нормализованная)")
+        self.assertEqual(self.trap.usage()[0].headers.get("chatgpt-account-id"), CODEX_ACCT_RAW,
+                         "m5/N7: в заголовок — исходный account_id из файла, без strip/lower")
         self.assertEqual([r for r in reads if r == 0], [0], "auth.json прочитан ровно один раз до запроса")
 
     def test_claude_account_captured_before_request(self):
