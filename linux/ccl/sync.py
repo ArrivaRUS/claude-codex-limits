@@ -34,7 +34,7 @@ MAX_BODY = 16 * 1024 * 1024
 MAX_MACHINE_BODY = 8 * 1024 * 1024
 MAX_MACHINE_FILES = 64
 MAX_TOTAL_BODY = 64 * 1024 * 1024
-_BODY_TOO_LARGE = "response body too large"
+_BODY_TOO_LARGE = common.BODY_TOO_LARGE
 _raw_cap = ContextVar("ccl_raw_cap", default=None)
 _sleep = time.sleep
 _first_attempt_at = None
@@ -105,7 +105,7 @@ def gh(path, token, method="GET", body=None, timeout=20):
 def _raw(url, cap=MAX_MACHINE_BODY):
     """Gist raw URLs carry their own secret path; never attach the OAuth token."""
     if not common.gist_raw_url(url):
-        return common.Resp(0, error=common.RAW_REDIRECT_REFUSED)
+        return common.Resp(0, error=common.RAW_URL_REFUSED)
     cap = min(MAX_MACHINE_BODY, cap)
     # Preserve the five-argument transport contract while carrying the current
     # cycle's remaining budget through wrappers, independently across threads.
@@ -448,7 +448,7 @@ def merge(contents, my_id, now=None):
         seen.add(mid)
         metadata = {k: _machine_text(m.get(k), k) for k in ("name", "os", "app")}
         machine = dict(metadata, id=mid, name=metadata["name"] or "?", updated=updated,
-                       tz=accounts._text(obj.get("tz")) or "")
+                       tz=accounts._text(obj.get("tz"), 64) or "")
         if any(k in obj for k in ("accounts", "unattributedDays", "captions", "lastSeenAt")):
             machine.update(accounts.parse_block(obj))
         machines.append(machine)
@@ -654,7 +654,10 @@ def _handle(r, st, res, token, what, active):
 def sync_cycle(days, force=False, auto=False, allow_push=True):
     """One pass: make sure the gist exists, write this machine's snapshot when it changed,
     read and merge everyone else's. `days` = this machine's local index days.
-    `auto` (timer / tray) honours the 10-minute minimum between writes."""
+    `auto` (timer / tray) honours the 10-minute minimum between writes.
+    Refused raw files leave a visible error after saving the other files; lastOkAt
+    advances. A failed cache write returns an error without advancing lastOkAt,
+    even when that error cannot be persisted either."""
     res = SyncResult()
     result = _sync_cycle(days, force, auto, res, allow_push)
     # A successful access401 recovery must resume actual protected sync now.
@@ -783,6 +786,7 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
         contents = {}
         total = 0
         size_error = None
+        read_error = None
         selected = _machine_files(files, MAX_MACHINE_FILES + 1)
         if len(selected) > MAX_MACHINE_FILES:
             size_error = common.tr("Слишком большой ответ синхронизации (предел 64 файла)",
@@ -799,7 +803,9 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
             if f.get("truncated") and f.get("raw_url"):
                 cap = min(MAX_MACHINE_BODY, MAX_TOTAL_BODY - total)
                 r = _raw(f["raw_url"], cap=cap)
-                if r.error == common.RAW_REDIRECT_REFUSED:
+                if r.error in (common.RAW_URL_REFUSED, common.RAW_REDIRECT_REFUSED):
+                    read_error = common.tr("Файл синхронизации пропущен: недопустимый raw URL или редирект",
+                                           "Sync file skipped: invalid raw URL or refused redirect")
                     continue
                 if r.error == _BODY_TOO_LARGE:
                     # Bounded reads consumed cap + 1 bytes even though Resp drops
@@ -841,12 +847,21 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
         if active[1] == "credential-v2":
             remote["authEpoch"] = access.epoch
             remote["authUserID"] = (st.get("authV2") or {}).get("userID")
-        common.write_json(common.SYNC_REMOTE_PATH, remote)
+        try:
+            common.write_json(common.SYNC_REMOTE_PATH, remote)
+        except (OSError, ValueError):
+            # _fail sets the in-memory result before attempting to persist it.
+            # A full/read-only disk can prevent both writes; never expose details.
+            try:
+                _fail(st, res, common.tr("Кэш синхронизации не записан", "Sync cache could not be written"))
+            except (OSError, ValueError):
+                pass
+            return res
         st.update(lastOkAt=time.time(), lastSync=None, lastError=None, lastErrorAt=None, backoffUntil=None)
         res.ok = True
         res.remote = remote
-        if size_error:
-            _fail(st, res, size_error)
+        if size_error or read_error:
+            _fail(st, res, size_error or read_error)
         return res
 
 

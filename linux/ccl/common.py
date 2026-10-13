@@ -429,6 +429,8 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+BODY_TOO_LARGE = "response body too large"
+RAW_URL_REFUSED = "gist raw URL refused"
 RAW_REDIRECT_REFUSED = "gist raw redirect refused"
 
 
@@ -449,7 +451,7 @@ class _RawRedirectRefused(Exception):
 
 
 class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
-    """Close intermediate responses without draining their untrusted bodies."""
+    """Close intermediate bodies unread; forward only normal, credential-free headers."""
     def __init__(self):
         self.hops = 0
 
@@ -466,7 +468,9 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
         if self.hops >= 3 or not gist_raw_url(target):
             raise _RawRedirectRefused()
         self.hops += 1
-        redirected = urllib.request.Request(target, headers=dict(req.header_items()), method=req.get_method())
+        forwarded = {k: v for k, v in req.headers.items()
+                     if k.lower() not in ("authorization", "cookie", "proxy-authorization")}
+        redirected = urllib.request.Request(target, headers=forwarded, method=req.get_method())
         return self.parent.open(redirected, timeout=req.timeout)
 
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
@@ -492,7 +496,7 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             data = r.read() if max_body is None else r.read(max_body + 1)
             response_headers = {k.lower(): v for k, v in r.headers.items()}
             if max_body is not None and len(data) > max_body:
-                return Resp(0, None, response_headers, "response body too large")
+                return Resp(0, None, response_headers, BODY_TOO_LARGE)
             return Resp(r.status, data, response_headers)
     except _RawRedirectRefused:
         return Resp(0, error=RAW_REDIRECT_REFUSED)
@@ -510,7 +514,7 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             data = None
         if max_body is not None and data is not None and len(data) > max_body:
             return Resp(0, None, {k.lower(): v for k, v in (e.headers or {}).items()},
-                        "response body too large")
+                        BODY_TOO_LARGE)
         return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()})
     except Exception as e:  # network down, DNS, TLS, timeout
         import socket

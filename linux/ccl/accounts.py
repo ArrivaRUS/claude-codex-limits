@@ -304,6 +304,16 @@ def _writer_text(value, limit):
     return value[:limit]
 
 
+def _writer_name(value, limit):
+    """Refuse email/path markers after NFKC, before NFC cleanup and truncation."""
+    if not isinstance(value, str):
+        return None
+    folded = unicodedata.normalize("NFKC", value)
+    if any(ch in folded for ch in ("@", "/", "\\")):
+        return None
+    return _writer_text(value, limit)
+
+
 def _writer_entry(raw, gist_id):
     if not isinstance(raw, dict) or raw.get("product") not in _PRODUCTS or "status" not in raw:
         return None
@@ -343,10 +353,10 @@ def _writer_entry(raw, gist_id):
             for model in candidate["models"][:8]:
                 if not isinstance(model, dict):
                     continue
-                name = model.get("name")
-                if not isinstance(name, str) or "@" in name or "/" in name:
+                name = _writer_name(model.get("name"), 48)
+                if name is None:
                     continue
-                models.append({"name": _writer_text(name, 48),
+                models.append({"name": name,
                                "pct": model.get("pct"), "resetAt": model.get("resetAt")})
             candidate["models"] = models
     return validate_entry(candidate)
@@ -359,11 +369,7 @@ def _writer_captions(value):
     for key, caption in value.items():
         if _label(key) is None or not isinstance(caption, dict):
             continue
-        text = caption.get("text")
-        # Refuse unsafe input before truncation can hide an email or a path.
-        if not isinstance(text, str) or "@" in text or "/" in text:
-            continue
-        text = _writer_text(text, 32)
+        text = _writer_name(caption.get("text"), 32)
         if text is None:
             continue
         out[key] = {"text": text}

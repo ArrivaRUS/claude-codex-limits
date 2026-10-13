@@ -31,7 +31,15 @@ to the shared file format require bumping `schema` and updating both sides.
 - **Token boundary.** Bearer authentication is allowed only on `https://api.github.com`:
   validate the scheme, ASCII host, port (absent or `443`) and absence of userinfo. Requests with
   Authorization do not follow redirects; `3xx` ends the cycle as an error. A truncated file's
-  `raw_url` is fetched **without Authorization**; those unauthenticated requests may follow redirects.
+  `raw_url` is fetched **without Authorization**, under the *raw rule* (both ports; macOS adopts it in C1):
+  - `raw_url` is accepted only if it starts with exactly `https://gist.githubusercontent.com/` (ASCII, no
+    spaces/control characters, no fragment); any other value is refused **before** a request;
+  - redirects: at most **3** hops, each only to `https://gist.githubusercontent.com/`, GET/HEAD only; a 4th hop,
+    another scheme or host, or a `Location` with control characters is refused;
+  - the body of a `3xx` is never read (closed unread); a `3xx` that is not followed (including `300`/`304`/`305`)
+    counts as a refused redirect;
+  - a followed hop carries no `Authorization`, `Cookie` or `Proxy-Authorization`;
+  - a refused `raw_url` or redirect skips that file only (*Read and merge → Refused raw transport*).
 - **Discovery.** `GET /gists?per_page=100`. Linux follows `Link: rel="next"` only to the same
   validated API origin, for at most 30 pages; macOS requests numbered pages, at most 10, stopping
   at a page with fewer than 100 entries. A sync gist must contain `ccl-sync.json` and have
@@ -145,7 +153,8 @@ to the shared file format require bumping `schema` and updating both sides.
   `RecursionError`; macOS skips `JSONSerialization` errors via `try?`. One bad file does not
   stop the merge.
   `machine` must be an object with a nonempty string `id`, and the filename must be exactly
-  `machine-<id>.json`. Each id contributes at most once.
+  `machine-<id>.json`. Each id contributes at most once. v1.1 readers also apply the string rule of
+  *Read rules → Validation (C7)* to the v1 envelope (`machine.*`, `tz`, keys of `days`).
 - An absent `updated` is accepted. If present, it must parse as an ISO-8601 timestamp;
   **fractional seconds are accepted** on both platforms. An invalid timestamp (including null)
   or one older than 45 days rejects the file.
@@ -161,9 +170,10 @@ to the shared file format require bumping `schema` and updating both sides.
   macOS `usageSum` ignores a contribution that would overflow `Int`, then clamps to `10^15`.
   Malformed remote counters/structures must not crash the app.
   Machines' transcripts are disjoint, so valid counts give the account total for what ran in the CLIs.
-- **Truncated-file failure.** A `raw_url` response other than `200`, or a missing/empty body,
-  fails the whole cycle: keep the previous remote merge/cache and do not advance the last-success
-  time (`syncLastOkAt` / `lastOkAt`). macOS also fails on invalid UTF-8, recording
+- **Truncated-file failure.** A `raw_url` response other than `200` (e.g. `404`, `429`, `5xx`; `3xx` is
+  covered below), a network failure, or a missing/empty body fails the whole cycle as in v1: keep the
+  previous remote merge/cache and do not advance the last-success time (`syncLastOkAt` / `lastOkAt`).
+  macOS also fails on invalid UTF-8, recording
   `Empty or unreadable GET raw_url response`. Linux decodes nonempty bytes with UTF-8 replacement:
   invalid bytes alone do not fail the cycle; the resulting text goes through normal JSON/file
   validation and may be skipped. Invalid JSON in an otherwise readable file is a file-level skip
@@ -171,6 +181,11 @@ to the shared file format require bumping `schema` and updating both sides.
   inline content if present, otherwise skips it. Raw `403`/`429` uses the backoff rules below;
   raw `401` is an unauthenticated read error and never starts the token-revocation checks.
   A write already completed earlier in the cycle keeps its push hash/upload time even if reading fails.
+- **Refused raw transport (file-level).** A `raw_url` outside `https://gist.githubusercontent.com/` or a refused
+  redirect (*Token boundary → raw rule*) skips only that file: the other files are merged, the remote cache is
+  written and the last-success time advances, but the cycle still records a visible error (Linux: `res.ok = false`,
+  `lastError`; no backoff) — RU «Файл синхронизации пропущен: недопустимый raw URL или редирект», EN «Sync file skipped: invalid raw URL or refused redirect». The error text never contains
+  the URL: its path is secret. Same visibility as an oversized file (*Reader limits*).
 - Show which machines are included and when each last reported (e.g. «2 компьютера · astra-desktop
   обновлён 10:15»).
 
@@ -200,6 +215,10 @@ to the shared file format require bumping `schema` and updating both sides.
   `backoffUntil`.
 - Network failure → keep the last merged result, retry next cycle. Sync must never block or break
   the limits display.
+- **Local cache write failure** (Linux behaviour; recommended for ports). If the merged remote cache
+  (`sync-remote.json`) cannot be written (disk full, permissions, read-only FS), the cycle ends with an error
+  (`res.ok = false`, `lastError`) and does **not** advance the last-success time; no exception escapes the cycle.
+  The error text is fixed: no exception text, no strings from remote files. The next cycle retries.
 - Storage reads/writes and network operations are bounded. Locked, unreachable, timeout and
   corrupt/unreadable state are distinct from a proven missing credential and server rejection.
   Retry retains the last durable issuance; Linux never falls through to a different backend
@@ -406,6 +425,8 @@ UTC; strings are shown only as plain text.
   members of an organization.
 - **Label** = `hex(HMAC_SHA256(K, "ccl-account-v1|" + product + "|" + localId))[:16]`, `K = SHA256("ccl-label-key-v1|" + gist_id)`.
   `localId` is normalized (trimmed, lowercased) before HMAC so two machines give one label for one account.
+  After normalization it must match `^[0-9a-z-]{8,64}$`; otherwise there is no label: `label: null`,
+  `labelReason: no_account_uuid` (status `error`).
 - The label is computed **only** when the block (or a log line) is built, under the gist id current at that moment. No
   local store keeps labels: the usage index, caches and publisher state are keyed by `localId`.
 - No label → `label: null`, **no provider request**, no values: `no_login` (no login file/block) → `signed_out`;
@@ -450,16 +471,27 @@ UTC; strings are shown only as plain text.
   - No `status`, `product` missing or not `claude`/`codex` → record dropped; unknown `status` → `error`; `label` not 16 hex → `null`.
   - `pct` not a finite number (string, boolean, NaN/Infinity) or outside 0…100 → that window dropped.
   - Unparsable time → that field dropped; a broken `asOf` leaves the record without a reading.
-  - `models` > 8 → tail dropped. A string containing control/format characters (`Cc`/`Cf`) is dropped **whole** (never
-    cleaned); a string over its limit is dropped. This includes v1's `machine.name/os/app`: `os`/`app` over 64 are
-    dropped, `machine.name` is truncated to 16.
+  - `models` > 8 → tail dropped. A string containing control/format characters or a lone surrogate (`Cc`/`Cf`/`Cs`,
+    i.e. not encodable as UTF-8) is dropped **whole** (never cleaned); a string over its limit is dropped.
+  - The same rule covers the v1 envelope: `machine.id` → file skipped; `machine.name/os/app` → field dropped
+    (`os`/`app` over 64 are dropped, `machine.name` is checked, then truncated to 16); `tz` → dropped, also over 64;
+    a product, day or model key of the root `days` → that entry skipped.
   - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
-- **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1):
-  - a body over 16 MiB, or a `raw_url` body over 8 MiB: reading stops at cap + 1 byte and that file is skipped like
-    invalid JSON in v1; the cycle goes on and the last-success time advances (Linux `_raw`/`common.http` take a body cap);
-  - more than 64 `machine-*.json` files: the first 64 by file name are taken, the rest ignored;
-  - more than 64 MiB in total: no further files are read; files already read are merged.
+- **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1).
+  Hitting any limit below still records a visible error («слишком большой ответ/файл синхронизации», Linux:
+  `res.ok = false`, `lastError`; no backoff), while the other files are merged, the remote cache is written and the
+  last-success time advances:
+  - a `raw_url` body (or inline content) over 8 MiB: reading stops at cap + 1 byte and that file is skipped like
+    invalid JSON in v1 (Linux `_raw`/`common.http` take a body cap);
+  - more than 64 `machine-*.json` files: the first 64 by file name are taken, the rest ignored. This machine's own
+    file occupies one of the 64 slots (it is selected first, then excluded from the merge);
+  - more than 64 MiB in total (inline contents plus raw bodies, counted as wire bytes): each raw read gets the
+    remaining budget as its cap, `min(8 MiB, 64 MiB − already read)`; a rejected body counts as cap + 1 bytes.
+    Once the budget is spent no further files are read; files already read are merged;
+  - `accounts`: only the first 64 raw array elements are examined; of them at most 8 valid records (after dedup) are kept.
+  - Known limitation (Linux; fix planned in A3): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
+    whole cycle, not one file.
 - Grouping: one card per `(product, label)` across machines, own included; the latest successful `asOf` wins (a tie →
   local). The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
   product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the whole root usage of that product
@@ -488,7 +520,10 @@ UTC; strings are shown only as plain text.
   `refreshTokenExpiresAt`, `OPENAI_API_KEY`; email, names, `accountUuid`, `account_id`, `organizationUuid` or any UUID
   other than `machine.id`; prompts, paths, project names, full hostnames; error texts (only the enumerated status).
 - `machine.name` is a sanitized tag (NFKD → ASCII, lowercase, `[a-z0-9-]`, ≤ 16; empty → `mac`/`linux`); the publisher
-  sets it explicitly (`--name vps`). Captions: no `Cc`/`Cf`, NFC, `@` and `/` refused on input. `tz` stays (v1).
+  sets it explicitly (`--name vps`). `tz` stays (v1).
+- Writer, captions and `models[].name`: a string containing `@`, `/` or `\` is dropped **whole** before truncation
+  (never cleaned). The check runs after NFKC, so fullwidth `＠`/`／`/`＼` are refused too. The published text drops
+  `Cc`/`Cf` and is NFC-normalized.
 - A scan test checks published files and publisher logs by values with an allow-list of keys and enum values (so
   `cli_refresh_pending` passes): email, `account_id`, `accountUuid`, `refresh`, `access_token`, `sk-`, `/home/`, `/Users/`.
 - Old revisions keep v1 `machine.name` values; only recreating the gist removes them (all labels then change).

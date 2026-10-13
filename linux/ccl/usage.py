@@ -74,15 +74,15 @@ def new_index():
 
 
 def _normalize_account_days(ix):
-    """Discard broken attribution only; existing token totals remain intact."""
+    """Discard unsafe attribution strings, including surrogates; retain token totals."""
     old = ix.get("accountByDay")
     clean = {}
     if isinstance(old, dict):
         for product, by_day in old.items():
-            if not isinstance(product, str) or not isinstance(by_day, dict):
+            if accounts._text(product) is None or not isinstance(by_day, dict):
                 continue
             clean[product] = {day: owner for day, owner in by_day.items()
-                              if isinstance(day, str) and isinstance(owner, str)}
+                              if accounts._text(day) is not None and accounts._text(owner) is not None}
     ix["accountByDay"] = clean
     return old != clean
 
