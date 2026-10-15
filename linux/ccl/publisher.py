@@ -54,6 +54,10 @@ def _load_product(saved, product, local_id, state):
     bucket = buckets.setdefault(local_id, {}) if local_id else {}
     if not isinstance(bucket, dict):
         bucket = buckets[local_id] = {}
+    if "attemptPublished" in bucket:
+        # Upgrade before an echo changes attemptPublished. Otherwise a second
+        # heartbeat would lose the old interrupted-attempt evidence.
+        bucket.setdefault("attemptPending", bucket["attemptPublished"] is False)
     mirror = _dict(_dict(state.get("autoPollState")).get(product))
     poll = polling.PollState(bucket.get("poll"))
     # The mirror is also a write-ahead reservation if the process died between
@@ -248,7 +252,72 @@ def _accept(product, local_id, bucket, data):
     common.write_json(common.CACHE_PATH, cache)
 
 
-def _locked(kind, ix, result, reopened=False):
+def _pending(bucket):
+    # Delivery of a later echo does not prove that the interrupted attempt ran.
+    # Older state has only the publication marker; retain its conservative value.
+    return bucket.get("attemptPending", bucket.get("attemptPublished") is False) is True
+
+
+def _reserve(saved, current, due, now, kind, result):
+    for product in due:
+        _local_id, _reason, bucket, poll = current[product]
+        poll.begin(now)
+        bucket.update(attemptAt=now, attemptKind=kind, attemptPublished=False, attemptPending=True)
+    try:
+        _save(saved, current)
+    except OSError:
+        for product in due:
+            _skip(result, product, "state_unsaved")
+        return False
+    return True
+
+
+def _poll_products(saved, current, due, now, auto, settings, kind, result, announced=False):
+    for product in due:
+        local_id, _reason, bucket, poll = current[product]
+        # Keep this in memory until the result is durable. A killed provider
+        # must leave one forced echo, even when PATCH #1 was confirmed.
+        bucket["attemptPublished"] = announced
+        # CLI sign-in can change while GET/PATCH is in flight. Do not send
+        # a request for B using the reservation we just announced for A.
+        if accounts.read_local_id(product)[0] != local_id:
+            common.o1_event("identity_changed", product=product)
+            bucket["status"] = "error"
+            _save(saved, current)
+            continue
+        common.o1_event("poll_attempt", product=product, kind=kind, attemptAt=now)
+        provider = getattr(limits, "fetch_" + product)
+        error_class = None
+        try:
+            data = provider(live=True) if product == "codex" else provider()
+        except Exception as exc:
+            _failed(result, exc)
+            data = limits.LimitData()
+            data.error, data.poll_failed = "provider failed", True
+            data.account = local_id
+            error_class = type(exc).__name__
+        result["polled"].append(product)
+        after_id, _ = accounts.read_local_id(product)
+        local_failure = (data.account is None and data.auth in (limits.LOGGED_OUT, limits.READ_ERROR)
+                         and not data.api_fresh and data.http_status is None)
+        if after_id != local_id or (data.account != local_id and not local_failure):
+            common.o1_event("identity_changed", product=product)
+            bucket["status"] = "error"
+        else:
+            poll.observe(data, time.time())
+            if not auto:
+                poll.interval = polling.normalize_interval(settings.get("interval"))
+            _accept(product, local_id, bucket, data)
+            if error_class:
+                bucket["errorClass"] = error_class
+            common.o1_event("poll_result", product=product, httpStatus=data.http_status,
+                            result="ok" if bucket["status"] == "ok" else "failed")
+        bucket["attemptPending"] = False
+        _save(saved, current)
+        result["next_at"][product] = max(poll.last_attempt + poll.interval, _time(bucket.get("retryUntil")) or 0)
+
+
+def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
     state = common.state()
     state.reload()
     saved = _dict(common.read_json(os.path.join(common.STATE_DIR, "publisher-state.json"), {}))
@@ -269,9 +338,64 @@ def _locked(kind, ix, result, reopened=False):
         current[product] = local_id, reason, bucket, poll
 
     now = time.time()
-    locally_due = any(local_id and poll.due(now, manual=kind == "manual")
-                      and now >= (_time(bucket.get("retryUntil")) or 0)
-                      for local_id, _reason, bucket, poll in current.values())
+    st = sync.sync_state()
+    eligible = [p for p, (local_id, _reason, bucket, poll) in current.items()
+                 if (due_at_start is None or p in due_at_start)
+                 and local_id and poll.due(now, manual=kind == "manual")
+                 and now >= (_time(bucket.get("retryUntil")) or 0)
+                 and not (p == "claude" and limits.claude_token_policy_blocks(now))]
+    locally_due = bool(eligible)
+    count = saved.get("_publishFailures", 0)
+    count = count if type(count) is int and count >= 0 else 0
+    if prior is None:
+        prior = count
+    # A reopen belongs to a pass whose PATCH #1 has already failed. Only a
+    # publication outcome resolves the provisional journal entry; GET does not.
+    series_resolved = reopened
+    if locally_due and not reopened:
+        count = min(count + 1, 3)
+        saved["_publishFailures"] = count
+        # Journal the due pass before its first blocking GET. This write does
+        # not reserve a provider attempt: coordination may still skip it.
+        try:
+            _save(saved, current)
+        except OSError:
+            for product in eligible:
+                _skip(result, product, "state_unsaved")
+            return
+    early = []
+    for product in eligible:
+        _local_id, _reason, bucket, poll = current[product]
+        if not st.get("gistId"):
+            continue
+        # An interrupted attempt from before this tick makes the third due
+        # tick poll before GET/PATCH #1: another kill would prevent fallback.
+        # Completed PATCH failures roll back their reservation, so without a
+        # pending attempt this tick's +1 counts only after PATCH #1 fails.
+        # No attempt has been reserved yet; a reopen restores the old bucket.
+        if not (prior >= 3
+                or (prior + 1 >= 3 and _pending(bucket))
+                or (poll.last_attempt > 0 and
+                    now - poll.last_attempt >= max(poll.interval, coordination.RETRY_CAP))):
+            continue
+        # Match the unavailable-gist path: no new remote observations, but a
+        # remembered foreign Retry-After still applies up to its existing cap.
+        decision = coordination.decide(now, dict(interval=poll.interval, last_attempt=poll.last_attempt,
+                                                server_until=bucket.get("retryUntil"), manual=kind == "manual",
+                                                remote_retry=bucket.get("remote_retry")), [],
+                                       common.machine_id(), bucket.get("tie_wait"))
+        bucket["remote_retry"], bucket["tie_wait"] = decision.remote_retry, decision.tie_wait
+        for ev in decision.events:
+            common.o1_event(ev, product=product)
+        if decision.action == "poll":
+            early.append(product)
+    if early:
+        # Once publication has exhausted its budget, even the GET must not
+        # stand between the local schedule and the provider. A separate durable
+        # reservation remains mandatory, including on this unavailable-gist path.
+        if not _reserve(saved, current, early, now, kind, result):
+            return
+        _poll_products(saved, current, early, now, auto, settings, kind, result)
     last_read_attempt = _time(sync.sync_state().get("lastAttemptAt"))
     guarded_read = (kind == "manual" and not locally_due and last_read_attempt is not None
                     and 0 <= now - last_read_attempt < 30)
@@ -281,13 +405,18 @@ def _locked(kind, ix, result, reopened=False):
     now = time.time()
     due = []
     for product, (local_id, reason, bucket, poll) in current.items():
+        if product in early:
+            continue
         if not local_id or not gist_id:
             _skip(result, product, "no_login" if reason == "no_login" else "no_label")
             continue
         if product == "claude" and limits.claude_token_policy_blocks(now):
             _skip(result, product, "token_policy")
             continue
-        local_due = poll.due(now, manual=kind == "manual")
+        # Eligibility is frozen before GET, alongside the durable tick journal.
+        # A product becoming due during a slow read waits for the next pass;
+        # it must not start an unjournalled attempt at the end of this one.
+        local_due = product in eligible
         interval = polling.MINIMUM if kind == "manual" and not poll.failed else poll.interval
         own_next = poll.last_attempt + interval if poll.last_attempt else now
         remote = _remote(session, product, accounts.label(product=product, local_id=local_id, gist_id=gist_id))
@@ -322,29 +451,18 @@ def _locked(kind, ix, result, reopened=False):
         old_polls = {p: copy.deepcopy(v[3].saved()) for p, v in current.items()}
         old_auto = copy.deepcopy(state.get("autoPollState"))
         old_retry = copy.deepcopy(state.get("quotaServerRetryAt"))
-        for product in due:
-            _local_id, _reason, bucket, poll = current[product]
-            poll.begin(now)
-            bucket.update(attemptAt=now, attemptKind=kind, attemptPublished=False)
-        try:
-            _save(saved, current)
-        except OSError:
-            for product in due:
-                _skip(result, product, "state_unsaved")
+        if not _reserve(saved, current, due, now, kind, result):
             return
         if session and not _publish(session, _text(saved, current, ix, gist_id, auto), result):
-            count = saved.get("_publishFailures", 0)
-            count = count if type(count) is int and count >= 0 else 0
-            # The reopen belongs to the same tick. Its failure is already in
-            # the durable rollback target, even if killed during GET or PATCH.
-            count = min(count + (0 if reopened else 1), 3)
-            saved["_publishFailures"] = old_saved["_publishFailures"] = count
+            series_resolved = True
+            # The tick (including a reopen) was already journalled before GET.
+            # The rollback target therefore retains this tick's failure count.
             fallback = [p for p in due if count >= 3 or
                         (old_polls[p]["last_attempt"] > 0 and
                          now - old_polls[p]["last_attempt"] >= max(old_polls[p]["interval"], coordination.RETRY_CAP))]
             if not fallback and not reopened and getattr(session, "write_error", None) in ("stale", "busy"):
                 _rollback(saved, old_saved, old_auto, old_retry, state)
-                return _locked(kind, ix, result, reopened=True)
+                return _locked(kind, ix, result, reopened=True, due_at_start=eligible, prior=prior)
             _publish_failed(result)
             if not fallback:
                 # Journal before restoring either file. Store.update preserves
@@ -370,46 +488,13 @@ def _locked(kind, ix, result, reopened=False):
             polls, retries = _mirrors(current)
             _rollback(saved, copy.deepcopy(saved), polls, retries, state)
         elif session:
+            series_resolved = True
             saved["_publishFailures"] = 0
-        for product in due:
-            local_id, _reason, bucket, poll = current[product]
-            bucket["attemptPublished"] = session is not None
-            # CLI sign-in can change while GET/PATCH is in flight. Do not send
-            # a request for B using the reservation we just announced for A.
-            if accounts.read_local_id(product)[0] != local_id:
-                common.o1_event("identity_changed", product=product)
-                bucket["status"] = "error"
-                _save(saved, current)
-                continue
-            common.o1_event("poll_attempt", product=product, kind=kind, attemptAt=now)
-            provider = getattr(limits, "fetch_" + product)
-            error_class = None
-            try:
-                data = provider(live=True) if product == "codex" else provider()
-            except Exception as exc:
-                _failed(result, exc)
-                data = limits.LimitData()
-                data.error, data.poll_failed = "provider failed", True
-                data.account = local_id
-                error_class = type(exc).__name__
-            result["polled"].append(product)
-            after_id, _ = accounts.read_local_id(product)
-            local_failure = (data.account is None and data.auth in (limits.LOGGED_OUT, limits.READ_ERROR)
-                             and not data.api_fresh and data.http_status is None)
-            if after_id != local_id or (data.account != local_id and not local_failure):
-                common.o1_event("identity_changed", product=product)
-                bucket["status"] = "error"
-            else:
-                poll.observe(data, time.time())
-                if not auto:
-                    poll.interval = polling.normalize_interval(settings.get("interval"))
-                _accept(product, local_id, bucket, data)
-                if error_class:
-                    bucket["errorClass"] = error_class
-                common.o1_event("poll_result", product=product, httpStatus=data.http_status,
-                                result="ok" if bucket["status"] == "ok" else "failed")
+            # A provider may never return. Persist the confirmed announcement
+            # now, rather than relying on the eventual provider-result write.
             _save(saved, current)
-            result["next_at"][product] = max(poll.last_attempt + poll.interval, _time(bucket.get("retryUntil")) or 0)
+        _poll_products(saved, current, due, now, auto, settings, kind, result,
+                       announced=session is not None)
     else:
         _save(saved, current)
 
@@ -417,17 +502,27 @@ def _locked(kind, ix, result, reopened=False):
         text = _text(saved, current, ix, gist_id, auto)
         pending = any(poll.last_attempt and bucket.get("attemptPublished") is False
                       for _local_id, _reason, bucket, poll in current.values())
-        if sync.write_due(session, text, force=bool(due) or pending):
+        incomplete = any(_pending(bucket) for _id, _reason, bucket, _poll in current.values())
+        if sync.write_due(session, text, force=bool(due or early) or pending):
             if _publish(session, text, result):
-                # A heartbeat (including an interrupted attempt's later echo)
-                # cannot erase failures of PATCH #1. Only a successful new
-                # announcement above resets the series.
+                # A normal heartbeat or this pass's completed fallback breaks
+                # the series; an echo of an interrupted attempt does not.
+                if not incomplete:
+                    series_resolved = True
+                    saved["_publishFailures"] = 0
                 for _local_id, _reason, bucket, poll in current.values():
                     if poll.last_attempt:
                         bucket["attemptPublished"] = True
                 _save(saved, current)
             else:
+                series_resolved = True
                 _publish_failed(result)
+    if not series_resolved and locally_due:
+        # A completed pass without a resolving publication outcome contributes
+        # no failure (including unavailable gist, skips and interrupted echoes).
+        # Keep this at normal completion: a killed pass must retain its journal.
+        saved["_publishFailures"] = prior
+        _save(saved, current)
 
 
 @sync.clock_observation()

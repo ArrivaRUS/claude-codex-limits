@@ -862,8 +862,12 @@ class _HTTPDeadlineStream(io.RawIOBase):
 
 class _HTTPDeadlineResponse(http_client.HTTPResponse):
     """Bound status/header parsing, including an unlimited sequence of 100s."""
-    def __init__(self, *args, header_deadline=None, **kwargs):
+    def __init__(self, *args, header_deadline=None, header_timeout=None, **kwargs):
         super().__init__(*args, **kwargs)
+        # CONNECT reads its own response inside connect(), before the origin's
+        # header deadline is set. Keep that interim phase bounded too.
+        if header_deadline is None and header_timeout is not None:
+            header_deadline = time.monotonic() + header_timeout
         self._deadline_stream = _HTTPDeadlineStream(self.fp, header_deadline)
         self.fp = io.BufferedReader(self._deadline_stream)
 
@@ -879,15 +883,30 @@ class _HTTPDeadlineResponse(http_client.HTTPResponse):
 
 
 class _HTTPDeadlineHandler:
-    def __init__(self, header_deadline):
+    def __init__(self, header_deadline, header_timeout=None):
         super().__init__()
         self.header_deadline = header_deadline
+        self.header_timeout = header_timeout
 
     def do_open(self, http_class, req, **kwargs):
         def connection(*args, **kw):
             conn = http_class(*args, **kw)
+            header_deadline = self.header_deadline
+            if header_deadline is None and self.header_timeout is not None:
+                original_connect = conn.connect
+
+                def connect():
+                    nonlocal header_deadline
+                    result = original_connect()
+                    # HTTPSConnection.connect also completes the TLS handshake.
+                    # Start before send(), so a fast response cannot move time
+                    # forward before its own deadline has been established.
+                    header_deadline = time.monotonic() + self.header_timeout
+                    return result
+
+                conn.connect = connect
             conn.response_class = lambda *a, **k: _HTTPDeadlineResponse(
-                *a, header_deadline=self.header_deadline, **k)
+                *a, header_deadline=header_deadline, header_timeout=self.header_timeout, **k)
             return conn
         return super().do_open(connection, req, **kwargs)
 
@@ -965,19 +984,25 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
 
 def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None,
          deadline=None):
-    """Per-socket timeout, bounded headers and optional body cap/monotonic deadline."""
+    """Per-socket timeout, bounded headers and optional body cap/monotonic deadline.
+
+    Without an explicit deadline, the origin header budget starts after connect
+    (including TLS), before sending the request. An explicit deadline still
+    includes connection establishment and body.
+    """
     if max_body is not None and (type(max_body) is not int or max_body < 0):
         raise ValueError("max_body must be a non-negative integer or None")
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     elif isinstance(body, str):
         body = body.encode("utf-8")
-    header_deadline = None if timeout is None else time.monotonic() + timeout
-    if deadline is not None:
-        header_deadline = deadline if header_deadline is None else min(header_deadline, deadline)
+    header_deadline = deadline
+    if deadline is not None and timeout is not None:
+        header_deadline = min(time.monotonic() + timeout, deadline)
     try:
         req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-        handlers = [_HTTPDeadlineHTTPHandler(header_deadline), _HTTPDeadlineHTTPSHandler(header_deadline)]
+        handlers = [_HTTPDeadlineHTTPHandler(header_deadline, timeout),
+                    _HTTPDeadlineHTTPSHandler(header_deadline, timeout)]
         if not follow_redirects:
             handlers.append(_NoRedirect())
         elif gist_raw_url(url):
