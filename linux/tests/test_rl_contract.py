@@ -33,6 +33,7 @@ import re
 import time
 import unicodedata
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from ccl import common, sync, usage
@@ -617,9 +618,60 @@ class TestA114ReaderLimits(Base):
         self.assertLessEqual(len(self.machine_ids(res)) * size, 64 * MiB)
 
     def test_gist_body_over_16_mib(self):
-        res = self.cycle_with({"machine-huge.json": padded_machine("huge", 17 * MiB)})
+        """A GET /gists/{id} body over 16 MiB is never read whole: the real outer transport (sync._transport →
+        common.http, socket answer faked) stops at cap+1. Since N8 (A3-30) the gist is then found through the
+        listing (`GET /gists?per_page=100`, no inline bodies) and each file is read through its raw_url with
+        the 8 MiB cap — the 17 MiB file is cut at 8 MiB+1 as well and its refusal is a visible error."""
+        name, raw_url = "machine-huge.json", self.RAW % "huge"
+        huge = padded_machine("huge", 17 * MiB)
+        gist_bytes = json.dumps(rl._sync_env.gist_json(
+            {sync.MANIFEST: "{}", sync.my_file_name(): "{}", name: huge})).encode()
+        self.assertGreater(len(gist_bytes), sync.MAX_BODY + 1)
+        listing = [
+            {"id": "other", "public": False, "files": {}},
+            {"id": rl._sync_env.GIST, "public": False, "created_at": "2026-09-01T00:00:00Z", "files": {
+                sync.MANIFEST: {"filename": sync.MANIFEST, "size": 2, "raw_url": self.RAW % "manifest"},
+                sync.my_file_name(): {"filename": sync.my_file_name(), "size": 2, "raw_url": self.RAW % "mine"},
+                name: {"filename": name, "size": len(huge), "raw_url": raw_url}}}]
+        reads = {"gist": [], "raw": []}
+        # common.http is the isolation guard here; run a fresh copy of the real one (as in the cap+1 test below)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("ccl_common_n8", os.path.join(rl.ROOT, "linux", "ccl", "common.py"))
+        real_common = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(real_common)
+
+        def socket_answer(kind, data):
+            class Body(io.BytesIO):
+                status, headers = 200, {}
+
+                def read(self, n=-1):
+                    chunk = super().read(n)
+                    reads[kind].append((n, len(chunk)))
+                    return chunk
+
+            def route(url, method, headers, body):
+                opener = SimpleNamespace(open=lambda req, timeout=None: Body(data))
+                with mock.patch("urllib.request.build_opener", lambda *a: opener), \
+                        mock.patch("urllib.request.urlopen", opener.open), \
+                        mock.patch.object(common, "http", real_common.http):
+                    return sync._transport(url, method, headers, body, 20)
+            return route
+
+        self.sign_in()
+        self.mark_pushed()
+        self.gh.on("GET", "/gists/g1", socket_answer("gist", gist_bytes))
+        self.gh.on("GET", "/gists?per_page=100", rl._sync_env.resp(200, listing))
+        self.gh.on("GET", raw_url, socket_answer("raw", huge.encode()))
+        res = self.cycle()
+
+        self.assertEqual(self.gh.urls(), [("GET", "/gists/g1"), ("GET", "/gists?per_page=100"), ("GET", raw_url)])
+        for kind, cap in (("gist", sync.MAX_BODY), ("raw", sync.MAX_MACHINE_BODY)):
+            self.assertTrue(reads[kind], kind)
+            self.assertTrue(all(n is not None and 0 <= n <= cap + 1 for n, _ in reads[kind]), (kind, reads[kind]))
+            self.assertLessEqual(sum(got for _, got in reads[kind]), cap + 1, kind)
         self.assertNotIn("huge", self.machine_ids(res))
         self.assertFalse(res.ok)
+        self.assertTrue(res.error, "the refused oversized body must be a visible error")
 
     def test_control_characters_in_old_machine_fields(self):  # П5-е
         obj = rl.fixture("machine-v11-hostile.json")

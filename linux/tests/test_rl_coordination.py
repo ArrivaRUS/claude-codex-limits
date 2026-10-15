@@ -145,6 +145,20 @@ class TestA301GoldenVectors(Base):
         self.assertEqual(by["chain_4_cap_reached_polls"]["now"], first + DAY)
         self.assertEqual(len({by[i]["remote"][0]["retryUntil"] for i in run}), len(run), "сосед каждый тик даёт новый срок")
 
+    def test_chainbreak_vectors_encode_the_900s_gap(self):
+        # Self-check (A3-01(k), decision 2026-10-15 «обрыв цепочки»): the 901/900 pair differs only by 1 s of the gap
+        # between the previous effective deadline min(until, firstSeenAt + 24 h) and now; no own poll in between.
+        doc = rl.fixture("decide-vectors.json")
+        by = {v["id"]: v for v in doc["vectors"]}
+        for vid, gap in (("chainbreak_expired_901s_new_chain", 901), ("chainbreak_expired_900s_inherits", 900),
+                         ("chainbreak_days_no_own_poll_real_429", 3 * DAY - 3600)):
+            v = by[vid]
+            rr, now = v["mine"]["remote_retry"], v.get("now", doc["now"])
+            self.assertEqual(now - min(rr["until"], rr["firstSeenAt"] + DAY), gap, vid)
+            self.assertLess(v["mine"]["last_attempt"], rr["firstSeenAt"], vid + ": своего опроса в цепочке не было")
+            self.assertGreater(v["remote"][0]["retryUntil"], now, vid)
+        self.assertNotIn("remote_retry_capped", by["chainbreak_days_no_own_poll_real_429"]["expect"]["events"])
+
 
 # ---- A3-01(d) tie-break waits once, then polls with the record unchanged ---------------------------------------------
 class TestA301TieBreakOnce(Base):
