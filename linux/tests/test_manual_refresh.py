@@ -74,7 +74,7 @@ class SyntheticCase(unittest.TestCase):
                              (usage, ("refresh", "load_index")),
                              (limits, ("_rollout_files", "_read_json_retry", "_rewrite_json")),
                              (socket, ("create_connection",)), (subprocess, ("Popen", "run")),
-                             (urllib.request, ("urlopen",)), (builtins, ("open",))):
+                             (urllib.request, ("urlopen", "build_opener")), (builtins, ("open",))):
             for name in names: self.patch(owner, name, forbidden)
         self.patch(common, "_settings", self.settings)
         self.patch(common, "_state", self.state)

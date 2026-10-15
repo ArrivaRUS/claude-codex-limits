@@ -652,7 +652,6 @@ class TestA114ReaderLimits(Base):
             def route(url, method, headers, body):
                 opener = SimpleNamespace(open=lambda req, timeout=None: Body(data))
                 with mock.patch("urllib.request.build_opener", lambda *a: opener), \
-                        mock.patch("urllib.request.urlopen", opener.open), \
                         mock.patch.object(common, "http", real_common.http):
                     return sync._transport(url, method, headers, body, 20)
             return route
@@ -682,36 +681,143 @@ class TestA114ReaderLimits(Base):
             self.assertTrue(v is None or (control_free(v) and len(v) <= 64), (k, v))
 
     def test_http_reads_at_most_cap_plus_one(self):
-        """common.http(max_body=) must stop at cap+1 bytes — exercised on a fresh copy of ccl/common.py with urlopen faked."""
+        """common.http(max_body=) stops at cap+1 bytes and refuses with "response body too large".
+
+        Seam: a real HTTP/1.1 server on 127.0.0.1 (as in test_rl_publisher_fixes2), a fresh copy of ccl/common.py
+        (the imported one is the isolation guard). The whole real client stack runs — build_opener, the deadline
+        handlers, http.client — so no private seam of common.http can be bypassed silently (the old `urlopen` fake
+        went dead when http() switched to build_opener). Connects are allowed to 127.0.0.1 only; any other
+        target is recorded and fails the test even though common.http swallows the guard's exception."""
         import importlib.util
+        import socket
+        import _socket
+        import http.client
         spec = importlib.util.spec_from_file_location("ccl_common_probe", os.path.join(rl.ROOT, "linux", "ccl", "common.py"))
         probe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(probe)
-        reads = []
-
-        class Body(io.BytesIO):
-            status, headers = 200, {}
-
-            def read(self, n=-1):
-                reads.append(n)
-                return super().read(n)
-
         cap = 16 * MiB
-        for size, accepted in ((cap, True), (cap + 1, False)):
-            reads.clear()
-            with mock.patch("urllib.request.urlopen", lambda req, timeout=None: Body(b"x" * size)):
+        slack = 256 * 1024  # status line + headers + both read-ahead buffers (8 KiB each by default)
+        foreign, reads, wire = [], [], [0]
+
+        def loopback_only(address):
+            if not (isinstance(address, tuple) and address[:1] == ("127.0.0.1",)):
+                foreign.append(address)
+                raise AssertionError("сеть в тестах запрещена (не loopback): %r" % (address,))
+
+        def connect(sock, address):
+            loopback_only(address)
+            return _socket.socket.connect(sock, address)
+
+        def create_connection(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **kw):
+            loopback_only(address)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            _socket.socket.connect(sock, address)
+            return sock
+
+        real_readinto = socket.SocketIO.readinto
+
+        def counted_readinto(sio, b):  # client side only: the server below uses recv/sendall
+            n = real_readinto(sio, b)
+            wire[0] += n or 0
+            return n
+
+        def spy(name):
+            real = getattr(http.client.HTTPResponse, name)
+
+            def call(resp, *a, **kw):
+                n = a[0] if a else kw.get("amt", kw.get("n"))
+                out = real(resp, *a, **kw)
+                reads.append((name, n, len(out) if isinstance(out, (bytes, bytearray)) else 0))
+                return out
+            return call
+
+        p = mock.patch.dict(os.environ, {"no_proxy": "*", "NO_PROXY": "*"})  # restores the proxy variables too
+        p.start()
+        self.addCleanup(p.stop)
+        for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
+            os.environ.pop(k, None)
+        for target, value in (("socket.socket.connect", connect), ("socket.create_connection", create_connection),
+                              ("socket.SocketIO.readinto", counted_readinto),
+                              ("http.client.HTTPResponse.read", spy("read")),
+                              ("http.client.HTTPResponse.read1", spy("read1"))):
+            p = mock.patch(target, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+        for size, accepted in ((cap, True), (cap + 1, False), (cap + 8 * MiB, False)):
+            with self.subTest(size=size):
+                reads.clear()
+                wire[0] = 0
+                server = _CappedBodyServer(size)
                 try:
-                    r = probe.http("https://api.github.com/gists/g1", max_body=cap)
-                except TypeError as e:
-                    self.fail("contract: common.http(..., max_body=) — %s" % e)
-                except Exception:  # refusing by exception is acceptable for the oversized body
-                    self.assertFalse(accepted)
-                    r = None
-            self.assertTrue(reads and all(n is not None and 0 <= n <= cap + 1 for n in reads), reads)
-            if accepted:
-                self.assertEqual((r.status, len(r.data)), (200, cap))
-            else:
-                self.assertFalse(r is not None and r.status == 200 and r.data and len(r.data) > cap)
+                    r = probe.http(server.url("/gists/g1"), max_body=cap)
+                finally:
+                    server.close()
+                self.assertEqual(foreign, [], "common.http tried a non-loopback connect")
+                self.assertEqual(server.errors, [], "loopback server harness")
+                self.assertEqual(server.requests, 1, "the request reached the loopback server (the seam is live)")
+                self.assertGreater(wire[0], 0, "the body was read from the socket (the seam is live)")
+                self.assertTrue(all(isinstance(n, int) and 0 <= n <= cap + 1 for _, n, _ in reads), reads)
+                self.assertLessEqual(sum(got for _, _, got in reads), cap + 1, "body bytes returned by HTTPResponse")
+                self.assertLessEqual(wire[0], cap + 1 + slack, "bytes taken from the socket: at most cap+1 of the body")
+                if accepted:
+                    self.assertEqual((r.status, r.error, len(r.data or b"")), (200, None, cap))
+                else:
+                    self.assertEqual((r.status, r.data, r.error), (0, None, "response body too large"))
+                    self.assertEqual(r.original_status, 200)
+
+
+class _CappedBodyServer(object):
+    """One-request HTTP/1.1 server on 127.0.0.1: answers 200 with `size` bytes and Content-Length.
+    The client may hang up after cap+1 bytes; the resulting broken pipe is expected, not a harness error."""
+
+    def __init__(self, size):
+        import socket
+        import threading
+        self.size, self.errors, self.requests = size, [], 0
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(1)
+        self.srv.settimeout(10)
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def url(self, path):
+        return "http://127.0.0.1:%d%s" % (self.srv.getsockname()[1], path)
+
+    def _serve(self):
+        try:
+            c, _ = self.srv.accept()
+        except OSError:
+            return
+        try:
+            c.settimeout(10)
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                got = c.recv(65536)
+                if not got:
+                    return
+                buf += got
+            self.requests += 1
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"
+                      b"Connection: close\r\n\r\n" % self.size)
+            piece, left = b"x" * (64 * 1024), self.size
+            while left:
+                n = min(left, len(piece))
+                c.sendall(piece[:n])
+                left -= n
+        except OSError:
+            pass  # the client stopped reading at cap+1 and closed
+        except Exception as e:
+            self.errors.append(repr(e))
+        finally:
+            c.close()
+
+    def close(self):
+        self.srv.close()
+        self.thread.join(15)
 
 
 # ---- A1-15 protocol document carries a valid v1.1 example (C8) ------------------------------------------
