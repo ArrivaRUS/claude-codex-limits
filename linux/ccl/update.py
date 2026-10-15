@@ -145,10 +145,36 @@ def due():
     return time.time() - float(common.state().get("updateCheckedAt") or 0) > CHECK_EVERY
 
 
+_TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,14}[a-z0-9])?")
+
+
+def _publisher_tag():
+    """None on an ordinary install; the publisher's tag (same rules as install.sh --name) or RuntimeError."""
+    current = common.read_json(common.SETTINGS_PATH, {})
+    if not isinstance(current, dict) or current.get("publisher") is not True:
+        return None
+    name = current.get("machineName")
+    if not isinstance(name, str) or not _TAG_RE.fullmatch(name):
+        # Never fall back to an ordinary reinstall (10-min timer, menu entry) on a publisher.
+        raise RuntimeError(common.tr(
+            "Издатель: в settings.json нет допустимого тега машины (machineName: строчные латинские буквы, цифры и "
+            "дефис, 1–16 символов). Переустановите: sh linux/install.sh --publisher --no-tray --name <тег>",
+            "Publisher: settings.json has no valid machine tag (machineName: lower-case latin letters, digits and "
+            "hyphens, 1-16 chars). Reinstall: sh linux/install.sh --publisher --no-tray --name <tag>"))
+    return name
+
+
 def _installer_flags():
+    """The same choices as the current install: publisher mode and tag, tray entry, autostart, timer."""
     conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.HOME, ".config")
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(common.HOME, ".local", "share")
     flags = []
-    if not os.path.exists(os.path.join(conf, "autostart", "claude-codex-limits.desktop")):
+    tag = _publisher_tag()
+    if tag is not None:
+        flags += ["--publisher", "--name", tag]
+        if not os.path.exists(os.path.join(data, "applications", "claude-codex-limits.desktop")):
+            flags.append("--no-tray")
+    if "--no-tray" not in flags and not os.path.exists(os.path.join(conf, "autostart", "claude-codex-limits.desktop")):
         flags.append("--no-autostart")
     timer = os.path.exists(os.path.join(conf, "systemd", "user", "ccl-sync.timer"))
     if not timer:
@@ -239,6 +265,7 @@ def apply():
     if is_checkout():
         raise RuntimeError(common.tr("Запущено из git-копии — обновляйте её командой git pull.",
                                      "Running from a git checkout — update it with git pull."))
+    flags = _installer_flags()        # a publisher without a valid tag is refused before any download
     common.ensure_dirs()
     tmp = tempfile.mkdtemp(prefix="update-", dir=common.STATE_DIR)
     try:
@@ -263,7 +290,7 @@ def apply():
             new = None
         if not new or not os.path.exists(installer):
             raise RuntimeError(common.tr("В архиве нет Linux-версии", "No Linux version in the archive"))
-        p = subprocess.run(["sh", installer] + _installer_flags(), stdout=subprocess.PIPE,
+        p = subprocess.run(["sh", installer] + flags, stdout=subprocess.PIPE,
                            stderr=subprocess.STDOUT, timeout=300)
         out = p.stdout.decode("utf-8", "replace")
         if p.returncode != 0:
