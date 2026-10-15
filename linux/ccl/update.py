@@ -149,7 +149,8 @@ _TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,14}[a-z0-9])?")
 
 
 def _publisher_tag():
-    """None on an ordinary install; the publisher's tag (same rules as install.sh --name) or RuntimeError."""
+    """None on an ordinary install; (tag, tray) of a publisher — the tag by the rules of install.sh --name,
+    `tray` from settings.json (`tray: false` written by `install.sh --no-tray`) — or RuntimeError."""
     current = common.read_json(common.SETTINGS_PATH, {})
     if not isinstance(current, dict) or current.get("publisher") is not True:
         return None
@@ -161,7 +162,7 @@ def _publisher_tag():
             "дефис, 1–16 символов). Переустановите: sh linux/install.sh --publisher --no-tray --name <тег>",
             "Publisher: settings.json has no valid machine tag (machineName: lower-case latin letters, digits and "
             "hyphens, 1-16 chars). Reinstall: sh linux/install.sh --publisher --no-tray --name <tag>"))
-    return name
+    return name, current.get("tray")
 
 
 def _installer_flags():
@@ -169,10 +170,14 @@ def _installer_flags():
     conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.HOME, ".config")
     data = os.environ.get("XDG_DATA_HOME") or os.path.join(common.HOME, ".local", "share")
     flags = []
-    tag = _publisher_tag()
-    if tag is not None:
+    publisher = _publisher_tag()
+    if publisher is not None:
+        tag, tray = publisher
         flags += ["--publisher", "--name", tag]
-        if not os.path.exists(os.path.join(data, "applications", "claude-codex-limits.desktop")):
+        # The stored choice decides (A4 M1); the menu entry is only a fallback for installs made
+        # before `tray` was stored.
+        if tray is False or (tray is not True and
+                             not os.path.exists(os.path.join(data, "applications", "claude-codex-limits.desktop"))):
             flags.append("--no-tray")
     if "--no-tray" not in flags and not os.path.exists(os.path.join(conf, "autostart", "claude-codex-limits.desktop")):
         flags.append("--no-autostart")

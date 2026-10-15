@@ -283,6 +283,8 @@ def _poll_products(saved, current, due, now, auto, settings, kind, result, annou
         if accounts.read_local_id(product)[0] != local_id:
             common.o1_event("identity_changed", product=product)
             bucket["status"] = "error"
+            # No request was sent for this reservation: nothing is in flight (A4 fix 1).
+            bucket["attemptPending"] = False
             _save(saved, current)
             continue
         common.o1_event("poll_attempt", product=product, kind=kind, attemptAt=now)
@@ -510,9 +512,16 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
                 if not incomplete:
                     series_resolved = True
                     saved["_publishFailures"] = 0
-                for _local_id, _reason, bucket, poll in current.values():
+                for product, (_local_id, _reason, bucket, poll) in current.items():
                     if poll.last_attempt:
                         bucket["attemptPublished"] = True
+                    if result["skipped"].get(product) == "token_policy":
+                        # The echo of an interrupted attempt is now published, and the product cannot be
+                        # polled until its token is renewed: its own poll will not clear the flag, so a
+                        # pending flag would keep later heartbeats from breaking the series (P1). This
+                        # pass still does not break it (`incomplete` above). A product that is merely not
+                        # due keeps the flag until it is polled (N5: early poll on the 3rd due tick).
+                        bucket["attemptPending"] = False
                 _save(saved, current)
             else:
                 series_resolved = True

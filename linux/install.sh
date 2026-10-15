@@ -66,17 +66,35 @@ UID_NUM=$(id -u)
 if [ "$PUBLISHER" = 1 ]; then
     # A tray of this user (0.4.x included) polls on its own and may hold an unfinished token rotation.
     # Refuse instead of stopping or restarting it: the owner stops it first (T1 П3-б.3).
+    # The process running this installer and its ancestors are not "another tray": the tray's own
+    # update (gui/app.py → update.apply → sh install.sh) runs it from inside the tray process.
     TRAY_PATTERN='(^|[/ ])claude-codex-limits( |$)'
+    SELF_PIDS=" "
+    p=$$
+    n=0
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null && [ "$n" -lt 64 ]; do
+        SELF_PIDS="$SELF_PIDS$p "
+        p=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$p/status" 2>/dev/null || true)
+        n=$((n + 1))
+    done
     set +e
-    pgrep -u "$UID_NUM" -f "$TRAY_PATTERN" >/dev/null 2>&1
+    TRAY_PIDS=$(pgrep -u "$UID_NUM" -f "$TRAY_PATTERN" 2>/dev/null)
     TRAY_RC=$?
     set -e
-    if [ "$TRAY_RC" != 1 ]; then
-        if [ "$TRAY_RC" = 0 ]; then
-            say "Запущен значок в трее Claude Codex Limits этого пользователя — с ним издатель включать нельзя."
-        else
-            say "Не удалось проверить, запущен ли значок в трее (pgrep, код $TRAY_RC)."
-        fi
+    OTHER_TRAY=0
+    for pid in $TRAY_PIDS; do
+        case "$SELF_PIDS" in *" $pid "*) ;; *) OTHER_TRAY=1 ;; esac
+    done
+    if [ "$TRAY_RC" = 127 ]; then
+        say "Не найдена программа pgrep — не могу проверить, запущен ли значок в трее. Установите procps"
+        say "(sudo apt install procps) и запустите установку снова."
+        exit 3
+    elif [ "$TRAY_RC" != 0 ] && [ "$TRAY_RC" != 1 ]; then
+        say "Не удалось проверить, запущен ли значок в трее (pgrep, код $TRAY_RC). Если он запущен, остановите его:"
+        say "  pkill -u $UID_NUM -f '$TRAY_PATTERN'"
+        exit 3
+    elif [ "$OTHER_TRAY" = 1 ]; then
+        say "Запущен значок в трее Claude Codex Limits этого пользователя — с ним издатель включать нельзя."
         say "Остановите значок и запустите установку снова. Команда остановки:"
         say "  pkill -u $UID_NUM -f '$TRAY_PATTERN'"
         exit 3
@@ -116,7 +134,7 @@ done
 if [ "$PUBLISHER" = 1 ]; then
     # Settings through the installed code: under the `quota` lock and the rotation guard, like
     # `ccl-sync publisher --enable`; the other keys of settings.json are kept.
-    if ! "$PY" -I -B - "$DEST" "$NAME" <<'PYEOF'
+    if ! "$PY" -I -B - "$DEST" "$NAME" "$TRAY" <<'PYEOF'
 import sys
 sys.path.insert(0, sys.argv[1])
 from ccl import common
@@ -125,8 +143,16 @@ try:
         if not held:
             print("Значок или издатель сейчас заняты попыткой (замок quota) — повторите установку позже.")
             sys.exit(1)
+        settings = common.settings()
+        settings.reload()
+        first = settings.get("publisher") is not True
         common.set_credential_write("never")
-        common.settings().update(publisher=True, autoPoll=True, credential_write="never", machineName=sys.argv[2])
+        changes = dict(publisher=True, credential_write="never", machineName=sys.argv[2], tray=sys.argv[3] == "1")
+        if first:
+            # Auto mode only when the publisher is first enabled: a reinstall or `ccl-sync update`
+            # keeps the mode chosen with `ccl-sync publisher --mode`.
+            changes["autoPoll"] = True
+        settings.update(**changes)
 except common.CredentialPolicyRefused as e:
     print("Политику токенов сейчас сменить нельзя: %s" % e)
     sys.exit(1)
@@ -141,7 +167,12 @@ PYEOF
     say "Издатель: включён, тег машины $NAME, политика токенов never"
 fi
 
-if [ "$TRAY" = 1 ]; then
+if [ "$TRAY" = 0 ]; then
+    # --no-tray also removes the menu entry and autostart of an earlier install (as uninstall.sh does):
+    # a leftover autostart would start the tray again at the next login.
+    rm -f "$CONF/autostart/claude-codex-limits.desktop" \
+          "${XDG_DATA_HOME:-$HOME/.local/share}/applications/claude-codex-limits.desktop"
+else
     # application menu entry
     mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
     DESKTOP_ENTRY="[Desktop Entry]
