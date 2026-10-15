@@ -11,6 +11,18 @@ MINIMUM = STEPS[0]
 DEFAULT = 1800
 
 
+def normalize_interval(value):
+    """Normalize a stored interval without importing the GUI or truncating fractions."""
+    if type(value) is str:
+        try:
+            value = int(value)
+        except (ValueError, OverflowError):
+            return DEFAULT
+    if type(value) not in (int, float) or value not in STEPS:
+        return DEFAULT
+    return int(value)
+
+
 def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
