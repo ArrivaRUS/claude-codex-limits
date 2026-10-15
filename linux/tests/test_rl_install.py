@@ -95,7 +95,8 @@ def tearDownModule():
 
 # ==== fake binaries ===================================================================================================
 def make_fakebin(root, uid=None):
-    """systemctl / pgrep / pkill / crontab (+ optional id -u) that only log. `root/tray-running` = tray is running."""
+    """systemctl / pgrep / pkill / crontab (+ optional id -u) that only log. `root/tray-running` = tray is running;
+    `root/tray-pids` (one pid per line) = exactly these processes match the tray pattern (A4-20)."""
     fb, log = os.path.join(root, "fakebin"), os.path.join(root, "log")
     os.makedirs(fb, exist_ok=True)
     os.makedirs(log, exist_ok=True)
@@ -103,7 +104,8 @@ def make_fakebin(root, uid=None):
         "systemctl": ('printf \'%%s|%%s\\n\' "${XDG_RUNTIME_DIR-UNSET}" "$*" >> "%s/systemctl.log"\n'
                       'case "$*" in *is-active*) echo active ;; *is-enabled*) echo enabled ;; esac\nexit 0\n' % log),
         "pgrep": ('printf \'%%s\\n\' "$*" >> "%s/pgrep.log"\n'
-                  'if [ -e "%s/tray-running" ]; then echo 4242; exit 0; fi\nexit 1\n' % (log, root)),
+                  'if [ -s "%s/tray-pids" ]; then cat "%s/tray-pids"; exit 0; fi\n'
+                  'if [ -e "%s/tray-running" ]; then echo 4242; exit 0; fi\nexit 1\n' % (log, root, root, root)),
         "pkill": 'printf \'%%s\\n\' "$*" >> "%s/pkill.log"\nexit 0\n' % log,
         "crontab": ('printf \'%%s\\n\' "$*" >> "%s/crontab.log"\n'
                     'if [ "$1" = "-l" ]; then exit 1; fi\ncat >/dev/null\nexit 0\n' % log),
@@ -696,7 +698,13 @@ PUBLISHER_FLAGS = ("--publisher", "--no-tray", "--name")
 
 UPDATE_CHILD = r"""
 import contextlib, io, json, subprocess, sys
+import os
 dest, tarball = sys.argv[1], sys.argv[2]
+if len(sys.argv) > 3:
+    # The caller of install.sh is the tray process itself (gui/app.py runs update.apply in-process): this process
+    # and its parent match the tray pattern, plus any extra pids (a foreign live tray).
+    with open(sys.argv[3], "w") as f:
+        f.write("".join("%%d\n" %% int(x) for x in [os.getpid(), os.getppid()] + sys.argv[4:]))
 sys.path.insert(0, dest)
 from ccl import cli, common, update
 assert update.app_dir() == dest, update.app_dir()
@@ -747,18 +755,29 @@ def build_tarball(path):
         tar.add(os.path.join(rl.ROOT, "Resources"), arcname=TOP + "/Resources", filter=skip)
 
 
-def run_update(r, tarball):
-    """`ccl-sync update` of the INSTALLED copy (r.home/.local/share/claude-codex-limits) in the same environment as
-    the install: fake systemctl/pgrep/crontab, `common.http` served from the tarball, every other URL refused."""
-    dest = os.path.join(r.home, ".local", "share", "claude-codex-limits")
+def installed_dest(r):
+    return os.path.join(r.home, ".local", "share", "claude-codex-limits")
+
+
+def env_of(r):
+    """The environment of `run_install` for later processes of the same installation."""
     fb = os.path.join(r.root, "fakebin")
     dead_proxy = "http://127.0.0.1:9"
-    env = {"HOME": r.home, "PATH": fb + ":/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
-           "USER": "ccltest", "LOGNAME": "ccltest", "DBUS_SESSION_BUS_ADDRESS": "disabled:",
-           "http_proxy": dead_proxy, "https_proxy": dead_proxy, "HTTP_PROXY": dead_proxy, "HTTPS_PROXY": dead_proxy,
-           "PYTHONDONTWRITEBYTECODE": "1"}
-    p = subprocess.run([sys.executable, "-I", "-c", UPDATE_CHILD, dest, tarball], env=env, cwd=r.root,
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+    return {"HOME": r.home, "PATH": fb + ":/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+            "USER": "ccltest", "LOGNAME": "ccltest", "DBUS_SESSION_BUS_ADDRESS": "disabled:",
+            "http_proxy": dead_proxy, "https_proxy": dead_proxy, "HTTP_PROXY": dead_proxy, "HTTPS_PROXY": dead_proxy,
+            "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def run_update(r, tarball, as_tray=False, foreign_pids=()):
+    """`ccl-sync update` of the INSTALLED copy (r.home/.local/share/claude-codex-limits) in the same environment as
+    the install: fake systemctl/pgrep/crontab, `common.http` served from the tarball, every other URL refused.
+    as_tray: the updating process (and its parent) are what `pgrep` finds as the tray, plus `foreign_pids`."""
+    argv = [sys.executable, "-I", "-c", UPDATE_CHILD, installed_dest(r), tarball]
+    if as_tray:
+        argv += [os.path.join(r.root, "tray-pids")] + [str(x) for x in foreign_pids]
+    p = subprocess.run(argv, env=env_of(r), cwd=r.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=180)
     text = p.stdout.decode("utf-8", "replace")
     head, sep, tail = text.rpartition("@@RESULT@@")
     if not sep:
@@ -880,6 +899,132 @@ class TestA416UpdateOrdinaryGuard(_A416Base):
         obj = json.loads(settings_of(r))
         self.assertNotEqual(obj.get("publisher"), True)
         self.assertEqual(obj.get("machineName"), "alse")
+
+
+# ==== A4-17…A4-20 (red: fix cycle 1 of A4, docs/review-remote-limits-a4.md M1 + minor) ==================================
+# Contract (tester, from docs/plans.md §A4 «Цикл правок A4 №1»): `--no-tray` removes the menu entry and autostart of an
+# earlier install (as uninstall.sh does) and stores `tray: false` in settings.json; `update` takes `--no-tray` from
+# that key, not from the presence of the menu entry. Reinstall/update of a publisher keeps `autoPoll`/`interval`
+# chosen by `publisher --mode` (autoPoll is set only when the publisher is first enabled). The tray check of install.sh
+# ignores the process that runs the installer and its parent (the tray's own update); any other live tray still refuses.
+def put_ui_files(r):
+    """Leftovers of an earlier tray install (0.4.x with PyQt5): menu entry + autostart."""
+    for path in ui_files(r):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("[Desktop Entry]\nType=Application\nName=Claude Codex Limits\nExec=/usr/bin/true\n")
+
+
+def cli_installed(r, *argv):
+    p = subprocess.run([sys.executable, "-I", os.path.join(installed_dest(r), "ccl-sync")] + list(argv), env=env_of(r),
+                       cwd=r.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
+    return p.returncode, p.stdout.decode("utf-8", "replace")
+
+
+class TestA417NoTrayRemovesLeftovers(_A416Base):
+    """M1: an ordinary install (VPS :20 with tray 0.4.5) → `install.sh --publisher --no-tray --name vps`."""
+
+    def ordinary_then_publisher(self):
+        root = self.fresh()
+        r0 = run_install(root, [], settings=json.dumps({"lang": "en"}).encode())
+        self.assertEqual(r0.rc, 0, "подготовка: обычная установка:\n" + r0.out[-1500:])
+        put_ui_files(r0)
+        r = run_install(root, ["--publisher", "--no-tray", "--name", "vps"])
+        self.assertEqual(r.rc, 0, "установка издателя поверх обычной:\n" + r.out[-1500:])
+        return r
+
+    def test_publisher_no_tray_removes_menu_entry_and_autostart(self):
+        r = self.ordinary_then_publisher()
+        left = [p for p in ui_files(r) if os.path.exists(p)]
+        self.assertEqual(left, [], "--no-tray оставил ярлык/автозапуск прежней установки — трей стартует при входе "
+                                   "(П3-б.3), update вернёт обычный режим (M1)")
+        obj = json.loads(settings_of(r))
+        self.assertIs(obj.get("tray"), False, "выбор «без трея» хранится в settings.json: tray: false; есть %r"
+                      % {k: obj.get(k) for k in ("tray", "publisher", "machineName")})
+        self.assertEqual({k: obj.get(k) for k in EXPECTED}, EXPECTED)
+        self.assertEqual(obj.get("lang"), "en")
+
+    def test_then_update_passes_no_tray(self):
+        r = self.ordinary_then_publisher()
+        u = run_update(r, self.tarball)
+        self.assertEqual(u.rc, 0, u.out[-1500:])
+        self.assertEqual(len(u.installer), 1, u.installer)
+        self.assertIn("--no-tray", u.installer[0], "update издателя без трея передаёт --no-tray; флаги: %r"
+                      % (u.installer[0],))
+        self.assertEqual([p for p in ui_files(r) if os.path.exists(p)], [], "после update ярлыков нет")
+        self.assertIs(json.loads(settings_of(r)).get("tray"), False)
+
+    def test_update_decides_by_setting_not_by_files(self):
+        """A clean `--no-tray` publisher; someone puts the menu entry back by hand → update still passes `--no-tray`
+        (tray: false decides) and the leftovers are gone afterwards."""
+        r = self.publisher_install()
+        put_ui_files(r)
+        u = run_update(r, self.tarball)
+        self.assertEqual(u.rc, 0, u.out[-1500:])
+        self.assertEqual(len(u.installer), 1, u.installer)
+        self.assertIn("--no-tray", u.installer[0], "решает tray: false в settings.json, а не наличие ярлыка; "
+                                                   "флаги: %r" % (u.installer[0],))
+        self.assertEqual([p for p in ui_files(r) if os.path.exists(p)], [], "ярлык и автозапуск после update убраны")
+        self.assertEqual(self.timer_minutes(r), [5])
+
+
+class TestA418PublisherModeKept(_A416Base):
+    """minor (install.sh:129): reinstall / update of a publisher keeps `publisher --mode fixed 3600`."""
+
+    def test_reinstall_and_update_keep_fixed_mode(self):
+        r = self.publisher_install()
+        code, out = cli_installed(r, "publisher", "--mode", "fixed", "3600")
+        self.assertEqual(code, 0, "подготовка: publisher --mode fixed 3600:\n" + out[-1500:])
+        obj = json.loads(settings_of(r))
+        self.assertEqual((obj.get("autoPoll"), obj.get("interval")), (False, 3600), "предусловие: режим fixed 3600")
+        r2 = run_install(r.root, ["--publisher", "--no-tray", "--name", "vps"])
+        self.assertEqual(r2.rc, 0, r2.out[-1500:])
+        obj = json.loads(settings_of(r2))
+        self.assertEqual((obj.get("autoPoll"), obj.get("interval")), (False, 3600),
+                         "переустановка издателя молча вернула autoPoll=true (режим publisher --mode сброшен)")
+        u = run_update(r2, self.tarball)
+        self.assertEqual(u.rc, 0, u.out[-1500:])
+        obj = json.loads(settings_of(r2))
+        self.assertEqual((obj.get("autoPoll"), obj.get("interval")), (False, 3600),
+                         "ccl-sync update издателя сбросил режим publisher --mode")
+        self.assertEqual({k: obj.get(k) for k in ("publisher", "credential_write", "machineName")},
+                         {"publisher": True, "credential_write": "never", "machineName": "vps"})
+
+
+class TestA420UpdateFromTray(_A416Base):
+    """minor (install.sh:71): a publisher WITH tray (`--publisher --name vps`) updates from the tray process
+    (gui/app.py → update.apply → sh install.sh): `pgrep` finds the caller and its parent — not a reason to refuse."""
+
+    def tray_publisher(self):
+        r = run_install(self.fresh(), ["--publisher", "--name", "vps"])
+        self.assertEqual(r.rc, 0, "подготовка: издатель с треем:\n" + r.out[-1500:])
+        return r
+
+    def foreign_tray(self):
+        p = subprocess.Popen(["sleep", "60"])
+        self.addCleanup(p.wait)
+        self.addCleanup(p.kill)
+        return p.pid
+
+    def test_update_from_own_tray_not_refused(self):
+        r = self.tray_publisher()
+        u = run_update(r, self.tarball, as_tray=True)
+        self.assertTrue(read_log(r.log, "pgrep"), "стенд: проверка трея вызывалась")
+        self.assertEqual(u.rc, 0, "обновление из своего трея отказало (install.sh находит вызывающий процесс, код 3):\n"
+                         + u.out[-1500:])
+        self.assertEqual(len(u.installer), 1, u.installer)
+        self.assertNotIn("--no-tray", u.installer[0], "издатель с треем: выбор трея сохраняется")
+        self.assertEqual(self.timer_minutes(r), [5])
+        self.assertEqual(read_log(r.log, "pkill"), [])
+
+    def test_foreign_live_tray_still_refused(self):  # GUARD
+        r = self.tray_publisher()
+        before = settings_of(r)
+        u = run_update(r, self.tarball, as_tray=True, foreign_pids=[self.foreign_tray()])
+        self.assertNotEqual(u.rc, 0, "посторонний живой трей: обновление издателя отказывает:\n" + u.out[-1500:])
+        self.assertRegex(u.out, r"(?m)\bp?kill\b", "напечатана команда остановки")
+        self.assertEqual(read_log(r.log, "pkill"), [], "установщик сам ничего не останавливает")
+        self.assertEqual(settings_of(r), before)
 
 if __name__ == "__main__":
     unittest.main()

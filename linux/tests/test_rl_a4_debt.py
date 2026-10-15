@@ -22,6 +22,11 @@ IDs:
   A4-14 R2-n2      the session reopen inside one pass does not get a new 60 s read budget: a GET of the reopened
                    session has timeout ≤ what is left of the pass budget (60 s from the start of the first read).
   A4-15 R2-n3      `sync.write` on a busy `sync` lock → `write_error = "busy"`, `lastError`/`lastErrorAt` untouched.
+  A4-19 minor      (fix cycle 1, docs/review-remote-limits-a4.md) `attemptPending` does not hang: (a) the identity
+                   changes after PATCH №1 and before the request (branch `continue` of _poll_products) → the bucket of
+                   the reserved account is not left pending; (b) an interrupted attempt of a product then held by
+                   `token_policy` for several ticks → not pending once it is not polled. In both, the next successful
+                   plain heartbeat breaks the series (`_publishFailures` 2 → 0), as A3-51 (P1).
 
 Contract chosen by the tester where the sources are silent:
   * Updater redirects: a handler of its own (as `_GistRawRedirect`): 3xx body closed unread, bounded hops, target only
@@ -38,10 +43,12 @@ if __package__:
     from . import _rl_env as rl
     from . import _net_guard
     from .test_rl_install import A4Env
+    from .test_rl_publisher_fixes3 import KillBase, PS
 else:
     import _rl_env as rl
     import _net_guard
     from test_rl_install import A4Env
+    from test_rl_publisher_fixes3 import KillBase, PS
 
 import errno
 import json
@@ -52,7 +59,7 @@ import time
 import unittest
 from unittest import mock
 
-from ccl import common, sync, update
+from ccl import common, limits, sync, update
 
 NOW = rl.NOW
 KiB, MiB = 1024, 1024 * 1024
@@ -398,6 +405,74 @@ class TestA415BusyIsNotAnError(A4Env):
         self.assertEqual((st.get("lastError"), st.get("lastErrorAt")), before,
                          "занятый sync — пропуск, не ошибка (протокол): lastError не пишется")
 
+
+
+# ==== A4-19 (red, fix cycle 1): attemptPending does not hang ==========================================================
+I19 = 1800
+
+
+class TestA419AttemptPendingNotStuck(KillBase):
+    def setUp(self):
+        super().setUp()
+        self.point = None
+
+    def bucket(self, local_id=rl.U_A):
+        ps = common.read_json(PS(), {}) or {}
+        return (((ps.get("claude") or {}).get("accounts") or {}).get(local_id)) or {}
+
+    def heartbeat_tick(self, at):
+        """A tick that is not locally due for Claude; ≥ 600 s since the last write → plain heartbeat PATCH."""
+        self.clock.now = self.t0 = at
+        self.calls0 = len(self.call_times)
+        ok0, n = self.ok_patches, len(self.claude_calls())
+        self.killed_tick()
+        self.assertGreater(self.ok_patches, ok0, "стенд: в тике %+d с был успешный heartbeat" % (at - rl.NOW))
+        self.assertEqual(len(self.claude_calls()), n, "стенд: тик без запроса к провайдеру")
+
+    def test_identity_changed_before_request(self):
+        self.first_pass()
+        t1 = rl.NOW + I19
+        switched = []
+
+        def hook(rec):
+            if not switched and self.attempt_patch(rec):
+                self.write_claude_json(rl.U_B)          # CLI sign-in changes while PATCH №1 is in flight
+                switched.append(True)
+            return None
+        self.clock.now = self.t0 = t1
+        n = len(self.claude_calls())
+        self.gist.patch_script[:] = [hook] * 8
+        self.killed_tick()
+        self.gist.patch_script[:] = []
+        self.write_claude_json(rl.U_A)                  # … and back: the reserved account is current again
+        self.assertTrue(switched, "стенд: смена identity во время PATCH №1 не сработала")
+        self.assertIn("identity_changed", [e.get("ev") for e in self.o1()], "стенд: ветка «identity сменилась»")
+        self.assertEqual(len(self.claude_calls()), n, "стенд: запроса к провайдеру в этом тике не было")
+        self.assertIsNot(self.bucket().get("attemptPending"), True,
+                         "ветка «identity сменилась до запроса» оставила attemptPending=true (запроса не было — "
+                         "попытка не висит): %r" % {k: self.bucket().get(k) for k in ("attemptPending", "attemptPublished")})
+        self.seed_counter(2)
+        self.heartbeat_tick(t1 + 660)
+        self.assertEqual(self.counter(), 0, "успешный heartbeat после ветки identity обрывает серию (P1); "
+                                            "attemptPending=%r" % self.bucket().get("attemptPending"))
+
+    def test_long_token_policy_block(self):
+        self.first_pass()
+        t1 = rl.NOW + I19
+        self.clock.now = self.t0 = t1
+        self.calls0 = len(self.call_times)
+        self.providers.kill_after = True                # killed with the provider request in flight
+        self.killed_tick()
+        self.assertEqual(len(self.claude_calls()), 2, "стенд: запрос был и убит")
+        self.assertIs(self.bucket().get("attemptPending"), True, "стенд: прерванная попытка висит после убийства")
+        self.patch(limits, "claude_token_policy_blocks", lambda now: True)   # spent token, policy never: long block
+        self.heartbeat_tick(t1 + 660)                   # echo of the interrupted attempt (does not break the series)
+        self.assertTrue(self.skipped("token_policy", "claude"), "стенд: пропуск token_policy")
+        self.seed_counter(2)
+        self.heartbeat_tick(t1 + 1320)                  # Claude still blocked: a plain heartbeat
+        self.assertIsNot(self.bucket().get("attemptPending"), True,
+                         "продукт под долгим token_policy не опрашивается, а attemptPending висит")
+        self.assertEqual(self.counter(), 0, "успешный heartbeat при долгом token_policy обрывает серию (P1)")
 
 if __name__ == "__main__":
     unittest.main()
