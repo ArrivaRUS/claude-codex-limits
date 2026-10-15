@@ -41,6 +41,9 @@ ME, LOW, HIGH = "m-bbbb", "m-aaaa", "m-cccc"
 DAY = 86400
 STEPS = (900, 1800, 3600, 14400)
 REASONS = (None, "retry_after", "remote_attempt", "fresh_remote", "tie_break")
+# Vectors of A3 fix cycle 1 (S1, M1) live in the shared file but are checked by test_rl_publisher_fixes, so this
+# suite stays green until the fix lands (red-first lives there).
+FIX_CYCLE_1_OWNED = ("s1_", "m1_")
 
 
 def tearDownModule():
@@ -95,6 +98,8 @@ class TestA301GoldenVectors(Base):
         doc = rl.fixture("decide-vectors.json")
         self.assertGreaterEqual(len(doc["vectors"]), 40)
         for v in doc["vectors"]:
+            if v["id"].startswith(FIX_CYCLE_1_OWNED):
+                continue                                  # owned and run by test_rl_publisher_fixes (A3-34, A3-39)
             with self.subTest(v["id"], ref=v["ref"]):
                 tw = v.get("tie_wait")
                 d = self.decide(v.get("now", doc["now"]), v["mine"], v["remote"], v["my_id"], tuple(tw) if tw else None)
