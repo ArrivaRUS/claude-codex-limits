@@ -11,6 +11,7 @@ import contextlib
 import errno
 import fcntl
 import json
+import math
 import os
 import re
 import socket
@@ -115,11 +116,12 @@ def file_lock(name, blocking=True, timeout=None):
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
     held = False
     try:
+        os.fchmod(fd, 0o600)
         if blocking and timeout is None:
             fcntl.flock(fd, fcntl.LOCK_EX)
             held = True
         else:
-            deadline = time.time() + (timeout or 0)
+            deadline = time.monotonic() + (timeout or 0)
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -128,9 +130,10 @@ def file_lock(name, blocking=True, timeout=None):
                 except OSError as e:
                     if e.errno not in (errno.EAGAIN, errno.EACCES):
                         raise
-                    if not blocking or time.time() >= deadline:
+                    remaining = deadline - time.monotonic()
+                    if not blocking or remaining <= 0:
                         break
-                    time.sleep(0.2)
+                    time.sleep(min(0.2, remaining))
         if held:
             names = getattr(_held_locks, "names", {})
             names[name] = names.get(name, 0) + 1
@@ -258,43 +261,184 @@ class CredentialPolicyRefused(Exception):
     """The token policy cannot change while a quota attempt or rotation is pending."""
 
 
-def credential_policy_event(ev, *, product=None, policy=None):
-    """Append an O1 policy event using only enumerated, credential-free fields.
+O1_EVENTS = frozenset((
+    "poll_attempt", "poll_result", "poll_skipped", "pass_skipped", "pass_failed", "token_refresh", "publish",
+    "clock_skew", "label_changed", "identity_changed", "remote_retry_capped", "policy_forced_never",
+    "policy_violation", "pending_rotation_lost", "accounts_days_dropped"))
+O1_SKIP_REASONS = frozenset((
+    "not_due", "fresh_remote", "remote_attempt", "tie_break", "retry_after", "no_github", "no_login", "no_label",
+    "state_unsaved", "publish_failed", "token_policy", "busy"))
+_O1_ENUMS = {
+    "product": frozenset(("claude", "codex")),
+    "policy": frozenset(("never", "guarded")),
+    "reason": O1_SKIP_REASONS | {"counter_overflow"},
+    "kind": frozenset(("auto", "manual")),
+    "status": frozenset(("ok", "expired", "signed_out", "error", "unavailable", "loggedOut", "readError")),
+    "result": frozenset(("changed", "ok", "failed", "unchanged", "saved", "superseded", "pending", "refused")),
+    "error": frozenset(("network", "timeout", "http", "rate_limit", "credentials", "busy", "parse", "unknown")),
+}
+_O1_NUMBERS = frozenset((
+    "seconds", "skew", "credentialWrite", "changed", "ok", "httpStatus", "interval", "count", "age",
+    "retryUntil", "firstSeenAt", "until", "attemptAt", "nextAt", "asOf"))
+_O1_LABELS = frozenset(("label", "oldLabel", "newLabel"))
+_O1_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,31}\Z")
+_O1_VALUE = re.compile(r"[A-Za-z0-9_.:+-]{0,64}\Z")
 
-    Logging failure must not turn an effective `never` policy into permission to write.
-    """
-    if ev not in ("policy_forced_never", "policy_violation", "pending_rotation_lost"):
-        raise ValueError("unknown credential policy event")
-    if product not in (None, "claude", "codex") or policy not in (None, "never", "guarded"):
-        raise ValueError("unknown credential policy event field")
-    record = {"ev": ev, "ts": iso_utc()}
-    if product is not None:
-        record["product"] = product
-    if policy is not None:
-        record["policy"] = policy
-    data = (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8")
-    try:
-        os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
-        fd = os.open(os.path.join(STATE_DIR, "publisher.jsonl"),
-                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+
+def _o1_state_dir():
+    """Make each missing parent accessible even under umask 0777; keep existing parents."""
+    missing = []
+    path = os.path.abspath(STATE_DIR)
+    while not os.path.isdir(path):
+        missing.append(path)
+        parent = os.path.dirname(path)
+        if parent == path:
+            raise OSError("O1 state directory unavailable")
+        path = parent
+    for path in reversed(missing):
         try:
-            os.fchmod(fd, 0o600)
-            return os.write(fd, data) == len(data)
-        finally:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        else:
+            os.chmod(path, 0o700)
+    os.chmod(STATE_DIR, 0o700)
+
+
+def _o1_record(ev, fields):
+    if ev not in O1_EVENTS:
+        raise ValueError("unknown O1 event")
+    for key, value in fields.items():
+        valid = bool(_O1_KEY.fullmatch(key))
+        if key in _O1_ENUMS:
+            valid = valid and (value is None or isinstance(value, str) and value in _O1_ENUMS[key])
+        elif key in _O1_NUMBERS:
+            valid = valid and (value is None or isinstance(value, (bool, int, float)))
+        elif key in _O1_LABELS:
+            valid = valid and (value is None or isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{16}", value)))
+        elif key == "class":
+            valid = valid and isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", value))
+        else:
+            valid = False
+        if isinstance(value, str):
+            valid = valid and bool(_O1_VALUE.fullmatch(value))
+        if isinstance(value, float):
+            valid = valid and math.isfinite(value)
+        if not valid:
+            raise ValueError("invalid O1 field")
+    if ev in ("poll_skipped", "pass_skipped") and fields.get("reason") not in O1_SKIP_REASONS:
+        raise ValueError("invalid O1 skip reason")
+    return dict(fields, ev=ev, ts=iso_utc())
+
+
+def _o1_append(record):
+    """Caller holds publisher-journal: no append can be lost to concurrent rotation."""
+    path = os.path.join(STATE_DIR, "publisher.jsonl")
+    data = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    # Existing files and restrictive umasks get exactly the same private modes.
+    os.chmod(STATE_DIR, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("O1 journal is not a regular file")
+        os.fchmod(fd, 0o600)
+        if os.fstat(fd).st_size > 1024 * 1024:
+            cutoff = time.time() - 45 * 86400
+            kept = bytearray()
+            with open(path, "rb") as source:
+                for line in source:
+                    try:
+                        old = json.loads(line)
+                        stamp = parse_iso(old.get("ts")) if isinstance(old, dict) else None
+                    except (ValueError, RecursionError):
+                        continue
+                    if stamp is not None and stamp >= cutoff:
+                        kept.extend(line if line.endswith(b"\n") else line + b"\n")
+            write_atomic(path, bytes(kept), mode=0o600)
             os.close(fd)
+            fd = None
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            os.fchmod(fd, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if not written:
+                raise OSError("O1 append failed")
+            view = view[written:]
+        return True
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def o1_event(ev, **fields):
+    """Append one private, headless O1 event; False means storage/lock failure.
+
+    Strings: product, policy, reason, kind, status, result, error use _O1_ENUMS;
+    class is an exception class NAME, never exception text. label/oldLabel/newLabel
+    accept only 16 hex gist-scoped labels. Numeric/bool/None fields: seconds, skew,
+    credentialWrite, changed, ok, httpStatus, interval, count, age, retryUntil,
+    firstSeenAt, until, attemptAt, nextAt, asOf. No identifiers or free text.
+    Invalid events/fields raise ValueError; ev and ts cannot be supplied as fields.
+    All writers and rotation share one cross-process lock, including policy events.
+    """
+    record = _o1_record(ev, fields)
+    try:
+        _o1_state_dir()
+        with file_lock("publisher-journal", timeout=5) as held:
+            return _o1_append(record) if held else False
     except OSError:
         return False
 
 
-def credential_write():
-    """Read the effective token policy afresh; callers pin it for their quota attempt."""
+def credential_policy_event(ev, *, product=None, policy=None):
+    """Compatibility entry point; policy errors must never authorize a token write."""
+    if ev not in ("policy_forced_never", "policy_violation", "pending_rotation_lost"):
+        raise ValueError("unknown credential policy event")
+    fields = {}
+    if product is not None:
+        fields["product"] = product
+    if policy is not None:
+        fields["policy"] = policy
+    return o1_event(ev, **fields)
+
+
+def _effective_credential_write():
     current = read_json(SETTINGS_PATH, {})
-    if not isinstance(current, dict) or current.get("credential_write") != "guarded":
-        return "never"
-    if current.get("publisher") is True:
-        credential_policy_event("policy_forced_never", policy="never")
-        return "never"
-    return "guarded"
+    guarded = isinstance(current, dict) and current.get("credential_write") == "guarded"
+    forced = guarded and current.get("publisher") is True
+    return ("guarded" if guarded and not forced else "never"), forced
+
+
+def credential_write():
+    """Re-read policy every attempt; journal a forced-policy transition once on disk."""
+    try:
+        policy, forced = _effective_credential_write()
+        path = os.path.join(STATE_DIR, "credential-policy-state.json")
+        previous = read_json(path, {})
+        was_forced = isinstance(previous, dict) and previous.get("forced") is True
+        if forced == was_forced:
+            return policy
+        # A plain policy read must not repair a deliberately unwritable state dir:
+        # guarded rotation still has to prove its marker can be saved before POST.
+        if not os.path.isdir(STATE_DIR):
+            _o1_state_dir()
+        with file_lock("publisher-journal", timeout=5) as held:
+            if not held:
+                return _effective_credential_write()[0]
+            # Read settings inside the lock so concurrent observers cannot reorder transitions.
+            policy, forced = _effective_credential_write()
+            path = os.path.join(STATE_DIR, "credential-policy-state.json")
+            previous = read_json(path, {})
+            was_forced = isinstance(previous, dict) and previous.get("forced") is True
+            if forced != was_forced:
+                if forced and not _o1_append(_o1_record("policy_forced_never", {"policy": "never"})):
+                    return policy
+                write_json(path, {"forced": forced})
+            return policy
+    except OSError:
+        # Journal/state failure never relaxes the live policy.
+        return _effective_credential_write()[0]
 
 
 def _rotation_marker_path(product):
@@ -618,11 +762,15 @@ def today_key():
 # ---- HTTP (urllib, synchronous; call off the GUI thread) -----------------------------------
 
 class Resp(object):
-    __slots__ = ("status", "data", "headers", "error", "definitely_not_sent")
+    __slots__ = ("status", "data", "headers", "error", "definitely_not_sent", "original_status")
 
-    def __init__(self, status, data=None, headers=None, error=None, definitely_not_sent=False):
+    def __init__(self, status, data=None, headers=None, error=None, definitely_not_sent=False,
+                 original_status=None):
         self.status, self.data, self.headers, self.error = status, data, headers or {}, error
         self.definitely_not_sent = definitely_not_sent
+        # A bounded body may fail to decode without undoing an acknowledged PATCH.
+        # Readers still see status=0 on BODY_TOO_LARGE and must reject its body.
+        self.original_status = original_status
 
     def json(self):
         try:
@@ -703,7 +851,7 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             data = r.read() if max_body is None else r.read(max_body + 1)
             response_headers = {k.lower(): v for k, v in r.headers.items()}
             if max_body is not None and len(data) > max_body:
-                return Resp(0, None, response_headers, BODY_TOO_LARGE)
+                return Resp(0, None, response_headers, BODY_TOO_LARGE, original_status=r.status)
             return Resp(r.status, data, response_headers)
     except _RawRedirectRefused:
         return Resp(0, error=RAW_REDIRECT_REFUSED)
@@ -721,7 +869,7 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             data = None
         if max_body is not None and data is not None and len(data) > max_body:
             return Resp(0, None, {k.lower(): v for k, v in (e.headers or {}).items()},
-                        BODY_TOO_LARGE)
+                        BODY_TOO_LARGE, original_status=e.code)
         return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()})
     except Exception as e:  # network down, DNS, TLS, timeout
         import socket

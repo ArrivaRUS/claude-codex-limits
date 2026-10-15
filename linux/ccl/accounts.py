@@ -379,15 +379,6 @@ def _writer_captions(value):
     return out
 
 
-def _writer_sum_days(target, source):
-    _sum_days(target, source)
-    if any(n > _MAX_COUNTER for models in target.values()
-           for counts in models.values() for n in counts.values()):
-        # Clamping only the projection would break account attribution. Refuse
-        # the whole local build rather than publish inconsistent usage totals.
-        raise ValueError("usage projection exceeds counter limit")
-
-
 def build(*, gist_id, entries, unattributed_days, captions):
     """Build a fresh v1.1 block, computing labels only under this gist id.
 
@@ -423,7 +414,7 @@ def build(*, gist_id, entries, unattributed_days, captions):
     for entry, _ in unique.values():
         if entry["label"] is None or len(accounts) == 8:
             if entry["days"]:
-                _writer_sum_days(unattributed.setdefault(entry["product"], {}), entry["days"])
+                _sum_days(unattributed.setdefault(entry["product"], {}), entry["days"])
             if len(accounts) == 8:
                 continue
             entry["days"] = {}
@@ -434,9 +425,29 @@ def build(*, gist_id, entries, unattributed_days, captions):
 
     projection = {}
     for product, days in unattributed.items():
-        _writer_sum_days(projection.setdefault(product, {}), days)
+        _sum_days(projection.setdefault(product, {}), days)
     for entry in accounts:
         if entry["days"]:
-            _writer_sum_days(projection.setdefault(entry["product"], {}), entry["days"])
-    return {"accounts": accounts, "unattributedDays": unattributed,
-            "captions": _writer_captions(captions), "days": projection}
+            _sum_days(projection.setdefault(entry["product"], {}), entry["days"])
+    overflow = any(n > _MAX_COUNTER for days in projection.values()
+                   for models in days.values() for counts in models.values()
+                   for n in counts.values())
+    if overflow:
+        # Account attribution cannot represent an overflowing projection. Keep
+        # metadata and the bounded v1 totals, making all usage unattributed so
+        # root days still equal the sum of the published split.
+        for entry in accounts:
+            entry["days"] = {}
+        projection = {product: {day: {model: {key: min(n, _MAX_COUNTER)
+                                            for key, n in counts.items()}
+                                     for model, counts in models.items()}
+                               for day, models in days.items()}
+                      for product, days in projection.items()}
+        unattributed = projection
+    block = {"accounts": accounts, "unattributedDays": unattributed,
+             "captions": _writer_captions(captions), "days": projection}
+    if overflow:
+        # Local journal signal only: the machine-file writer allow-lists its
+        # wire fields and must never copy this marker into a gist snapshot.
+        block["dropped"] = "counter_overflow"
+    return block

@@ -8,9 +8,11 @@ leaves the token store except in the Authorization header, and is never logged.
 from contextlib import nullcontext
 from contextvars import ContextVar
 import hashlib
+import email.utils
 import json
 import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -87,7 +89,8 @@ def _api_origin(url):
 def _bounded_response(response, cap):
     """Enforce the same bound when a transport adapter returns a buffered body."""
     if response.data is not None and len(response.data) > cap:
-        return common.Resp(0, headers=response.headers, error=_BODY_TOO_LARGE)
+        return common.Resp(0, headers=response.headers, error=_BODY_TOO_LARGE,
+                           original_status=response.status)
     return response
 
 
@@ -99,7 +102,38 @@ def gh(path, token, method="GET", body=None, timeout=20):
          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": UA}
     if body is not None:
         h["Content-Type"] = "application/json"
-    return _bounded_response(transport(url, method, h, body, timeout), MAX_BODY)
+    response = transport(url, method, h, body, timeout)
+    _observe_date(response)
+    response = _bounded_response(response, MAX_BODY)
+    if (method == "PATCH" and response.error == _BODY_TOO_LARGE
+            and response.original_status is not None and 200 <= response.original_status < 300):
+        # GitHub PATCH echoes the gist. A huge echo must not turn a confirmed
+        # successful write into a failed announcement; no response body is needed.
+        return common.Resp(response.original_status, headers=response.headers)
+    return response
+
+
+def _observe_date(response):
+    """Keep the last server clock sample, including HTTP error responses."""
+    value = next((v for k, v in response.headers.items() if k.lower() == "date"), None)
+    if not value:
+        return
+    try:
+        server = email.utils.parsedate_to_datetime(value).timestamp()
+        now = time.time()
+        skew = server - now
+        if not math.isfinite(skew):
+            return
+    except (TypeError, ValueError, OverflowError, AttributeError):
+        return
+    # Telemetry must not turn a successful credential/network operation into an
+    # ambiguous failure (for example if the state volume just became read-only).
+    try:
+        sync_state().update(clockSkew=skew, clockSkewAt=now)
+        if abs(skew) > 60:
+            common.o1_event("clock_skew", seconds=skew)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def _raw(url, cap=MAX_MACHINE_BODY):
@@ -112,6 +146,7 @@ def _raw(url, cap=MAX_MACHINE_BODY):
     context = _raw_cap.set(cap)
     try:
         response = transport(url, "GET", {"User-Agent": UA}, None, 30)
+        _observe_date(response)
         # Any remaining 3xx is an unfollowed/refused raw transition, including
         # statuses urllib does not handle (for example 300 or 305).
         if 300 <= response.status < 400:
@@ -127,6 +162,7 @@ def _form_result(url, fields):
     body = urllib.parse.urlencode(fields)
     r = transport(url, "POST", {"Accept": "application/json", "User-Agent": UA,
                                 "Content-Type": "application/x-www-form-urlencoded"}, body, 15)
+    _observe_date(r)
     if url == auth.REFRESH_URL and fields.get("grant_type") == "refresh_token" and getattr(r, "definitely_not_sent", False):
         raise auth.RefreshNotSent()
     j = r.json()
@@ -530,6 +566,8 @@ class SyncResult(object):
     def __init__(self):
         self.ok = False
         self.pushed = False
+        self.partial = False
+        self.session = None
         self.skipped = None        # why nothing was done ("signed-out", "revoked", "backoff", "busy",
         #                            "locked", "unreachable")
         self.error = None
@@ -651,6 +689,170 @@ def _handle(r, st, res, token, what, active):
     return _fail(st, res, "%s: %s" % (what, status_text(r)))
 
 
+def _listed_gist(token, gid):
+    """Find metadata for an oversized gist without trusting its discarded body."""
+    url = "/gists?per_page=100"
+    for _ in range(30):
+        response = gh(url, token)
+        if response.status != 200:
+            return None, response
+        items = response.json()
+        if not isinstance(items, list):
+            return None, common.Resp(0)
+        for item in items:
+            if isinstance(item, dict) and item.get("id") == gid:
+                return item, None
+        url = _next_link(response.headers.get("link", ""))
+        if not url or not items:
+            break
+    return None, common.Resp(404)
+
+
+def _raw_key(url):
+    return hashlib.sha256(url.encode("utf-8", "surrogatepass")).hexdigest()[:16] if isinstance(url, str) else None
+
+
+def _rejected_raw(st):
+    now = time.time()
+    stored = st.get("rejectedRaw")
+    stored = stored if isinstance(stored, dict) else {}
+    valid = {key: value for key, value in stored.items()
+             if isinstance(key, str) and re.fullmatch(r"[0-9a-f]{16}", key)
+             and type(value) in (int, float) and math.isfinite(value)
+             and 0 <= now - value <= 86400}
+    valid = dict(sorted(valid.items(), key=lambda item: item[1])[-64:])
+    if valid != stored:
+        st.update(rejectedRaw=valid)
+    return valid
+
+
+def _reject_raw(st, rejected, key):
+    if key is None:
+        return
+    rejected[key] = time.time()
+    while len(rejected) > 64:
+        del rejected[min(rejected, key=rejected.get)]
+    st.update(rejectedRaw=rejected)
+
+
+class SyncSession:
+    """Validated gist capability; holds no flock across provider requests.
+
+    Each write reacquires sync and verifies the captured sign-in and gist. This
+    allows logout to complete while a provider stalls without reviving that login.
+    """
+    def __init__(self, gid, token, active, fetched_at, fetched_mono, files, auto, result):
+        self.gist_id = gid
+        self._token = token
+        self._active = active
+        self._fetched_at = fetched_at
+        self._fetched_mono = fetched_mono
+        self._files = files
+        self.auto = auto
+        self.result = result
+        self.remote = None
+        self._invalid = False
+
+
+def open_cycle(auto=True):
+    """Wait at most 60 seconds for sync and return a successfully merged session.
+
+    A partial merge is still a read; errors that leave only an old remote cache
+    are not. No lock or secret resource escapes on a failed open.
+    """
+    deadline = time.monotonic() + 60
+    try:
+        for _ in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            result = _sync_cycle({}, False, auto, SyncResult(), allow_push=False,
+                                 opening=True, lock_timeout=min(60, remaining))
+            if result.skipped != "renewed":
+                return result.session
+    except (OSError, ValueError):
+        # The ordinary transport returns Resp on network failure; an adapter or
+        # a local cache/lock failure can instead raise. Both mean no usable read.
+        return None
+    return None
+
+
+def _fingerprints(obj):
+    metadata = {"accounts": [{k: v for k, v in record.items() if k != "days"}
+                             for record in obj.get("accounts", []) if isinstance(record, dict)],
+                "captions": obj.get("captions", {})}
+    return snapshot_hash(obj.get("days", {})), snapshot_hash(metadata)
+
+
+def write_due(session, text, force=False):
+    """Three independent write triggers; write() itself is an explicit PATCH.
+
+    Attempt/result publication must not be throttled. Callers deciding whether
+    a final unchanged snapshot needs a PATCH use this predicate first.
+    """
+    obj = json.loads(text)
+    push_hash, meta_hash = _fingerprints(obj)
+    st = sync_state()
+    now = time.time()
+    if force or my_file_name() not in session._files:
+        return True
+    usage_changed = st.get("pushHash") != push_hash
+    usage_due = usage_changed and (not session.auto or now - float(st.get("pushedAt") or 0) >= 570)
+    # A v1 snapshot has no account metadata/heartbeat; retain the established
+    # write budget for those callers while enabling all three v1.1 triggers.
+    metadata_enabled = any(key in obj for key in ("accounts", "captions", "lastSeenAt"))
+    return bool(usage_due or (metadata_enabled and
+                (st.get("metaHash") != meta_hash or
+                 (session.auto and now - float(st.get("heartbeatAt") or 0) >= 600))))
+
+
+def write(session, text):
+    """PATCH one full snapshot, only against this session's recent secret gist."""
+    if not isinstance(session, SyncSession):
+        return False
+    try:
+        with common.file_lock("sync", timeout=60) as held:
+            if not held:
+                return False
+            auth.LinuxManifest().read()
+            return _write_locked(session, text, sync_state())
+    except (OSError, ValueError):
+        return False
+
+
+def _write_locked(session, text, st):
+    now = time.time()
+    if (session._invalid or st.get("gistId") != session.gist_id or st.get("revoked")
+            or not st.get("login") or vault.active(st) != session._active
+            or not 0 <= now - session._fetched_at <= 120
+            or not 0 <= time.monotonic() - session._fetched_mono <= 120):
+        return False
+    try:
+        obj = json.loads(text)
+        if not isinstance(obj, dict):
+            return False
+        obj.pop("dropped", None)  # accounts.build's local overflow diagnosis
+        push_hash, meta_hash = _fingerprints(obj)
+        obj["lastSeenAt"] = obj["updated"] = common.iso_utc(now)
+        text = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    response = gh("/gists/" + session.gist_id, session._token, "PATCH",
+                  {"files": {my_file_name(): {"content": text}}})
+    if response.status == 404:
+        session._invalid = True
+        st.update(gistId=None, pushHash=None, metaHash=None, heartbeatAt=None)
+        _fail(st, session.result, "PATCH /gists/{id}: " + common.tr("gist пропал, найдём заново", "gist gone, will rediscover"))
+        return False
+    if not 200 <= response.status < 300:
+        _handle(response, st, session.result, session._token, "PATCH /gists/{id}", session._active)
+        return False
+    st.update(pushHash=push_hash, metaHash=meta_hash, pushedAt=now, heartbeatAt=now)
+    session._files[my_file_name()] = {"content": text}
+    session.result.pushed = True
+    return True
+
+
 def sync_cycle(days, force=False, auto=False, allow_push=True):
     """One pass: make sure the gist exists, write this machine's snapshot when it changed,
     read and merge everyone else's. `days` = this machine's local index days.
@@ -664,9 +866,9 @@ def sync_cycle(days, force=False, auto=False, allow_push=True):
     return _sync_cycle(days, force, auto, SyncResult(), allow_push) if result.skipped == "renewed" else result
 
 
-def _sync_cycle(days, force, auto, res, allow_push=True):
+def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_timeout=60):
     global _first_attempt_at
-    with common.file_lock("sync", blocking=False) as held:
+    with common.file_lock("sync", blocking=opening, timeout=lock_timeout if opening else None) as held:
         if not held:
             res.skipped = "busy"
             return res
@@ -752,9 +954,19 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
             if g.status == 404:                        # deleted or not ours any more → rediscover
                 st.update(gistId=None, pushHash=None)
                 continue
-            if _handle(g, st, res, token, "GET /gists/{id}", active):
-                return res
-            candidate = g.json()
+            fetched_at = time.time()
+            fetched_mono = time.monotonic()
+            if g.error == _BODY_TOO_LARGE:
+                # Listing contains file metadata/raw URLs without inline bodies.
+                # It independently proves that this exact gist is still secret.
+                candidate, bad = _listed_gist(token, gid)
+                if bad is not None:
+                    _handle(bad, st, res, token, "GET /gists", active)
+                    return res
+            else:
+                if _handle(g, st, res, token, "GET /gists/{id}", active):
+                    return res
+                candidate = g.json()
             if not isinstance(candidate, dict) or candidate.get("public") is not False:
                 st.update(gistId=None, pushHash=None, discoveredAt=None)
                 continue
@@ -764,29 +976,25 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
             _fail(st, res, "GET /gists/{id}: " + common.tr("gist не найден", "gist not found"))
             return res
         files = gist.get("files") or {}
+        if not isinstance(files, dict):
+            _fail(st, res, "GET /gists/{id}: " + common.tr("нет файлов", "invalid files"))
+            return res
+        session = SyncSession(st.get("gistId"), token, active, fetched_at, fetched_mono,
+                              files, auto, res)
 
-        # write — whole snapshot, only when it changed (or our file went missing)
-        missing = mine not in files
-        due = force or missing or st.get("pushHash") != h
-        if due and auto and not missing and not force:
-            if time.time() - float(st.get("pushedAt") or 0) < MIN_PUSH_INTERVAL - 30:
-                due = False
-        if due and allow_push:
-            p = gh("/gists/" + st.get("gistId"), token, "PATCH", {"files": {mine: {"content": machine_file(snap)}}})
-            if p.status == 404:
-                st.update(gistId=None, pushHash=None)
-                _fail(st, res, "PATCH /gists/{id}: " + common.tr("gist пропал, найдём заново", "gist gone, will rediscover"))
+        # Legacy callers keep their manual/force semantics. A v1.1 caller can
+        # use write_due() before an unconditional attempt/result write().
+        text = machine_file(snap)
+        if allow_push and (force or write_due(session, text)):
+            if not _write_locked(session, text, st):
                 return res
-            if _handle(p, st, res, token, "PATCH /gists/{id}", active):
-                return res
-            st.update(pushHash=h, pushedAt=time.time())
-            res.pushed = True
 
         # read + merge everyone else
         contents = {}
         total = 0
         size_error = None
         read_error = None
+        rejected = _rejected_raw(st)
         selected = _machine_files(files, MAX_MACHINE_FILES + 1)
         if len(selected) > MAX_MACHINE_FILES:
             size_error = common.tr("Слишком большой ответ синхронизации (предел 64 файла)",
@@ -800,14 +1008,22 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
                                        "Sync response too large (64 MiB limit)")
                 break
             text = f.get("content")
-            if f.get("truncated") and f.get("raw_url"):
+            if (f.get("truncated") or text is None) and f.get("raw_url"):
+                raw_url = f["raw_url"]
+                key = _raw_key(raw_url)
+                if key in rejected:
+                    read_error = common.tr("Файл синхронизации пропущен: raw ранее отклонён",
+                                           "Sync file skipped: previously refused raw URL")
+                    continue
                 cap = min(MAX_MACHINE_BODY, MAX_TOTAL_BODY - total)
-                r = _raw(f["raw_url"], cap=cap)
+                r = _raw(raw_url, cap=cap)
                 if r.error in (common.RAW_URL_REFUSED, common.RAW_REDIRECT_REFUSED):
+                    _reject_raw(st, rejected, key)
                     read_error = common.tr("Файл синхронизации пропущен: недопустимый raw URL или редирект",
                                            "Sync file skipped: invalid raw URL or refused redirect")
                     continue
                 if r.error == _BODY_TOO_LARGE:
+                    _reject_raw(st, rejected, key)
                     # Bounded reads consumed cap + 1 bytes even though Resp drops
                     # the rejected body. Count them before considering the next file.
                     total += cap + 1
@@ -860,7 +1076,10 @@ def _sync_cycle(days, force, auto, res, allow_push=True):
         st.update(lastOkAt=time.time(), lastSync=None, lastError=None, lastErrorAt=None, backoffUntil=None)
         res.ok = True
         res.remote = remote
+        session.remote = remote
+        res.session = session
         if size_error or read_error:
+            res.partial = True
             _fail(st, res, size_error or read_error)
         return res
 

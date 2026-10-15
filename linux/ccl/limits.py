@@ -497,6 +497,7 @@ def _save_claude_tokens_guarded(path, old_rt, tok, t, first):
         with contextlib.suppress(OSError):
             common.remove_rotation_marker("claude")
         _PENDING.pop("claude", None)
+        common.o1_event("token_refresh", product="claude", credentialWrite=1, policy=_ATTEMPT.policy)
         return "saved"
     except OSError:
         return "pending"
@@ -683,6 +684,7 @@ def _save_codex_tokens_guarded(old_rt, tok, first):
         with contextlib.suppress(OSError):
             common.remove_rotation_marker("codex")
         _PENDING.pop("codex", None)
+        common.o1_event("token_refresh", product="codex", credentialWrite=1, policy=_ATTEMPT.policy)
         return "saved"
     except OSError:
         return "pending"

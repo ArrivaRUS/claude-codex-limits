@@ -170,7 +170,7 @@ def cmd_push(args):
         if not args.quiet:
             _say(common.tr("Синхронизация уже идёт в другом процессе.", "A sync is already running in another process."))
         return 0
-    if not res.ok:
+    if not res.ok and not getattr(res, "partial", False):
         _say(common.tr("Ошибка синхронизации: ", "Sync failed: ") + str(res.error))
         if sync.sync_state().get("revoked"):
             _say(common.tr("Войдите в GitHub заново: ccl-sync login", "Sign in to GitHub again: ccl-sync login"))
