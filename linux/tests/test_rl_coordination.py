@@ -97,14 +97,18 @@ class TestA301GoldenVectors(Base):
         for v in doc["vectors"]:
             with self.subTest(v["id"], ref=v["ref"]):
                 tw = v.get("tie_wait")
-                d = self.decide(doc["now"], v["mine"], v["remote"], v["my_id"], tuple(tw) if tw else None)
+                d = self.decide(v.get("now", doc["now"]), v["mine"], v["remote"], v["my_id"], tuple(tw) if tw else None)
                 exp = v["expect"]
                 self.assertEqual((field(d, "action"), field(d, "reason")), (exp["action"], exp["reason"]))
                 if "tie_wait" in exp:
                     self.assertEqual(norm_pair(field(d, "tie_wait")), exp["tie_wait"], "tie_wait to persist")
                 if "remote_retry" in exp:
-                    rr = field(d, "remote_retry") or {}
-                    self.assertEqual({k: rr.get(k) for k in ("until", "firstSeenAt")}, exp["remote_retry"])
+                    rr = field(d, "remote_retry")
+                    if exp["remote_retry"] is None:
+                        self.assertFalse(rr, "remote_retry: nothing to persist")
+                    else:
+                        rr = rr or {}
+                        self.assertEqual({k: rr.get(k) for k in ("until", "firstSeenAt")}, exp["remote_retry"])
                 events = list(field(d, "events") or ())
                 self.assertEqual(events, exp.get("events", []), "events of this decision")
 
@@ -116,8 +120,30 @@ class TestA301GoldenVectors(Base):
                      "b_asof_I61_14400", "d_tie_first", "d_tie_second_same_pair", "d_tie_dead_source_16min",
                      "f_asof_plus30", "f_asof_2099", "f_asof_garbage", "g_dead_source_fresh_asof",
                      "h_remote_retry_10y_capped", "h_own_retry_48h_not_cut", "n_next_15min_future_fresh",
-                     "n_next_beyond_interval_not_fresh", "n_next_garbage_interval_cap_14400_not_fresh"):
+                     "n_next_beyond_interval_not_fresh", "n_next_garbage_interval_cap_14400_not_fresh",
+                     "chain_1_accept", "chain_2_expired_reaccept_inherits_first", "chain_4_cap_reached_polls",
+                     "chain_5_own_poll_clears_mark_new_chain", "chain_5_no_own_poll_mark_kept",
+                     "chain_ordinary_ends_on_cap_no_event", "chain_deadline_cap_plus_1s_capped",
+                     "nolastseen_missing_fresh_asof", "nolastseen_garbage_fresh_asof", "nolastseen_missing_no_tie_break",
+                     "nolastseen_garbage_no_tie_break", "nolastseen_null_retry_not_accepted"):
             self.assertIn(need, ids)
+
+    def test_chain_steps_are_one_run(self):
+        # Self-check (decision 2026-10-15 §D-amend-1): chain_k+1 starts from the state chain_k persisted, its tick is
+        # later, and the poll comes no later than firstSeenAt + 24 h.
+        doc = rl.fixture("decide-vectors.json")
+        by = {v["id"]: v for v in doc["vectors"]}
+        run = ["chain_1_accept", "chain_2_expired_reaccept_inherits_first", "chain_3_cap_minus_1s_still_waits",
+               "chain_4_cap_reached_polls", "chain_5_own_poll_clears_mark_new_chain"]
+        for a, b in zip(run, run[1:]):
+            va, vb = by[a], by[b]
+            self.assertLess(va["now"], vb["now"], b)
+            self.assertEqual(vb["mine"]["remote_retry"], va["expect"]["remote_retry"], b)
+            polled = va["expect"]["action"] == "poll"
+            self.assertEqual(vb["mine"]["last_attempt"], va["now"] if polled else va["mine"]["last_attempt"], b)
+        first = by[run[0]]["expect"]["remote_retry"]["firstSeenAt"]
+        self.assertEqual(by["chain_4_cap_reached_polls"]["now"], first + DAY)
+        self.assertEqual(len({by[i]["remote"][0]["retryUntil"] for i in run}), len(run), "сосед каждый тик даёт новый срок")
 
 
 # ---- A3-01(d) tie-break waits once, then polls with the record unchanged ---------------------------------------------
@@ -169,6 +195,73 @@ class TestA301RemoteRetryCap(Base):
         before = dict(m)
         self.decide(N, m, [rec(status="rate_limited", retryUntil=N + 3600)])
         self.assertEqual(m, before, "decide не меняет вход (чужой дедлайн хранится отдельно, не в server_until)")
+
+
+# ---- A3-01(j) decision 2026-10-15 §D-amend-1: a chain of foreign deadlines is bounded by firstSeenAt + 24 h ----------
+class TestA301DeadlineChain(Base):
+    def simulate(self, hours=80, step=300, publish=lambda t: t + 23 * 3600, last=0):
+        """Caller loop: persists remote_retry, sets last_attempt = now after a poll. Returns poll times and events."""
+        rr, polls, capped = None, [], []
+        t = N
+        while t < N + hours * 3600:
+            r = rec(status="rate_limited", retryUntil=publish(t), lastSeenAt=t - 30, attemptAt=N - 2 * DAY)
+            d = self.decide(t, mine(last=last, remote_retry=rr), [r])
+            rr = field(d, "remote_retry")
+            if list(field(d, "events") or ()).count("remote_retry_capped"):
+                capped.append(t)
+            if field(d, "action") == "poll":
+                polls.append(t)
+                last = t
+            t += step
+        return polls, capped
+
+    def test_neighbour_23h_every_tick_polls_every_24h(self):
+        polls, capped = self.simulate()
+        self.assertEqual(polls[0], N + DAY, "первый опрос — ровно firstSeenAt + 24 ч")
+        # The next chain starts on the first tick after my own poll (firstSeenAt = that tick), so the gap is 24 h + 1 tick.
+        gaps = [b - a for a, b in zip(polls, polls[1:])]
+        self.assertTrue(gaps and max(gaps) <= DAY + 300, gaps)
+        self.assertEqual(capped, polls, "remote_retry_capped — ровно на каждом опросе по потолку, не чаще")
+
+    def test_short_deadlines_chain_is_bounded_too(self):
+        # 2 h 7 min deadlines re-published every tick: accepted one after another without my poll → capped at 24 h.
+        polls, capped = self.simulate(hours=30, publish=lambda t: t + 2 * 3600 + 420)
+        self.assertEqual(polls[:1], [N + DAY])
+        self.assertEqual(capped[:1], [N + DAY])
+
+    def test_chain_ending_exactly_on_cap_has_no_event(self):
+        # 2 h deadlines on a 300 s grid: the last one ends exactly at firstSeenAt + 24 h → poll then, no capped event.
+        polls, capped = self.simulate(hours=30, publish=lambda t: t + 2 * 3600)
+        self.assertEqual(polls[:1], [N + DAY])
+        self.assertEqual(capped, [])
+
+    def test_own_poll_restarts_the_chain(self):
+        # A 1 h deadline ends, I poll, then a new deadline is accepted: firstSeenAt is the new tick, not the old chain's.
+        # decide() does not check my own due (the caller does), so every unsuppressed tick is a poll here.
+        def publish(t):
+            if t < N + 3600:
+                return t + 3600
+            return t + 23 * 3600 if t >= N + 7200 else N - 1
+        polls, capped = self.simulate(hours=30, publish=publish)
+        self.assertEqual(polls[0], N + 3600)
+        self.assertEqual([p for p in polls if p >= N + 7200][:1], [N + 7200 + DAY])
+        self.assertEqual(capped, [N + 7200 + DAY], "обычный срок 1 ч — без события; новая цепочка — от своего тика")
+
+
+# ---- A3-01(j) decision 2026-10-15 §D-amend-2: a non-finite lastSeenAt (not strict JSON → not in the shared file) ------
+class TestA301NonFiniteLastSeen(Base):
+    def test_nan_and_infinity_last_seen_are_not_alive(self):
+        cases = {"fresh_asof": dict(asOf=N - 100), "attempt": dict(attemptAt=N - 100),
+                 "retry": dict(status="rate_limited", retryUntil=N + 3600),
+                 "tie": dict(attemptAt=N - 14370, asOf=N - 14368, nextAt=N + 30)}
+        for seen in (float("nan"), float("inf"), float("-inf"), float("1e400")):
+            for name, kw in cases.items():
+                with self.subTest(seen=repr(seen), case=name):
+                    m = mine(14400, last=N - 14400) if name == "fresh_asof" else mine()   # tie: I = 900, due = N
+                    d = self.decide(N, m, [rec(lastSeenAt=seen, **kw)])
+                    self.assertEqual(field(d, "action"), "poll")
+                    self.assertFalse(field(d, "remote_retry"))
+                    self.assertIsNone(field(d, "tie_wait"))
 
 
 # ---- A3-01(f) decision Q3: a future nextAt is normal; beyond interval + 60 (interval capped at 14400) → not fresh ----------
