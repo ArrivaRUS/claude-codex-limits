@@ -405,6 +405,8 @@ def flush_pending():
     Only entries produced by a guarded save authorize finishing a rotation after
     settings changed. No token endpoint is called, and stale documents never win.
     """
+    if not _PENDING:
+        return
     try:
         with _credential_attempt(policy="guarded"):
             for product, pending in list(_PENDING.items()):

@@ -4,6 +4,7 @@
     ccl-sync logout     forget the token (the gist stays)
     ccl-sync status     who is signed in, the gist, which machines are in it and when they reported
     ccl-sync credentials --write never|guarded   set the token write policy
+    ccl-sync publisher --enable|--disable|--now|--status   control the headless publisher
     ccl-sync push       one pass: index the local logs, write this machine's file, read the others
     ccl-sync dump       per-day, per-model summary of the local logs (to check the numbers)
     ccl-sync update     install the newest Linux version from the repository's main branch
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from . import APP_VERSION, common, sync, update, vault, usage, accounts
+from . import APP_VERSION, common, sync, update, vault, usage, accounts, polling
 
 
 def _say(*a):
@@ -128,6 +129,10 @@ def cmd_logout(_args):
 
 
 def cmd_push(args):
+    settings = common.settings()
+    settings.reload()
+    if getattr(args, "auto", False) and settings.get("publisher") is True:
+        return _publisher_pass("auto", quiet=args.quiet)
     common.ensure_dirs()
     cb = None if args.quiet else _progress_printer()
     t0 = time.time()
@@ -221,6 +226,67 @@ def cmd_credentials(args):
                              " (publisher: guarded ignored; effective policy: never)")
                    if args.write == "guarded" and common.settings().get("publisher") is True else "")
     _say(common.tr("Настройка записи токенов сохранена: ", "Token write setting saved: ") + args.write + policy_note)
+    return 0
+
+
+def _publisher_pass(kind, quiet=False):
+    from . import publisher
+    result = publisher.run_pass(kind)
+    # A pass may return no summary (e.g. an early exit); it still owns all sync work.
+    result = result if isinstance(result, dict) else {}
+    if result.get("error"):
+        _say(common.tr("Проход издателя не завершён; подробности в журнале издателя.",
+                       "Publisher pass failed; see the publisher journal for details."))
+        return 1
+    if not quiet:
+        next_at = result.get("next_at")
+        if isinstance(next_at, dict):
+            for product in ("claude", "codex"):
+                deadline = next_at.get(product)
+                if polling.number(deadline) and deadline > time.time():
+                    _say(product.capitalize() + common.tr(": опрос можно с ", ": polling available from ")
+                         + _fmt_time(deadline))
+        _say(common.tr("Проход издателя завершён.", "Publisher pass complete."))
+    return 0
+
+
+def cmd_publisher(args):
+    settings = common.settings()
+    if args.enable or args.disable:
+        try:
+            with common.file_lock("quota", timeout=60) as held:
+                if not held:
+                    raise common.CredentialPolicyRefused("quota is busy; retry after the current attempt")
+                settings.reload()
+                # Both transitions change the effective policy. Reuse the rotation guard
+                # while holding quota until the publisher setting has also been saved.
+                policy = "never" if args.enable else settings.get("credential_write", "never")
+                common.set_credential_write("guarded" if policy == "guarded" else "never")
+                changes = {"publisher": bool(args.enable)}
+                if args.enable:
+                    changes["autoPoll"] = True
+                settings.update(**changes)
+        except common.CredentialPolicyRefused as e:
+            _say(common.tr("Смена режима издателя отклонена: ", "Publisher mode change refused: ") + str(e))
+            return 1
+        except OSError:
+            _say(common.tr("Не удалось сохранить режим издателя; проверьте права доступа к настройкам и состоянию.",
+                           "Could not save publisher mode; check access permissions for settings and state."))
+            return 1
+        _say(common.tr("Издатель включён.", "Publisher enabled.") if args.enable
+             else common.tr("Издатель выключен.", "Publisher disabled."))
+        return 0
+    if args.now:
+        return _publisher_pass("manual")
+    settings.reload()
+    enabled = settings.get("publisher") is True
+    _say(common.tr("Издатель: ", "Publisher: ") + (
+        common.tr("включён", "enabled") if enabled else common.tr("выключен", "disabled")))
+    products = [p.capitalize() for p in ("claude", "codex") if common.product_enabled(p)]
+    _say(common.tr("Продукты: ", "Products: ") + (", ".join(products) or common.tr("нет", "none")))
+    policy = "guarded" if not enabled and settings.get("credential_write") == "guarded" else "never"
+    _say(common.tr("Политика токенов: ", "Token policy: ") + policy)
+    _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
     return 0
 
 
@@ -431,6 +497,12 @@ def main(argv=None):
     p = sub.add_parser("credentials", help=common.tr("политика записи токенов", "token write policy"))
     p.add_argument("--write", choices=["never", "guarded"], required=True,
                    help=common.tr("разрешить или запретить запись токенов", "allow or forbid token writes"))
+    p = sub.add_parser("publisher", help=common.tr("управление издателем лимитов", "control the limits publisher"))
+    actions = p.add_mutually_exclusive_group(required=True)
+    actions.add_argument("--enable", action="store_true", help=common.tr("включить издатель", "enable the publisher"))
+    actions.add_argument("--disable", action="store_true", help=common.tr("выключить издатель", "disable the publisher"))
+    actions.add_argument("--now", action="store_true", help=common.tr("ручной проход с учётом сроков", "manual pass respecting deadlines"))
+    actions.add_argument("--status", action="store_true", help=common.tr("состояние издателя", "publisher status"))
     p = sub.add_parser("push", help=common.tr("один проход: индекс → gist", "one pass: index → gist"))
     p.add_argument("--force", action="store_true", help=common.tr("записать даже без изменений", "write even if unchanged"))
     p.add_argument("--auto", action="store_true", help=common.tr("режим таймера (не чаще раза в 10 мин)",
@@ -455,4 +527,5 @@ def main(argv=None):
         return 0
     common.ensure_dirs()
     return {"login": cmd_login, "logout": cmd_logout, "status": cmd_status,
-            "credentials": cmd_credentials, "push": cmd_push, "dump": cmd_dump, "update": cmd_update}[args.cmd](args)
+            "credentials": cmd_credentials, "publisher": cmd_publisher,
+            "push": cmd_push, "dump": cmd_dump, "update": cmd_update}[args.cmd](args)

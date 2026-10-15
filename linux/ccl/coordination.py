@@ -70,9 +70,9 @@ def _remote_retry(now, saved, records, last_attempt):
 
     Setting until to firstSeenAt + 24 h marks a consumed cap without adding fields.
     It is retained even when the source disappears: a heartbeat, changed deadline,
-    or restart must not arm another 24 h wait. A local attempt at or after the cap
-    clears this marker. Replacing an expired ordinary deadline retains firstSeenAt
-    unless a local attempt reached that deadline; only then does a new chain start.
+    or restart must not arm another 24 h wait in the same chain. A local attempt
+    at or after the cap clears this marker. An effective deadline expired more
+    than 900 seconds ago also ends the chain, including a consumed cap marker.
     Missing or malformed last_attempt cannot prove that a local attempt occurred.
     """
     retry = None
@@ -80,6 +80,10 @@ def _remote_retry(now, saved, records, last_attempt):
         until, first = _number(saved.get("until")), _number(saved.get("firstSeenAt"))
         if until is not None and first is not None and first <= now:
             retry = {"until": until, "firstSeenAt": first}
+    if retry is not None:
+        cap = retry["firstSeenAt"] + RETRY_CAP
+        if now - min(retry["until"], cap) > 900:
+            retry = None
     if retry is not None:
         cap = retry["firstSeenAt"] + RETRY_CAP
         if retry["until"] >= cap:
