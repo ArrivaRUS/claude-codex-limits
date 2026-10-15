@@ -5,7 +5,7 @@ Each computer writes one whole-snapshot file of daily per-model token totals
 leaves the token store except in the Authorization header, and is never logged.
 """
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 import hashlib
 import email.utils
@@ -38,6 +38,9 @@ MAX_MACHINE_FILES = 64
 MAX_TOTAL_BODY = 64 * 1024 * 1024
 _BODY_TOO_LARGE = common.BODY_TOO_LARGE
 _raw_cap = ContextVar("ccl_raw_cap", default=None)
+_read_deadline = ContextVar("ccl_read_deadline", default=None)
+_clock_observation = ContextVar("ccl_clock_observation", default=None)
+_READ_TIMEOUT = "Sync read deadline exceeded"
 _sleep = time.sleep
 _first_attempt_at = None
 _login_lock = threading.RLock()
@@ -47,6 +50,38 @@ _login_current = None
 
 def sync_state():
     return common.Store(common.SYNC_STATE_PATH)
+
+
+@contextmanager
+def clock_observation():
+    """One clock sample per pass, shared by nested opens, writes and a reopen."""
+    if _clock_observation.get() is not None:
+        yield
+        return
+    context = _clock_observation.set({"observed": False})
+    try:
+        yield
+    finally:
+        _clock_observation.reset(context)
+
+
+@contextmanager
+def _read_budget():
+    # Auth recovery and nested cycles share the original deadline. Waiting for
+    # sync can consume this budget too; it must never extend the read phase.
+    if _read_deadline.get() is not None:
+        yield
+        return
+    context = _read_deadline.set(time.monotonic() + 60)
+    try:
+        yield
+    finally:
+        _read_deadline.reset(context)
+
+
+def _read_timeout(timeout):
+    deadline = _read_deadline.get()
+    return timeout if deadline is None else max(0, min(timeout, deadline - time.monotonic()))
 
 
 def my_file_name():
@@ -98,6 +133,10 @@ def gh(path, token, method="GET", body=None, timeout=20):
     url = API + path if path[:1] == "/" and path[:2] != "//" else path
     if not _api_origin(url):
         return common.Resp(0, error="Invalid GitHub API origin")
+    if method == "GET":
+        timeout = _read_timeout(timeout)
+        if timeout <= 0:
+            return common.Resp(0, error=_READ_TIMEOUT)
     h = {"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json",
          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": UA}
     if body is not None:
@@ -105,16 +144,19 @@ def gh(path, token, method="GET", body=None, timeout=20):
     response = transport(url, method, h, body, timeout)
     _observe_date(response)
     response = _bounded_response(response, MAX_BODY)
-    if (method == "PATCH" and response.error == _BODY_TOO_LARGE
+    if (method == "PATCH" and response.error in (_BODY_TOO_LARGE, common.HTTP_DEADLINE)
             and response.original_status is not None and 200 <= response.original_status < 300):
-        # GitHub PATCH echoes the gist. A huge echo must not turn a confirmed
+        # GitHub PATCH echoes the gist. A huge/slow echo must not turn a confirmed
         # successful write into a failed announcement; no response body is needed.
         return common.Resp(response.original_status, headers=response.headers)
     return response
 
 
 def _observe_date(response):
-    """Keep the last server clock sample, including HTTP error responses."""
+    """Keep one valid server clock sample per pass, including HTTP errors."""
+    observation = _clock_observation.get()
+    if observation is not None and observation["observed"]:
+        return
     value = next((v for k, v in response.headers.items() if k.lower() == "date"), None)
     if not value:
         return
@@ -126,6 +168,8 @@ def _observe_date(response):
             return
     except (TypeError, ValueError, OverflowError, AttributeError):
         return
+    if observation is not None:
+        observation["observed"] = True
     # Telemetry must not turn a successful credential/network operation into an
     # ambiguous failure (for example if the state volume just became read-only).
     try:
@@ -140,12 +184,15 @@ def _raw(url, cap=MAX_MACHINE_BODY):
     """Gist raw URLs carry their own secret path; never attach the OAuth token."""
     if not common.gist_raw_url(url):
         return common.Resp(0, error=common.RAW_URL_REFUSED)
+    timeout = _read_timeout(30)
+    if timeout <= 0:
+        return common.Resp(0, error=_READ_TIMEOUT)
     cap = min(MAX_MACHINE_BODY, cap)
     # Preserve the five-argument transport contract while carrying the current
     # cycle's remaining budget through wrappers, independently across threads.
     context = _raw_cap.set(cap)
     try:
-        response = transport(url, "GET", {"User-Agent": UA}, None, 30)
+        response = transport(url, "GET", {"User-Agent": UA}, None, timeout)
         _observe_date(response)
         # Any remaining 3xx is an unfollowed/refused raw transition, including
         # statuses urllib does not handle (for example 300 or 305).
@@ -752,8 +799,11 @@ class SyncSession:
         self.result = result
         self.remote = None
         self._invalid = False
+        self.write_error = None
 
 
+@clock_observation()
+@_read_budget()
 def open_cycle(auto=True):
     """Wait at most 60 seconds for sync and return a successfully merged session.
 
@@ -806,26 +856,36 @@ def write_due(session, text, force=False):
                  (session.auto and now - float(st.get("heartbeatAt") or 0) >= 600))))
 
 
+@clock_observation()
 def write(session, text):
     """PATCH one full snapshot, only against this session's recent secret gist."""
     if not isinstance(session, SyncSession):
         return False
+    session.write_error = None
     try:
         with common.file_lock("sync", timeout=60) as held:
             if not held:
+                session.write_error = "busy"
+                _fail(sync_state(), session.result, common.tr("Синхронизация занята", "Sync is busy"))
                 return False
             auth.LinuxManifest().read()
             return _write_locked(session, text, sync_state())
     except (OSError, ValueError):
+        if session.write_error is None:
+            session.write_error = "storage"
         return False
 
 
 def _write_locked(session, text, st):
     now = time.time()
     if (session._invalid or st.get("gistId") != session.gist_id or st.get("revoked")
-            or not st.get("login") or vault.active(st) != session._active
-            or not 0 <= now - session._fetched_at <= 120
+            or not st.get("login") or vault.active(st) != session._active):
+        session.write_error = "invalid"
+        return False
+    if (not 0 <= now - session._fetched_at <= 120
             or not 0 <= time.monotonic() - session._fetched_mono <= 120):
+        session.write_error = "stale"
+        _fail(st, session.result, common.tr("Сессия синхронизации устарела", "Sync session is stale"))
         return False
     try:
         obj = json.loads(text)
@@ -853,6 +913,8 @@ def _write_locked(session, text, st):
     return True
 
 
+@clock_observation()
+@_read_budget()
 def sync_cycle(days, force=False, auto=False, allow_push=True):
     """One pass: make sure the gist exists, write this machine's snapshot when it changed,
     read and merge everyone else's. `days` = this machine's local index days.
@@ -868,7 +930,7 @@ def sync_cycle(days, force=False, auto=False, allow_push=True):
 
 def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_timeout=60):
     global _first_attempt_at
-    with common.file_lock("sync", blocking=opening, timeout=lock_timeout if opening else None) as held:
+    with common.file_lock("sync", blocking=opening, timeout=lock_timeout if opening else None) as held, _read_budget():
         if not held:
             res.skipped = "busy"
             return res
@@ -1003,6 +1065,9 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
             f = files[name]
             if name == mine or not isinstance(f, dict):
                 continue
+            if _read_timeout(30) <= 0:
+                read_error = common.tr("Чтение синхронизации прервано по сроку", _READ_TIMEOUT)
+                break
             if total >= MAX_TOTAL_BODY:
                 size_error = common.tr("Слишком большой ответ синхронизации (предел 64 МиБ)",
                                        "Sync response too large (64 MiB limit)")
@@ -1035,6 +1100,10 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                         break
                     continue
                 if r.status != 200 or not r.data:
+                    if ((r.error in (_READ_TIMEOUT, common.HTTP_DEADLINE) or _read_timeout(30) <= 0)
+                            and not _rate_limited(r)):
+                        read_error = common.tr("Чтение синхронизации прервано по сроку", _READ_TIMEOUT)
+                        break
                     if _rate_limited(r):
                         st.update(backoffUntil=_backoff_until(r))
                     _fail(st, res, "GET raw_url: " + status_text(r))

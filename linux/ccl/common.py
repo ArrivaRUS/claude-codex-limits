@@ -10,6 +10,8 @@ import calendar
 import contextlib
 import errno
 import fcntl
+import http.client as http_client
+import io
 import json
 import math
 import os
@@ -337,28 +339,36 @@ def _o1_append(record):
     data = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
     # Existing files and restrictive umasks get exactly the same private modes.
     os.chmod(STATE_DIR, 0o700)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("O1 journal is not a regular file")
         os.fchmod(fd, 0o600)
-        if os.fstat(fd).st_size > 1024 * 1024:
+        size = os.fstat(fd).st_size
+        if size + len(data) > 1024 * 1024:
+            # Read only the newest bounded tail, keeping whole JSON lines. The
+            # incoming record is part of the atomic replacement: even just after
+            # this append the journal is <= 512 KiB, with room before rotation.
+            budget = 512 * 1024 - len(data)
+            offset = max(0, size - budget)
+            os.lseek(fd, offset, os.SEEK_SET)
+            tail = os.read(fd, budget)
+            if offset:
+                tail = tail.partition(b"\n")[2]
             cutoff = time.time() - 45 * 86400
             kept = bytearray()
-            with open(path, "rb") as source:
-                for line in source:
-                    try:
-                        old = json.loads(line)
-                        stamp = parse_iso(old.get("ts")) if isinstance(old, dict) else None
-                    except (ValueError, RecursionError):
-                        continue
-                    if stamp is not None and stamp >= cutoff:
-                        kept.extend(line if line.endswith(b"\n") else line + b"\n")
-            write_atomic(path, bytes(kept), mode=0o600)
-            os.close(fd)
-            fd = None
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-            os.fchmod(fd, 0o600)
+            for line in tail.splitlines(keepends=True):
+                try:
+                    old = json.loads(line)
+                    stamp = parse_iso(old.get("ts")) if isinstance(old, dict) else None
+                except (ValueError, RecursionError):
+                    continue
+                if stamp is not None and stamp >= cutoff:
+                    line = line if line.endswith(b"\n") else line + b"\n"
+                    if len(kept) + len(line) <= budget:
+                        kept.extend(line)
+            write_atomic(path, bytes(kept) + data, mode=0o600)
+            return True
         view = memoryview(data)
         while view:
             written = os.write(fd, view)
@@ -785,6 +795,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 BODY_TOO_LARGE = "response body too large"
+HTTP_DEADLINE = "HTTP response deadline exceeded"
 RAW_URL_REFUSED = "gist raw URL refused"
 RAW_REDIRECT_REFUSED = "gist raw redirect refused"
 
@@ -805,10 +816,86 @@ class _RawRedirectRefused(Exception):
     pass
 
 
+class _HTTPDeadlineExceeded(TimeoutError):
+    pass
+
+
+def _http_remaining(deadline, timeout):
+    if deadline is None:
+        return timeout
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _HTTPDeadlineExceeded(HTTP_DEADLINE)
+    return remaining if timeout is None else min(timeout, remaining)
+
+
+class _HTTPDeadlineStream(io.RawIOBase):
+    """Keep the existing socket buffer, checking time each time it is read.
+
+    HTTPResponse.read1 may internally use readline/read for chunk framing and
+    trailers. Putting the deadline below that parser also bounds those reads.
+    """
+    def __init__(self, source, deadline):
+        super().__init__()
+        self.source, self.deadline = source, deadline
+
+    def readable(self):
+        return True
+
+    def readinto(self, target):
+        _http_remaining(self.deadline, None)
+        try:
+            data = self.source.read1(len(target))
+        except TimeoutError:
+            _http_remaining(self.deadline, None)
+            raise
+        _http_remaining(self.deadline, None)
+        target[:len(data)] = data
+        return len(data)
+
+    def close(self):
+        try:
+            self.source.close()
+        finally:
+            super().close()
+
+
+def _read_http_body(response, max_body, deadline):
+    """Read at most cap+1 bytes without letting regular small packets reset time.
+
+    The stream wrapper bounds chunk framing/trailers too: HTTPResponse.read1
+    alone can still perform many underlying reads for chunked responses.
+    In-memory streams and older adapters without read1 retain bounded read(n).
+    An in-flight socket operation can still take its original timeout; no
+    private urllib/socket internals or worker threads are needed to stop trickle.
+    """
+    wire = response.fp if isinstance(response, urllib.error.HTTPError) else response
+    if deadline is not None and isinstance(wire, http_client.HTTPResponse) and wire.fp is not None:
+        wire.fp = io.BufferedReader(_HTTPDeadlineStream(wire.fp, deadline))
+    reader = response.read if isinstance(response, io.BytesIO) else getattr(response, "read1", response.read)
+    data = bytearray()
+    limit = None if max_body is None else max_body + 1
+    while limit is None or len(data) < limit:
+        _http_remaining(deadline, None)
+        try:
+            chunk = reader(64 * 1024 if limit is None else min(64 * 1024, limit - len(data)))
+        except TimeoutError:
+            # A socket timeout at the shared deadline is the same bounded-read
+            # outcome as a packet arriving too late, rather than a new budget.
+            _http_remaining(deadline, None)
+            raise
+        _http_remaining(deadline, None)
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
+
+
 class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
     """Close intermediate bodies unread; forward only normal, credential-free headers."""
-    def __init__(self):
+    def __init__(self, deadline=None):
         self.hops = 0
+        self.deadline = deadline
 
     def http_error_302(self, req, fp, code, msg, headers):
         fp.close()
@@ -826,51 +913,59 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
         forwarded = {k: v for k, v in req.headers.items()
                      if k.lower() not in ("authorization", "cookie", "proxy-authorization")}
         redirected = urllib.request.Request(target, headers=forwarded, method=req.get_method())
-        return self.parent.open(redirected, timeout=req.timeout)
+        return self.parent.open(redirected, timeout=_http_remaining(self.deadline, req.timeout))
 
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
 def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None):
-    """Optional max_body bounds response bytes, including HTTP error bodies."""
+    """Bound response time and optional body bytes, including HTTP error bodies."""
     if max_body is not None and (type(max_body) is not int or max_body < 0):
         raise ValueError("max_body must be a non-negative integer or None")
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     elif isinstance(body, str):
         body = body.encode("utf-8")
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
         if not follow_redirects:
             opener = urllib.request.build_opener(_NoRedirect()).open
         elif gist_raw_url(url):
-            opener = urllib.request.build_opener(_GistRawRedirect()).open
+            opener = urllib.request.build_opener(_GistRawRedirect(deadline)).open
         else:
             opener = urllib.request.urlopen
-        with opener(req, timeout=timeout) as r:
-            data = r.read() if max_body is None else r.read(max_body + 1)
+        with opener(req, timeout=_http_remaining(deadline, timeout)) as r:
             response_headers = {k.lower(): v for k, v in r.headers.items()}
+            try:
+                data = _read_http_body(r, max_body, deadline)
+            except _HTTPDeadlineExceeded:
+                return Resp(0, None, response_headers, HTTP_DEADLINE, original_status=r.status)
             if max_body is not None and len(data) > max_body:
                 return Resp(0, None, response_headers, BODY_TOO_LARGE, original_status=r.status)
             return Resp(r.status, data, response_headers)
     except _RawRedirectRefused:
         return Resp(0, error=RAW_REDIRECT_REFUSED)
+    except _HTTPDeadlineExceeded:
+        return Resp(0, error=HTTP_DEADLINE)
     except urllib.error.HTTPError as e:
+        read_error = None
         try:
             if 300 <= e.code < 400:
                 e.close()
                 data = None
-            elif max_body is None:
-                data = e.read()
             else:
                 with e:
-                    data = e.read(max_body + 1)
+                    data = _read_http_body(e, max_body, deadline)
+        except _HTTPDeadlineExceeded:
+            data = None
+            read_error = HTTP_DEADLINE
         except Exception:
             data = None
         if max_body is not None and data is not None and len(data) > max_body:
             return Resp(0, None, {k.lower(): v for k, v in (e.headers or {}).items()},
                         BODY_TOO_LARGE, original_status=e.code)
-        return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()})
+        return Resp(e.code, data, {k.lower(): v for k, v in (e.headers or {}).items()}, error=read_error)
     except Exception as e:  # network down, DNS, TLS, timeout
         import socket
         cause = e.reason if isinstance(e, urllib.error.URLError) else e

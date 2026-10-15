@@ -131,8 +131,8 @@ def cmd_logout(_args):
 def cmd_push(args):
     settings = common.settings()
     settings.reload()
-    if getattr(args, "auto", False) and settings.get("publisher") is True:
-        return _publisher_pass("auto", quiet=args.quiet)
+    if settings.get("publisher") is True:
+        return _publisher_pass("auto" if getattr(args, "auto", False) else "manual", quiet=args.quiet)
     common.ensure_dirs()
     cb = None if args.quiet else _progress_printer()
     t0 = time.time()
@@ -277,6 +277,11 @@ def cmd_publisher(args):
              else common.tr("Издатель выключен.", "Publisher disabled."))
         return 0
     if args.now:
+        settings.reload()
+        if settings.get("publisher") is not True:
+            _say(common.tr("Сначала включите издатель: ccl-sync publisher --enable",
+                           "Enable the publisher first: ccl-sync publisher --enable"))
+            return 1
         return _publisher_pass("manual")
     settings.reload()
     enabled = settings.get("publisher") is True
@@ -284,7 +289,7 @@ def cmd_publisher(args):
         common.tr("включён", "enabled") if enabled else common.tr("выключен", "disabled")))
     products = [p.capitalize() for p in ("claude", "codex") if common.product_enabled(p)]
     _say(common.tr("Продукты: ", "Products: ") + (", ".join(products) or common.tr("нет", "none")))
-    policy = "guarded" if not enabled and settings.get("credential_write") == "guarded" else "never"
+    policy = common.credential_write()
     _say(common.tr("Политика токенов: ", "Token policy: ") + policy)
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
     return 0

@@ -283,6 +283,22 @@ def _rewrite_json_guarded(path, obj):
 
 # ---- Claude Code ---------------------------------------------------------------------------
 
+def claude_token_policy_blocks(now):
+    """Read-only preflight: a known spent access token cannot be used in never.
+
+    Missing/unreadable credentials retain the provider's normal diagnostic path.
+    No reservation, token update, or HTTP request is made by this check.
+    """
+    if common.credential_write() != "never":
+        return False
+    creds = _read_login(common.CLAUDE_CREDENTIALS, LimitData())
+    oauth = creds.get("claudeAiOauth") if creds else None
+    if not isinstance(oauth, dict):
+        return False
+    expiry = _num(oauth.get("expiresAt"))
+    return expiry is not None and expiry - now * 1000 < 120000
+
+
 def fetch_claude():
     try:
         with _credential_attempt():

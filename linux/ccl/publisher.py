@@ -64,15 +64,16 @@ def _load_product(saved, product, local_id, state):
         if "poll" not in bucket or (_time(mirror.get("last_attempt")) is not None
                                     and mirror["last_attempt"] > poll.last_attempt):
             poll = polling.PollState(mirror)
-        if "retryUntil" not in bucket:
-            bucket["retryUntil"] = _dict(state.get("quotaServerRetryAt")).get(product)
+        deadlines = [_time(bucket.get("retryUntil")),
+                     _time(_dict(state.get("quotaServerRetryAt")).get(product))]
+        bucket["retryUntil"] = max((v for v in deadlines if v is not None), default=None)
     root["accountId"] = local_id
     if previous_id != local_id:
         common.o1_event("label_changed", product=product)
     return bucket, poll
 
 
-def _save(saved, current):
+def _mirrors(current):
     polls, retries = {}, {}
     for product, (local_id, _reason, bucket, poll) in current.items():
         if local_id:
@@ -80,6 +81,11 @@ def _save(saved, current):
             polls[product] = dict(poll.saved(), accountId=local_id)
             if _time(bucket.get("retryUntil")) is not None:
                 retries[product] = bucket["retryUntil"]
+    return polls, retries
+
+
+def _save(saved, current):
+    polls, retries = _mirrors(current)
     # A crash after this first write retains the attempt via the account-fenced
     # mirror. Failure of either write prevents provider I/O.
     common.state().update(autoPollState=polls, quotaServerRetryAt=retries)
@@ -92,7 +98,7 @@ def _remote(session, product, label):
         if not isinstance(machine, dict):
             continue
         for record in machine.get("accounts", []):
-            if record.get("product") != product or record.get("label") != label:
+            if not isinstance(record, dict) or record.get("product") != product or record.get("label") != label:
                 continue
             schedule = _dict(record.get("schedule"))
             out.append(dict(machineId=machine.get("id"), status=record.get("status"),
@@ -138,7 +144,7 @@ def _entry(product, local_id, reason, bucket, poll, auto):
     out["retryUntil"] = common.iso_utc(retry) if retry is not None else None
     schedule = out["schedule"] = dict(mode="auto" if auto else "fixed", interval=poll.interval, backoff=poll.failed)
     if poll.last_attempt:
-        schedule["nextAt"] = common.iso_utc(max(poll.last_attempt + poll.interval, retry or 0))
+        schedule["nextAt"] = common.iso_utc(poll.last_attempt + poll.interval)
     return out
 
 
@@ -178,6 +184,38 @@ def _publish(session, text, result):
     return ok
 
 
+def _publish_failed(result):
+    result["error"] = "publish_failed"
+    try:
+        sync.sync_state().update(lastError="Publisher publication failed", lastErrorAt=time.time())
+    except OSError:
+        # Diagnostic storage must not prevent the reservation rollback. The
+        # caller still receives an error even when status cannot be persisted.
+        pass
+
+
+def _recover_rollback(saved, state):
+    """Complete an interrupted rollback, only after a confirmed PATCH failure.
+
+    The marker is written before either restored file. A crash before a PATCH
+    outcome or after a successful PATCH keeps the original conservative attempt.
+    """
+    rollback = saved.get("_rollback")
+    if not isinstance(rollback, dict):
+        return saved
+    restored = rollback["saved"]
+    state.update(autoPollState=rollback["autoPollState"], quotaServerRetryAt=rollback["quotaServerRetryAt"])
+    common.write_json(os.path.join(common.STATE_DIR, "publisher-state.json"), restored)
+    return restored
+
+
+def _rollback(saved, old_saved, old_auto, old_retry, state):
+    saved["_rollback"] = dict(saved=old_saved, autoPollState=old_auto, quotaServerRetryAt=old_retry)
+    common.write_json(os.path.join(common.STATE_DIR, "publisher-state.json"), saved)
+    _recover_rollback(saved, state)
+    saved.pop("_rollback", None)
+
+
 def _accept(product, local_id, bucket, data):
     """C3 fallback and cache writes are restricted to this identity's snapshot.
 
@@ -201,10 +239,11 @@ def _accept(product, local_id, bucket, data):
     common.write_json(common.CACHE_PATH, cache)
 
 
-def _locked(kind, ix, result):
+def _locked(kind, ix, result, reopened=False):
     state = common.state()
     state.reload()
     saved = _dict(common.read_json(os.path.join(common.STATE_DIR, "publisher-state.json"), {}))
+    saved = _recover_rollback(saved, state)
     settings = common.settings()
     settings.reload()
     auto = bool(settings.get("autoPoll"))
@@ -236,6 +275,9 @@ def _locked(kind, ix, result):
         if not local_id or not gist_id:
             _skip(result, product, "no_login" if reason == "no_login" else "no_label")
             continue
+        if product == "claude" and limits.claude_token_policy_blocks(now):
+            _skip(result, product, "token_policy")
+            continue
         local_due = poll.due(now, manual=kind == "manual")
         interval = polling.MINIMUM if kind == "manual" and not poll.failed else poll.interval
         own_next = poll.last_attempt + interval if poll.last_attempt else now
@@ -254,7 +296,7 @@ def _locked(kind, ix, result):
             next_at = max(next_at, min(retry["until"], retry["firstSeenAt"] + coordination.RETRY_CAP))
         if decision and decision.reason == "remote_attempt":
             # Use precisely the records admitted by B2, including its time fences.
-            valid = coordination._records(now, remote, common.machine_id())
+            valid = coordination.records(now, remote, common.machine_id())
             next_at = max([next_at] + [r["attemptAt"] + coordination.ATTEMPT_WINDOW
                                       for r in valid if r["attemptAt"] is not None])
         result["next_at"][product] = next_at
@@ -282,14 +324,41 @@ def _locked(kind, ix, result):
                 _skip(result, product, "state_unsaved")
             return
         if session and not _publish(session, _text(saved, current, ix, gist_id, auto), result):
-            # Only these owned keys are restored; concurrent unrelated state is
-            # preserved by Store.update's locked read/modify/write.
-            state.update(autoPollState=old_auto, quotaServerRetryAt=old_retry)
-            common.write_json(os.path.join(common.STATE_DIR, "publisher-state.json"), old_saved)
+            if not reopened and getattr(session, "write_error", None) in ("stale", "busy"):
+                _rollback(saved, old_saved, old_auto, old_retry, state)
+                return _locked(kind, ix, result, reopened=True)
+            _publish_failed(result)
+            count = saved.get("_publishFailures", 0)
+            count = min(count + 1, 3) if type(count) is int and count >= 0 else 1
+            saved["_publishFailures"] = old_saved["_publishFailures"] = count
+            fallback = [p for p in due if count >= 3 or
+                        (old_polls[p]["last_attempt"] > 0 and
+                         now - old_polls[p]["last_attempt"] >= max(old_polls[p]["interval"], coordination.RETRY_CAP))]
+            if not fallback:
+                # Journal before restoring either file. Store.update preserves
+                # unrelated keys that other components may have changed.
+                _rollback(saved, old_saved, old_auto, old_retry, state)
+                for product in due:
+                    _skip(result, product, "publish_failed")
+                    result["next_at"][product] = old_polls[product]["last_attempt"] + old_polls[product]["interval"]
+                return
+            # A failed announcement is treated like an unavailable gist only
+            # for products whose own schedule has exhausted the failure budget.
             for product in due:
-                _skip(result, product, "publish_failed")
-                result["next_at"][product] = old_polls[product]["last_attempt"] + old_polls[product]["interval"]
-            return
+                if product not in fallback:
+                    local_id, reason, bucket, _poll = current[product]
+                    bucket.clear()
+                    bucket.update(old_saved[product]["accounts"][local_id])
+                    current[product] = local_id, reason, bucket, polling.PollState(old_polls[product])
+                    _skip(result, product, "publish_failed")
+            due, session = fallback, None
+            # Mixed fallback still rolls back the excluded products. Journal
+            # the complete target (retaining the fallback reservations) before
+            # either mirror is restored, exactly as for a full rollback.
+            polls, retries = _mirrors(current)
+            _rollback(saved, copy.deepcopy(saved), polls, retries, state)
+        elif session:
+            saved["_publishFailures"] = 0
         for product in due:
             local_id, _reason, bucket, poll = current[product]
             bucket["attemptPublished"] = session is not None
@@ -338,12 +407,16 @@ def _locked(kind, ix, result):
                       for _local_id, _reason, bucket, poll in current.values())
         if sync.write_due(session, text, force=bool(due) or pending):
             if _publish(session, text, result):
+                saved["_publishFailures"] = 0
                 for _local_id, _reason, bucket, poll in current.values():
                     if poll.last_attempt:
                         bucket["attemptPublished"] = True
                 _save(saved, current)
+            else:
+                _publish_failed(result)
 
 
+@sync.clock_observation()
 def run_pass(kind="auto"):
     """Run once; return {polled, skipped, next_at, error} for CLI/status callers.
 

@@ -1,6 +1,7 @@
 """Local account identity and gist-scoped labels, without credential updates."""
 
 import hashlib
+import copy
 import hmac
 import json
 import math
@@ -443,7 +444,7 @@ def build(*, gist_id, entries, unattributed_days, captions):
                                      for model, counts in models.items()}
                                for day, models in days.items()}
                       for product, days in projection.items()}
-        unattributed = projection
+        unattributed = copy.deepcopy(projection)
     block = {"accounts": accounts, "unattributedDays": unattributed,
              "captions": _writer_captions(captions), "days": projection}
     if overflow:

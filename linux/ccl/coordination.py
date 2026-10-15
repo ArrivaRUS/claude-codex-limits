@@ -6,6 +6,7 @@ There are no clocks, I/O or process-local caches here.
 """
 
 import math
+import re
 from collections import namedtuple
 
 from .polling import STEPS, normalize_interval
@@ -30,12 +31,16 @@ def _number(value):
 
 def _pair(value):
     if (isinstance(value, (tuple, list)) and len(value) == 2
-            and isinstance(value[0], str) and value[0] and _number(value[1]) is not None):
+            and _machine_id(value[0]) and _number(value[1]) is not None):
         return value[0], value[1]
     return None
 
 
-def _records(now, remote, my_id):
+def _machine_id(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9-]{1,64}", value) is not None
+
+
+def records(now, remote, my_id):
     """Reject stale/inconsistent records as a whole; malformed individual times are absent."""
     if not isinstance(remote, (list, tuple)):
         return []
@@ -47,7 +52,7 @@ def _records(now, remote, my_id):
         if not isinstance(machine_id, str) or not machine_id or machine_id == my_id:
             continue
         seen = _number(record.get("lastSeenAt"))
-        if seen is None or seen < now - LIVE_WINDOW:
+        if seen is None or seen < now - LIVE_WINDOW or seen > now + SKEW:
             continue
         as_of = _number(record.get("asOf"))
         attempt = _number(record.get("attemptAt"))
@@ -122,9 +127,9 @@ def decide(now, mine, remote, my_id, tie_wait=None):
         now = 0
     mine = mine if isinstance(mine, dict) else {}
     interval = normalize_interval(mine.get("interval"))
-    records = _records(now, remote, my_id)
+    admitted = records(now, remote, my_id)
     last_attempt = _number(mine.get("last_attempt"))
-    retry, events = _remote_retry(now, mine.get("remote_retry"), records, last_attempt)
+    retry, events = _remote_retry(now, mine.get("remote_retry"), admitted, last_attempt)
     remembered = _pair(tie_wait)
 
     server_until = _number(mine.get("server_until"))
@@ -133,18 +138,19 @@ def decide(now, mine, remote, my_id, tie_wait=None):
             or (remote_until is not None and now < remote_until)):
         return Decision("skip", "retry_after", remembered, retry, events)
 
-    if any(r["attemptAt"] is not None and now - r["attemptAt"] < ATTEMPT_WINDOW for r in records):
+    if any(r["attemptAt"] is not None and now - r["attemptAt"] < ATTEMPT_WINDOW for r in admitted):
         return Decision("skip", "remote_attempt", remembered, retry, events)
 
     if mine.get("manual") is not True:
         if any(r["status"] == "ok" and r["asOf"] is not None
-               and now - r["asOf"] < interval + SKEW for r in records):
+               and now - r["asOf"] < interval + SKEW for r in admitted):
             return Decision("skip", "fresh_remote", remembered, retry, events)
 
         if last_attempt is not None and isinstance(my_id, str):
             due = last_attempt + interval
-            candidates = [(r["machineId"], r["nextAt"]) for r in records
-                          if r["nextAt"] is not None and abs(r["nextAt"] - due) <= SKEW
+            candidates = [(r["machineId"], r["nextAt"]) for r in admitted
+                          if _machine_id(r["machineId"]) and r["nextAt"] is not None
+                          and abs(r["nextAt"] - due) <= SKEW
                           and r["lastSeenAt"] >= now - 900 and r["machineId"] < my_id]
             # A stable winner prevents record order / multiple peers from making
             # us alternate between pairs and wait indefinitely.
