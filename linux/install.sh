@@ -5,17 +5,32 @@
 #   sh linux/install.sh                 # everything: ccl-sync, tray app, 10-minute timer, autostart
 #   sh linux/install.sh --no-autostart  # don't start the tray app at login
 #   sh linux/install.sh --no-timer      # don't install the systemd/cron timer
+#   sh linux/install.sh --publisher --no-tray --name vps
+#                                       # headless limits publisher: 5-minute timer, token policy `never`,
+#                                       # machine tag <name> ([a-z0-9-], 1-16 chars, required); refuses while
+#                                       # this user's tray app runs; --no-tray: no menu entry, no autostart
 set -eu
 
 AUTOSTART=1
 TIMER=1
-for a in "$@"; do
-    case "$a" in
+TRAY=1
+PUBLISHER=0
+NAME=
+NAME_SET=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --no-autostart) AUTOSTART=0 ;;
         --no-timer) TIMER=0 ;;
-        -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
-        *) echo "unknown option: $a" >&2; exit 2 ;;
+        --no-tray) TRAY=0; AUTOSTART=0 ;;
+        --publisher) PUBLISHER=1 ;;
+        --name)
+            [ "$#" -ge 2 ] || { echo "--name: нужен тег машины, например --name vps" >&2; exit 2; }
+            NAME=$2; NAME_SET=1; shift ;;
+        --name=*) NAME=${1#--name=}; NAME_SET=1 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
 SRC=$(cd "$(dirname "$0")" && pwd)
@@ -27,9 +42,54 @@ CONF="${XDG_CONFIG_HOME:-$HOME/.config}"
 
 say() { printf '%s\n' "$*"; }
 
+# ---- checks that come before any write: --name, a running tray (A4) ----
+if [ "$NAME_SET" = 1 ] && [ "$PUBLISHER" = 0 ]; then
+    say "--name задаёт тег издателя и используется только вместе с --publisher."
+    exit 2
+fi
+if [ "$PUBLISHER" = 1 ]; then
+    if [ "$NAME_SET" = 0 ]; then
+        # A desktop hostname is often <user>-<model>: the public tag in the gist is chosen explicitly (A1 N7).
+        say "Для --publisher нужен --name <тег> — короткое имя машины в gist (например --name vps)."
+        exit 2
+    fi
+    case "$NAME" in
+        ""|-*|*-|*[!abcdefghijklmnopqrstuvwxyz0123456789-]*) NAME_OK=0 ;;
+        *) NAME_OK=1 ;;
+    esac
+    if [ "$NAME_OK" = 0 ] || [ "${#NAME}" -gt 16 ]; then
+        say "--name: тег из строчных латинских букв, цифр и дефиса, 1–16 символов (например vps, macbook, alse)."
+        exit 2
+    fi
+fi
+UID_NUM=$(id -u)
+if [ "$PUBLISHER" = 1 ]; then
+    # A tray of this user (0.4.x included) polls on its own and may hold an unfinished token rotation.
+    # Refuse instead of stopping or restarting it: the owner stops it first (T1 П3-б.3).
+    TRAY_PATTERN='(^|[/ ])claude-codex-limits( |$)'
+    set +e
+    pgrep -u "$UID_NUM" -f "$TRAY_PATTERN" >/dev/null 2>&1
+    TRAY_RC=$?
+    set -e
+    if [ "$TRAY_RC" != 1 ]; then
+        if [ "$TRAY_RC" = 0 ]; then
+            say "Запущен значок в трее Claude Codex Limits этого пользователя — с ним издатель включать нельзя."
+        else
+            say "Не удалось проверить, запущен ли значок в трее (pgrep, код $TRAY_RC)."
+        fi
+        say "Остановите значок и запустите установку снова. Команда остановки:"
+        say "  pkill -u $UID_NUM -f '$TRAY_PATTERN'"
+        exit 3
+    fi
+fi
+
 [ -x "$PY" ] || { say "Нужен системный Python 3 ($PY)."; exit 1; }
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 7) else 1)' || { say "Нужен Python 3.7 или новее."; exit 1; }
-if "$PY" -c 'import PyQt5.QtWidgets' 2>/dev/null; then GUI=1; else
+if [ "$TRAY" = 0 ]; then
+    GUI=0
+elif "$PY" -c 'import PyQt5.QtWidgets' 2>/dev/null; then
+    GUI=1
+else
     GUI=0
     say "PyQt5 не найден — ставлю только ccl-sync. Для значка в трее: sudo apt install python3-pyqt5"
 fi
@@ -53,9 +113,38 @@ for name in ccl-sync claude-codex-limits; do
     chmod 755 "$BIN/$name" 2>/dev/null || say "Не удалось сделать $BIN/$name исполняемым — запускайте: $PY $DEST/$name"
 done
 
-# application menu entry
-mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-DESKTOP_ENTRY="[Desktop Entry]
+if [ "$PUBLISHER" = 1 ]; then
+    # Settings through the installed code: under the `quota` lock and the rotation guard, like
+    # `ccl-sync publisher --enable`; the other keys of settings.json are kept.
+    if ! "$PY" -I -B - "$DEST" "$NAME" <<'PYEOF'
+import sys
+sys.path.insert(0, sys.argv[1])
+from ccl import common
+try:
+    with common.file_lock("quota", timeout=60) as held:
+        if not held:
+            print("Значок или издатель сейчас заняты попыткой (замок quota) — повторите установку позже.")
+            sys.exit(1)
+        common.set_credential_write("never")
+        common.settings().update(publisher=True, autoPoll=True, credential_write="never", machineName=sys.argv[2])
+except common.CredentialPolicyRefused as e:
+    print("Политику токенов сейчас сменить нельзя: %s" % e)
+    sys.exit(1)
+except OSError:
+    print("Не удалось сохранить настройки; проверьте права на ~/.config/claude-codex-limits и каталог состояния.")
+    sys.exit(1)
+PYEOF
+    then
+        say "Настройки издателя не записаны — таймер не устанавливаю."
+        exit 1
+    fi
+    say "Издатель: включён, тег машины $NAME, политика токенов never"
+fi
+
+if [ "$TRAY" = 1 ]; then
+    # application menu entry
+    mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    DESKTOP_ENTRY="[Desktop Entry]
 Type=Application
 Name=Claude Codex Limits
 Comment=Лимиты Claude Code и Codex в трее
@@ -64,13 +153,21 @@ Icon=$DEST/Resources/appicon.png
 Terminal=false
 Categories=Utility;
 "
-printf '%s' "$DESKTOP_ENTRY" > "${XDG_DATA_HOME:-$HOME/.local/share}/applications/claude-codex-limits.desktop"
+    printf '%s' "$DESKTOP_ENTRY" > "${XDG_DATA_HOME:-$HOME/.local/share}/applications/claude-codex-limits.desktop"
 
-if [ "$GUI" = 1 ] && [ "$AUTOSTART" = 1 ]; then
-    mkdir -p "$CONF/autostart"
-    printf '%sX-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\n' "$DESKTOP_ENTRY" > "$CONF/autostart/claude-codex-limits.desktop"
-    say "Автозапуск значка: $CONF/autostart/claude-codex-limits.desktop"
+    if [ "$GUI" = 1 ] && [ "$AUTOSTART" = 1 ]; then
+        mkdir -p "$CONF/autostart"
+        printf '%sX-GNOME-Autostart-enabled=true\nX-KDE-autostart-after=panel\n' "$DESKTOP_ENTRY" > "$CONF/autostart/claude-codex-limits.desktop"
+        say "Автозапуск значка: $CONF/autostart/claude-codex-limits.desktop"
+    fi
 fi
+
+# `systemctl --user` needs the user's runtime directory; a session without one (ssh, su) gets it only if it exists.
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$UID_NUM" ]; then
+    XDG_RUNTIME_DIR="/run/user/$UID_NUM"
+    export XDG_RUNTIME_DIR
+fi
+if [ "$PUBLISHER" = 1 ]; then MINUTES=5; else MINUTES=10; fi
 
 if [ "$TIMER" = 1 ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
@@ -84,16 +181,19 @@ After=network-online.target
 [Service]
 Type=oneshot
 ExecStart=$PY "$DEST/ccl-sync" push --auto --quiet
+# Finite, and above the worst pass (lock waits, 60 s of reads, provider requests): a stuck pass is
+# stopped and the next tick runs. Not 300 s — that would cut ordinary slow passes.
+TimeoutStartSec=20min
 Nice=10
 IOSchedulingClass=idle
 EOF
         cat > "$UNITS/ccl-sync.timer" <<EOF
 [Unit]
-Description=Claude Codex Limits sync every 10 minutes
+Description=Claude Codex Limits sync every $MINUTES minutes
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=10min
+OnUnitActiveSec=${MINUTES}min
 AccuracySec=1min
 
 [Install]
@@ -101,15 +201,15 @@ WantedBy=timers.target
 EOF
         systemctl --user daemon-reload || true
         if systemctl --user enable --now ccl-sync.timer >/dev/null 2>&1; then
-            say "Таймер: systemd --user (ccl-sync.timer), каждые 10 минут"
+            say "Таймер: systemd --user (ccl-sync.timer), каждые $MINUTES минут"
         else
             say "Не удалось включить ccl-sync.timer — синхронизация будет идти, пока запущен значок в трее."
         fi
     elif command -v crontab >/dev/null 2>&1; then
         # cron has no session bus; point it at the user's one so the keyring stays reachable
-        LINE="*/10 * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"
+        LINE="*/$MINUTES * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"
         ( crontab -l 2>/dev/null | grep -v 'ccl-sync" push' ; printf '%s\n' "$LINE" ) | crontab -
-        say "Таймер: cron, каждые 10 минут"
+        say "Таймер: cron, каждые $MINUTES минут"
     else
         say "Ни systemd --user, ни cron не найдены — синхронизация только пока запущен значок в трее."
     fi

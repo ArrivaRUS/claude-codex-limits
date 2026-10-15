@@ -39,6 +39,7 @@ MAX_TOTAL_BODY = 64 * 1024 * 1024
 _BODY_TOO_LARGE = common.BODY_TOO_LARGE
 _raw_cap = ContextVar("ccl_raw_cap", default=None)
 _read_deadline = ContextVar("ccl_read_deadline", default=None)
+_pass_read = ContextVar("ccl_pass_read", default=None)
 _clock_observation = ContextVar("ccl_clock_observation", default=None)
 _READ_TIMEOUT = "Sync read deadline exceeded"
 _sleep = time.sleep
@@ -66,13 +67,40 @@ def clock_observation():
 
 
 @contextmanager
+def pass_read_budget():
+    """One 60 s read budget for a whole publisher pass (R2-n2).
+
+    It is spent by GitHub reads (network GETs) and by waiting for the `sync` lock
+    to open a session; a session reopened later in the pass gets only what is
+    left, never a fresh 60 s. Provider requests and local work (merge, files)
+    do not spend it.
+    """
+    if _pass_read.get() is not None:
+        yield
+        return
+    context = _pass_read.set({"spent": 0.0})
+    try:
+        yield
+    finally:
+        _pass_read.reset(context)
+
+
+def _spend_read(started):
+    shared = _pass_read.get()
+    if shared is not None:
+        shared["spent"] += max(0.0, time.monotonic() - started)
+
+
+@contextmanager
 def _read_budget():
     # Auth recovery and nested cycles share the original deadline. Waiting for
     # sync can consume this budget too; it must never extend the read phase.
     if _read_deadline.get() is not None:
         yield
         return
-    context = _read_deadline.set(time.monotonic() + 60)
+    shared = _pass_read.get()
+    deadline = time.monotonic() + (60 if shared is None else max(0.0, 60 - shared["spent"]))
+    context = _read_deadline.set(deadline)
     try:
         yield
     finally:
@@ -144,12 +172,17 @@ def gh(path, token, method="GET", body=None, timeout=20):
          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": UA}
     if body is not None:
         h["Content-Type"] = "application/json"
-    response = transport(url, method, h, body, timeout)
+    started = time.monotonic()
+    try:
+        response = transport(url, method, h, body, timeout)
+    finally:
+        if method == "GET":
+            _spend_read(started)
     _observe_date(response)
     response = _bounded_response(response, MAX_BODY)
-    if (method == "PATCH" and response.error in (_BODY_TOO_LARGE, common.HTTP_DEADLINE)
+    if (method == "PATCH" and response.error in (_BODY_TOO_LARGE, common.HTTP_DEADLINE, common.INCOMPLETE_BODY)
             and response.original_status is not None and 200 <= response.original_status < 300):
-        # GitHub PATCH echoes the gist. A huge/slow echo must not turn a confirmed
+        # GitHub PATCH echoes the gist. A huge/slow/cut-short echo must not turn a confirmed
         # successful write into a failed announcement; no response body is needed.
         return common.Resp(response.original_status, headers=response.headers)
     return response
@@ -195,7 +228,11 @@ def _raw(url, cap=MAX_MACHINE_BODY):
     # cycle's remaining budget through wrappers, independently across threads.
     context = _raw_cap.set(cap)
     try:
-        response = transport(url, "GET", {"User-Agent": UA}, None, timeout)
+        started = time.monotonic()
+        try:
+            response = transport(url, "GET", {"User-Agent": UA}, None, timeout)
+        finally:
+            _spend_read(started)
         _observe_date(response)
         # Any remaining 3xx is an unfollowed/refused raw transition, including
         # statuses urllib does not handle (for example 300 or 305).
@@ -813,7 +850,7 @@ def open_cycle(auto=True):
     A partial merge is still a read; errors that leave only an old remote cache
     are not. No lock or secret resource escapes on a failed open.
     """
-    deadline = time.monotonic() + 60
+    deadline = _read_deadline.get()   # set by @_read_budget: shared with the rest of the pass
     try:
         for _ in range(2):
             remaining = deadline - time.monotonic()
@@ -868,8 +905,10 @@ def write(session, text):
     try:
         with common.file_lock("sync", timeout=60) as held:
             if not held:
+                # A busy lock is a skip, not an error (sync-protocol): lastError stays untouched.
                 session.write_error = "busy"
-                _fail(sync_state(), session.result, common.tr("Синхронизация занята", "Sync is busy"))
+                session.result.ok = False
+                session.result.error = common.tr("Синхронизация занята", "Sync is busy")
                 return False
             auth.LinuxManifest().read()
             return _write_locked(session, text, sync_state())
@@ -910,7 +949,12 @@ def _write_locked(session, text, st):
     if not 200 <= response.status < 300:
         _handle(response, st, session.result, session._token, "PATCH /gists/{id}", session._active)
         return False
-    st.update(pushHash=push_hash, metaHash=meta_hash, pushedAt=now, heartbeatAt=now)
+    try:
+        st.update(pushHash=push_hash, metaHash=meta_hash, pushedAt=now, heartbeatAt=now)
+    except (OSError, ValueError):
+        # The PATCH is confirmed by GitHub; only the local fingerprints were not saved
+        # (e.g. ENOSPC). The write stands — the next pass simply repeats the PATCH.
+        pass
     session._files[my_file_name()] = {"content": text}
     session.result.pushed = True
     return True
@@ -931,9 +975,18 @@ def sync_cycle(days, force=False, auto=False, allow_push=True):
     return _sync_cycle(days, force, auto, SyncResult(), allow_push) if result.skipped == "renewed" else result
 
 
+@contextmanager
+def _sync_lock(opening, lock_timeout):
+    """The `sync` flock; waiting for it to open a session spends the pass read budget."""
+    started = time.monotonic()
+    with common.file_lock("sync", blocking=opening, timeout=lock_timeout if opening else None) as held:
+        _spend_read(started)
+        yield held
+
+
 def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_timeout=60):
     global _first_attempt_at
-    with common.file_lock("sync", blocking=opening, timeout=lock_timeout if opening else None) as held, _read_budget():
+    with _sync_lock(opening, lock_timeout) as held, _read_budget():
         if not held:
             res.skipped = "busy"
             return res
@@ -1162,9 +1215,10 @@ def last_ok_at(st=None):
     return st.get("lastOkAt") or st.get("lastSync")
 
 
-def warning(st=None, now=None, moment=None, require_attempt=True):
+def warning(st=None, now=None, moment=None, require_attempt=True, error_text=None):
     """The orange line for the main screen, or None when sync is fine or off
-    (docs/sync-protocol.md → Errors → Visibility). `moment` formats a time ("HH:MM")."""
+    (docs/sync-protocol.md → Errors → Visibility). `moment` formats a time ("HH:MM").
+    `error_text` replaces the stored lastError in the line (`ccl-sync status` never prints it verbatim)."""
     st = st or sync_state()
     now = time.time() if now is None else now
     moment = moment or (lambda t: time.strftime("%H:%M", time.localtime(t)))
@@ -1179,9 +1233,10 @@ def warning(st=None, now=None, moment=None, require_attempt=True):
     if not st.get("login") or (require_attempt and _first_attempt_at is None):
         return None
     err = st.get("lastError")
+    shown = str(err) if error_text is None else error_text
     since = last_ok_at(st) or st.get("pushedAt")
     if not since:
-        return (common.tr("Синхронизация не работает: ", "Sync isn't working: ") + str(err)) if err else None
+        return (common.tr("Синхронизация не работает: ", "Sync isn't working: ") + shown) if err else None
     # A post-threshold error confirms the stall; sleeping through the threshold doesn't.
     try:
         since, error_at = float(since), float(st.get("lastErrorAt") or 0)
@@ -1195,8 +1250,8 @@ def warning(st=None, now=None, moment=None, require_attempt=True):
         since_text = moment(since)
     except (ValueError, OverflowError, OSError):
         return None
-    return common.tr("Синхронизация стоит с %s: %s" % (since_text, str(err)),
-                     "Sync stalled since %s: %s" % (since_text, str(err)))
+    return common.tr("Синхронизация стоит с %s: %s" % (since_text, shown),
+                     "Sync stalled since %s: %s" % (since_text, shown))
 
 
 def machine_list():

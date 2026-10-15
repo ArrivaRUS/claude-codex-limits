@@ -5,13 +5,17 @@
     ccl-sync status     who is signed in, the gist, which machines are in it and when they reported
     ccl-sync credentials --write never|guarded   set the token write policy
     ccl-sync publisher --enable|--disable|--now|--status   control the headless publisher
+    ccl-sync publisher --products claude[,codex] | --mode auto | --mode fixed <seconds>
     ccl-sync push       one pass: index the local logs, write this machine's file, read the others
     ccl-sync dump       per-day, per-model summary of the local logs (to check the numbers)
     ccl-sync update     install the newest Linux version from the repository's main branch
 """
 
 import argparse
+import json
+import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -193,22 +197,93 @@ def cmd_push(args):
     return 0
 
 
+_SPAN = re.compile(r"(\d+)\s*(s|sec|m|min)?")
+
+
+def _timer_minutes():
+    """OnUnitActiveSec of the ccl-sync.timer that systemd loads (the user's unit wins), in whole minutes.
+    No readable unit: install.sh writes 5 min for a publisher, the .deb ships 10 min."""
+    conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.HOME, ".config")
+    for d in (os.path.join(conf, "systemd", "user"), "/etc/systemd/user", "/usr/lib/systemd/user",
+              "/lib/systemd/user"):
+        try:
+            with open(os.path.join(d, "ccl-sync.timer"), encoding="utf-8") as f:
+                text = f.read(64 * 1024)
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in text.splitlines():
+            key, _, value = line.partition("=")
+            m = _SPAN.fullmatch(value.strip()) if key.strip() == "OnUnitActiveSec" else None
+            if m:
+                seconds = int(m.group(1)) * (60 if m.group(2) in ("m", "min") else 1)
+                if seconds >= 60 and seconds % 60 == 0:
+                    return seconds // 60
+        break
+    return 5 if common.settings().get("publisher") is True else 10
+
+
 def _timer_status():
     try:
         r = subprocess.run(["systemctl", "--user", "is-active", "ccl-sync.timer"],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
         s = r.stdout.decode().strip()
         if s == "active":
-            return common.tr("systemd --user, каждые 10 мин", "systemd --user, every 10 min")
+            minutes = _timer_minutes()
+            return common.tr("systemd --user, каждые %d мин" % minutes, "systemd --user, every %d min" % minutes)
     except (OSError, subprocess.SubprocessError):
         pass
     try:
         r = subprocess.run(["crontab", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
-        if b"ccl-sync" in r.stdout:
-            return common.tr("cron, каждые 10 мин", "cron, every 10 min")
+        line = next((ln for ln in r.stdout.decode("utf-8", "replace").splitlines() if "ccl-sync" in ln), None)
+        if line is not None:
+            m = re.match(r"\s*\*/(\d+)\s", line)
+            minutes = int(m.group(1)) if m else 10
+            return common.tr("cron, каждые %d мин" % minutes, "cron, every %d min" % minutes)
     except (OSError, subprocess.SubprocessError):
         pass
     return common.tr("не установлен (см. linux/install.sh)", "not installed (see linux/install.sh)")
+
+
+def _journal_counts(now):
+    """24 h counters from the publisher's O1 journal: per product (requests, 429) and failed publications."""
+    counts = {"claude": [0, 0], "codex": [0, 0], "failed": 0}
+    try:
+        with open(os.path.join(common.STATE_DIR, "publisher.jsonl"), "rb") as f:
+            data = f.read(2 * 1024 * 1024)       # rotation keeps the journal ≤ 1 MiB
+    except OSError:
+        return counts
+    for line in data.splitlines():
+        try:
+            rec = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(rec, dict):
+            continue
+        ts = common.parse_iso(rec.get("ts"))
+        if ts is None or not now - 86400 < ts <= now:
+            continue
+        ev, product = rec.get("ev"), rec.get("product")
+        if ev == "poll_attempt" and product in ("claude", "codex"):
+            counts[product][0] += 1
+        elif (ev == "poll_result" and product in ("claude", "codex") and type(rec.get("httpStatus")) is int
+              and rec["httpStatus"] == 429):
+            counts[product][1] += 1
+        elif ev == "publish" and rec.get("result") == "failed":
+            counts["failed"] += 1
+    return counts
+
+
+def _say_o2(st):
+    """Publisher diagnostics (O2): state directory, 24 h counters, clock skew. Numbers and paths only."""
+    _say(common.tr("Каталог состояния: ", "State directory: ") + common.STATE_DIR)
+    counts = _journal_counts(time.time())
+    for product, title in (("claude", "Claude"), ("codex", "Codex")):
+        _say(title + common.tr(" · за 24 ч: запросов %d, 429 — %d", " · last 24 h: requests %d, 429 %d")
+             % tuple(counts[product]))
+    _say(common.tr("Публикации · за 24 ч: неудачных %d", "Publications · last 24 h: failed %d") % counts["failed"])
+    skew = st.get("clockSkew")
+    if polling.number(skew):
+        _say(common.tr("Расхождение часов с GitHub: %d с", "Clock skew vs GitHub: %d s") % int(round(skew)))
 
 
 def cmd_credentials(args):
@@ -250,8 +325,51 @@ def _publisher_pass(kind, quiet=False):
     return 0
 
 
+def _publisher_changes(args):
+    """--products / --mode → settings changes, or None after printing why they are refused."""
+    if args.products is not None:
+        chosen = [p.strip() for p in args.products.split(",")]
+        if not chosen or any(p not in ("claude", "codex") for p in chosen):
+            _say(common.tr("--products: claude, codex или claude,codex", "--products: claude, codex or claude,codex"))
+            return None
+        return {"monitor_claude": "claude" in chosen, "monitor_codex": "codex" in chosen}
+    mode = args.mode
+    if mode == ["auto"]:
+        return {"autoPoll": True}
+    if len(mode) == 2 and mode[0] == "fixed" and re.fullmatch(r"[0-9]{1,6}", mode[1]) and int(mode[1]) in polling.STEPS:
+        return {"autoPoll": False, "interval": int(mode[1])}
+    _say(common.tr("--mode auto или --mode fixed <секунды>, где секунды — ", "--mode auto or --mode fixed <seconds>, seconds one of ")
+         + ", ".join(str(v) for v in polling.STEPS))
+    return None
+
+
+def _publisher_mode_text(settings):
+    if settings.get("autoPoll") is True:
+        return common.tr("Режим: авто", "Mode: auto")
+    return common.tr("Режим: фиксированный, %d с", "Mode: fixed, %d s") % polling.normalize_interval(settings.get("interval"))
+
+
 def cmd_publisher(args):
     settings = common.settings()
+    if args.products is not None or args.mode is not None:
+        changes = _publisher_changes(args)
+        if changes is None:
+            return 2
+        try:
+            # The publisher reads these settings under quota; never change them in the middle of its attempt.
+            with common.file_lock("quota", timeout=60) as held:
+                if not held:
+                    _say(common.tr("Издатель занят попыткой — настройки не изменены, повторите позже.",
+                                   "The publisher is busy with an attempt — settings unchanged, retry later."))
+                    return 1
+                settings.update(**changes)
+        except OSError:
+            _say(common.tr("Не удалось сохранить настройки издателя; проверьте права доступа к настройкам и состоянию.",
+                           "Could not save publisher settings; check access permissions for settings and state."))
+            return 1
+        settings.reload()
+        _say(common.tr("Сохранено. ", "Saved. ") + _publisher_mode_text(settings))
+        return 0
     if args.enable or args.disable:
         try:
             with common.file_lock("quota", timeout=60) as held:
@@ -289,6 +407,7 @@ def cmd_publisher(args):
         common.tr("включён", "enabled") if enabled else common.tr("выключен", "disabled")))
     products = [p.capitalize() for p in ("claude", "codex") if common.product_enabled(p)]
     _say(common.tr("Продукты: ", "Products: ") + (", ".join(products) or common.tr("нет", "none")))
+    _say(_publisher_mode_text(settings))
     policy = common.credential_write()
     _say(common.tr("Политика токенов: ", "Token policy: ") + policy)
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
@@ -297,29 +416,38 @@ def cmd_publisher(args):
 
 def cmd_status(_args):
     st = sync.sync_state()
-    token, backend, gist = None, None, None
+    token, backend, gist, degraded = None, None, None, False
     with common.file_lock("sync", blocking=False) as held:
         if held:
-            st.reload()
-            if st.get("login") and not st.get("revoked"):
-                access = sync.ensure_access(reason="status", lock_held=True)
-                token = access.access if access.kind == "ready" else None
-                backend = (access.ref or {}).get("backend") if token else access.reason
+            try:
                 st.reload()
-                if token and st.get("gistId"):
-                    g = sync.gh("/gists/" + st.get("gistId"), token)
-                    if g.status == 200:
-                        gist = g.json()
+                if st.get("login") and not st.get("revoked"):
+                    access = sync.ensure_access(reason="status", lock_held=True)
+                    token = access.access if access.kind == "ready" else None
+                    backend = (access.ref or {}).get("backend") if token else access.reason
+                    st.reload()
+                    if token and st.get("gistId"):
+                        g = sync.gh("/gists/" + st.get("gistId"), token)
+                        if g.status == 200:
+                            gist = g.json()
+            except (OSError, ValueError):
+                # Full disk / unwritable state: show what is cached, never an exception text.
+                token, backend, gist, degraded = None, None, None, True
     pending = sync.sign_out_incomplete(st)
     _say("Claude Codex Limits (linux %s)" % APP_VERSION)
+    try:
+        mid = common.machine_id()
+    except OSError:
+        mid = "?"
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
-        common.machine_name(), common.os_name(), common.machine_id()))
+        common.machine_name(), common.os_name(), mid))
     policy = common.credential_write()
     settings = common.settings()
     settings.reload()
     policy_note = (common.tr(" (издатель: принудительно never)", " (publisher: forced never)")
                    if policy == "never" and settings.get("publisher") is True else "")
     _say(common.tr("Политика токенов: ", "Token policy: ") + policy + policy_note)
+    _say_o2(st)
     if pending:
         _say(sync._delete_pending_text())
         _say(common.tr("Повторить выход: ccl-sync logout", "Retry sign-out: ccl-sync logout"))
@@ -338,7 +466,7 @@ def cmd_status(_args):
              + common.tr(" — синхронизация повторит попытку сама", " — sync will try again by itself"))
     elif sync.auth_snapshot(st).get("kind") in ("temporary", "actionRequired"):
         _say("GitHub: " + sync.auth_reason(sync.auth_snapshot(st).get("reason")))
-    elif not held and st.get("login"):
+    elif (not held or degraded) and st.get("login"):
         _say("GitHub: " + st.get("login"))
     else:
         _say("GitHub: " + common.tr("вход не выполнен (ccl-sync login)", "not signed in (ccl-sync login)"))
@@ -349,11 +477,14 @@ def cmd_status(_args):
     _say(common.tr("Последняя отправка: ", "Last upload: ") + _fmt_time(st.get("pushedAt"))
          + " · " + common.tr("чтение: ", "read: ") + _fmt_time(sync.last_ok_at(st)))
     _say(common.tr("Последняя попытка: ", "Last attempt: ") + _fmt_time(st.get("lastAttemptAt")))
+    # lastError may hold exception text, a host or an address: status (read by agents, П6) shows a fixed text.
+    error_note = common.tr("ошибка синхронизации, подробности — ccl-sync push",
+                           "sync failed, details: ccl-sync push")
     if st.get("lastError"):
         at = st.get("lastErrorAt")
-        _say(common.tr("Последняя ошибка", "Last error") + (" (%s)" % _fmt_time(at) if at else "") + ": "
-             + str(st.get("lastError")))
-    warn = None if pending else sync.warning(st, moment=_fmt_time, require_attempt=False)
+        _say(common.tr("Последняя ошибка", "Last error") + (" (%s)" % _fmt_time(at) if polling.number(at) else "")
+             + ": " + error_note)
+    warn = None if pending else sync.warning(st, moment=_fmt_time, require_attempt=False, error_text=error_note)
     if warn:
         _say("! " + warn)
 
@@ -363,7 +494,6 @@ def cmd_status(_args):
     machines = None
     if isinstance(gist, dict) and isinstance(gist.get("files"), dict):
         machines = []
-        import json
         for name in sync._machine_files(gist["files"]):
             f = gist["files"][name]
             if not isinstance(f, dict):
@@ -508,6 +638,11 @@ def main(argv=None):
     actions.add_argument("--disable", action="store_true", help=common.tr("выключить издатель", "disable the publisher"))
     actions.add_argument("--now", action="store_true", help=common.tr("ручной проход с учётом сроков", "manual pass respecting deadlines"))
     actions.add_argument("--status", action="store_true", help=common.tr("состояние издателя", "publisher status"))
+    actions.add_argument("--products", metavar="claude[,codex]",
+                         help=common.tr("какие продукты опрашивать", "which products to poll"))
+    actions.add_argument("--mode", nargs="+", metavar="auto|fixed SECONDS",
+                         help=common.tr("авто или фиксированный интервал (900, 1800, 3600, 14400)",
+                                        "auto or a fixed interval (900, 1800, 3600, 14400)"))
     p = sub.add_parser("push", help=common.tr("один проход: индекс → gist", "one pass: index → gist"))
     p.add_argument("--force", action="store_true", help=common.tr("записать даже без изменений", "write even if unchanged"))
     p.add_argument("--auto", action="store_true", help=common.tr("режим таймера (не чаще раза в 10 мин)",

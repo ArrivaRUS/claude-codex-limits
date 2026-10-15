@@ -668,14 +668,47 @@ def machine_name():
     return n if n else socket.gethostname()
 
 
-def machine_tag():
-    """Short public tag from the configured name or the first hostname label."""
-    name = settings().get("machineName")
-    if not isinstance(name, str) or not name.strip():
-        name = socket.gethostname().split(".", 1)[0]
+def _tag_text(name):
     name = "".join(ch for ch in name if unicodedata.category(ch) not in ("Cc", "Cf"))
     name = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii").lower()
-    return re.sub(r"[^a-z0-9-]+", "-", name).strip("-")[:16].rstrip("-") or "linux"
+    return re.sub(r"[^a-z0-9-]+", "-", name).strip("-")
+
+
+def _owner_name_parts():
+    """Login and GECOS name parts of the current user, lower-case ASCII (A1 N7)."""
+    names = [os.environ.get("USER"), os.environ.get("LOGNAME")]
+    for probe in (lambda: __import__("getpass").getuser(), os.getlogin):
+        try:
+            names.append(probe())
+        except Exception:
+            pass
+    try:
+        import pwd
+        pw = pwd.getpwuid(os.getuid())
+        names += [pw.pw_name, (pw.pw_gecos or "").split(",", 1)[0]]
+    except Exception:
+        pass
+    parts = set()
+    for name in names:
+        if isinstance(name, str):
+            parts.update(p for p in _tag_text(name).split("-") if len(p) >= 2)
+    return parts
+
+
+def machine_tag():
+    """Short public tag from the configured name or the first hostname label.
+
+    The hostname fallback drops labels carrying the user's login or GECOS name
+    (`alex-ThinkPad-X1` → `thinkpad-x1`): a typical desktop hostname is `<user>-<model>`.
+    """
+    name = settings().get("machineName")
+    if isinstance(name, str) and name.strip():
+        tag = _tag_text(name)
+    else:
+        owner = _owner_name_parts()
+        words = _tag_text(socket.gethostname().split(".", 1)[0]).split("-")
+        tag = "-".join(w for w in words if w and not any(p in w for p in owner if len(p) >= 3) and w not in owner)
+    return tag[:16].rstrip("-") or "linux"
 
 
 def os_name():
@@ -796,6 +829,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 BODY_TOO_LARGE = "response body too large"
 HTTP_DEADLINE = "HTTP response deadline exceeded"
+INCOMPLETE_BODY = "response body cut short"
+REDIRECT_REFUSED = "redirect refused"
+_HEADER_BUFFER = 8 * 1024
 RAW_URL_REFUSED = "gist raw URL refused"
 RAW_REDIRECT_REFUSED = "gist raw redirect refused"
 
@@ -842,6 +878,9 @@ class _HTTPDeadlineStream(io.RawIOBase):
     def readable(self):
         return True
 
+    def fileno(self):
+        return self.source.fileno()
+
     def readinto(self, target):
         _http_remaining(self.deadline, None)
         try:
@@ -869,7 +908,10 @@ class _HTTPDeadlineResponse(http_client.HTTPResponse):
         if header_deadline is None and header_timeout is not None:
             header_deadline = time.monotonic() + header_timeout
         self._deadline_stream = _HTTPDeadlineStream(self.fp, header_deadline)
-        self.fp = io.BufferedReader(self._deadline_stream)
+        # A small buffer bounds what header parsing pulls off the wire: a 3xx
+        # closed unread then leaves its body on the socket. Body reads ask for
+        # larger blocks and go to the socket directly (read1 on an empty buffer).
+        self.fp = io.BufferedReader(self._deadline_stream, _HEADER_BUFFER)
 
     def begin(self):
         try:
@@ -961,6 +1003,9 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
         self.hops = 0
         self.deadline = deadline
 
+    def allowed(self, target):
+        return gist_raw_url(target)
+
     def http_error_302(self, req, fp, code, msg, headers):
         fp.close()
         location = headers.get("Location")
@@ -971,7 +1016,7 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
             target = urllib.parse.urljoin(req.full_url, location)
         except ValueError:
             raise _RawRedirectRefused() from None
-        if self.hops >= 3 or not gist_raw_url(target):
+        if self.hops >= 3 or not self.allowed(target):
             raise _RawRedirectRefused()
         self.hops += 1
         forwarded = {k: v for k, v in req.headers.items()
@@ -982,9 +1027,29 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
+class _AllowListRedirect(_GistRawRedirect):
+    """Same rules for other downloads: each target is https:// on an exact host allow-list."""
+    def __init__(self, hosts, deadline=None):
+        super().__init__(deadline)
+        self.hosts = frozenset(hosts)
+
+    def allowed(self, target):
+        if not isinstance(target, str) or not target.isascii() or "@" in target:
+            return False
+        try:
+            parts = urllib.parse.urlsplit(target)
+            return (target.startswith("https://") and parts.scheme == "https"
+                    and parts.hostname in self.hosts and parts.port in (None, 443))
+        except ValueError:
+            return False
+
+
 def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None,
-         deadline=None):
+         deadline=None, redirect_hosts=None):
     """Per-socket timeout, bounded headers and optional body cap/monotonic deadline.
+
+    `redirect_hosts`: follow redirects only to https:// targets on these exact hosts
+    (intermediate 3xx bodies closed unread, at most 3 hops); anything else → status 0.
 
     Without an explicit deadline, the origin header budget starts after connect
     (including TLS), before sending the request. An explicit deadline still
@@ -1007,6 +1072,8 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
             handlers.append(_NoRedirect())
         elif gist_raw_url(url):
             handlers.append(_GistRawRedirect(deadline))
+        elif redirect_hosts is not None:
+            handlers.append(_AllowListRedirect(redirect_hosts, deadline))
         opener = urllib.request.build_opener(*handlers).open
         with opener(req, timeout=_http_remaining(deadline, timeout)) as r:
             response_headers = {k.lower(): v for k, v in r.headers.items()}
@@ -1014,11 +1081,16 @@ def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirect
                 data = _read_http_body(r, max_body, deadline)
             except _HTTPDeadlineExceeded:
                 return Resp(0, None, response_headers, HTTP_DEADLINE, original_status=r.status)
+            except http_client.IncompleteRead:
+                # The status line arrived; only the body was cut short. Keep the
+                # status for callers that need it (an acknowledged PATCH), never the body.
+                return Resp(0, None, response_headers, INCOMPLETE_BODY, original_status=r.status)
             if max_body is not None and len(data) > max_body:
                 return Resp(0, None, response_headers, BODY_TOO_LARGE, original_status=r.status)
             return Resp(r.status, data, response_headers)
     except _RawRedirectRefused:
-        return Resp(0, error=RAW_REDIRECT_REFUSED)
+        return Resp(0, error=REDIRECT_REFUSED if redirect_hosts is not None and not gist_raw_url(url)
+                    else RAW_REDIRECT_REFUSED)
     except _HTTPDeadlineExceeded:
         return Resp(0, error=HTTP_DEADLINE)
     except urllib.error.HTTPError as e:

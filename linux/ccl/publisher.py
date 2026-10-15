@@ -551,7 +551,8 @@ def run_pass(kind="auto"):
                     common.o1_event("pass_skipped", reason="busy")
                     result["skipped"] = {p: "busy" for p in PRODUCTS if common.product_enabled(p)}
                     return result
-                _locked(kind, ix, result)
+                with sync.pass_read_budget():
+                    _locked(kind, ix, result)
             except Exception as exc:
                 _failed(result, exc)
             finally:

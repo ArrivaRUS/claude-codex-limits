@@ -35,6 +35,12 @@ MAX_TARBALL = 64 * 1024 * 1024
 MAX_DEB = 32 * 1024 * 1024
 UA = {"User-Agent": "ClaudeCodexLimits"}
 CHECK_EVERY = 6 * 3600
+MAX_VERSION_BODY = 256 * 1024
+MAX_RELEASES_BODY = 4 * 1024 * 1024
+# Redirect TARGETS only (the first URL is a constant or GitHub's release asset link): https:// on
+# these hosts; 3xx bodies are closed unread (common.http). Release assets redirect to the CDN hosts.
+REDIRECT_HOSTS = frozenset(("raw.githubusercontent.com", "codeload.github.com", "github.com", "api.github.com",
+                            "objects.githubusercontent.com", "release-assets.githubusercontent.com"))
 
 _VER_RE = re.compile(r'^APP_VERSION\s*=\s*["\'](\d+(?:\.\d+)*)["\']', re.M)
 
@@ -98,7 +104,8 @@ def latest_deb(releases):
 
 
 def _check_releases():
-    r = common.http(RELEASES_API, headers=dict(UA, Accept="application/vnd.github+json"), timeout=15)
+    r = common.http(RELEASES_API, headers=dict(UA, Accept="application/vnd.github+json"), timeout=15,
+                    max_body=MAX_RELEASES_BODY, redirect_hosts=REDIRECT_HOSTS)
     if r.status != 200 or not r.data:
         return None, ("HTTP %d" % r.status) if r.status else (r.error or "network")
     rel = latest_deb(r.json())
@@ -115,7 +122,7 @@ def check():
     """→ (latest_version or None, error or None). Remembers the result in the state file."""
     if is_packaged():
         return _check_releases()
-    r = common.http(VERSION_URL, headers=UA, timeout=15)
+    r = common.http(VERSION_URL, headers=UA, timeout=15, max_body=MAX_VERSION_BODY, redirect_hosts=REDIRECT_HOSTS)
     st = common.state()
     if r.status == 404:
         st.update(updateCheckedAt=time.time(), updateAvailable=None)
@@ -212,7 +219,7 @@ def fetch_deb():
         ver, url = st.get("updateAvailable"), st.get("updateDebUrl")
         if not (ver and url):
             raise RuntimeError(common.tr("Установлена последняя версия.", "You're up to date."))
-    r = common.http(url, headers=UA, timeout=120, max_body=MAX_DEB)
+    r = common.http(url, headers=UA, timeout=120, max_body=MAX_DEB, redirect_hosts=REDIRECT_HOSTS)
     if r.status != 200 or not r.data:
         raise RuntimeError(common.tr("Не удалось скачать пакет", "Download failed")
                            + (" (HTTP %d)" % r.status if r.status else ""))
@@ -235,7 +242,7 @@ def apply():
     common.ensure_dirs()
     tmp = tempfile.mkdtemp(prefix="update-", dir=common.STATE_DIR)
     try:
-        r = common.http(TARBALL_URL, headers=UA, timeout=120, max_body=MAX_TARBALL)
+        r = common.http(TARBALL_URL, headers=UA, timeout=120, max_body=MAX_TARBALL, redirect_hosts=REDIRECT_HOSTS)
         if r.status != 200 or not r.data:
             raise RuntimeError(common.tr("Не удалось скачать обновление", "Download failed")
                                + (" (HTTP %d)" % r.status if r.status else ""))
