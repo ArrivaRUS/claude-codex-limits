@@ -4,7 +4,7 @@
 
 ## 🔁 Точка возобновления · 2026-10-15 · REMOTE-LIMITS A3 на ревью
 
-- Codex-лимиты сброшены (владелец, 2026-10-15). Сессия Юрки — Opus 5.5.
+- Codex-лимиты сброшены (владелец, 2026-10-15). Сессия Юрки — Opus 5.5. ⚠️ Fable-лимит с 2026-10-15 ~09:00 UTC: T2 security-analyst перезапущен на Opus @xhigh + Astra.
 - **A3 код готов:** красные тесты `53bfd16` + `f322121` (103 теста, решения Q1–Q5) + `4ae911f`/`8b0bf9e` (векторы цепочки/обрыва, A1-14 под N8) → шаг 1 `8acb078` (coordination/normalize_interval) → шаг 2 `8596511` (sync open_cycle/write, отпечатки, clockSkew, partial, N8/N9, журнал O1, N3/N4, monotonic file_lock) → шаг 3 `74c6860` (publisher.run_pass, `ccl-sync publisher`, хук push --auto, обрыв цепочки). Полный набор 604 OK / 49 skip; `test_rl_sim` ~6 мин. Решения 2026-10-15 — `decisions/log.md` (nextAt, rejectedRaw на диске, цепочка дедлайнов 24 ч + обрыв 900 с, неживая запись без lastSeenAt). `--products`/`--mode` → A4.
 - **Сейчас:** code-reviewer (+ Codex Sol) → `docs/review-remote-limits-a3.md`; T2 security-analyst (+ Astra @xhigh) → `docs/security-remote-limits-a3-t2.md`. Дальше: цикл правок (лимит 3) → A4 (Sol) → A5 выкатка на VPS только с «да» владельца.
 
