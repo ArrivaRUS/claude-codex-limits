@@ -455,13 +455,21 @@ UTC; strings are shown only as plain text.
   1. one validating `GET /gists/{id}` (`public == false`), merge other files, coordination decision (*Read rules*);
   2. save the attempt locally first; if it can't be saved → no request;
   3. **PATCH №1** with the new `attemptAt`. Any failure (non-2xx, network, 404) → restore the previous attempt time,
-     **no provider request** (skip `publish_failed`); the next tick retries. **Series limit:** the 1st and 2nd
-     consecutive `publish_failed` ticks skip; the 3rd consecutive one polls on its own schedule without the
-     announcement, as when the gist is unavailable (silent data loss ≤ 10 min; neighbours are not visible then —
-     the same tolerance as «gist unavailable»);
+     **no provider request** (skip `publish_failed`); the next tick retries. **Series limit:** a product polls on
+     its own schedule without the announcement, as when the gist is unavailable, if either holds:
+     - this is the 3rd consecutive `publish_failed` tick (the 1st and 2nd skip);
+     - `now − last_attempt ≥ max(I, 24 h)` for that product (it has polled before), so a failing announcement can never
+       stop its own polling for more than a day.
+     Other due products of the same tick still skip and are rolled back. Silent data loss ≤ 10 min; neighbours are not
+     visible then — the same tolerance as «gist unavailable». The failure (series count and the 24 h check) is
+     recorded **before** any reopen, so a pass killed in the middle of a reopen cannot reset the series;
+     **Reopen.** If PATCH №1 failed only because the session expired (GET older than 120 s) or the `sync` lock was
+     busy, the attempt is rolled back and the pass opens a new session (new GET, coordination decided again) **once**;
+     a second failure is final for the pass;
   4. provider request;
   5. **PATCH №2** with the result (status, `asOf`, values, `retryUntil`, schedule).
-  Both PATCHes reuse the one GET within **120 s**; PATCH 404 clears the gist id and hash as in v1; no discovery in between.
+  Both PATCHes reuse the one GET within **120 s** (older → the session is stale, see *Reopen*); PATCH 404 clears the
+  gist id and hash as in v1; no discovery in between.
   If the GET fails, nothing is announced: the machine polls on its own schedule and publishes on the next good pass.
 - **Budget:** a polling tick ≤ 1 GET + 2 PATCH; any other tick 1 GET + ≤ 1 PATCH. VPS with both products at 15 min:
   288 GET and ≤ 528 PATCH a day. Worst case for three machines ≈ 34 GET/h and ≈ 50 PATCH/h, i.e. 1.7 % of the core
@@ -481,6 +489,13 @@ UTC; strings are shown only as plain text.
     a product, day or model key of the root `days` → that entry skipped.
   - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
+- **Read deadline (Linux).** The read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
+  every `raw_url` body) shares one deadline of **60 s**. Once it is spent the remaining raw files are skipped without a
+  download, the files already read are merged and the pass is **partial**: the read counts (cache written, last-success
+  time advances, coordination runs), but the error «Чтение синхронизации прервано по сроку» is recorded in `lastError`.
+  A raw body still in progress when the deadline hits is dropped the same way. No completed read within the deadline →
+  no session: nothing is announced and the machine polls on its own schedule. Known limitation (A4): the single reopen
+  (*Write rules*) starts its own 60 s, so the worst pass is about 2 × 60 s of reading.
 - **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1).
   Hitting any limit below still records a visible error («слишком большой ответ/файл синхронизации», Linux:
   `res.ok = false`, `lastError`; no backoff), while the other files are merged, the remote cache is written and the
@@ -550,8 +565,10 @@ UTC; strings are shown only as plain text.
     such files for coordination (a Mac id may be upper-case, fixtures may be shorter than 8 chars).
   - Manual refresh: only `retry_after` and `remote_attempt` apply (≥ 960 s after another machine's `attemptAt`, never
     before any `retryUntil`), plus my own ≥ 900 s floor.
-- **Clocks.** Skew = GitHub's `Date` header − local time, sampled on every GitHub response (errors included) and kept
-  in `sync-state.json` as `clockSkew` (seconds, signed) and `clockSkewAt` (local epoch of the sample). The 60 s margins
+- **Clocks.** Skew = GitHub's `Date` header − local time, sampled **once per pass**: the first GitHub response of the
+  pass that carries a valid `Date` (errors included); the session opens, writes and a reopen of that pass share the
+  sample. It is kept in `sync-state.json` as `clockSkew` (seconds, signed) and `clockSkewAt` (local epoch of the
+  sample), and `clock_skew` is logged at most once per pass. The 60 s margins
   assume |skew| ≤ 60 s; above that the machine logs `clock_skew`, shows it in status, and no coordination guarantee is
   claimed (no auto-correction; use NTP).
 
@@ -561,6 +578,11 @@ Private, headless event log `$XDG_STATE_HOME/claude-codex-limits/publisher.jsonl
 directory 0700, file 0600, append-only, one JSON object per line with `ev` and `ts`). Values are enumerations,
 16-hex labels, numbers or an exception **class name** — never identifiers, URLs, paths or error text. The allow-list
 lives in `linux/ccl/common.py` (`O1_EVENTS`, `O1_SKIP_REASONS`, `_O1_ENUMS`); an unknown event or field raises.
+
+**Rotation (compaction with hysteresis).** When an append would take the file over **1 MiB**, the journal is rewritten
+atomically from its newest tail: only whole lines, only records younger than 45 days (unparsable lines dropped), with
+the new record included, so the result is **≤ 512 KiB**. Compaction then does not run again until the file grows past
+1 MiB. Appends and compaction hold one lock (`publisher-journal`), so no event is lost to a concurrent rotation.
 
 | Event | Fields | When |
 |---|---|---|
