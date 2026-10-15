@@ -12,6 +12,7 @@ account, token, e-mail or host. Spec: `arch/plan-synth.md` §A/§B, test plan `d
 | `machine-v11-surrogate.json` | ASCII-only file whose `\ud800` escapes decode to **lone surrogates** in `machine.name/os/app`, `tz`, product/day/model keys of `days` (N1/M2, A1-16). Edit with care: re-saving through a UTF-8 editor that decodes escapes makes the file invalid |
 | `label-vectors.json` | HMAC label vectors (normalisation, gist key, product domain) |
 | `sanitize-vectors.json` | `machine_tag` and caption vectors |
+| `decide-vectors.json` | A3-01 golden vectors for `coordination.decide` (synth §D, T1 П7): epoch seconds, non-numbers = absent; shared with Swift C4-04 |
 | `pii-sentinels.json` | synthetic PII; token-like sentinels are split into parts and joined at run time (secret scanners stay quiet) |
 
 Regenerate: none — files are hand-reviewed goldens; change only together with the contract.
