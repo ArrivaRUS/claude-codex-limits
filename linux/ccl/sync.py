@@ -97,9 +97,12 @@ def _transport(url, method, headers, body, timeout):
     cap = MAX_MACHINE_BODY if method == "GET" and not authorized else MAX_BODY
     if method == "GET" and not authorized and _raw_cap.get() is not None:
         cap = min(cap, _raw_cap.get())
+    options = {}
+    if method == "GET" and _read_deadline.get() is not None:
+        options["deadline"] = _read_deadline.get()
     return common.http(url, method, headers, body, timeout,
                        follow_redirects=not (authorized or url.startswith("https://github.com/login/")),
-                       max_body=cap)
+                       max_body=cap, **options)
 
 
 # Test seam: every request of this module (gist, /user, Device Flow) goes through `transport`

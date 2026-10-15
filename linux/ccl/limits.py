@@ -296,7 +296,7 @@ def claude_token_policy_blocks(now):
     if not isinstance(oauth, dict):
         return False
     expiry = _num(oauth.get("expiresAt"))
-    return expiry is not None and expiry - now * 1000 < 120000
+    return not oauth.get("accessToken") or (expiry or 0) - now * 1000 < 120000
 
 
 def fetch_claude():

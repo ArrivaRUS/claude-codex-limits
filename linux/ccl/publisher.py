@@ -200,8 +200,17 @@ def _recover_rollback(saved, state):
     The marker is written before either restored file. A crash before a PATCH
     outcome or after a successful PATCH keeps the original conservative attempt.
     """
-    rollback = saved.get("_rollback")
-    if not isinstance(rollback, dict):
+    if "_rollback" not in saved:
+        return saved
+    rollback = saved["_rollback"]
+    if not (isinstance(rollback, dict) and isinstance(rollback.get("saved"), dict)
+            and all(key in rollback and (rollback[key] is None or isinstance(rollback[key], dict))
+                    for key in ("autoPollState", "quotaServerRetryAt"))):
+        # Corrupt local metadata cannot authorize restoring either mirror.
+        # Retain the conservative reservation and discard only the bad marker.
+        saved.pop("_rollback")
+        common.write_json(os.path.join(common.STATE_DIR, "publisher-state.json"), saved)
+        common.o1_event("rollback_invalid")
         return saved
     restored = rollback["saved"]
     state.update(autoPollState=rollback["autoPollState"], quotaServerRetryAt=rollback["quotaServerRetryAt"])
@@ -324,16 +333,19 @@ def _locked(kind, ix, result, reopened=False):
                 _skip(result, product, "state_unsaved")
             return
         if session and not _publish(session, _text(saved, current, ix, gist_id, auto), result):
-            if not reopened and getattr(session, "write_error", None) in ("stale", "busy"):
-                _rollback(saved, old_saved, old_auto, old_retry, state)
-                return _locked(kind, ix, result, reopened=True)
-            _publish_failed(result)
             count = saved.get("_publishFailures", 0)
-            count = min(count + 1, 3) if type(count) is int and count >= 0 else 1
+            count = count if type(count) is int and count >= 0 else 0
+            # The reopen belongs to the same tick. Its failure is already in
+            # the durable rollback target, even if killed during GET or PATCH.
+            count = min(count + (0 if reopened else 1), 3)
             saved["_publishFailures"] = old_saved["_publishFailures"] = count
             fallback = [p for p in due if count >= 3 or
                         (old_polls[p]["last_attempt"] > 0 and
                          now - old_polls[p]["last_attempt"] >= max(old_polls[p]["interval"], coordination.RETRY_CAP))]
+            if not fallback and not reopened and getattr(session, "write_error", None) in ("stale", "busy"):
+                _rollback(saved, old_saved, old_auto, old_retry, state)
+                return _locked(kind, ix, result, reopened=True)
+            _publish_failed(result)
             if not fallback:
                 # Journal before restoring either file. Store.update preserves
                 # unrelated keys that other components may have changed.
@@ -407,7 +419,9 @@ def _locked(kind, ix, result, reopened=False):
                       for _local_id, _reason, bucket, poll in current.values())
         if sync.write_due(session, text, force=bool(due) or pending):
             if _publish(session, text, result):
-                saved["_publishFailures"] = 0
+                # A heartbeat (including an interrupted attempt's later echo)
+                # cannot erase failures of PATCH #1. Only a successful new
+                # announcement above resets the series.
                 for _local_id, _reason, bucket, poll in current.values():
                     if poll.last_attempt:
                         bucket["attemptPublished"] = True

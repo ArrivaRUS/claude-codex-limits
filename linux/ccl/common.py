@@ -266,7 +266,7 @@ class CredentialPolicyRefused(Exception):
 O1_EVENTS = frozenset((
     "poll_attempt", "poll_result", "poll_skipped", "pass_skipped", "pass_failed", "token_refresh", "publish",
     "clock_skew", "label_changed", "identity_changed", "remote_retry_capped", "policy_forced_never",
-    "policy_violation", "pending_rotation_lost", "accounts_days_dropped"))
+    "policy_violation", "pending_rotation_lost", "accounts_days_dropped", "rollback_invalid"))
 O1_SKIP_REASONS = frozenset((
     "not_due", "fresh_remote", "remote_attempt", "tie_break", "retry_after", "no_github", "no_login", "no_label",
     "state_unsaved", "publish_failed", "token_policy", "busy"))
@@ -860,6 +860,46 @@ class _HTTPDeadlineStream(io.RawIOBase):
             super().close()
 
 
+class _HTTPDeadlineResponse(http_client.HTTPResponse):
+    """Bound status/header parsing, including an unlimited sequence of 100s."""
+    def __init__(self, *args, header_deadline=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._deadline_stream = _HTTPDeadlineStream(self.fp, header_deadline)
+        self.fp = io.BufferedReader(self._deadline_stream)
+
+    def begin(self):
+        try:
+            super().begin()
+        except BaseException:
+            self.close()
+            raise
+        # Token responses and downloads retain per-socket body timeouts.
+        # Only _read_http_body's explicit deadline may bound their total time.
+        self._deadline_stream.deadline = None
+
+
+class _HTTPDeadlineHandler:
+    def __init__(self, header_deadline):
+        super().__init__()
+        self.header_deadline = header_deadline
+
+    def do_open(self, http_class, req, **kwargs):
+        def connection(*args, **kw):
+            conn = http_class(*args, **kw)
+            conn.response_class = lambda *a, **k: _HTTPDeadlineResponse(
+                *a, header_deadline=self.header_deadline, **k)
+            return conn
+        return super().do_open(connection, req, **kwargs)
+
+
+class _HTTPDeadlineHTTPHandler(_HTTPDeadlineHandler, urllib.request.HTTPHandler):
+    pass
+
+
+class _HTTPDeadlineHTTPSHandler(_HTTPDeadlineHandler, urllib.request.HTTPSHandler):
+    pass
+
+
 def _read_http_body(response, max_body, deadline):
     """Read at most cap+1 bytes without letting regular small packets reset time.
 
@@ -870,7 +910,9 @@ def _read_http_body(response, max_body, deadline):
     private urllib/socket internals or worker threads are needed to stop trickle.
     """
     wire = response.fp if isinstance(response, urllib.error.HTTPError) else response
-    if deadline is not None and isinstance(wire, http_client.HTTPResponse) and wire.fp is not None:
+    if isinstance(wire, _HTTPDeadlineResponse):
+        wire._deadline_stream.deadline = deadline
+    elif deadline is not None and isinstance(wire, http_client.HTTPResponse) and wire.fp is not None:
         wire.fp = io.BufferedReader(_HTTPDeadlineStream(wire.fp, deadline))
     reader = response.read if isinstance(response, io.BytesIO) else getattr(response, "read1", response.read)
     data = bytearray()
@@ -886,6 +928,9 @@ def _read_http_body(response, max_body, deadline):
             raise
         _http_remaining(deadline, None)
         if not chunk:
+            # read1(), unlike read(), does not reject a short Content-Length.
+            if isinstance(wire, http_client.HTTPResponse) and wire.length:
+                raise http_client.IncompleteRead(bytes(data), wire.length)
             break
         data.extend(chunk)
     return bytes(data)
@@ -918,23 +963,26 @@ class _GistRawRedirect(urllib.request.HTTPRedirectHandler):
     http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
 
 
-def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None):
-    """Bound response time and optional body bytes, including HTTP error bodies."""
+def http(url, method="GET", headers=None, body=None, timeout=15, follow_redirects=True, max_body=None,
+         deadline=None):
+    """Per-socket timeout, bounded headers and optional body cap/monotonic deadline."""
     if max_body is not None and (type(max_body) is not int or max_body < 0):
         raise ValueError("max_body must be a non-negative integer or None")
     if isinstance(body, (dict, list)):
         body = json.dumps(body).encode("utf-8")
     elif isinstance(body, str):
         body = body.encode("utf-8")
-    deadline = None if timeout is None else time.monotonic() + timeout
+    header_deadline = None if timeout is None else time.monotonic() + timeout
+    if deadline is not None:
+        header_deadline = deadline if header_deadline is None else min(header_deadline, deadline)
     try:
         req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
+        handlers = [_HTTPDeadlineHTTPHandler(header_deadline), _HTTPDeadlineHTTPSHandler(header_deadline)]
         if not follow_redirects:
-            opener = urllib.request.build_opener(_NoRedirect()).open
+            handlers.append(_NoRedirect())
         elif gist_raw_url(url):
-            opener = urllib.request.build_opener(_GistRawRedirect(deadline)).open
-        else:
-            opener = urllib.request.urlopen
+            handlers.append(_GistRawRedirect(deadline))
+        opener = urllib.request.build_opener(*handlers).open
         with opener(req, timeout=_http_remaining(deadline, timeout)) as r:
             response_headers = {k.lower(): v for k, v in r.headers.items()}
             try:
