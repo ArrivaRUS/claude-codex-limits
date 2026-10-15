@@ -7,8 +7,9 @@ Provider truth depends on true time: «active» = +1.5 pp per 15 min (Auto falls
 to 4 h). Pair = two consecutive requests for one account (any machines) closer than 900 s of true time.
 
 Grid (test plan A3-20): I ∈ {15 min, 4 h} × visibility delay × skew; phase of machine 2 = 137 s (seeded, fixed).
-A 5-min visibility delay cannot give «0 pairs» under the synth's 60-s margins — a recorded open question (skipped with
-the reason), not a silent omission; delay 30 s + skew ±59 s holds only at the fixed phase (see the grid comment).
+A 5-min visibility delay is outside the tolerance (Юрка Q1: synth §D assumes a consistent gist API read; a visibility
+delay is an event, not a steady state) — skipped with that reason; delay 30 s + skew ±59 s holds only at the fixed phase.
+Gist outage (d): «≤ 1 pair per 15 min of outage» = «≤ 1 extra request of the cut-off machine per 15 min» (Юрка Q2, synth §D).
 Run: cd linux && python3 -m unittest tests.test_rl_sim -v
 """
 
@@ -67,9 +68,8 @@ class TestA320aSteadyState(SimBase):
             self.assertTrue(s.requests(p), "%s: аккаунт вообще опрашивается" % p)
         self.assert_budget(s, mode)
 
-    @unittest.skip("open question (report): a 5-min visibility delay exceeds the synth's 60-s margin — a correct "
-                   "implementation pairs every period (reference probe: 71 steady pairs/day); the test plan's «0 pairs» "
-                   "for this cell needs a decision (wider margin, read-before-poll, or drop the cell)")
+    @unittest.skip("решение Юрки Q1 (2026-10-15): синтез §D предполагает согласованное чтение API gist; задержка "
+                   "видимости — событие, не установившийся режим; вне допуска")
     def test_delay_5min(self):
         for mode in ("active", "idle"):
             self.steady(mode, 300, 0)
@@ -124,6 +124,10 @@ class TestA320cFuzz(SimBase):
             def t_bad():
                 return rnd.choice([None, "garbage", rl.iso(now + 61 + rnd.uniform(0, 7 * DAY)),
                                    "2099-01-01T00:00:00Z", rl.iso(now + rl.TEN_YEARS), "", "NaN"])
+
+            def next_bad():   # Q3: a future nextAt is normal; «bad» = beyond interval + 60 (≤ 14400 + 60) or unparsable
+                return rnd.choice([None, "garbage", rl.iso(now + 14400 + 61 + rnd.uniform(0, 7 * DAY)),
+                                   "2099-01-01T00:00:00Z"])
             pick = t_bad if garbage_only else t_any
             records = []
             for p in PRODUCTS:
@@ -131,7 +135,7 @@ class TestA320cFuzz(SimBase):
                     r = {"product": p, "label": labels[p],
                          "status": rnd.choice(["ok", "error", "rate_limited", "expired", "bogus"]), "days": {}}
                     for key in ("asOf", "attemptAt", "nextAt", "retryUntil"):
-                        v = pick()
+                        v = next_bad() if (garbage_only and key == "nextAt") else pick()
                         if v is not None:
                             r[key] = v
                     if "nextAt" in r:

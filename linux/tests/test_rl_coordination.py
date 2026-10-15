@@ -7,7 +7,8 @@ Contract (tester → developer; synth fixes the rules, these names/shapes are te
               "remote_retry": None | {"until", "firstSeenAt"}  (accepted foreign retryUntil, stored apart from mine),
               "manual": bool (optional, default False)}
     remote   list of other machines' records for MY label: {"machineId", "status", "asOf"?, "attemptAt"?, "retryUntil"?,
-             "nextAt"?, "lastSeenAt"?}; times are epoch seconds, ANY non-number (str, None, bool, NaN, missing) = absent.
+             "nextAt"?, "interval"? (= its schedule.interval), "lastSeenAt"?}; times are epoch seconds, ANY non-number
+             (str, None, bool, NaN, missing) = absent.
     my_id    this machine's machine.id (string compare for the tie-break).
     tie_wait None | (machineId, nextAt) remembered from the previous skip.
   Decision: .action ∈ {"poll","skip"}; .reason ∈ {None,"retry_after","remote_attempt","fresh_remote","tie_break"};
@@ -18,8 +19,9 @@ Contract (tester → developer; synth fixes the rules, these names/shapes are te
   accepted only from a live record (lastSeenAt ≥ now − 30 min) and only while no accepted one is in effect;
   2 remote_attempt: now − attemptAt < 960; 3 fresh_remote: now − asOf < I + 60; 4 tie_break: foreign nextAt within ±60 s of
   my due (= last_attempt + I), source alive ≤ 15 min, foreign machineId < my_id, (id, nextAt) ≠ tie_wait; 5 poll.
-  A foreign record is NOT fresh for B2 when asOf/attemptAt > now + 60, when asOf > attemptAt + 60 (inconsistent: a success
-  later than the last attempt — tester's reading of «несогласованные», open question), or when lastSeenAt < now − 30 min.
+  A foreign record is NOT fresh for B2 when asOf/attemptAt > now + 60, when asOf > attemptAt + 60 (inconsistent), when
+  nextAt > now + interval + 60 (interval = its schedule.interval if in {900,1800,3600,14400}, else 14400; a future nextAt
+  within that bound is normal — Юрка's decision Q3, 2026-10-15), or when lastSeenAt < now − 30 min.
   Future within 60 s counts as age 0. Manual (mine.manual): rules 1–2 only.
 Run: cd linux && python3 -m unittest tests.test_rl_coordination -v
 """
@@ -113,7 +115,8 @@ class TestA301GoldenVectors(Base):
         for need in ("a_attempt_959", "a_attempt_961", "b_asof_I59_900", "b_asof_I61_900", "b_asof_I59_14400",
                      "b_asof_I61_14400", "d_tie_first", "d_tie_second_same_pair", "d_tie_dead_source_16min",
                      "f_asof_plus30", "f_asof_2099", "f_asof_garbage", "g_dead_source_fresh_asof",
-                     "h_remote_retry_10y_capped", "h_own_retry_48h_not_cut"):
+                     "h_remote_retry_10y_capped", "h_own_retry_48h_not_cut", "n_next_15min_future_fresh",
+                     "n_next_beyond_interval_not_fresh", "n_next_garbage_interval_cap_14400_not_fresh"):
             self.assertIn(need, ids)
 
 
@@ -168,6 +171,27 @@ class TestA301RemoteRetryCap(Base):
         self.assertEqual(m, before, "decide не меняет вход (чужой дедлайн хранится отдельно, не в server_until)")
 
 
+# ---- A3-01(f) decision Q3: a future nextAt is normal; beyond interval + 60 (interval capped at 14400) → not fresh ----------
+class TestA301NextAtBound(Base):
+    def outcome(self, **kw):
+        d = self.decide(N, mine(), [rec(asOf=N - 100, **kw)])
+        return field(d, "action")
+
+    def test_next_at_within_and_beyond_own_interval(self):
+        for interval in (900, 1800, 3600, 14400):
+            with self.subTest(interval=interval):
+                self.assertEqual(self.outcome(interval=interval, nextAt=N + 900), "skip", "nextAt через 15 мин — норма")
+                self.assertEqual(self.outcome(interval=interval, nextAt=N + interval + 60), "skip", "граница включительно")
+                self.assertEqual(self.outcome(interval=interval, nextAt=N + interval + 120), "poll",
+                                 "nextAt > now + interval + 60 → запись не свежая")
+
+    def test_garbage_interval_caps_at_14400(self):
+        for interval in ("garbage", None, 1234, 0, -900, True, float("nan"), 10 ** 9):
+            with self.subTest(interval=repr(interval)):
+                self.assertEqual(self.outcome(interval=interval, nextAt=N + 14400 - 100), "skip")
+                self.assertEqual(self.outcome(interval=interval, nextAt=N + 14400 + 120), "poll")
+
+
 # ---- И4: a foreign fresh reading suppresses only while asOf ≤ now + 60 and now − asOf < I + 60 --------------------------
 class TestA301FreshnessWindow(Base):
     def test_asof_window_property(self):
@@ -195,6 +219,8 @@ class TestA301Fuzz(Base):
         for k in ("asOf", "attemptAt", "retryUntil", "nextAt", "lastSeenAt"):
             if rnd.random() < 0.8:
                 r[k] = self.pool(rnd, now)
+        if rnd.random() < 0.5:
+            r["interval"] = rnd.choice(STEPS + ("garbage", None, 1234, -1, True))
         return r
 
     def test_foreign_input_never_makes_me_poll(self):

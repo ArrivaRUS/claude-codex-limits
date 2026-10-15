@@ -20,6 +20,7 @@ Contract for the developer (names the synth leaves open are tester's choice — 
   sync_state(): clockSkew (= Date − now, seconds) and clockSkewAt after every GitHub answer.
   SyncResult.partial: True when the cycle merged but skipped a file (size/raw refusal); `ccl-sync push` exits 0 then
       and does not print «Sync failed / Ошибка синхронизации».
+  sync-state.json rejectedRaw = {sha256(raw_url)[:16]: refusal ts}, 24 h, ≤ 64 (oldest evicted), no URL/gist id/sha (N9, Q4).
   Files: <STATE>/publisher.jsonl (O1, 0600, O_APPEND|O_CREAT, rotation > 1 MiB drops lines older than 45 days, atomic),
       <STATE>/publisher-state.json, state.json (autoPollState / quotaServerRetryAt — never a foreign deadline).
   O1 line = {"ev": <event>, "ts": ISO, scalar enumerated fields}; events — rl.O1_EVENTS, poll_skipped reasons —
@@ -114,9 +115,9 @@ class TestA302Order(Base):
         self.assertLess(gets[0].seq, p1.seq)
         self.assertLess(p1.seq, calls[0].seq, "PATCH с attemptAt раньше запроса к провайдеру (№5)")
         self.assertLess(calls[0].seq, p2.seq)
-        saved = [e for e in ev if e.kind == "write" and e.name in rl.STATE_FILES and e.seq < p1.seq
+        saved = [e for e in ev if e.kind == "write" and e.name in rl.STATE_FILES and gets[0].seq < e.seq < p1.seq
                  and (str(int(NOW)) in e.data or rl.iso(NOW) in e.data)]
-        self.assertTrue(saved, "B3: попытка сохранена в state.json/publisher-state.json до PATCH №1")
+        self.assertTrue(saved, "B3 (synth §C, Q5): GET → попытка сохранена в state.json/publisher-state.json → PATCH №1")
         bodies = self.bodies()
         r1 = self.record(bodies[0][1], self.label())
         self.assertIsNotNone(r1, "PATCH №1 несёт запись своей метки")
@@ -1009,19 +1010,87 @@ class TestA330HugeGist(BigFiles):
         self.assertIsNotNone(sync.open_cycle(auto=True), "сессия есть — публикация возможна")
 
 
-# ---- A3-31 (A1 review N9): rejected raw_url is not downloaded again every cycle ------------------------------------------------
+# ---- A3-31 (A1 review N9, decision Q4): rejected raw_url cache ON DISK (sync-state.json rejectedRaw) -----------------------
 class TestA331RejectedRawCache(BigFiles):
-    def test_negative_cache_by_raw_url(self):
+    """rejectedRaw = {sha256(raw_url)[:16]: ts of the refusal}; no URL / gist id / revision sha stored (A1-25);
+    lifetime 24 h; ≤ 64 entries, the oldest evicted. A VPS timer tick is a new process: only the disk counts."""
+
+    def setUp(self):
+        super().setUp()
         self.write_settings(publisher=False)
+
+    @staticmethod
+    def key(url):
+        import hashlib
+        return hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+    def new_process_cycle(self, auto=True):
+        common._state = common._settings = None
+        sync._first_attempt_at = None
+        return sync.sync_cycle({}, auto=auto)
+
+    def rejected(self):
+        st = sync.sync_state()
+        st.reload()
+        value = st.get("rejectedRaw")
+        return value if isinstance(value, dict) else {}
+
+    def test_second_process_does_not_download_again(self):
         url = self.big_raw()
-        sync.sync_cycle({})
+        self.new_process_cycle(auto=False)
+        self.assertEqual(len(self.ledger.of("RAW", url=url)), 1)
+        self.assertEqual(self.rejected().get(self.key(url)), NOW, "отказ записан в sync-state.json: ключ → ts")
         self.clock.advance(600)
-        sync.sync_cycle({}, auto=True)
-        self.assertEqual(len(self.ledger.of("RAW", url=url)), 1, "отвергнутый raw_url второй раз не качается")
-        url2 = self.big_raw(sha="bbbbbbbbbbbb")                # a new revision = a new raw_url
+        self.new_process_cycle()
+        self.assertEqual(len(self.ledger.of("RAW", url=url)), 1, "новый процесс не качает отвергнутый raw_url")
+
+    def test_cache_lives_on_disk_not_in_memory(self):
+        url = self.big_raw()
+        self.new_process_cycle(auto=False)
+        sync.sync_state().remove("rejectedRaw")               # the disk forgot it → a new process must download again
         self.clock.advance(600)
-        sync.sync_cycle({}, auto=True)
-        self.assertEqual(len(self.ledger.of("RAW", url=url2)), 1, "новая ревизия читается")
+        self.new_process_cycle()
+        self.assertEqual(len(self.ledger.of("RAW", url=url)), 2, "кеш только в памяти процесса не годится (VPS)")
+
+    def test_expires_after_24h(self):
+        url = self.big_raw()
+        self.new_process_cycle(auto=False)
+        self.clock.now = NOW + DAY
+        self.new_process_cycle()
+        self.assertEqual(len(self.ledger.of("RAW", url=url)), 1, "ровно 24 ч — ещё в кеше")
+        self.clock.now = NOW + DAY + 1
+        self.new_process_cycle()
+        self.assertEqual(len(self.ledger.of("RAW", url=url)), 2, "24 ч + 1 с — качается снова")
+
+    def test_new_revision_is_read(self):
+        self.big_raw()
+        self.new_process_cycle(auto=False)
+        url2 = self.big_raw(sha="bbbbbbbbbbbb")               # a new revision = a new raw_url
+        self.clock.advance(600)
+        self.new_process_cycle()
+        self.assertEqual(len(self.ledger.of("RAW", url=url2)), 1)
+
+    def test_no_url_gist_or_sha_on_disk(self):
+        url = self.big_raw()
+        self.new_process_cycle(auto=False)
+        with open(common.SYNC_STATE_PATH, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn(self.key(url), text)
+        for needle in (url, "gist.githubusercontent.com", "aaaaaaaaaaaa", "/raw/", self.BIG):
+            self.assertNotIn(needle, text, "в sync-state.json не хранится URL/gist id/sha (A1-25)")
+        for k, v in self.rejected().items():
+            self.assertRegex(k, r"^[0-9a-f]{16}\Z")
+            self.assertTrue(isinstance(v, (int, float)) and not isinstance(v, bool))
+
+    def test_at_most_64_entries_oldest_evicted(self):
+        old = {"%016x" % i: NOW - 3600 + i for i in range(64)}
+        sync.sync_state().update(rejectedRaw=old)
+        url = self.big_raw()
+        self.new_process_cycle(auto=False)
+        got = self.rejected()
+        self.assertLessEqual(len(got), 64)
+        self.assertIn(self.key(url), got, "новый отказ записан")
+        self.assertNotIn("%016x" % 0, got, "вытеснена самая старая запись")
 
 
 # ---- A3-32 CLI: `push --auto` hook and `publisher` subcommands ------------------------------------------------------------------
