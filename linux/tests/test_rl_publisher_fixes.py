@@ -11,7 +11,9 @@ IDs (A3-34…A3-38 keep the numbering proposed in T2 §6):
             sync-state.json written for the skew ≤ 1 per pass.
   A3-37 S4/m5  `publisher --now` with publisher != true → refusal, rc ≠ 0; manual `push` on a publisher machine →
             run_pass("manual"), the accounts block survives.
-  A3-38 S5  a foreign machine.id outside the id form never lands in tie_wait / publisher-state.json.
+  A3-38 S5  a foreign machine.id outside ^[A-Za-z0-9-]{1,64}$ is never a tie_break candidate and never lands in tie_wait /
+            publisher-state.json; the filter lives in coordination only (decision 2026-10-15): the reader keeps the
+            record and every other rule (retry_after, remote_attempt, fresh_remote) still applies (vectors s5_*).
   A3-39 M1  published schedule.nextAt = attemptAt + interval, own deadline only in retryUntil (vectors m1_*; round trip
             through the neighbour's reader).
   A3-40 m3  `never` + expired Claude access token → poll_skipped token_policy, no begin, no attemptAt, no backoff.
@@ -19,14 +21,14 @@ IDs (A3-34…A3-38 keep the numbering proposed in T2 §6):
   A3-42 m2  kill in the middle of the publish_failed rollback → no «attempt without a request», next tick polls.
 
 Contract choices made by the tester where the sources are silent (see the A3 fix-cycle report):
-  - S2 counter: ticks 1–2 of a publish_failed series must not poll (A3-03 stays), the request comes no later than
-    tick 4 (both «3rd tick polls» and «4th tick polls» satisfy it).
+  - S2 counter (decision 2026-10-15): ticks 1–2 of a publish_failed series skip, the 3rd tick itself polls on its own
+    schedule.
   - S2 deadline: measured on the injected clock (time.time and time.monotonic move together); read phase ≤ 60 s + one
     raw timeout (30 s).
   - S3: «sync-state.json for the skew ≤ 1 per pass» = the same pass with 10 raw files writes sync-state.json at most once
     more than with the same files inline (no raw answers).
-  - S5: the invalid ids are invalid under every candidate form (`^[0-9a-z-]{8,64}$` from the brief, `[A-Za-z0-9-]{1,64}`
-    from T2): '@', '/', 65 characters. A valid lowercase UUID still wins the tie (control).
+  - S5 form `^[A-Za-z0-9-]{1,64}$` (decision 2026-10-15; T2): '@', '/', '.', 65 characters are outside; 64 characters,
+    upper case and a lowercase UUID are inside (control).
   - m3: the expired token is the real ~/.claude/.credentials.json (expiresAt one hour ago); the pre-check must not call
     limits.fetch_claude (FakeProviders answer like the real `never` path: CLI credentials expired, no HTTP).
 Run: cd linux && python3 -m unittest tests.test_rl_publisher_fixes -v
@@ -224,8 +226,9 @@ class TestA335PublishFailedFallback(Base):
                 polled_at = n
             self.clock.advance(300)
         self.assertIsNotNone(polled_at, "PATCH всегда 500: опроса нет вообще (S2)")
-        self.assertGreaterEqual(polled_at, 3, "1-й и 2-й publish_failed не опрашивают (A3-03)")
-        self.assertLessEqual(polled_at, 4, "после 3 тиков publish_failed подряд — опрос по своему расписанию")
+        self.assertEqual(polled_at, 3, "тики 1 и 2 — publish_failed без опроса, 3-й тик подряд опрашивает сам")
+        self.assertEqual(len(self.claude_calls()), 1,
+                         "дальше — только своё расписание (I = 1800 с), без лишних запросов")
 
     def test_failed_for_24h_polls_on_the_first_failure(self):
         self.first_pass()
@@ -359,6 +362,11 @@ class TestA337PublisherOnly(Base):
 
 
 # ==== A3-38 (S5): malformed foreign machine.id never reaches tie_wait ==================================================
+class TestA338MachineIdVectors(VectorBase):
+    def test_s5_vectors(self):
+        self.run_vectors("s5_", 9)
+
+
 class TestA338ForeignMachineIdForm(Base):
     MY_ID = "ffffffff-ffff-4fff-bfff-ffffffffffff"
     VALID = "00000000-0000-4000-8000-000000000000"
@@ -396,6 +404,18 @@ class TestA338ForeignMachineIdForm(Base):
         events = self.tie("0a/../x")
         self.assertFalse(self.skipped("tie_break", "claude", events))
         self.assertNotIn("0a/../x", self.publisher_state_text())
+
+    def test_malformed_id_other_rules_still_apply(self):
+        # Filter in coordination only: the reader keeps the record, a fresh foreign attempt still holds me.
+        mid = "0a@review.invalid"
+        self.first_pass()
+        self.clock.now = NOW + 1800
+        self.foreign(mid, [self.foreign_record(attemptAt=rl.iso(NOW + 1700))], last_seen=NOW + 1790)
+        n = len(self.o1())
+        self.tick()
+        self.assertTrue(self.skipped("remote_attempt", "claude", self.o1()[n:]), "remote_attempt применяется как обычно")
+        self.assertEqual(len(self.claude_calls()), 1)
+        self.assertNotIn(mid, self.publisher_state_text())
 
     def test_malformed_id_65_chars(self):
         mid = "0" * 65
