@@ -72,7 +72,7 @@ import unittest
 from collections import namedtuple
 from unittest import mock
 
-from ccl import cli, common, sync
+from ccl import cli, common, sync, update
 
 NOW = rl.NOW
 DAY = 86400
@@ -681,6 +681,205 @@ class TestA406PublisherCli(A4Env):
         self.assertEqual(code, 0, out)
         self.assertTrue(writes and all(writes), writes)
 
+
+
+# ==== A4-16 (red: hole found by the A4 developer) =====================================================================
+# `ccl-sync update` on a per-user install runs the NEW install.sh with `update._installer_flags()`; on a publisher
+# (settings.json `publisher: true`, `machineName`, no tray) those flags carry no `--publisher --no-tray --name <tag>`,
+# so the update reinstalls the ordinary mode: 10-minute timer, menu entry (and autostart where PyQt5 exists).
+# Contract (tester): the tag comes from settings.json `machineName` and must pass the installer's own check
+# ([a-z0-9-], 1–16, no leading/trailing `-`); missing/invalid → update refuses BEFORE running the installer, the text
+# names the tag / `--name`, nothing is reinstalled. A non-publisher machine keeps today's flags (GUARD).
+TOP = "claude-codex-limits-main"
+VERSION_URL_BODY = b'APP_VERSION = "99.0.0"\n'
+PUBLISHER_FLAGS = ("--publisher", "--no-tray", "--name")
+
+UPDATE_CHILD = r"""
+import contextlib, io, json, subprocess, sys
+dest, tarball = sys.argv[1], sys.argv[2]
+sys.path.insert(0, dest)
+from ccl import cli, common, update
+assert update.app_dir() == dest, update.app_dir()
+calls, urls = [], []
+with open(tarball, "rb") as f:
+    TGZ = f.read()
+
+def fake_http(url, *a, **kw):
+    urls.append(url)
+    if url == update.VERSION_URL:
+        return common.Resp(200, %(version)r)
+    if url == update.TARBALL_URL:
+        return common.Resp(200, TGZ)
+    return common.Resp(0, error="blocked by test")
+common.http = fake_http
+real_run = subprocess.run
+
+def spy_run(argv, *a, **kw):
+    if isinstance(argv, (list, tuple)) and argv and argv[0] == "sh":
+        calls.append(list(argv[2:]))
+    return real_run(argv, *a, **kw)
+subprocess.run = spy_run
+out = io.StringIO()
+with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+    try:
+        rc = cli.main(["update"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 2
+    except Exception as e:
+        rc = "exception %%s: %%s" %% (type(e).__name__, e)
+print("@@RESULT@@" + json.dumps({"rc": rc, "installer": calls, "urls": urls, "out": out.getvalue()}))
+""" % {"version": VERSION_URL_BODY}
+
+Update = namedtuple("Update", "rc out installer urls")
+
+
+def build_tarball(path):
+    """The working tree as GitHub's branch tarball: <top>/linux/… (no tests) + <top>/Resources/…"""
+    import tarfile
+
+    def skip(ti):
+        parts = ti.name.split("/")
+        if "__pycache__" in parts or (len(parts) > 2 and parts[1] == "linux" and parts[2] == "tests"):
+            return None
+        return ti
+    with tarfile.open(path, "w:gz") as tar:
+        tar.add(LINUX, arcname=TOP + "/linux", filter=skip)
+        tar.add(os.path.join(rl.ROOT, "Resources"), arcname=TOP + "/Resources", filter=skip)
+
+
+def run_update(r, tarball):
+    """`ccl-sync update` of the INSTALLED copy (r.home/.local/share/claude-codex-limits) in the same environment as
+    the install: fake systemctl/pgrep/crontab, `common.http` served from the tarball, every other URL refused."""
+    dest = os.path.join(r.home, ".local", "share", "claude-codex-limits")
+    fb = os.path.join(r.root, "fakebin")
+    dead_proxy = "http://127.0.0.1:9"
+    env = {"HOME": r.home, "PATH": fb + ":/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8",
+           "USER": "ccltest", "LOGNAME": "ccltest", "DBUS_SESSION_BUS_ADDRESS": "disabled:",
+           "http_proxy": dead_proxy, "https_proxy": dead_proxy, "HTTP_PROXY": dead_proxy, "HTTPS_PROXY": dead_proxy,
+           "PYTHONDONTWRITEBYTECODE": "1"}
+    p = subprocess.run([sys.executable, "-I", "-c", UPDATE_CHILD, dest, tarball], env=env, cwd=r.root,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
+    text = p.stdout.decode("utf-8", "replace")
+    head, sep, tail = text.rpartition("@@RESULT@@")
+    if not sep:
+        raise AssertionError("дочерний процесс обновления не дошёл до результата:\n" + text[-2000:])
+    res = json.loads(tail)
+    return Update(res["rc"], res["out"], res["installer"], res["urls"])
+
+
+def file_text(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def ui_files(r):
+    return (os.path.join(r.home, ".local", "share", "applications", "claude-codex-limits.desktop"),
+            os.path.join(r.conf, "autostart", "claude-codex-limits.desktop"))
+
+
+class _A416Base(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.shared = tempfile.mkdtemp(prefix="ccl-a4-16-tgz-", dir="/tmp")
+        cls.tarball = os.path.join(cls.shared, "src.tar.gz")
+        build_tarball(cls.tarball)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.shared, ignore_errors=True)
+
+    def fresh(self):
+        tmp = tempfile.mkdtemp(prefix="ccl-a4-16-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        return tmp
+
+    def publisher_install(self, settings=None):
+        r = run_install(self.fresh(), ["--publisher", "--no-tray", "--name", "vps"], settings=settings)
+        self.assertEqual(r.rc, 0, "подготовка: установка издателя не прошла:\n" + r.out[-1500:])
+        self.assertEqual([span(v) for v in unit(r, "ccl-sync.timer").get("OnUnitActiveSec", [])], [300])
+        return r
+
+    def timer_minutes(self, r):
+        timer = unit(r, "ccl-sync.timer")
+        self.assertIsNotNone(timer, "нет ccl-sync.timer")
+        return [span(v) / 60 for v in timer.get("OnUnitActiveSec", [])]
+
+
+class TestA416UpdateKeepsPublisher(_A416Base):
+    """A publisher installed by `install.sh --publisher --no-tray --name vps`, then `ccl-sync update`."""
+
+    def test_publisher_update_passes_publisher_flags_and_keeps_mode(self):
+        r = self.publisher_install(settings=json.dumps({"lang": "en"}).encode())
+        u = run_update(r, self.tarball)
+        self.assertEqual(u.rc, 0, "ccl-sync update у издателя упал:\n" + u.out[-1500:])
+        self.assertEqual(len(u.installer), 1, "установщик запущен ровно один раз: %r" % (u.installer,))
+        argv = u.installer[0]
+        for flag in ("--publisher", "--no-tray"):
+            self.assertIn(flag, argv, "update не передаёт %s новому install.sh у издателя; флаги: %r" % (flag, argv))
+        self.assertIn("--name", argv, "update не передаёт --name <тег> у издателя; флаги: %r" % (argv,))
+        self.assertEqual(argv[argv.index("--name") + 1:argv.index("--name") + 2], ["vps"],
+                         "тег — machineName из settings.json, отдельным аргументом: %r" % (argv,))
+        self.assertNotIn("--no-timer", argv, "таймер издателя был — он остаётся")
+        self.assertEqual(self.timer_minutes(r), [5], "после обновления таймер издателя — 5 мин, не 10")
+        for path in ui_files(r):
+            self.assertFalse(os.path.exists(path), "после обновления издателя появился ярлык/автозапуск: " + path)
+        obj = json.loads(settings_of(r))
+        self.assertEqual({k: obj.get(k) for k in EXPECTED}, EXPECTED, "настройки издателя сохраняются")
+        self.assertEqual(obj.get("lang"), "en")
+        self.assertEqual(u.urls, [update.VERSION_URL, update.TARBALL_URL], "сеть — только подмена")
+
+    def test_bad_or_missing_tag_refuses_before_installer(self):
+        """publisher: true but machineName missing/invalid → no silent ordinary reinstall."""
+        for label, value in (("нет machineName", None), ("пустой", ""), ("с пробелом и заглавными", "Alex PC"),
+                             ("17 символов", "a" * 17), ("ведущий дефис", "-vps"), ("ESC", "vps\x1b[1m"),
+                             ("не строка", 42)):
+            with self.subTest(label):
+                r = self.publisher_install()
+                obj = json.loads(settings_of(r))
+                if value is None:
+                    obj.pop("machineName", None)
+                else:
+                    obj["machineName"] = value
+                with open(os.path.join(r.conf, "claude-codex-limits", "settings.json"), "w") as f:
+                    json.dump(obj, f)
+                before_settings = settings_of(r)
+                before_timer = file_text(os.path.join(units_dir(r), "ccl-sync.timer"))
+                u = run_update(r, self.tarball)
+                self.assertNotEqual(u.rc, 0, "%s: обновление издателя без валидного тега должно отказать, "
+                                              "а поставило обычный режим; флаги: %r" % (label, u.installer))
+                self.assertEqual(u.installer, [], "%s: установщик не запускается" % label)
+                self.assertRegex(u.out, r"(?i)(--name|\bтег|\btag\b|machineName)",
+                                 "%s: понятный текст про тег машины:\n%s" % (label, u.out[-800:]))
+                self.assertNotIn("Traceback", u.out)
+                self.assertEqual(file_text(os.path.join(units_dir(r), "ccl-sync.timer")), before_timer, label)
+                for path in ui_files(r):
+                    self.assertFalse(os.path.exists(path), path)
+                self.assertEqual(settings_of(r), before_settings, label)
+
+
+class TestA416UpdateOrdinaryGuard(_A416Base):
+    """GUARD (green now): an ordinary install keeps today's flags — no publisher flags even with a machineName set."""
+
+    def test_ordinary_update_flags_unchanged(self):
+        r = run_install(self.fresh(), [], settings=json.dumps({"lang": "en", "machineName": "alse"}).encode())
+        self.assertEqual(r.rc, 0, r.out[-1500:])
+        had_autostart = os.path.exists(ui_files(r)[1])
+        u = run_update(r, self.tarball)
+        self.assertEqual(u.rc, 0, u.out[-1500:])
+        self.assertEqual(len(u.installer), 1, u.installer)
+        argv = u.installer[0]
+        for flag in PUBLISHER_FLAGS:
+            self.assertNotIn(flag, argv, "обычная машина: %s не передаётся; флаги: %r" % (flag, argv))
+        self.assertEqual(sorted(argv), sorted([] if had_autostart else ["--no-autostart"]),
+                         "прежние флаги: --no-autostart без автозапуска, таймер есть → без --no-timer")
+        self.assertEqual(self.timer_minutes(r), [10])
+        self.assertTrue(os.path.exists(ui_files(r)[0]), "ярлык меню у обычной установки остаётся")
+        obj = json.loads(settings_of(r))
+        self.assertNotEqual(obj.get("publisher"), True)
+        self.assertEqual(obj.get("machineName"), "alse")
 
 if __name__ == "__main__":
     unittest.main()
