@@ -31,83 +31,40 @@
 3. **Ревизия зафиксирована.** Это коммит, на котором закрыт долг T2 (если после T2 были правки, то последний из них).
    На момент написания код издателя не менялся после `d0b06b2`: `git diff d0b06b2..e28793f -- linux Resources` пуст.
    Ставим именно из этой ревизии, а не из рабочего дерева.
-4. **Владелец на связи.** Он делает `ccl-sync login` (Device Flow) и, если на `:20` запущен трей, закрывает его.
+4. **Владелец на связи.** Он делает `ccl-sync login` (Device Flow).
 5. **Решения T1 §7 п. 5:**
    - П4-б: gist не пересоздаём (решение владельца 2026-10-12, `decisions/log.md`). В истории ревизий остаются старые
      имена машин из v1.
    - П6-б: по HEARTBEAT от 2026-10-12, `~/.codex` уже переведён в 0700. Проверка — в шаге 1.
 
-## 1. Проверить перед стартом: что сейчас стоит на VPS
+## 1. Состояние VPS перед стартом
 
-**Что известно из репозитория.** На 2026-10-12 на VPS стоят Ubuntu 26.04 и XFCE на `:20`, `Linger=yes`, нет PyQt5 и
-secretstorage, GitHub и Anthropic доступны (HEARTBEAT, PRD). В gist синка есть файлы мака и ThinkPad, файла VPS нет.
+**Факт на 2026-10-15** (проверил Юрка, только чтение): Claude Codex Limits на VPS **не установлен вовсе**:
+- нет `~/.local/share/claude-codex-limits`, `~/.config/claude-codex-limits` и `~/.local/state/claude-codex-limits`;
+- нет ярлыков и автозапуска;
+- нет юнитов `ccl-sync.*` в `~/.config/systemd/user`;
+- нет `ccl-sync` в `PATH`;
+- нет процесса трея;
+- нет пакета в dpkg.
 
-**Чего репозиторий не знает:**
-- стоит ли на VPS Linux 0.4.5, и как именно: `.deb` или `install.sh`;
-- запущен ли трей на `:20`.
+Из HEARTBEAT и PRD (2026-10-12): Ubuntu 26.04, XFCE на `:20`, `Linger=yes`, нет PyQt5 и secretstorage. Файла VPS в
+gist нет. Значит, A5 — **чистая установка**: останавливать трей и бэкапить прежние настройки не нужно.
 
-Документы здесь расходятся. В `arch/plan-synth.md` §C и в ревью A4 упоминается «трей 0.4.5 на `:20`». В HEARTBEAT и
-PRD записано, что PyQt5 на VPS нет, а без PyQt5 трей не запускается.
+Упоминания «трей 0.4.5 на `:20`» в `arch/plan-synth.md` §C (и риск 9) и в `docs/review-remote-limits-a4.md` устарели.
 
-Поэтому перед установкой снимаем фактическое состояние. Все команды шага только читают.
-
-Пользователь, Linger и синхронизация часов. Ожидается `Linger=yes` и `NTPSynchronized=yes`: расхождение часов больше
-60 с ломает гарантию пола 900 с, риск 6 в синтезе.
+**Перепроверка в день выкатки.** Если между проверкой и стартом что-то поставили, ниже ожидаются строки `нет`:
 
 ```bash
-id -un; id -u
+for p in ~/.local/share/claude-codex-limits ~/.config/claude-codex-limits ~/.local/state/claude-codex-limits ~/.config/systemd/user/ccl-sync.timer ~/.config/autostart/claude-codex-limits.desktop ~/.local/share/applications/claude-codex-limits.desktop; do [ -e "$p" ] && echo "ЕСТЬ $p" || echo "нет  $p"; done; command -v ccl-sync || echo "нет  ccl-sync в PATH"; pgrep -u "$(id -u)" -f '(^|[/ ])claude-codex-limits( |$)' >/dev/null && echo "ЕСТЬ процесс трея" || echo "нет  процесса трея"; dpkg-query -W claude-codex-limits >/dev/null 2>&1 && echo "ЕСТЬ пакет .deb" || echo "нет  пакета .deb"
 ```
 
-```bash
-loginctl show-user "$(id -un)" -p Linger
-```
+Если хоть одна строка начинается с `ЕСТЬ`, это уже не чистая установка: выполните шаг 2 и сообщите Юрке до шага 4.
+
+Linger и часы. Ожидается `Linger=yes` и `NTPSynchronized=yes`: расхождение часов больше 60 с ломает гарантию пола
+900 с (риск 6 в синтезе).
 
 ```bash
-timedatectl show -p NTPSynchronized
-```
-
-Запущен ли трей. Шаблон тот же, по которому проверяет `install.sh`.
-
-```bash
-pgrep -u "$(id -u)" -af '(^|[/ ])claude-codex-limits( |$)' || echo "трей не запущен"
-```
-
-Стоит ли пакет `.deb`.
-
-```bash
-dpkg-query -W -f='${Status} ${Version}\n' claude-codex-limits 2>/dev/null || echo "пакета .deb нет"
-```
-
-Стоит ли копия из `install.sh` и какой она версии.
-
-```bash
-ls -l ~/.local/bin/ccl-sync ~/.local/bin/claude-codex-limits 2>&1; grep -h '^APP_VERSION' ~/.local/share/claude-codex-limits/ccl/__init__.py 2>/dev/null || echo "копии install.sh нет"
-```
-
-Таймер, cron и ярлыки прежней установки.
-
-```bash
-systemctl --user list-unit-files 'ccl-sync*' --no-pager; ls -l ~/.config/systemd/user/ccl-sync.* 2>&1
-```
-
-```bash
-crontab -l 2>/dev/null | grep -c 'ccl-sync'
-```
-
-```bash
-ls -l ~/.config/autostart/claude-codex-limits.desktop ~/.local/share/applications/claude-codex-limits.desktop 2>&1
-```
-
-Ключи `settings.json`, если файл есть. Печатаются только перечисленные ключи, секретов в этом файле нет.
-
-```bash
-python3 -I -c 'import json,os; p=os.path.expanduser("~/.config/claude-codex-limits/settings.json"); s=json.load(open(p)) if os.path.exists(p) else {}; print({k: s.get(k) for k in ("publisher","autoPoll","interval","credential_write","machineName","tray","monitor_claude","monitor_codex")})'
-```
-
-Вход в GitHub прежней установки, если она есть. Строка `GitHub: …` покажет, выполнен ли вход.
-
-```bash
-command -v ccl-sync >/dev/null && ccl-sync status | grep -v '^Gist: ' || echo "ccl-sync не установлен"
+loginctl show-user "$(id -un)" -p Linger; timedatectl show -p NTPSynchronized
 ```
 
 Права на каталоги CLI. Для `~/.codex` ожидается `700` (П6-б).
@@ -116,61 +73,40 @@ command -v ccl-sync >/dev/null && ccl-sync status | grep -v '^Gist: ' || echo "c
 stat -c '%a %U %n' ~/.claude ~/.codex
 ```
 
-PyQt5. Нужно только для понимания отката: без PyQt5 «обычная установка» означает `ccl-sync` и таймер, без значка.
+## 2. Только если перепроверка что-то нашла: остановить трей и сохранить прежнее
 
-```bash
-python3 -c 'import PyQt5.QtWidgets' 2>/dev/null && echo "PyQt5 есть" || echo "PyQt5 нет"
-```
+При чистой установке шаг пропускается.
 
-Результаты этого шага записываем в `docs/remote-limits-verification.md`, раздел «До выкатки». По ним выбирается
-вариант отката (шаг 8).
-
-## 2. Остановить трей пользователя (если шаг 1 его нашёл)
-
-`install.sh --publisher` при живом трее этого пользователя **отказывает** (код 3) и печатает команду остановки.
-Перезапуск он не делает (T1 П3-б.3, тест A4-02). Трей 0.4.x опрашивает лимиты сам и не знает режима `delegated`:
-этот режим появится только в вехе B1.
-
-Лучший способ остановки — владелец на `:20` выбирает в меню значка пункт **«Выход»**. Так трей завершается штатно,
-а не посреди возможной ротации токена (T1 П3-б). Если штатно не выходит, используйте ту же команду, которую печатает
-установщик:
+- **Найден процесс трея.** `install.sh --publisher` при живом трее этого пользователя **отказывает** (код 3) и
+  печатает команду остановки. Перезапуск он не делает (T1 П3-б.3, тест A4-02).
+  - Лучший способ остановки — владелец на `:20` выбирает в меню значка пункт **«Выход»**: так трей не прерывается
+    посреди возможной ротации токена (T1 П3-б).
+  - Иначе используйте команду, которую печатает установщик:
 
 ```bash
 pkill -u "$(id -u)" -f '(^|[/ ])claude-codex-limits( |$)'
 ```
 
-Проверка: ожидается «трей не запущен».
+- **Найдены каталоги, юниты или ярлыки прежней установки.** Сохраняем их до установки, чтобы было куда откатиться.
+  Если в архив попадёт копия токена GitHub, его удаляет владелец, когда окно отката закрыто.
 
 ```bash
-pgrep -u "$(id -u)" -af '(^|[/ ])claude-codex-limits( |$)' || echo "трей не запущен"
+BKOLD=~/ccl-a5-prev-$(date +%Y%m%d-%H%M); mkdir -m 700 "$BKOLD"; for p in .config/claude-codex-limits .local/state/claude-codex-limits .local/share/claude-codex-limits .local/bin/ccl-sync .local/bin/claude-codex-limits .config/systemd/user/ccl-sync.service .config/systemd/user/ccl-sync.timer .config/autostart/claude-codex-limits.desktop .local/share/applications/claude-codex-limits.desktop; do [ -e "$HOME/$p" ] && printf '%s\n' "$p"; done > "$BKOLD/paths.txt"; (umask 077; tar -C "$HOME" -czf "$BKOLD/ccl-before.tgz" -T "$BKOLD/paths.txt"); ls -l "$BKOLD"
 ```
 
-Автозапуск значка удалит сам установщик с `--no-tray` (`install.sh:170-174`). Этим займёмся в шаге 4.
+- **Найден пакет `.deb`.** Его глобальный `ccl-sync.timer` перекроется одноимённым юнитом пользователя. Установщик
+  предупредит строкой «Внимание: уже установлен пакет…».
 
-## 3. Бэкап и снимок «до»
+## 3. Снимок «до» (файлы входа)
 
-Каталог бэкапа закрыт для чужих (0700). Если на VPS уже был вход в GitHub, в бэкап попадёт копия токена
-(`.config/claude-codex-limits/github-token`). Тогда бэкап держим только на время окна отката, а удаляет его владелец.
+Каталог для снимков и результатов проверок закрыт для чужих (0700). В нём же в шаге 7.4 окажется копия файла VPS
+из gist.
 
 ```bash
-BK=~/ccl-a5-backup-$(date +%Y%m%d-%H%M); mkdir -m 700 "$BK" && echo "$BK"
+BK=~/ccl-a5-$(date +%Y%m%d-%H%M); mkdir -m 700 "$BK" && echo "$BK"
 ```
 
-Список существующих путей прежней установки (настройки, состояние, программа, юниты, ярлыки):
-
-```bash
-for p in .config/claude-codex-limits .local/state/claude-codex-limits .local/share/claude-codex-limits .local/bin/ccl-sync .local/bin/claude-codex-limits .config/systemd/user/ccl-sync.service .config/systemd/user/ccl-sync.timer .config/autostart/claude-codex-limits.desktop .local/share/applications/claude-codex-limits.desktop; do [ -e "$HOME/$p" ] && printf '%s\n' "$p"; done > "$BK/paths.txt"; cat "$BK/paths.txt"
-```
-
-```bash
-(umask 077; [ -s "$BK/paths.txt" ] && tar -C "$HOME" -czf "$BK/ccl-before.tgz" -T "$BK/paths.txt" && ls -l "$BK/ccl-before.tgz" || echo "прежней установки нет — архивировать нечего")
-```
-
-```bash
-(umask 077; crontab -l > "$BK/crontab.txt" 2>/dev/null; wc -l < "$BK/crontab.txt")
-```
-
-Снимок файлов входа «до»: время, размер и inode, без содержимого (T1 §7 п. 1, тест-план §3 п. 1).
+Снимок файлов входа: время, размер и inode, без содержимого (T1 §7 п. 1, тест-план §3 п. 1).
 
 ```bash
 stat -c '%y %s %i %n' ~/.claude/.credentials.json ~/.codex/auth.json | tee "$BK/creds-before.txt"
@@ -231,7 +167,6 @@ sh "$SRC/linux/install.sh" --publisher --no-tray --name vps
   - в таймере `OnBootSec=2min`, `OnUnitActiveSec=5min`, `AccuracySec=1min`;
   - включает таймер: `enable --now`.
 
-Если на VPS стоит `.deb`, его глобальный `ccl-sync.timer` перекрывается одноимённым юнитом пользователя в `~/.config`.
 
 **До входа в GitHub опросов нет.** `ccl-sync push --auto` без входа выходит сразу (`cli.py:664-667`).
 
@@ -446,7 +381,7 @@ G1 считается по аккаунту. На VPS один аккаунт н
 stat -c '%y %s %i %n' ~/.claude/.credentials.json ~/.codex/auth.json | tee "$BK/creds-after.txt"; diff "$BK/creds-before.txt" "$BK/creds-after.txt" && echo "без изменений"
 ```
 
-Если `BK` в новой сессии не задан, задайте его заново: `BK=~/ccl-a5-backup-<дата-время>`.
+Если `BK` в новой сессии не задан, задайте его заново: `BK=~/ccl-a5-<дата-время>` (каталог из шага 3).
 
 Изменения допустимы только там, где их объясняет сам CLI: Claude Code и Codex обновляют свои токены сами. Сверяйте
 с активностью команды и с тем, что в 7.1 ноль `token_refresh` и ноль `policy_violation`. Журнал пишет тот же UID,
@@ -548,80 +483,69 @@ grep -o -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$BK/v
 - вывод проверок 6 и 7, без строки `Gist:` и без ID;
 - вердикт по G1, G2 и риску 1.
 
-В `docs/status.md` — одну строку. Бэкап удаляет владелец, когда окно отката закрыто: в нём может лежать копия токена.
+В `docs/status.md` — одну строку. Каталог `$BK` удаляет владелец после приёмки; токенов в нём нет.
 
 ## 8. Откат
 
-Выберите вариант по тому, что показал шаг 1.
+До A5 на VPS ничего не стояло, поэтому откат — это удаление издателя. Удаление данных — разрушительное действие:
+только с «да» владельца.
 
 ### 8.1 Пауза без удаления (быстро)
 
-Таймер выключен — запросов к Anthropic, OpenAI и GitHub нет. Настройки и журнал остаются.
+Таймер выключен — запросов к Anthropic, OpenAI и GitHub нет. Настройки, вход и журнал остаются. Вернуть:
+`systemctl --user enable --now ccl-sync.timer`.
 
 ```bash
 systemctl --user disable --now ccl-sync.timer
 ```
 
-### 8.2 Обычная установка из той же ревизии
+### 8.2 Удалить издатель
 
-Подходит, если до A5 стояла обычная установка или нужен значок. Сначала останавливаем таймер (8.1), затем
-выключаем издатель. Ожидается «Издатель выключен.».
+`linux/uninstall.sh` без ключей делает следующее:
+- выключает и удаляет `ccl-sync.timer`/`.service` из `~/.config/systemd/user`, затем `daemon-reload`;
+- убирает строку cron, если она есть;
+- останавливает значок;
+- удаляет ярлыки, обёртки в `~/.local/bin` и программу `~/.local/share/claude-codex-limits`.
 
-```bash
-ccl-sync publisher --disable
-```
-
-```bash
-sh "$SRC/linux/install.sh"
-```
-
-- Обычная установка пишет таймер на 10 мин (`push --auto`), ярлык меню и, если есть PyQt5, автозапуск значка.
-  Без PyQt5 будет строка «PyQt5 не найден — ставлю только ccl-sync. …».
-- `credential_write: never` остаётся, поэтому значок из этой ревизии токены тоже не обновляет.
-- `machineName: vps` остаётся, и в gist машина по-прежнему называется `vps`.
-- `tray: false` остаётся в файле, но при `publisher: false` его никто не читает (`update.py:151-165`).
-- С выключенным издателем значок опрашивает сам. Это единственный опросчик на машине.
-
-### 8.3 Полный возврат к состоянию до A5 (например, 0.4.5)
-
-Порядок: таймер → удаление программы → отложить новые данные → вернуть архив.
-
-```bash
-systemctl --user disable --now ccl-sync.timer
-```
-
-`uninstall.sh` без `--purge`: программа, юниты и ярлыки удаляются, данные остаются.
+Настройки (`~/.config/claude-codex-limits`) и состояние (`~/.local/state/claude-codex-limits`) он оставляет.
 
 ```bash
 sh "$SRC/linux/uninstall.sh"
 ```
 
-Каталоги настроек и состояния переносим в сторону, ничего не удаляя:
+Ожидается строка «Удалено. Настройки и индекс остались в …/claude-codex-limits и ~/.local/state/claude-codex-limits
+(--purge — удалить)».
+
+Затем удаляем каталог состояния: журнал O1, индекс, состояние синка и издателя.
 
 ```bash
-mv ~/.config/claude-codex-limits ~/.config/claude-codex-limits.a5; mv ~/.local/state/claude-codex-limits ~/.local/state/claude-codex-limits.a5
+rm -rf ~/.local/state/claude-codex-limits
 ```
 
-Возвращаем архив из шага 3: программа, юниты, ярлыки, настройки, состояние.
+Если `$SRC` из шага 4 уже удалён, распакуйте ту же ревизию заново командой из шага 4.
+
+**Каталог настроек.** В `~/.config/claude-codex-limits` лежат `machine-id`, токен GitHub и `settings.json`.
+
+- **Рекомендуется его оставить**, если издатель, скорее всего, вернётся. Тогда повторная установка возьмёт тот же
+  `machine-id` и продолжит тот же файл `machine-<id>.json` в gist.
+- **Удалить всё** можно ключом `uninstall.sh --purge` вместо команды выше. Он дополнительно делает `ccl-sync logout`
+  (вход в GitHub удаляется с этой машины) и удаляет оба каталога: настройки и состояние.
+  - Новый `machine-id` при будущей установке даст второй файл VPS в gist. Старые читатели будут считать VPS дважды,
+    пока старый файл живёт (до 45 дней; `common.py`, `machine_id()`).
 
 ```bash
-tar -C "$HOME" -xzf "$BK/ccl-before.tgz" && systemctl --user daemon-reload
+sh "$SRC/linux/uninstall.sh" --purge
 ```
 
-Таймер включаем, только если он был до A5 (шаг 1). Строки cron возвращает владелец из `$BK/crontab.txt`, если
-`ccl-sync` был в cron: `crontab` заменяет таблицу целиком.
+**Файл VPS в gist** после любого отката остаётся с последними данными: `uninstall.sh` gist не трогает. Убрать его
+можно только правкой gist — это решение и руки владельца.
+
+**Если шаг 2 что-то нашёл и сохранил,** после 8.2 верните прежнее из архива. Таймер включайте, только если он был до
+A5.
 
 ```bash
-systemctl --user enable --now ccl-sync.timer
+tar -C "$HOME" -xzf "$BKOLD/ccl-before.tgz" && systemctl --user daemon-reload
 ```
-
-- Значок 0.4.5 вернётся при следующем входе в XFCE через восстановленный автозапуск. Можно и сразу: владелец
-  запускает `claude-codex-limits &` в сессии `:20`.
-- Если до A5 стоял `.deb`, после `uninstall.sh` снова действуют его `/usr/bin/ccl-sync` и глобальный таймер.
-- **Цена полного отката.** Вернётся поведение 0.4.5: значок обновляет токены CLI сам. Именно от этого защищает S1.
-- **Файл VPS в gist.** Если машина вернулась с тем же `machine-id`, следующий синк 0.4.5 перезапишет файл в формате
-  v1. Если до A5 установки не было (`machine-id` новый), файл VPS остаётся в gist с последними данными. Удалить его
-  можно только правкой gist — это решение и руки владельца.
 
 ## 9. Известные ограничения
 
