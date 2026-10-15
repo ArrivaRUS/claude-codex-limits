@@ -409,7 +409,7 @@ is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secre
 | `windows.session`, `windows.weekly` | `{pct, resetAt}` | `pct` finite number 0…100, not boolean | no, each |
 | `models` | array of `{name, pct, resetAt}` | ≤ 8; `name` ≤ 48 chars | no |
 | `resetCredits` | integer | 0…1000 (Codex) | no |
-| `schedule` | `{mode, interval, nextAt, backoff}` | `mode` `auto`·`fixed`; `interval` 900·1800·3600·14400 s; `backoff` boolean | no |
+| `schedule` | `{mode, interval, nextAt, backoff}` | `mode` `auto`·`fixed`; `interval` 900·1800·3600·14400 s; `backoff` boolean; `nextAt` = own last attempt + `interval` — the writer's cadence only, **never** its provider deadline (that goes only to `retryUntil`) | no |
 | `retryUntil` | time or `null` | the provider's deadline (429 / Retry-After) | no |
 | `days` (record) | day → model → counters | v1 counters | yes, may be `{}` |
 
@@ -455,7 +455,10 @@ UTC; strings are shown only as plain text.
   1. one validating `GET /gists/{id}` (`public == false`), merge other files, coordination decision (*Read rules*);
   2. save the attempt locally first; if it can't be saved → no request;
   3. **PATCH №1** with the new `attemptAt`. Any failure (non-2xx, network, 404) → restore the previous attempt time,
-     **no provider request**; the next tick retries;
+     **no provider request** (skip `publish_failed`); the next tick retries. **Series limit:** the 1st and 2nd
+     consecutive `publish_failed` ticks skip; the 3rd consecutive one polls on its own schedule without the
+     announcement, as when the gist is unavailable (silent data loss ≤ 10 min; neighbours are not visible then —
+     the same tolerance as «gist unavailable»);
   4. provider request;
   5. **PATCH №2** with the result (status, `asOf`, values, `retryUntil`, schedule).
   Both PATCHes reuse the one GET within **120 s**; PATCH 404 clears the gist id and hash as in v1; no discovery in between.
@@ -490,6 +493,10 @@ UTC; strings are shown only as plain text.
     remaining budget as its cap, `min(8 MiB, 64 MiB − already read)`; a rejected body counts as cap + 1 bytes.
     Once the budget is spent no further files are read; files already read are merged;
   - `accounts`: only the first 64 raw array elements are examined; of them at most 8 valid records (after dedup) are kept.
+  - **Refused-raw cache** (`sync-state.json` → `rejectedRaw`): a `raw_url` refused for its transport/redirect or for
+    exceeding 8 MiB is stored as the first 16 hex chars of sha256(URL) → refusal time (epoch s). While the entry is
+    present that file is skipped without a download (visible error as above). Entries live 24 h; at most 64 (the
+    oldest is evicted). The URL itself is never stored. On disk, because each headless tick is a new process.
   - Known limitation (Linux; fix planned in A3): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
     whole cycle, not one file.
 - Grouping: one card per `(product, label)` across machines, own included; the latest successful `asOf` wins (a tie →
@@ -499,20 +506,79 @@ UTC; strings are shown only as plain text.
 - A source machine is offline when its `lastSeenAt` is older than 30 min. Files without `lastSeenAt` fall back to
   `updated`: they come from older writers without limit snapshots, so the offline card state does not apply to them.
   Links on remote cards are product constants, never taken from the file.
-- **Trust in other machines' fields** — they may only **postpone** my polling, never make it more frequent than my Auto:
-  - another machine's `attemptAt` for my label younger than 900 + 60 s → skip (a failed attempt counts too);
-  - its successful `asOf` younger than my interval + 60 s → skip;
-  - its `retryUntil` is stored apart from my own deadline, with `firstSeenAt` on disk, and honoured until
-    `min(retryUntil, firstSeenAt + 24 h)`; repeats, heartbeats and restarts don't move `firstSeenAt`; then my own
-    schedule resumes (`remote_retry_capped`). My own Retry-After has no cap;
-  - `asOf`/`attemptAt`/`nextAt` more than 60 s in the future, or inconsistent with each other → not fresh for coordination
-    (display rules above still apply);
-  - records from a file whose `lastSeenAt` is older than 30 min suppress nothing (an accepted `retryUntil` still holds);
-  - tie: its `nextAt` within ±60 s of my due time, the source alive (`lastSeenAt` ≥ now − 15 min) and its `machine.id`
-    lower than mine → I skip once per `(machineId, nextAt)`, then poll;
-  - manual refresh: my own ≥ 900 s floor, ≥ 960 s after another machine's `attemptAt`, never before `retryUntil`.
-- **Clocks.** Skew = GitHub's `Date` header − local time. The 60 s margins assume |skew| ≤ 60 s; above that the machine
-  logs `clock_skew`, shows it in status, and no coordination guarantee is claimed (no auto-correction; use NTP).
+- **Trust in other machines' fields** — they may only **postpone** my polling, never make it more frequent than my Auto.
+  Coordination runs only when my own schedule is due; it considers other machines' records for my `(product, label)`.
+  Below, `now` is local time, `I` my interval, `I′` the other record's `schedule.interval` if it is one of 900 · 1800 ·
+  3600 · 14400, otherwise 14400. All bounds are in seconds.
+  - **Liveness** (the record takes part in coordination at all): its file's `lastSeenAt` is present, parsable and within
+    `now − 1800 ≤ lastSeenAt ≤ now + 60` (`now + 60` itself is alive). Missing, broken, older or further in the future →
+    **not alive**: it suppresses nothing, takes no part in the tie-break, and its `retryUntil` is not accepted (a
+    previously accepted one still holds, see the chain below).
+  - **Freshness** (an alive record is dropped **as a whole** if any holds; display rules above still apply):
+    `asOf > now + 60`; `attemptAt > now + 60`; `asOf > attemptAt + 60`; `nextAt > now + I′ + 60`. A future `nextAt`
+    within `I′ + 60` is normal. A single unparsable time is treated as absent, not as a reason to drop.
+  - **Meaning of `nextAt`:** the writer's last attempt + its interval (*Field rules*). A writer never folds its own
+    provider deadline into `nextAt`; that deadline travels only in `retryUntil`. (Folding it in would push `nextAt`
+    past `now + I′ + 60` after a long Retry-After and make neighbours drop the very record that should stop them.)
+  - Order of checks: `retry_after` > `remote_attempt` > `fresh_remote` > `tie_break` > poll.
+  - `retry_after`: my own `retryUntil` (no cap) or an accepted foreign deadline (below) is in the future → skip.
+  - `remote_attempt`: another machine's `attemptAt` younger than 900 + 60 s → skip (a failed attempt counts too).
+  - `fresh_remote`: its `status = ok` and `asOf` younger than `I + 60` → skip.
+  - **Foreign `retryUntil` chain.** Accepted only from fresh, alive records with `retryUntil > now`; the latest such
+    deadline is taken; while it is in force it is not replaced, and at its expiry the next foreign deadline (if any)
+    continues the chain. It is stored apart from my own deadline as `{until, firstSeenAt}` (Linux:
+    `publisher-state.json` → `remote_retry`) and honoured until `min(until, firstSeenAt + 24 h)`. Repeats, heartbeats
+    and restarts don't move `firstSeenAt`.
+    - A newly accepted deadline **inherits** `firstSeenAt` (the same chain, one 24 h cap) only if the previous
+      effective deadline `min(until, firstSeenAt + 24 h)` is still in force or expired ≤ 900 s ago, and I have not
+      polled since (my last attempt < the previous `until`). Otherwise a **new chain** starts with `firstSeenAt = now`.
+      So a neighbour republishing `retryUntil = now + 23 h` every tick cannot suppress me for more than 24 h, and a
+      chain broken by > 900 s without deadlines cannot make a fresh 429 elsewhere trigger an immediate poll.
+    - When the cap fires, the stored value becomes the **cap marker** `until = firstSeenAt + 24 h`, the event
+      `remote_retry_capped` is logged and my own schedule resumes. The marker is kept even if the source disappears,
+      so a heartbeat, a changed deadline or a restart cannot arm another 24 h in the same chain. It is cleared when my
+      last attempt ≥ `firstSeenAt + 24 h`. The marker also counts as «the previous effective deadline»: if it expired
+      > 900 s ago without my poll, the next foreign deadline starts a new chain.
+    - Edge case: a normal deadline that ends exactly on the cap is treated as the marker — no `remote_retry_capped`,
+      and I poll.
+    - My own Retry-After has no cap. Invariant: ≥ 1 own request per 24 h.
+  - **Tie-break** (`tie_break`): an alive, fresh record whose `nextAt` is within ±60 s of my due time
+    (`last attempt + I`), whose source is alive within 15 min (`lastSeenAt ≥ now − 900`) and whose `machine.id`
+    matches `^[A-Za-z0-9-]{1,64}$` and is lower than mine (plain string comparison) → I skip once per
+    `(machineId, nextAt)` (Linux: `tie_wait`), then poll. With several candidates the lowest pair wins. A record whose
+    `machine.id` fails the form never tie-breaks, but every other rule still applies to it; readers do **not** drop
+    such files for coordination (a Mac id may be upper-case, fixtures may be shorter than 8 chars).
+  - Manual refresh: only `retry_after` and `remote_attempt` apply (≥ 960 s after another machine's `attemptAt`, never
+    before any `retryUntil`), plus my own ≥ 900 s floor.
+- **Clocks.** Skew = GitHub's `Date` header − local time, sampled on every GitHub response (errors included) and kept
+  in `sync-state.json` as `clockSkew` (seconds, signed) and `clockSkewAt` (local epoch of the sample). The 60 s margins
+  assume |skew| ≤ 60 s; above that the machine logs `clock_skew`, shows it in status, and no coordination guarantee is
+  claimed (no auto-correction; use NTP).
+
+### Publisher journal (O1, Linux)
+
+Private, headless event log `$XDG_STATE_HOME/claude-codex-limits/publisher.jsonl` (default `~/.local/state/…`;
+directory 0700, file 0600, append-only, one JSON object per line with `ev` and `ts`). Values are enumerations,
+16-hex labels, numbers or an exception **class name** — never identifiers, URLs, paths or error text. The allow-list
+lives in `linux/ccl/common.py` (`O1_EVENTS`, `O1_SKIP_REASONS`, `_O1_ENUMS`); an unknown event or field raises.
+
+| Event | Fields | When |
+|---|---|---|
+| `poll_attempt` | `product`, `kind` (`auto`·`manual`), `attemptAt` | provider request about to be made |
+| `poll_result` | `product`, `httpStatus`, `result` (`ok`·`failed`) | provider answer accepted |
+| `poll_skipped` | `product`, `reason` | product not polled on this tick; `reason` ∈ `not_due` · `fresh_remote` · `remote_attempt` · `tie_break` · `retry_after` · `no_github` · `no_login` · `no_label` · `state_unsaved` · `publish_failed` · `token_policy` · `busy` |
+| `pass_skipped` | `reason` = `busy` | the whole pass skipped: the `quota` lock was not obtained within 30 s |
+| `pass_failed` | `class` | unexpected exception ended the pass (class name only) |
+| `publish` | `result` (`ok`·`failed`) | machine-file PATCH outcome |
+| `accounts_days_dropped` | `reason` = `counter_overflow` | `accounts[].days` omitted from the file (overflow); root `days` still published |
+| `token_refresh` | `product`, `credentialWrite` (1), `policy` (`guarded`) | token rotation written to the CLI credentials |
+| `policy_forced_never` | `policy` = `never` | `guarded` overridden to `never` because the machine is a publisher (logged once per transition) |
+| `policy_violation` | `product`, `policy` = `never` | a credential write was attempted under `never` and refused |
+| `pending_rotation_lost` | `product` | a pending rotated token pair was not saved, or its rotation marker could not be removed |
+| `remote_retry_capped` | `product` | a foreign `retryUntil` chain hit its 24 h cap |
+| `label_changed` | `product` | the account label for a product changed |
+| `identity_changed` | `product` | the CLI sign-in changed during a pass; the reserved attempt is not used for the new account |
+| `clock_skew` | `seconds` (signed skew) | absolute skew (GitHub `Date` − local) > 60 s |
 
 ### Privacy
 
