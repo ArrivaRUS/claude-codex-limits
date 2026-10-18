@@ -67,6 +67,25 @@ Linger и часы. Ожидается `Linger=yes` и `NTPSynchronized=yes`: р
 loginctl show-user "$(id -un)" -p Linger; timedatectl show -p NTPSynchronized
 ```
 
+XDG-каталоги ssh-шелла и user manager (T2 §5 п. 2). Таймер работает в user manager, а команды этой инструкции — в
+ssh-шелле. Если каталоги у них разные, издатель пишет не туда, куда смотрят проверки §6–§8. Сначала шелл:
+
+```bash
+env | grep -E '^XDG_(CONFIG|STATE|DATA)_HOME='
+```
+
+Затем user manager:
+
+```bash
+systemctl --user show-environment | grep -E '^XDG_(CONFIG|STATE|DATA)_HOME='
+```
+
+Ожидается: оба вывода пусты или строки совпадают. Если расходятся — остановитесь и сообщите Юрке до шага 4.
+
+> **Внимание.** `systemctl --user show-environment` и `env` печатают всё окружение. В окружение менеджера могут быть
+> импортированы секреты (токены, пароли). Запускайте их **только** с фильтром `grep -E` выше, ровно в этом виде.
+> Без фильтра, с `| less`, с другим шаблоном или «посмотреть целиком» — нельзя: вывод может попасть в чат или отчёт.
+
 Права на каталоги CLI. Для `~/.codex` ожидается `700` (П6-б).
 
 ```bash
@@ -319,6 +338,13 @@ stat -c '%a %U %n' ~/.config/claude-codex-limits ~/.config/claude-codex-limits/s
 и пар меньше 900 с на продукт, а также самую длинную серию `publish failed` подряд. В журнале по контракту нет ни
 токенов, ни идентификаторов (`sync-protocol.md`, «Publisher journal»).
 
+**Зазоры G1 скрипт считает по `ts` события `poll_attempt`, а не по полю `attemptAt`** (T2 §5 п. 3, находка N1).
+Событие `poll_attempt` пишется непосредственно перед вызовом провайдера, поэтому его `ts` — фактический старт
+запроса. `attemptAt` в ревизиях до цикла правок A4 №2 — время резерва, общее для всех продуктов прохода. Если
+второй запрос начался позже и проход убили, по `attemptAt` пара выглядит как ≥ 900 с, хотя фактически короче.
+После цикла правок A4 №2 время попытки ставится перед каждым вызовом провайдера, и `attemptAt` совпадёт с `ts`.
+Скрипт берёт `ts` в любой ревизии. `ts` пишется с точностью до секунды.
+
 ```bash
 python3 -I - <<'EOF'
 import calendar, collections, json, os, time
@@ -337,7 +363,7 @@ for line in open(path, "rb"):
         continue
     events["/".join(str(r[k]) for k in ("ev", "product", "reason", "result", "httpStatus", "class") if k in r)] += 1
     if r.get("ev") == "poll_attempt":
-        attempts[r.get("product")].append(r.get("attemptAt") or t)
+        attempts[r.get("product")].append(t)
     if r.get("ev") == "publish":
         run = run + 1 if r.get("result") == "failed" else 0
         worst = max(worst, run)
@@ -492,11 +518,29 @@ grep -o -E '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$BK/v
 
 ### 8.1 Пауза без удаления (быстро)
 
-Таймер выключен — запросов к Anthropic, OpenAI и GitHub нет. Настройки, вход и журнал остаются. Вернуть:
-`systemctl --user enable --now ccl-sync.timer`.
+Настройки, вход и журнал остаются. Сначала выключаем таймер, чтобы не начался новый проход:
 
 ```bash
 systemctl --user disable --now ccl-sync.timer
+```
+
+Выключение таймера **не прерывает проход, который уже идёт**: он может ещё до 20 минут (`TimeoutStartSec`)
+обращаться к Anthropic, OpenAI и GitHub. Поэтому останавливаем и сам сервис (SIGTERM, проход завершается сразу):
+
+```bash
+systemctl --user stop ccl-sync.service
+```
+
+Проверка — ожидается `inactive` (не `activating` и не `active`):
+
+```bash
+systemctl --user is-active ccl-sync.service
+```
+
+Только после этого запросов к Anthropic, OpenAI и GitHub нет. Вернуть:
+
+```bash
+systemctl --user enable --now ccl-sync.timer
 ```
 
 ### 8.2 Удалить издатель
@@ -508,6 +552,24 @@ systemctl --user disable --now ccl-sync.timer
 - удаляет ярлыки, обёртки в `~/.local/bin` и программу `~/.local/share/claude-codex-limits`.
 
 Настройки (`~/.config/claude-codex-limits`) и состояние (`~/.local/state/claude-codex-limits`) он оставляет.
+
+**Перед удалением остановите идущий проход.** `uninstall.sh` выключает таймер, но не ждёт проход, который уже идёт,
+и удаляет программу прямо под ним. Выполните три команды из 8.1 по порядку: выключить таймер, остановить
+`ccl-sync.service`, убедиться, что он `inactive`:
+
+```bash
+systemctl --user disable --now ccl-sync.timer
+```
+
+```bash
+systemctl --user stop ccl-sync.service
+```
+
+```bash
+systemctl --user is-active ccl-sync.service
+```
+
+Ожидается `inactive`. Затем удаление:
 
 ```bash
 sh "$SRC/linux/uninstall.sh"
@@ -528,7 +590,8 @@ rm -rf ~/.local/state/claude-codex-limits
 
 - **Рекомендуется его оставить**, если издатель, скорее всего, вернётся. Тогда повторная установка возьмёт тот же
   `machine-id` и продолжит тот же файл `machine-<id>.json` в gist.
-- **Удалить всё** можно ключом `uninstall.sh --purge` вместо команды выше. Он дополнительно делает `ccl-sync logout`
+- **Удалить всё** можно ключом `uninstall.sh --purge` вместо команды выше (остановка таймера и сервиса — та же,
+  перед ним). Он дополнительно делает `ccl-sync logout`
   (вход в GitHub удаляется с этой машины) и удаляет оба каталога: настройки и состояние.
   - Новый `machine-id` при будущей установке даст второй файл VPS в gist. Старые читатели будут считать VPS дважды,
     пока старый файл живёт (до 45 дней; `common.py`, `machine_id()`).
