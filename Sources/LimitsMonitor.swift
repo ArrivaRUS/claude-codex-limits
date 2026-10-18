@@ -8588,6 +8588,9 @@ if CommandLine.arguments.contains("--sync-selftest") {
         }
     }
 
+    // REMOTE-LIMITS C1 (Sources/RemoteLimitsSelfTests.swift): merge v1.1, reader limits, resolver, injected now.
+    failures += runRemoteLimitsSelfTests(defaults: selfTestDefaults, root: selfTestRoot)
+
     selfTestDefaults.clear()
     try? FileManager.default.removeItem(atPath: remoteFile)
     try? FileManager.default.removeItem(atPath: selfTestRoot)
