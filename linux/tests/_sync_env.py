@@ -265,12 +265,19 @@ class SyncEnv(unittest.TestCase):
         return sync.sync_state()
 
     def sign_in(self, token=None, gist=GIST):
-        """Store `token` as a fresh generation (fake Secret Service) and mark the sign-in active."""
+        """Store `token` as a fresh generation and mark the sign-in active.
+
+        Exact backend (S4, A5): a stand with `publisher: true` in its settings stores the token only in the 0600
+        file; otherwise the (fake, unlocked) Secret Service is chosen. Decided from the stand's settings, not from
+        the code under test, so a regression either way fails here."""
+        settings = common.settings()
+        settings.reload()
+        expected = "file" if settings.get("publisher") is True else "secret-service"
         with common.file_lock("sync") as held:
             self.assertTrue(held)
             backend = vault.write(token or self.token)
         self.st().update(login="me", revoked=False, gistId=gist, discoveredAt=time.time())
-        self.assertEqual(backend, "secret-service")
+        self.assertEqual(backend, expected)
         return vault.active(self.st())
 
     def empty_hash(self):
