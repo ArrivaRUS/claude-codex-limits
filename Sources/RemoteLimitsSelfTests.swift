@@ -920,7 +920,7 @@ private func rlC108(_ fx: RLFixtures, _ expect: RLExpect) {
 /// Deadline for reading other machines' raw files in one sync cycle (decision brief 2026-10-18: 30 s). Linux differs:
 /// `_read_budget` = 60 s for the whole read phase (GET /gists included), each request ≤ min(30 s, remaining). If Юрка picks the
 /// Linux number, change only this constant — every C1-14 expectation is derived from it.
-private let RL_RAW_READ_DEADLINE: TimeInterval = 30
+private let RL_RAW_READ_DEADLINE: TimeInterval = 60
 private let RL_FIX_GIST = "rl-fix-gist"
 private let RL_RAW_BASE = "https://gist.githubusercontent.com/u/rl-fix-gist/raw/abc/"
 
