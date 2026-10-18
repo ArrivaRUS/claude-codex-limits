@@ -1,6 +1,7 @@
 """Where the GitHub token lives: the desktop's Secret Service (KWallet / GNOME Keyring through
 org.freedesktop.secrets) when it is reachable and unlocked, otherwise a 0600 file in
-~/.config/claude-codex-limits/. The token is never printed or logged, not even in part.
+~/.config/claude-codex-limits/. Publishers always use the file backend (0600).
+The token is never printed or logged, not even in part.
 
 Only non-interactive Secret Service calls are made: if the keyring would need a password
 prompt (locked collection, no default collection), we fall back to the file rather than pop
@@ -387,6 +388,69 @@ def active(st):
     return generation, st.get("tokenBackend")
 
 
+def publisher_requires_file():
+    settings = common.settings()
+    settings.reload()
+    return settings.get("publisher") is True
+
+
+def credential_ref(st):
+    """Resolve the active backend from nonsecret state only; never contact D-Bus."""
+    generation, backend = active(st)
+    if not generation:
+        return None
+    if backend == "credential-v2":
+        manifest = st.get("authV2") or {}
+        return manifest.get("active") if isinstance(manifest, dict) else None
+    return dict(generation=generation, backend=backend)
+
+
+def publisher_secret_service(st):
+    return publisher_secret_service_ref(st) is not None
+
+
+def publisher_secret_service_ref(st):
+    """Include unpublished credentials that owner recovery could still consume.
+
+    Retirement references (cleanupRefs/tokenDeletePending) cannot become active
+    and must not block a new file login just because old deletion is pending.
+    """
+    if not publisher_requires_file():
+        return None
+    refs = [credential_ref(st)]
+    if st.get("tokenBackend") == "credential-v2" and active(st)[0]:
+        manifest = st.get("authV2") or {}
+        if isinstance(manifest, dict) and not manifest.get("signedOut"):
+            transition = manifest.get("transition") or {}
+            if isinstance(transition, dict):
+                refs.extend((transition.get("to"), transition.get("probe")))
+                if transition.get("candidateSource"):
+                    refs.append(transition.get("from"))
+    return next((ref for ref in refs if isinstance(ref, dict) and ref.get("backend") == "secret-service"), None)
+
+
+def token_file_path(st):
+    ref = credential_ref(st)
+    return _v2_path(ref) if st.get("tokenBackend") == "credential-v2" and ref else common.TOKEN_FILE_PATH
+
+
+def publisher_relogin_text(st):
+    login = st.get("login") or "?"
+    return common.tr(
+        "GitHub: %s — токен в хранилище секретов, а издатель хранит его только в файле: выполните ccl-sync logout "
+        "(там, где хранилище разблокировано), затем ccl-sync login",
+        "GitHub: %s — the token is in the Secret Service, a publisher keeps it only in a file: run ccl-sync logout "
+        "(where the keyring is unlocked), then ccl-sync login") % login
+
+
+def publisher_warning_text():
+    return common.tr(
+        "Внимание: токен GitHub в хранилище секретов, а издатель хранит его только в файле. Ничего не перенесено: "
+        "выполните ccl-sync logout, затем ccl-sync login",
+        "Warning: the GitHub token is in the Secret Service; a publisher keeps it only in a file. Nothing was moved: "
+        "run ccl-sync logout, then ccl-sync login")
+
+
 def _read(generation, backend):
     if not generation:
         return None, None
@@ -487,6 +551,13 @@ def store(token):
     st = common.Store(common.SYNC_STATE_PATH)
     ss_ref = [generation, "secret-service"]
     with _sigint_deferred():
+        if publisher_requires_file():
+            st.update(tokenDeletePending=_pending(st, [generation, "file"]))
+            _file_set(token, generation)
+            if _file_get(generation, staged=True) != token:
+                delete_ref(generation, "file")
+                raise OSError("could not save the token")
+            return generation, "file"
         # Persist intent before a worker can create a copy, including one that outlives us.
         st.update(tokenDeletePending=_pending(st, ss_ref))
 
@@ -815,6 +886,8 @@ class CredentialStore:
             return "failure"
 
     def login_backend(self):
+        if publisher_requires_file():
+            return "file"
         # Existing explicit-login policy permits file selection if SS is not
         # usable. This method is NEVER used for refresh or recovery.
         def usable():

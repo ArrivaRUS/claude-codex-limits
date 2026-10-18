@@ -107,7 +107,7 @@ def cmd_login(args):
         backend = sync.auth_snapshot().get("backend") or sync.sync_state().get("tokenBackend")
         _say(common.tr("Готово. GitHub: ", "Done. GitHub: ") + (login or "?") + "  ("
              + (common.tr("токен в хранилище секретов", "token in the Secret Service") if backend == "secret-service"
-                else common.tr("токен в файле ", "token in file ") + common.TOKEN_FILE_PATH) + ")")
+                else common.tr("токен в файле ", "token in file ") + vault.token_file_path(sync.sync_state())) + ")")
         return cmd_push(argparse.Namespace(force=True, auto=False, quiet=False))
     except KeyboardInterrupt:
         sync.cancel_login(attempt)
@@ -393,6 +393,8 @@ def cmd_publisher(args):
             return 1
         _say(common.tr("Издатель включён.", "Publisher enabled.") if args.enable
              else common.tr("Издатель выключен.", "Publisher disabled."))
+        if args.enable and vault.publisher_secret_service(sync.sync_state()):
+            _say(vault.publisher_warning_text())
         return 0
     if args.now:
         settings.reload()
@@ -454,9 +456,11 @@ def cmd_status(_args):
     elif st.get("revoked"):
         _say("GitHub: " + common.tr("вход отозван — войдите заново (ccl-sync login)",
                                     "sign-in revoked — sign in again (ccl-sync login)"))
+    elif vault.publisher_secret_service(st):
+        _say(vault.publisher_relogin_text(st))
     elif token:
         _say("GitHub: %s  (%s)" % (st.get("login") or "?", common.tr("токен: ", "token: ") + (
-            common.tr("хранилище секретов", "Secret Service") if backend == "secret-service" else common.TOKEN_FILE_PATH)))
+            common.tr("хранилище секретов", "Secret Service") if backend == "secret-service" else vault.token_file_path(st))))
     elif backend == "locked":
         _say("GitHub: " + common.tr("токен в заблокированном хранилище секретов — разблокируйте KWallet",
                                     "token is in a locked Secret Service — unlock KWallet"))

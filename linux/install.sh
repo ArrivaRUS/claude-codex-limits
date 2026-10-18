@@ -141,7 +141,7 @@ done
 if ! "$PY" -I -B - "$DEST" "$NAME" "$TRAY" "$PUBLISHER" <<'PYEOF'
 import sys
 sys.path.insert(0, sys.argv[1])
-from ccl import common
+from ccl import common, vault
 try:
     with common.file_lock("quota", timeout=60) as held:
         if not held:
@@ -158,6 +158,10 @@ try:
                 # Auto mode only on first enable; reinstall/update keeps publisher --mode.
                 changes["autoPoll"] = True
         settings.update(**changes)
+        if sys.argv[4] == "1" and vault.publisher_secret_service(common.Store(common.SYNC_STATE_PATH)):
+            # Installer output is always Russian, regardless of the saved UI language.
+            print("Внимание: токен GitHub в хранилище секретов, а издатель хранит его только в файле. Ничего не перенесено: "
+                  "выполните ccl-sync logout, затем ccl-sync login")
 except common.CredentialPolicyRefused as e:
     print("Политику токенов сейчас сменить нельзя: %s" % e)
     sys.exit(1)

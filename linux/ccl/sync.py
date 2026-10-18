@@ -1223,6 +1223,8 @@ def warning(st=None, now=None, moment=None, require_attempt=True, error_text=Non
     now = time.time() if now is None else now
     moment = moment or (lambda t: time.strftime("%H:%M", time.localtime(t)))
     presentation = auth_snapshot(st)
+    if presentation.get("reason") == "publisher_file_required":
+        return vault.publisher_relogin_text(st)
     if presentation.get("kind") == "actionRequired":
         return auth_reason(presentation.get("reason"))
     if presentation.get("kind") == "temporary" and st.get("login"):
@@ -1296,6 +1298,8 @@ def auth_owner():
 
 
 def auth_reason(reason):
+    if reason == "publisher_file_required":
+        return vault.publisher_relogin_text(sync_state())
     messages = {
         "missing": ("Ключ GitHub не найден на этом компьютере — войдите заново", "GitHub key not found on this computer — sign in again"),
         "locked": ("Хранилище секретов заблокировано — синхронизация продолжится после разблокировки", "The Secret Service is locked — sync resumes after unlocking"),
@@ -1335,6 +1339,12 @@ def _retire_legacy_pending():
 
 
 def ensure_access(reason="sync", lock_held=False):
+    # Enforce publisher policy before owner recovery, cleanup, vault reads or HTTP.
+    # The timer and an unlocked desktop must make the same decision from JSON.
+    st = sync_state()
+    ref = vault.publisher_secret_service_ref(st)
+    if ref:
+        return auth.AccessResult("actionRequired", reason="publisher_file_required", ref=ref)
     owner = auth_owner()
     result = owner.ensure_access(reason=reason, lock_held=lock_held)
     _publish_auth_status(owner, result)
@@ -1351,6 +1361,11 @@ def ensure_access(reason="sync", lock_held=False):
 def auth_snapshot(st=None):
     """Nonsecret projection only: safe on the GUI thread; no vault or HTTP."""
     st = st or sync_state()
+    if not st.get("revoked") and vault.publisher_secret_service(st):
+        # Stored authStatus may still describe an earlier locked desktop keyring.
+        # Publisher policy wins without rewriting the manifest or recovering it.
+        return dict(kind="actionRequired", reason="publisher_file_required", retryAt=None,
+                    backend="secret-service", login=st.get("login"))
     snapshot = st.get("authStatus")
     if isinstance(snapshot, dict):
         return snapshot
