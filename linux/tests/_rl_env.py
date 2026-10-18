@@ -2,8 +2,8 @@
 
 Order matters (lesson 006):
   1. Before any `ccl` import: take the REAL home from the passwd database (not $HOME), install an
-     audit hook that refuses to open the real ~/.claude.json, ~/.claude/, ~/.codex/, and stat the
-     app's own real files (presence + mtime only — contents are never read).
+     audit hook that refuses to open the real ~/.claude.json, ~/.claude/, ~/.codex/; `_real_guard` refuses and
+     records every write of the test process to the app's real files (no mtime: a live publisher, A5).
   2. If `ccl` was not imported yet in this process, point $HOME to a temporary directory, so every
      `~` path `ccl.common` computes at import lands in the sandbox. Then import `_isolate`
      (XDG_* → temp, `common.http` / `sync.transport` / keyring → hard failures).
@@ -19,12 +19,16 @@ import pwd
 import sys
 import tempfile
 
+if __package__:
+    from . import _real_guard  # noqa: E402  (first: computes the real directories before HOME moves)
+else:
+    import _real_guard  # noqa: E402
+
 REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
-# Files only this app writes: mtime must not move during the run. The live CLIs rewrite their own
-# login files at any moment, so those are protected differently: any attempt to open them fails.
-REAL_CLI_FILES = tuple(os.path.join(REAL_HOME, p) for p in (
-    ".local/state/claude-codex-limits/publisher.jsonl", ".local/state/claude-codex-limits/publisher-state.json",
-    ".config/claude-codex-limits/settings.json"))
+# The app's own real files (settings.json, publisher.jsonl, publisher-state.json, …) are guarded by `_real_guard`:
+# any write of the test process is refused and recorded — no mtime, since an installed publisher (A5) rewrites them
+# every 5 minutes. The live CLIs rewrite their own login files at any moment, so those are stricter still: any
+# attempt to OPEN them fails.
 FORBIDDEN_REAL = tuple(os.path.join(REAL_HOME, p) for p in (".claude.json", ".claude" + os.sep, ".codex" + os.sep))
 
 
@@ -38,17 +42,6 @@ def _deny_real_cli_files(event, args):
 sys.addaudithook(_deny_real_cli_files)  # process-wide and permanent: no test may read the owner's logins
 
 
-def _real_state():
-    out = {}
-    for p in REAL_CLI_FILES:
-        try:
-            out[p] = os.stat(p).st_mtime_ns
-        except OSError:
-            out[p] = None
-    return out
-
-
-REAL_BEFORE = _real_state()
 SANDBOX_HOME = tempfile.mkdtemp(prefix="ccl-rl-home-", dir="/tmp")
 if "ccl" not in sys.modules:
     os.environ["HOME"] = SANDBOX_HOME
@@ -86,11 +79,7 @@ assert all(getattr(common, n).startswith(_isolate.ROOT) for n in CLI_CONSTANTS),
 
 
 def assert_real_files_untouched():
-    now = _real_state()
-    changed = [p for p in REAL_CLI_FILES if now[p] != REAL_BEFORE[p]]
-    if changed:
-        raise AssertionError("real CLI/publisher files changed during tests: %s" % changed)
-    _sync_env.assert_real_files_untouched()
+    _real_guard.assert_clean()
 
 
 def fixture_text(name):

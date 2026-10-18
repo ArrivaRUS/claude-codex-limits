@@ -297,7 +297,5 @@ class SyncEnv(unittest.TestCase):
 
 
 def assert_real_files_untouched(case=None):
-    now = _isolate.real_files_state()
-    if now != _isolate.REAL_BEFORE:
-        changed = [p for p in now if now[p] != _isolate.REAL_BEFORE.get(p)]
-        raise AssertionError("real files changed during tests: %s" % changed)
+    """No write of the test process (or a child with real app dirs) reached the owner's files (`_real_guard`)."""
+    _isolate._real_guard.assert_clean()

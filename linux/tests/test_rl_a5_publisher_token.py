@@ -1,7 +1,7 @@
 """REMOTE-LIMITS A5 — incident 2026-10-18: on a headless publisher the GitHub token went to the Secret Service.
 Sources: decisions/log.md «2026-10-18 — A5: токен GitHub ушёл в Secret Service вопреки S4»; docs/prd-remote-limits.md
 F3 P1 («токен GitHub хранится в существующем файловом бэкенде 0600 (S4)») and S4 («только в файловом бэкенде 0600»).
-Test-plan IDs A5-01…A5-10 (docs/test-plan-remote-limits.md §A5). Written BEFORE the fix (red): every red test fails on
+Test-plan IDs A5-01…A5-11 (docs/test-plan-remote-limits.md §A5). Written BEFORE the fix (red): every red test fails on
 a missing behaviour, never on its harness. Tests marked GUARD are green now on purpose and must stay green.
 
 Where the token is chosen today (both paths are pinned, the incident went through the second one):
@@ -27,6 +27,8 @@ IDs:
          the re-login hint (contract below); the «unlock KWallet» advice is not printed (under the timer it never
          unlocks).
   A5-07  GUARD publisher with the token in the file: `status` prints the usual «GitHub: me  (token: <path>)», no hint.
+  A5-11  (decision of Yurka 2026-10-18) the same pass with the token in an UNLOCKED Secret Service: the fake's
+         `get` is never called, no request, `lastError` = the A5-08 hint. Automatic SS → file migration: NOT done.
   A5-08  publisher pass with the token in a LOCKED Secret Service (`sync.open_cycle(auto=True)` — the pass's read
          step): no exception, no request, `lastError` carries the re-login hint instead of «sync resumes after
          unlocking».
@@ -57,7 +59,7 @@ Text contract chosen by the tester (developer: implement exactly this, or ask Yu
          выполните ccl-sync logout, затем ccl-sync login`
     install.sh prints the ru text. Checked: a line with «Warning»/«Внимание», «Secret Service»/«хранилищ»,
     «ccl-sync logout» then «ccl-sync login».
-  NOT required (question to Yurka, not a test): automatic migration of an existing Secret Service token into the file.
+  NOT done (decision of Yurka 2026-10-18): automatic migration of an existing Secret Service token into the file.
 
 Run: cd linux && python3 -m unittest tests.test_rl_a5_publisher_token -v   (≈ 5 s, no network, no D-Bus, no systemctl)
 """
@@ -339,6 +341,27 @@ class TestA508PassLockedSecretService(Base):
         self.assertTrue(hint_ok(error), "lastError прохода — подсказка перелогиниться, а не «ждём разблокировки»: %r"
                         % (error,))
         self.assertNotIn("after unlocking", error or "")
+
+
+class TestA511PassUnlockedSecretService(Base):
+    """Decision of Yurka 2026-10-18: with `publisher: true` the pass never reads the token from the Secret Service,
+    even an unlocked one (cron/desktop session with a live D-Bus) — same hint as A5-08."""
+
+    def test_open_cycle_refuses_unlocked_secret_service_token(self):
+        ref = self.v2_login_in_secret_service()
+        self.assertIn(ref["generation"], self.v2ss.items, "стенд: токен в разблокированном хранилище")
+        requests = []
+
+        def any_request(url, method, headers, body, timeout):
+            requests.append((method, url))
+            return env.resp(503, {"message": "fixture"})
+        sync.transport = any_request          # restored by SyncEnv.tearDown; a request must not crash the pass
+        with patch.object(self.v2ss, "get", wraps=self.v2ss.get) as read_secret:
+            self.assertIsNone(sync.open_cycle(auto=True))
+        self.assertEqual(read_secret.call_count, 0, "S4: издатель не читает токен из хранилища секретов")
+        self.assertEqual(requests, [], "без токена из файла — ни одного запроса")
+        error = self.st().get("lastError")
+        self.assertTrue(hint_ok(error), "lastError — подсказка перелогиниться: %r" % (error,))
 
 
 # ==== A5-09 — `ccl-sync publisher --enable` ==========================================================================

@@ -1,4 +1,9 @@
-"""Process-wide safety defaults; import before ccl in every test entry point (lesson 006)."""
+"""Process-wide safety defaults; import before ccl in every test entry point (lesson 006).
+
+The owner's real files are protected by `_real_guard` (imported first, before XDG_* move): every write-like
+operation of the test process on them is refused and recorded, children with real app directories are refused.
+No mtime comparison: an installed publisher on this machine (A5) rewrites its state files every 5 minutes.
+"""
 
 import atexit
 import os
@@ -6,29 +11,10 @@ import shutil
 import sys
 import tempfile
 
-_HOME = os.path.expanduser("~")
-# The user's real files (lesson 006). Tests compare presence + mtime only; contents are never read.
-REAL_FILES = tuple(os.path.join(_HOME, p) for p in (
-    ".config/claude-codex-limits/github-token",
-    ".config/claude-codex-limits/machine-id",
-    ".local/state/claude-codex-limits/sync-state.json",
-    ".local/state/claude-codex-limits/sync-remote.json",
-    ".config/claude-codex-limits/github-credentials",
-    ".local/state/claude-codex-limits/github-credential-writers",
-))
-
-
-def real_files_state():
-    out = {}
-    for p in REAL_FILES:
-        try:
-            out[p] = os.stat(p).st_mtime_ns
-        except FileNotFoundError:
-            out[p] = None
-    return out
-
-
-REAL_BEFORE = real_files_state()
+if __package__:
+    from . import _real_guard  # noqa: E402  (before anything moves XDG_* or HOME)
+else:
+    import _real_guard  # noqa: E402
 
 ROOT = tempfile.mkdtemp(prefix="ccl-tests-", dir="/tmp")
 atexit.register(shutil.rmtree, ROOT, ignore_errors=True)
