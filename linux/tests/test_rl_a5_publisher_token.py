@@ -1,0 +1,448 @@
+"""REMOTE-LIMITS A5 — incident 2026-10-18: on a headless publisher the GitHub token went to the Secret Service.
+Sources: decisions/log.md «2026-10-18 — A5: токен GitHub ушёл в Secret Service вопреки S4»; docs/prd-remote-limits.md
+F3 P1 («токен GitHub хранится в существующем файловом бэкенде 0600 (S4)») and S4 («только в файловом бэкенде 0600»).
+Test-plan IDs A5-01…A5-10 (docs/test-plan-remote-limits.md §A5). Written BEFORE the fix (red): every red test fails on
+a missing behaviour, never on its harness. Tests marked GUARD are green now on purpose and must stay green.
+
+Where the token is chosen today (both paths are pinned, the incident went through the second one):
+  * legacy explicit login (a plain string token): `vault.store` (vault.py `def store`) tries the Secret Service first;
+  * the real `ccl-sync login` (Device Flow returns a dict → `sync.login_finish` → `AuthOwner.accept_login`) takes the
+    backend from `vault.CredentialStore.login_backend()` — «secret-service» whenever the default collection is
+    unlocked. That is what happened on the VPS desktop terminal (XFCE, unlocked keyring).
+
+IDs:
+  A5-01  `publisher: true` + reachable, UNLOCKED Secret Service (fake that can set/get): `vault.write` (= store +
+         publish) → backend «file», `common.TOKEN_FILE_PATH` mode 0600 holds the token, no Secret Service item, the
+         fake's `set` (= CreateItem) never called.
+  A5-02  the same through legacy `sync.login_finish(<str>)`: `tokenBackend` = «file», file 0600, no `set`.
+  A5-03  `publisher: true`: `CredentialStore.login_backend()` → «file» although the collection is unlocked.
+  A5-04  `publisher: true`: `ccl-sync login --force --no-browser` (Device Flow, V2) → active ref backend «file»,
+         `github-credentials/<generation>` mode 0600 with the envelope, no V2 Secret Service item, `set` never called;
+         the «Done» line says «token in file …» (en) / «токен в файле …» (ru), never the Secret Service.
+  A5-05  GUARD `publisher: false` (and key absent): previous behaviour — `vault.write` and `ccl-sync login` choose the
+         Secret Service when it is unlocked; the «Done» line says «token in the Secret Service».
+  A5-06  publisher whose token already lives in the Secret Service (legacy of the incident), `ccl-sync status`
+         (lang en and ru), variants: V2 ref locked (what the systemd timer sees), V2 ref unlocked (desktop terminal),
+         legacy ref (`tokenBackend: secret-service`) locked and unlocked → rc 0, no traceback, a «GitHub: …» line with
+         the re-login hint (contract below); the «unlock KWallet» advice is not printed (under the timer it never
+         unlocks).
+  A5-07  GUARD publisher with the token in the file: `status` prints the usual «GitHub: me  (token: <path>)», no hint.
+  A5-08  publisher pass with the token in a LOCKED Secret Service (`sync.open_cycle(auto=True)` — the pass's read
+         step): no exception, no request, `lastError` carries the re-login hint instead of «sync resumes after
+         unlocking».
+  A5-09  `ccl-sync publisher --enable` while the token is in the Secret Service (V2 and legacy) → rc 0, publisher
+         enabled, warning (contract below); nothing is moved: the Secret Service item stays, no token file appears,
+         `sync-state.json` sign-in fields unchanged, the Secret Service is not even contacted (decision from the
+         nonsecret state only — P1 headless). GUARD: token in the file → no warning.
+  A5-10  `sh install.sh --publisher --no-tray --name vps` over a `sync-state.json` that points at the Secret Service
+         (real state produced by a login in this sandbox, V2 and legacy) → rc 0, settings as A4-01, warning (Russian,
+         install.sh speaks Russian only), `sync-state.json` byte-for-byte unchanged, no credential file. GUARD: token
+         in the file → no warning.
+
+Text contract chosen by the tester (developer: implement exactly this, or ask Yurka). Tests check the marked parts:
+  * login «Done» line (existing format): en `Done. GitHub: <login>  (token in file <path>)`,
+    ru `Готово. GitHub: <login>  (токен в файле <path>)` — checked: «token in file»/«токен в файле», no
+    «Secret Service»/«хранилище секретов» on that line.
+  * re-login hint (status line and `lastError` of the pass), one line:
+      en `GitHub: <login> — the token is in the Secret Service, a publisher keeps it only in a file: run ccl-sync logout
+         (where the keyring is unlocked), then ccl-sync login`
+      ru `GitHub: <login> — токен в хранилище секретов, а издатель хранит его только в файле: выполните ccl-sync logout
+         (там, где хранилище разблокировано), затем ccl-sync login`
+    checked: status line starts with «GitHub:»; it contains «Secret Service» (en) / «хранилищ» (ru), «ccl-sync logout»
+    and, after it, «ccl-sync login»; `lastError` contains «ccl-sync logout» then «ccl-sync login».
+  * enable warning (`publisher --enable`, after «Publisher enabled.»):
+      en `Warning: the GitHub token is in the Secret Service; a publisher keeps it only in a file. Nothing was moved:
+         run ccl-sync logout, then ccl-sync login`
+      ru `Внимание: токен GitHub в хранилище секретов, а издатель хранит его только в файле. Ничего не перенесено:
+         выполните ccl-sync logout, затем ccl-sync login`
+    install.sh prints the ru text. Checked: a line with «Warning»/«Внимание», «Secret Service»/«хранилищ»,
+    «ccl-sync logout» then «ccl-sync login».
+  NOT required (question to Yurka, not a test): automatic migration of an existing Secret Service token into the file.
+
+Run: cd linux && python3 -m unittest tests.test_rl_a5_publisher_token -v   (≈ 5 s, no network, no D-Bus, no systemctl)
+"""
+
+if __package__:
+    from . import _rl_env as rl
+    from . import _sync_env as env
+    from .test_rl_install import run_install, settings_of, EXPECTED
+else:
+    import _rl_env as rl
+    import _sync_env as env
+    from test_rl_install import run_install, settings_of, EXPECTED
+
+import contextlib
+import io
+import json
+import os
+import re
+import shutil
+import stat
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from ccl import cli, common, sync, vault
+
+
+def tearDownModule():
+    rl.assert_real_files_untouched()
+
+
+def mode_of(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+def hint_ok(text):
+    """«ccl-sync logout» first, then «ccl-sync login» (the order the owner must follow)."""
+    return bool(re.search(r"ccl-sync logout\b.*\bccl-sync login\b", text or "", re.S))
+
+
+class Base(env.SyncEnv):
+    def setUp(self):
+        super().setUp()
+        self._timer = patch.object(cli, "_timer_status", return_value="test timer")
+        self._timer.start()
+        self.addCleanup(self._timer.stop)
+        common.settings().update(lang="en")
+
+    # ---- helpers -----------------------------------------------------------------------------------------------
+    def publisher(self, on=True):
+        common.settings().update(publisher=on)
+
+    def lang(self, value):
+        common.settings().update(lang=value)
+
+    def run_cli(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = cli.main(list(argv))
+        return rc, out.getvalue() + err.getvalue()
+
+    def credential_files(self):
+        names = []
+        if os.path.isdir(common.CONFIG_DIR):
+            base = os.path.basename(common.TOKEN_FILE_PATH)
+            names = [n for n in os.listdir(common.CONFIG_DIR) if base in n]
+        directory = os.path.join(common.CONFIG_DIR, "github-credentials")
+        if os.path.isdir(directory):
+            names.extend("github-credentials/" + n for n in os.listdir(directory))
+        return sorted(names)
+
+    def script_device_login(self, token, login="me"):
+        self.gh.on("POST", "https://github.com/login/device/code", env.resp(200, {
+            "device_code": "dc", "user_code": "UC-T", "interval": 0.01, "expires_in": 60,
+            "verification_uri": "https://github.com/login/device"}))
+        self.gh.on("POST", "https://github.com/login/oauth/access_token",
+                   env.resp(200, dict(access_token=token, refresh_token=env.make_token())))
+        self.gh.on("GET", "/user", env.resp(200, {"id": 7, "login": login}))
+
+    def cli_login(self, token=None):
+        """The real `ccl-sync login` (Device Flow → V2 owner → CredentialStore); the push after it is skipped."""
+        self.enable_v2_login()
+        self.script_device_login(token or self.token)
+        with patch.object(cli, "cmd_push", return_value=0):
+            return self.run_cli("login", "--force", "--no-browser")
+
+    def done_line(self, out):
+        lines = [ln for ln in out.splitlines() if ln.startswith(("Done. GitHub:", "Готово. GitHub:"))]
+        self.assertEqual(len(lines), 1, out)
+        return lines[0]
+
+    def v2_login_in_secret_service(self):
+        """Reproduce the incident: login on an unlocked desktop keyring (publisher off, as before the fix)."""
+        self.publisher(False)
+        rc, out = self.cli_login()
+        self.assertEqual(rc, 0, out)
+        _credential, ref = self.credential()
+        self.assertEqual(ref["backend"], "secret-service", "стенд: вход до фикса — в хранилище секретов")
+        self.publisher(True)
+        return ref
+
+    def lock_v2(self, ref):
+        """What the systemd timer sees: the item exists, but only in a locked collection."""
+        self.v2ss.items.pop(ref["generation"], None)
+        self.v2ss.locked.add(ref["generation"])
+
+    def legacy_login_in_secret_service(self):
+        self.publisher(False)
+        generation, backend = self.sign_in(gist=None)
+        self.assertEqual(backend, "secret-service")
+        self.publisher(True)
+        return generation
+
+    def lock_legacy(self, generation):
+        self.ss.items.pop(generation, None)
+        self.ss.locked.add(generation)
+
+    def status(self):
+        rc, out = self.run_cli("status")
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("Traceback", out)
+        return out
+
+    def github_line(self, out):
+        lines = [ln for ln in out.splitlines() if ln.startswith("GitHub:")]
+        self.assertEqual(len(lines), 1, out)
+        return lines[0]
+
+
+# ==== A5-01 / A5-02 — legacy store ===================================================================================
+class TestA501VaultStorePublisherFileOnly(Base):
+    def test_write_goes_to_file_0600_and_never_to_secret_service(self):
+        self.publisher(True)
+        with patch.object(self.ss, "set", wraps=self.ss.set) as create_item, \
+                common.file_lock("sync") as held:
+            self.assertTrue(held)
+            backend = vault.write(self.token)
+        self.assertEqual(create_item.call_count, 0, "S4: у издателя CreateItem в хранилище секретов не вызывается")
+        self.assertEqual(self.ss.items, {}, "S4: в хранилище секретов токена нет")
+        self.assertEqual(backend, "file")
+        self.assertEqual(vault.active(self.st())[1], "file")
+        self.assertEqual(mode_of(common.TOKEN_FILE_PATH), 0o600)
+        self.assertEqual(vault.read(), (self.token, "file"))
+
+    def test_store_reference_is_file(self):
+        self.publisher(True)
+        with patch.object(self.ss, "set", wraps=self.ss.set) as create_item, \
+                common.file_lock("sync") as held:
+            self.assertTrue(held)
+            generation, backend = vault.store(self.token)
+            vault.delete_ref(generation, backend)
+        self.assertEqual((backend, create_item.call_count), ("file", 0))
+
+
+class TestA502LegacyLoginFinish(Base):
+    def test_login_finish_with_plain_token_stores_file(self):
+        self.publisher(True)
+        self.gh.on("GET", "/user", env.resp(200, {"id": 7, "login": "me"}))
+        with patch.object(self.ss, "set", wraps=self.ss.set) as create_item:
+            self.assertEqual(sync.login_finish(self.token), "me")
+        self.assertEqual(create_item.call_count, 0)
+        self.assertEqual(self.ss.items, {})
+        self.assertEqual(self.st().get("tokenBackend"), "file")
+        self.assertEqual(mode_of(common.TOKEN_FILE_PATH), 0o600)
+
+
+# ==== A5-03 / A5-04 — the real `ccl-sync login` (V2) =================================================================
+class TestA503LoginBackend(Base):
+    def test_publisher_login_backend_is_file_with_unlocked_keyring(self):
+        self.enable_v2_login()
+        self.publisher(True)
+        self.assertEqual(self.auth_owner.store.login_backend(), "file")
+
+
+class TestA504CliLoginPublisher(Base):
+    def test_cli_login_stores_envelope_in_file_0600(self):
+        for lang, phrase in (("en", "token in file"), ("ru", "токен в файле")):
+            with self.subTest(lang=lang):
+                self.publisher(True)
+                self.lang(lang)
+                self.st().update(tokenGeneration="")
+                self.enable_v2_login()
+                with patch.object(self.v2ss, "set", wraps=self.v2ss.set) as create_item:
+                    rc, out = self.cli_login(env.make_token())
+                self.assertEqual(rc, 0, out)
+                self.assertEqual(create_item.call_count, 0, "S4: CreateItem у издателя не вызывается")
+                self.assertEqual(self.v2ss.items, {}, "S4: конверта входа в хранилище секретов нет")
+                _credential, ref = self.credential()
+                self.assertEqual(ref["backend"], "file")
+                files = [n for n in self.credential_files() if n.startswith("github-credentials/")]
+                self.assertEqual(files, ["github-credentials/" + ref["generation"]])
+                self.assertEqual(mode_of(os.path.join(common.CONFIG_DIR, files[0])), 0o600)
+                line = self.done_line(out)
+                self.assertIn(phrase, line)
+                self.assertNotIn("Secret Service", line)
+                self.assertNotIn("хранилище секретов", line)
+                rc, out = self.run_cli("logout")
+                self.assertEqual(rc, 0, out)
+
+
+# ==== A5-05 GUARD — publisher off: unchanged =========================================================================
+class TestA505GuardNotPublisher(Base):
+    def test_vault_write_prefers_unlocked_secret_service(self):
+        for value in (False, None):
+            with self.subTest(publisher=value):
+                if value is None:
+                    common.settings().update(publisher=None)
+                else:
+                    self.publisher(value)
+                with common.file_lock("sync") as held:
+                    self.assertTrue(held)
+                    self.assertEqual(vault.write(env.make_token()), "secret-service")
+
+    def test_cli_login_prefers_unlocked_secret_service(self):
+        self.publisher(False)
+        rc, out = self.cli_login()
+        self.assertEqual(rc, 0, out)
+        _credential, ref = self.credential()
+        self.assertEqual(ref["backend"], "secret-service")
+        self.assertEqual(len(self.v2ss.items), 1)
+        self.assertIn("token in the Secret Service", self.done_line(out))
+
+
+# ==== A5-06 / A5-07 — status of a publisher whose token is in the Secret Service =====================================
+class TestA506StatusHint(Base):
+    def check(self, out, lang):
+        line = self.github_line(out)
+        self.assertTrue(hint_ok(line), "подсказка: ccl-sync logout, затем ccl-sync login — " + line)
+        self.assertIn("Secret Service" if lang == "en" else "хранилищ", line)
+        self.assertNotIn("unlock KWallet", out, "под таймером хранилище не разблокируется — совет вводит в заблуждение")
+        self.assertNotIn("разблокируйте KWallet", out)
+
+    def test_v2_locked(self):
+        ref = self.v2_login_in_secret_service()
+        self.lock_v2(ref)
+        for lang in ("en", "ru"):
+            with self.subTest(lang=lang):
+                self.lang(lang)
+                self.check(self.status(), lang)
+
+    def test_v2_unlocked(self):
+        self.v2_login_in_secret_service()
+        for lang in ("en", "ru"):
+            with self.subTest(lang=lang):
+                self.lang(lang)
+                self.check(self.status(), lang)
+
+    def test_legacy_locked(self):
+        self.lock_legacy(self.legacy_login_in_secret_service())
+        self.check(self.status(), "en")
+
+    def test_legacy_unlocked(self):
+        self.legacy_login_in_secret_service()
+        self.check(self.status(), "en")
+
+
+class TestA507GuardStatusFileToken(Base):
+    def test_file_token_no_hint(self):
+        self.publisher(False)
+        self.enable_v2_login()
+        with patch.object(self.v2ss, "_unlocked", return_value=[]):    # keyring unusable → file, today too
+            rc, out = self.cli_login()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.credential()[1]["backend"], "file")
+        self.publisher(True)
+        line = self.github_line(self.status())
+        self.assertTrue(line.startswith("GitHub: me  (token: "), line)
+        self.assertNotIn("ccl-sync logout", line)
+
+
+# ==== A5-08 — the publisher pass =====================================================================================
+class TestA508PassLockedSecretService(Base):
+    def test_open_cycle_records_relogin_hint(self):
+        self.lock_v2(self.v2_login_in_secret_service())
+        before = len(self.gh.calls)
+        self.assertIsNone(sync.open_cycle(auto=True))
+        self.assertEqual(len(self.gh.calls), before, "без токена — ни одного запроса")
+        error = self.st().get("lastError")
+        self.assertTrue(hint_ok(error), "lastError прохода — подсказка перелогиниться, а не «ждём разблокировки»: %r"
+                        % (error,))
+        self.assertNotIn("after unlocking", error or "")
+
+
+# ==== A5-09 — `ccl-sync publisher --enable` ==========================================================================
+class TestA509EnableWarns(Base):
+    SIGN_IN_KEYS = ("login", "tokenGeneration", "tokenBackend", "authV2", "tokenDeletePending")
+
+    def enable(self):
+        self.publisher(False)
+        before = {k: self.st().get(k) for k in self.SIGN_IN_KEYS}
+        items = (dict(self.v2ss.items) if self.v2ss else None, dict(self.ss.items))
+        files = self.credential_files()
+        calls = []
+        real_v2, real_v1 = vault._ss_v2, vault._ss
+        with patch.object(vault, "_ss_v2", side_effect=lambda: calls.append("v2") or real_v2()), \
+                patch.object(vault, "_ss", side_effect=lambda: calls.append("v1") or real_v1()):
+            rc, out = self.run_cli("publisher", "--enable")
+        self.assertEqual(rc, 0, out)
+        self.assertIs(common.settings().get("publisher"), True)
+        self.st().reload()
+        self.assertEqual({k: self.st().get(k) for k in self.SIGN_IN_KEYS}, before, "вход не переносится")
+        self.assertEqual((dict(self.v2ss.items) if self.v2ss else None, dict(self.ss.items)), items)
+        self.assertEqual(self.credential_files(), files, "файла токена не появилось")
+        self.assertEqual(calls, [], "решение — по несекретному состоянию, без D-Bus (P1)")
+        return out
+
+    def warning(self, out):
+        return [ln for ln in out.splitlines() if ln.startswith(("Warning", "Внимание"))]
+
+    def test_v2_secret_service(self):
+        for lang, word in (("en", "Secret Service"), ("ru", "хранилищ")):
+            with self.subTest(lang=lang):
+                self.v2_login_in_secret_service()
+                self.lang(lang)
+                lines = self.warning(self.enable())
+                self.assertEqual(len(lines), 1, "одно предупреждение")
+                self.assertIn(word, lines[0])
+                self.assertTrue(hint_ok(lines[0]), lines[0])
+
+    def test_legacy_secret_service(self):
+        self.legacy_login_in_secret_service()
+        lines = self.warning(self.enable())
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(hint_ok(lines[0]), lines[0])
+
+    def test_guard_file_token_no_warning(self):
+        self.enable_v2_login()
+        with patch.object(self.v2ss, "_unlocked", return_value=[]):
+            rc, out = self.cli_login()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.warning(self.enable()), [])
+
+    def test_guard_not_signed_in_no_warning(self):
+        self.assertEqual(self.warning(self.enable()), [])
+
+
+# ==== A5-10 — install.sh --publisher ==================================================================================
+class TestA510InstallWarns(Base):
+    def install_over(self, state_bytes):
+        tmp = tempfile.mkdtemp(prefix="ccl-a5-install-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        state_dir = os.path.join(tmp, "home", ".local", "state", "claude-codex-limits")
+        os.makedirs(state_dir, mode=0o700)
+        state_path = os.path.join(state_dir, "sync-state.json")
+        with open(state_path, "wb") as f:
+            f.write(state_bytes)
+        r = run_install(tmp, ["--publisher", "--no-tray", "--name", "vps"])
+        self.assertEqual(r.rc, 0, r.out[-1500:])
+        obj = json.loads(settings_of(r))
+        self.assertEqual({k: obj.get(k) for k in EXPECTED}, EXPECTED)
+        with open(state_path, "rb") as f:
+            self.assertEqual(f.read(), state_bytes, "sync-state.json не меняется: переноса нет")
+        conf = os.path.join(r.conf, "claude-codex-limits")
+        leftovers = [n for n in os.listdir(conf) if n.startswith("github-")] if os.path.isdir(conf) else []
+        self.assertEqual(leftovers, [], "файла токена не появилось")
+        return r.out
+
+    def state_bytes(self):
+        with open(common.SYNC_STATE_PATH, "rb") as f:
+            return f.read()
+
+    def warning(self, out):
+        # install.sh already prints «Внимание: … нет в PATH» in this sandbox: only the keyring warning counts.
+        return [ln for ln in out.splitlines() if "Внимание" in ln and "хранилищ" in ln]
+
+    def test_v2_secret_service_state(self):
+        self.v2_login_in_secret_service()
+        lines = self.warning(self.install_over(self.state_bytes()))
+        self.assertEqual(len(lines), 1, "одно предупреждение в выводе install.sh")
+        self.assertIn("хранилищ", lines[0])
+        self.assertTrue(hint_ok(lines[0]), lines[0])
+
+    def test_legacy_secret_service_state(self):
+        self.legacy_login_in_secret_service()
+        lines = self.warning(self.install_over(self.state_bytes()))
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(hint_ok(lines[0]), lines[0])
+
+    def test_guard_file_state_no_warning(self):
+        self.enable_v2_login()
+        with patch.object(self.v2ss, "_unlocked", return_value=[]):
+            rc, out = self.cli_login()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.warning(self.install_over(self.state_bytes())), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
