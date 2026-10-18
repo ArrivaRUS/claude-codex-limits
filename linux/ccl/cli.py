@@ -438,9 +438,9 @@ def cmd_status(_args):
     try:
         mid = common.machine_id()
     except OSError:
-        mid = "?"
+        mid = None
     _say(common.tr("Эта машина: ", "This machine: ") + "%s · %s · id %s" % (
-        common.machine_name(), common.os_name(), mid))
+        common.machine_name(), common.os_name(), mid if mid is not None else "?"))
     policy = common.credential_write()
     settings = common.settings()
     settings.reload()
@@ -509,7 +509,7 @@ def cmd_status(_args):
                 continue
             machines.append((sync._machine_text(m.get("name"), "name") or "?",
                              sync._machine_text(m.get("os"), "os"), sync._machine_text(m.get("app"), "app"),
-                             common.parse_iso(obj.get("updated")), m.get("id") == common.machine_id()))
+                             common.parse_iso(obj.get("updated")), mid is not None and m.get("id") == mid))
     if machines is None:
         machines = [(m["name"], m.get("os", ""), m.get("app", ""), m.get("updated"), False)
                     for m in sync.load_remote().get("machines", [])]

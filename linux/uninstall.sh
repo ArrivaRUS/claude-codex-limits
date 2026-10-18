@@ -16,8 +16,8 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
     rm -f "$CONF/systemd/user/ccl-sync.service" "$CONF/systemd/user/ccl-sync.timer"
     systemctl --user daemon-reload || true
 fi
-if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q 'ccl-sync" push'; then
-    crontab -l 2>/dev/null | grep -v 'ccl-sync" push' | crontab -
+if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q -E "ccl-sync[\"']? push"; then
+    ( crontab -l 2>/dev/null | grep -v -E "ccl-sync[\"']? push" || true ) | crontab -
 fi
 pkill -f "$DEST/claude-codex-limits" 2>/dev/null || true
 if [ "$PURGE" = 1 ] && [ -f "$DEST/ccl-sync" ]; then

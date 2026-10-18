@@ -170,15 +170,17 @@ def _installer_flags():
     conf = os.environ.get("XDG_CONFIG_HOME") or os.path.join(common.HOME, ".config")
     data = os.environ.get("XDG_DATA_HOME") or os.path.join(common.HOME, ".local", "share")
     flags = []
+    current = common.read_json(common.SETTINGS_PATH, {})
+    tray = current.get("tray") if isinstance(current, dict) else None
     publisher = _publisher_tag()
     if publisher is not None:
         tag, tray = publisher
         flags += ["--publisher", "--name", tag]
-        # The stored choice decides (A4 M1); the menu entry is only a fallback for installs made
-        # before `tray` was stored.
-        if tray is False or (tray is not True and
-                             not os.path.exists(os.path.join(data, "applications", "claude-codex-limits.desktop"))):
-            flags.append("--no-tray")
+    # The stored choice decides for every install (A4 M1/C2); only old publishers
+    # fall back to the menu entry when no tray preference was stored.
+    if tray is False or (publisher is not None and tray is not True and
+                         not os.path.exists(os.path.join(data, "applications", "claude-codex-limits.desktop"))):
+        flags.append("--no-tray")
     if "--no-tray" not in flags and not os.path.exists(os.path.join(conf, "autostart", "claude-codex-limits.desktop")):
         flags.append("--no-autostart")
     timer = os.path.exists(os.path.join(conf, "systemd", "user", "ccl-sync.timer"))

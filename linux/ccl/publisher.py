@@ -259,6 +259,9 @@ def _pending(bucket):
 
 
 def _reserve(saved, current, due, now, kind, result):
+    # Freeze the oldest-first order before the shared reservation overwrites
+    # every due timestamp. Repeated kills in the first provider must rotate it.
+    due.sort(key=lambda product: current[product][3].last_attempt)
     for product in due:
         _local_id, _reason, bucket, poll = current[product]
         poll.begin(now)
@@ -275,9 +278,6 @@ def _reserve(saved, current, due, now, kind, result):
 def _poll_products(saved, current, due, now, auto, settings, kind, result, announced=False):
     for product in due:
         local_id, _reason, bucket, poll = current[product]
-        # Keep this in memory until the result is durable. A killed provider
-        # must leave one forced echo, even when PATCH #1 was confirmed.
-        bucket["attemptPublished"] = announced
         # CLI sign-in can change while GET/PATCH is in flight. Do not send
         # a request for B using the reservation we just announced for A.
         if accounts.read_local_id(product)[0] != local_id:
@@ -287,7 +287,15 @@ def _poll_products(saved, current, due, now, auto, settings, kind, result, annou
             bucket["attemptPending"] = False
             _save(saved, current)
             continue
-        common.o1_event("poll_attempt", product=product, kind=kind, attemptAt=now)
+        # Keep the shared reservation for every due product, but journal this
+        # request's actual start too: a slow PATCH or previous provider must not
+        # let a restart shorten the interval after a killed request.
+        if not _reserve(saved, current, [product], time.time(), kind, result):
+            continue
+        # Keep this in memory until the result is durable. A killed provider
+        # must leave one forced echo, even when PATCH #1 was confirmed.
+        bucket["attemptPublished"] = announced
+        common.o1_event("poll_attempt", product=product, kind=kind, attemptAt=poll.last_attempt)
         provider = getattr(limits, "fetch_" + product)
         error_class = None
         try:
@@ -377,7 +385,7 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
         # No attempt has been reserved yet; a reopen restores the old bucket.
         if not (prior >= 3
                 or (prior + 1 >= 3 and _pending(bucket))
-                or (poll.last_attempt > 0 and
+                or ((prior >= 1 or _pending(bucket)) and poll.last_attempt > 0 and
                     now - poll.last_attempt >= max(poll.interval, coordination.RETRY_CAP))):
             continue
         # Match the unavailable-gist path: no new remote observations, but a
@@ -449,13 +457,37 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
             due.append(product)
 
     if due:
+        # A healthy day-old attempt must first see this GET's neighbours. If
+        # coordination admits it, keep the day-cap request ahead of PATCH #1
+        # (which may hang), while reserving ALL due products before any request.
+        coordinated_day = [p for p in due if prior == 0 and
+                           current[p][3].last_attempt > 0 and
+                           now - current[p][3].last_attempt >=
+                           max(current[p][3].interval, coordination.RETRY_CAP)]
         old_saved = copy.deepcopy(saved)
         old_polls = {p: copy.deepcopy(v[3].saved()) for p, v in current.items()}
         old_auto = copy.deepcopy(state.get("autoPollState"))
         old_retry = copy.deepcopy(state.get("quotaServerRetryAt"))
         if not _reserve(saved, current, due, now, kind, result):
             return
-        if session and not _publish(session, _text(saved, current, ix, gist_id, auto), result):
+        if coordinated_day:
+            # Preserve the oldest-first order fixed by the shared reservation.
+            coordinated_day = [p for p in due if p in coordinated_day]
+            _poll_products(saved, current, coordinated_day, now, auto, settings, kind, result)
+            early.extend(coordinated_day)
+            due = [p for p in due if p not in coordinated_day]
+            # A later failed announcement may roll back only the unpolled
+            # products. Completed day-cap results and their actual starts stay
+            # durable in both rollback mirrors too.
+            polls, retries = _mirrors(current)
+            old_auto, old_retry = _dict(old_auto), _dict(old_retry)
+            for product in coordinated_day:
+                old_saved[product] = copy.deepcopy(saved[product])
+                old_auto[product] = copy.deepcopy(polls[product])
+                old_retry.pop(product, None)
+                if product in retries:
+                    old_retry[product] = retries[product]
+        if due and session and not _publish(session, _text(saved, current, ix, gist_id, auto), result):
             series_resolved = True
             # The tick (including a reopen) was already journalled before GET.
             # The rollback target therefore retains this tick's failure count.
@@ -489,7 +521,7 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
             # either mirror is restored, exactly as for a full rollback.
             polls, retries = _mirrors(current)
             _rollback(saved, copy.deepcopy(saved), polls, retries, state)
-        elif session:
+        elif due and session:
             series_resolved = True
             saved["_publishFailures"] = 0
             # A provider may never return. Persist the confirmed announcement

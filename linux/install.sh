@@ -126,15 +126,19 @@ find "$DEST" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 # Wrappers run the scripts through the system interpreter explicitly — the variant that works
 # under Astra's interpreter control, and needs no exec bit on the scripts themselves.
+shell_quote() {
+    "$PY" -I -B -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$1"
+}
 for name in ccl-sync claude-codex-limits; do
-    printf '#!/bin/sh\nexec %s "%s/%s" "$@"\n' "$PY" "$DEST" "$name" > "$BIN/$name"
+    SCRIPT=$(shell_quote "$DEST/$name")
+    printf '#!/bin/sh\nexec %s %s "$@"\n' "$PY" "$SCRIPT" > "$BIN/$name"
     chmod 755 "$BIN/$name" 2>/dev/null || say "Не удалось сделать $BIN/$name исполняемым — запускайте: $PY $DEST/$name"
 done
 
-if [ "$PUBLISHER" = 1 ]; then
-    # Settings through the installed code: under the `quota` lock and the rotation guard, like
-    # `ccl-sync publisher --enable`; the other keys of settings.json are kept.
-    if ! "$PY" -I -B - "$DEST" "$NAME" "$TRAY" <<'PYEOF'
+# Keep the tray choice for ordinary installations too, so updates preserve --no-tray.
+# Settings through the installed code: under the `quota` lock; publisher policy changes
+# also use the rotation guard, like `ccl-sync publisher --enable`. Other keys are kept.
+if ! "$PY" -I -B - "$DEST" "$NAME" "$TRAY" "$PUBLISHER" <<'PYEOF'
 import sys
 sys.path.insert(0, sys.argv[1])
 from ccl import common
@@ -145,13 +149,14 @@ try:
             sys.exit(1)
         settings = common.settings()
         settings.reload()
-        first = settings.get("publisher") is not True
-        common.set_credential_write("never")
-        changes = dict(publisher=True, credential_write="never", machineName=sys.argv[2], tray=sys.argv[3] == "1")
-        if first:
-            # Auto mode only when the publisher is first enabled: a reinstall or `ccl-sync update`
-            # keeps the mode chosen with `ccl-sync publisher --mode`.
-            changes["autoPoll"] = True
+        changes = dict(tray=sys.argv[3] == "1")
+        if sys.argv[4] == "1":
+            first = settings.get("publisher") is not True
+            common.set_credential_write("never")
+            changes.update(publisher=True, credential_write="never", machineName=sys.argv[2])
+            if first:
+                # Auto mode only on first enable; reinstall/update keeps publisher --mode.
+                changes["autoPoll"] = True
         settings.update(**changes)
 except common.CredentialPolicyRefused as e:
     print("Политику токенов сейчас сменить нельзя: %s" % e)
@@ -160,10 +165,14 @@ except OSError:
     print("Не удалось сохранить настройки; проверьте права на ~/.config/claude-codex-limits и каталог состояния.")
     sys.exit(1)
 PYEOF
-    then
-        say "Настройки издателя не записаны — таймер не устанавливаю."
+then
+    if [ "$PUBLISHER" = 1 ]; then
+        say "Настройки не записаны — таймер не устанавливаю."
         exit 1
     fi
+    say "Выбор «без значка» может не сохраниться для ccl-sync update — повторите установку позже."
+fi
+if [ "$PUBLISHER" = 1 ]; then
     say "Издатель: включён, тег машины $NAME, политика токенов never"
 fi
 
@@ -204,6 +213,15 @@ if [ "$TIMER" = 1 ]; then
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         UNITS="$CONF/systemd/user"
         mkdir -p "$UNITS"
+        # ExecStart has its own C quoting, % specifiers and $ environment expansion;
+        # shell quoting is not sufficient. Store the literal path directly in the unit.
+        SYSTEMD_SCRIPT=$("$PY" -I -B -c '
+import sys
+p = sys.argv[1].replace("\\", "\\\\").replace("\"", "\\\"")
+p = p.replace("%", "%%").replace("$", "$$")
+p = p.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+print("\"" + p + "\"")
+' "$DEST/ccl-sync")
         cat > "$UNITS/ccl-sync.service" <<EOF
 [Unit]
 Description=Claude Codex Limits — index local usage logs and sync through the GitHub gist
@@ -211,7 +229,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$PY "$DEST/ccl-sync" push --auto --quiet
+ExecStart=$PY $SYSTEMD_SCRIPT push --auto --quiet
 # Finite, and above the worst pass (lock waits, 60 s of reads, provider requests): a stuck pass is
 # stopped and the next tick runs. Not 300 s — that would cut ordinary slow passes.
 TimeoutStartSec=20min
@@ -238,8 +256,11 @@ EOF
         fi
     elif command -v crontab >/dev/null 2>&1; then
         # cron has no session bus; point it at the user's one so the keyring stays reachable
-        LINE="*/$MINUTES * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY \"$DEST/ccl-sync\" push --auto --quiet >/dev/null 2>&1"
-        ( crontab -l 2>/dev/null | grep -v 'ccl-sync" push' ; printf '%s\n' "$LINE" ) | crontab -
+        SCRIPT=$(shell_quote "$DEST/ccl-sync")
+        # cron processes % even inside shell quotes. Escape it after shell quoting.
+        LINE=$(printf '%s\n' "*/$MINUTES * * * * DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus $PY $SCRIPT push --auto --quiet >/dev/null 2>&1" | sed 's/%/\\%/g')
+        ( crontab -l 2>/dev/null | grep -v -E "ccl-sync[\"']? push" || true
+          printf '%s\n' "$LINE" ) | crontab -
         say "Таймер: cron, каждые $MINUTES минут"
     else
         say "Ни systemd --user, ни cron не найдены — синхронизация только пока запущен значок в трее."
