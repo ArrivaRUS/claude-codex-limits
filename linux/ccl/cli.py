@@ -375,15 +375,16 @@ def cmd_publisher(args):
             with common.file_lock("quota", timeout=60) as held:
                 if not held:
                     raise common.CredentialPolicyRefused("quota is busy; retry after the current attempt")
-                settings.reload()
-                # Both transitions change the effective policy. Reuse the rotation guard
-                # while holding quota until the publisher setting has also been saved.
-                policy = "never" if args.enable else settings.get("credential_write", "never")
-                common.set_credential_write("guarded" if policy == "guarded" else "never")
-                changes = {"publisher": bool(args.enable)}
-                if args.enable:
-                    changes["autoPoll"] = True
-                settings.update(**changes)
+                with vault.token_policy_guard():
+                    settings.reload()
+                    # Both transitions change the effective policy. Reuse the rotation guard
+                    # while holding quota until the publisher setting has also been saved.
+                    policy = "never" if args.enable else settings.get("credential_write", "never")
+                    common.set_credential_write("guarded" if policy == "guarded" else "never")
+                    changes = {"publisher": bool(args.enable)}
+                    if args.enable:
+                        changes["autoPoll"] = True
+                    settings.update(**changes)
         except common.CredentialPolicyRefused as e:
             _say(common.tr("Смена режима издателя отклонена: ", "Publisher mode change refused: ") + str(e))
             return 1
@@ -474,6 +475,8 @@ def cmd_status(_args):
         _say("GitHub: " + st.get("login"))
     else:
         _say("GitHub: " + common.tr("вход не выполнен (ccl-sync login)", "not signed in (ccl-sync login)"))
+    if vault.publisher_leftover_copy(st):
+        _say(vault.publisher_leftover_text())
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
     gid = st.get("gistId")
     if gid:

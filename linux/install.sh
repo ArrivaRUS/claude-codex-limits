@@ -147,21 +147,23 @@ try:
         if not held:
             print("Значок или издатель сейчас заняты попыткой (замок quota) — повторите установку позже.")
             sys.exit(1)
-        settings = common.settings()
-        settings.reload()
-        changes = dict(tray=sys.argv[3] == "1")
-        if sys.argv[4] == "1":
-            first = settings.get("publisher") is not True
-            common.set_credential_write("never")
-            changes.update(publisher=True, credential_write="never", machineName=sys.argv[2])
-            if first:
-                # Auto mode only on first enable; reinstall/update keeps publisher --mode.
-                changes["autoPoll"] = True
-        settings.update(**changes)
+        from contextlib import nullcontext
+        with vault.token_policy_guard() if sys.argv[4] == "1" else nullcontext():
+            settings = common.settings()
+            settings.reload()
+            changes = dict(tray=sys.argv[3] == "1")
+            if sys.argv[4] == "1":
+                first = settings.get("publisher") is not True
+                common.set_credential_write("never")
+                changes.update(publisher=True, credential_write="never", machineName=sys.argv[2])
+                if first:
+                    # Auto mode only on first enable; reinstall/update keeps publisher --mode.
+                    changes["autoPoll"] = True
+            settings.update(**changes)
         if sys.argv[4] == "1" and vault.publisher_secret_service(common.Store(common.SYNC_STATE_PATH)):
             # Installer output is always Russian, regardless of the saved UI language.
             print("Внимание: токен GitHub в хранилище секретов, а издатель хранит его только в файле. Ничего не перенесено: "
-                  "выполните ccl-sync logout, затем ccl-sync login")
+                  "выполните ccl-sync logout там, где хранилище разблокировано, затем ccl-sync login")
 except common.CredentialPolicyRefused as e:
     print("Политику токенов сейчас сменить нельзя: %s" % e)
     sys.exit(1)

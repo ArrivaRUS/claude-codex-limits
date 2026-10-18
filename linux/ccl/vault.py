@@ -17,10 +17,12 @@ Test seams (replace before exercising sync/vault): `_ss` (Secret Service factory
 
 import os
 import fcntl
+import errno
 import json
 import secrets
 import signal
 import threading
+import time
 from contextlib import contextmanager
 from threading import current_thread, main_thread
 
@@ -389,9 +391,65 @@ def active(st):
 
 
 def publisher_requires_file():
-    settings = common.settings()
-    settings.reload()
-    return settings.get("publisher") is True
+    # Store.reload deliberately substitutes defaults on errors; token policy
+    # must distinguish an absent settings file from an unusable existing one.
+    settings_path = common.settings().path
+    try:
+        with open(settings_path, encoding="utf-8") as f:
+            settings = json.load(f)
+    except FileNotFoundError:
+        try:
+            os.lstat(settings_path)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        return True  # An existing dangling symlink is unusable, not absent.
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return True
+    return not isinstance(settings, dict) or settings.get("publisher") is True
+
+
+@contextmanager
+def token_policy_guard(writer=False):
+    """Leaf barrier shared by actual SS workers and publisher mode changes.
+
+    Writers share the barrier, so a late operation cannot change the backend of
+    an unrelated login. Mode changes require exclusive access. A timed-out
+    worker retains its lock until its daemon operation completes.
+    """
+    if not writer:
+        with common.file_lock("github-token-policy", timeout=TIMEOUT) as held:
+            if not held:
+                raise common.CredentialPolicyRefused("GitHub token storage is busy; retry after the current operation")
+            yield
+        return
+    # Keep shared locking local: common.file_lock's existing API and exclusive
+    # quota/sync semantics remain unchanged, including existing callers' mocks.
+    path = os.path.join(common.STATE_DIR, "github-token-policy.lock")
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except FileNotFoundError:
+        common.ensure_dirs()
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                break
+            except OSError as e:
+                if e.errno not in (errno.EAGAIN, errno.EACCES):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise common.CredentialPolicyRefused(
+                        "GitHub token storage is busy; retry after the current operation") from None
+                time.sleep(min(0.05, remaining))
+        yield
+    finally:
+        os.close(fd)
 
 
 def credential_ref(st):
@@ -426,7 +484,28 @@ def publisher_secret_service_ref(st):
                 refs.extend((transition.get("to"), transition.get("probe")))
                 if transition.get("candidateSource"):
                     refs.append(transition.get("from"))
-    return next((ref for ref in refs if isinstance(ref, dict) and ref.get("backend") == "secret-service"), None)
+    return next((ref for ref in refs if isinstance(ref, dict) and
+                 (ref.get("backend") in ("secret-service", "keychain") or
+                  (ref.get("generation") == "legacy" and ref.get("backend") is None and
+                   st.get("login") and not os.path.isfile(common.TOKEN_FILE_PATH)))), None)
+
+
+def publisher_leftover_copy(st):
+    if not publisher_requires_file():
+        return False
+    manifest = st.get("authV2") or {}
+    cleanup = manifest.get("cleanupRefs", []) if isinstance(manifest, dict) else []
+    return (any(isinstance(ref, dict) and ref.get("backend") in ("secret-service", "keychain") for ref in cleanup) or
+            any(isinstance(ref, (tuple, list)) and len(ref) == 2 and ref[0] and
+                ref[1] in ("secret-service", "keychain", None) for ref in st.get("tokenDeletePending") or []))
+
+
+def publisher_leftover_text():
+    return common.tr(
+        "Внимание: старая копия токена осталась в хранилище секретов — выполните ccl-sync logout там, где хранилище "
+        "разблокировано, затем ccl-sync login",
+        "Note: an old copy of the token is left in the Secret Service — run ccl-sync logout where the keyring "
+        "is unlocked, then ccl-sync login")
 
 
 def token_file_path(st):
@@ -446,9 +525,9 @@ def publisher_relogin_text(st):
 def publisher_warning_text():
     return common.tr(
         "Внимание: токен GitHub в хранилище секретов, а издатель хранит его только в файле. Ничего не перенесено: "
-        "выполните ccl-sync logout, затем ccl-sync login",
+        "выполните ccl-sync logout там, где хранилище разблокировано, затем ccl-sync login",
         "Warning: the GitHub token is in the Secret Service; a publisher keeps it only in a file. Nothing was moved: "
-        "run ccl-sync logout, then ccl-sync login")
+        "run ccl-sync logout where the keyring is unlocked, then ccl-sync login")
 
 
 def _read(generation, backend):
@@ -456,6 +535,9 @@ def _read(generation, backend):
         return None, None
     # Only pre-generation installations with an unknown backend may discover a legacy copy.
     legacy_discovery = generation == "legacy" and backend is None
+    if publisher_requires_file() and (backend in ("secret-service", "keychain") or legacy_discovery):
+        token = _file_get("legacy") if legacy_discovery else None
+        return (token, "file") if token else (None, "publisher_file_required")
     if backend == "file":
         token = _file_get(generation)
         return (token, "file") if token else (None, None)
@@ -565,18 +647,21 @@ def store(token):
             ss = _ss()
             if ss is None:
                 return None                   # no CreateItem was attempted
-            _worker.cleanup = lambda: ss.delete(generation)
-            # Publish intent before checking abandonment: after _timed abandons under its
-            # guard, an unset flag guarantees this worker cannot subsequently call set.
-            ss_write_started.set()
-            if _worker.abandoned.is_set():
-                return False
-            ss.set(token, generation)
-            if _worker.abandoned.is_set():
-                ss.delete(generation)          # same connection as the late CreateItem
-                _worker.cleanup = None
-                return False
-            return ss.get(generation) == token
+            with token_policy_guard(writer=True):
+                if publisher_requires_file():
+                    return None
+                _worker.cleanup = lambda: ss.delete(generation)
+                # Publish intent before checking abandonment: after _timed abandons under its
+                # guard, an unset flag guarantees this worker cannot subsequently call set.
+                ss_write_started.set()
+                if _worker.abandoned.is_set():
+                    return False
+                ss.set(token, generation)
+                if _worker.abandoned.is_set():
+                    ss.delete(generation)          # same connection as the late CreateItem
+                    _worker.cleanup = None
+                    return False
+                return ss.get(generation) == token
         backend = "file"
         try:
             if _timed(ss_write):
@@ -726,6 +811,8 @@ class CredentialStore:
         from .auth import AuthRead
         try:
             path = _v2_path(ref)
+            if ref["backend"] != "file" and publisher_requires_file():
+                return AuthRead("publisher_file_required", ref=ref)
             if ref["backend"] == "file":
                 try:
                     with open(path, "r", encoding="ascii") as f:
@@ -751,6 +838,8 @@ class CredentialStore:
             return AuthRead("unreachable", ref=ref)
 
     def stage_refresh(self, ref, payload):
+        if ref.get("backend") != "file" and publisher_requires_file():
+            return "failure"
         finished = threading.Event()
         writer_fd = None
         ownership = {"worker": False, "server_settled": False, "receipt_pending": False}
@@ -818,11 +907,15 @@ class CredentialStore:
                     if ss is None:
                         ownership["server_settled"] = True
                         return "failure"
-                    # No abandoned-login cleanup. Intent already names this ref.
-                    started = True
-                    ss.set(payload, ref["generation"])
-                    ownership["server_settled"] = True
-                    return "ready" if ss.get(ref["generation"]) == payload else "uncertain"
+                    with token_policy_guard(writer=True):
+                        if publisher_requires_file():
+                            ownership["server_settled"] = True
+                            return "failure"
+                        # No abandoned-login cleanup. Intent already names this ref.
+                        started = True
+                        ss.set(payload, ref["generation"])
+                        ownership["server_settled"] = True
+                        return "ready" if ss.get(ref["generation"]) == payload else "uncertain"
                 except _SecretWriteNotStarted:
                     ownership["server_settled"] = True
                     return "failure"
