@@ -2,6 +2,12 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-12.
 
+## 🔁 2026-10-18 ночь · срез C начат (мак), ветка `remote-limits` в origin
+
+- Владелец: суть — на маке видеть остаток лимитов Claude и расходы по обеим подпискам; мак 3.2.7 читает только v1 → **версия для мака не готова**. Маршрут: C1 → C2 → C3 → релиз macOS; C4 отложен. Push разрешён в ветку `remote-limits` (не main); merge/релиз — отдельное «да». Сессия Юрки — Fable 5.1 (лимиты сброшены).
+- **C1:** красные Swift-селфтесты `301d0dc` (`Sources/RemoteLimitsSelfTests.swift`, в `--sync-selftest`, фикстуры через `--rl-fixtures`/`CCL_RL_FIXTURES`; на VPS Swift нет — не компилировались). Код — developer-codex Sol (идёт), `Sources/RemoteLimits.swift`.
+- **Сборка на маке:** диспетчер запрещал сеть Codex и `--write` в `vibe`; решение владельца — корень `ccl` → клон проекта на маке + сеть Codex в нём (пометка `:net` в `~/.config/yurka/agent-shell.roots`). Правка `tools/agent-shell.sh` — Claude developer (идёт) → T2 → владелец один раз на маке: `git pull` папки Юрки, `cp tools/agent-shell.sh ~/.local/bin/agent-shell`, строка корня. Затем цикл: push ветки → `codex-job.sh macbook ccl --write -m gpt-6.1-sol` (fetch + `bash build.sh` + `--sync-selftest`) → отчёт как данные → правки на VPS.
+
 ## 🔁 2026-10-18 вечер · A5 выкачен на VPS, идут сутки журнала
 
 - **A5 выкачен** («да» владельца 2026-10-18): чистая установка `install.sh --publisher --no-tray --name vps` (07:05 UTC) → инцидент S4 (токен ушёл в Secret Service, под таймером keyring заперт; урок `.patches/016`) → фикс `0457333` + цикл правок `71678d2` (ревью r2 PASS, T2-r2 PASS с условием) → VPS переустановлен `71678d2` → владелец сделал logout/login, токен в файле `~/.config/claude-codex-limits/github-credentials/…` (0600) → **таймер синхронизирует сам** (14:46 UTC `publish ok`). Набор Linux 789 OK.
