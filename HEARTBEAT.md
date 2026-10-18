@@ -2,10 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-12.
 
-## 🔁 2026-10-18 · A4 окончательно закрыта, ждём «да» на A5
+## 🔁 2026-10-18 вечер · A5 выкачен на VPS, идут сутки журнала
 
-- Лимиты Codex и Fable сброшены (владелец). Долг закрыт: отложенный T2 A4 (PASS с условиями) + Codex-проход r3 → цикл правок A4 №2 на **Sol @high** (1 заход + 1 resume) `9dd3bb6` (тесты `a401b01`) → ревью r4 PASS (Opus + Sol) + T2-r2 **PASS, выкатка A5 разрешена ИБ** (`docs/security-remote-limits-a4-t2.md`). Инструкция выкатки поправлена `579a32b`. Набор Linux 748 OK. Остатки — `docs/plans.md` §A4 «Остатки A4 → обязательны до C4».
-- **Следующий шаг: A5** — чистая установка на VPS по `docs/rollout-remote-limits-vps.md` из локальной ревизии (origin отстаёт; `ccl-sync update` не запускать), `ccl-sync login` делает владелец, 24 ч журнала. Только после «да» владельца.
+- **A5 выкачен** («да» владельца 2026-10-18): чистая установка `install.sh --publisher --no-tray --name vps` (07:05 UTC) → инцидент S4 (токен ушёл в Secret Service, под таймером keyring заперт; урок `.patches/016`) → фикс `0457333` + цикл правок `71678d2` (ревью r2 PASS, T2-r2 PASS с условием) → VPS переустановлен `71678d2` → владелец сделал logout/login, токен в файле `~/.config/claude-codex-limits/github-credentials/…` (0600) → **таймер синхронизирует сам** (14:46 UTC `publish ok`). Набор Linux 789 OK.
+- Важно для установки: в шелле сессии Claude `XDG_RUNTIME_DIR=/run/yurka-desktop` — `install.sh`/`systemctl --user` запускать с `XDG_RUNTIME_DIR=/run/user/1000`. Снимок файлов входа «до»: `~/ccl-a5-20261018-0705/creds-before.txt`. `ccl-sync update` на VPS не запускать (origin отстаёт; push — «да» владельца).
+- **Следующий шаг: 2026-10-19 после ~14:45 UTC** — проверки `docs/rollout-remote-limits-vps.md` §7 (журнал O1: серии `publish_failed`, зазоры по `ts`, `policy_violation`, `token_refresh` = 0; размер < 1 МиБ; `stat` файлов входа — меняет только сам CLI; journald; файл VPS в gist) + один скриншот с мака владельца (машина `vps` в синхронизации). Затем закрыть A5, выбрать дальше B1 / C-срез.
+- **Долг:** S4 N1–N3, r2-1…r2-4 → B1/C4; N4 (обвязка тестов) — до тех пор полный набор на VPS только в песочнице; остатки A4 → до C4 (`docs/plans.md`).
+- **Счётчики сессии 2026-10-18:** delegations = 13 запусков (security-analyst ×4, code-reviewer ×4, tester ×2, developer-codex ×2, tech-writer ×1) + 10 возобновлений; yurka_direct_actions = 0 (выкатка A5 и проверки — зона Юрки по плану; уроки/решения/HEARTBEAT); 🤖 ≈ 8 ч 47 мин; 🙋 1 вопрос.
 
 ## 🔁 Точка возобновления · 2026-10-15 вечер · REMOTE-LIMITS: A3 закрыта, A4 начата, стоп до сброса недельного лимита Codex
 
