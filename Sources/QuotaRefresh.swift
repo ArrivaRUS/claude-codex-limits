@@ -43,6 +43,7 @@ struct LimitData {
     var credentialIssue: QuotaCredentialIssue?
     var permissionRequestInFlight = false
     var auth: AuthState = .ok  // Confirmed provider auth/storage state, never inferred from snapshot age.
+    var source: RemoteSource? = nil
 }
 
 /// Snapshot fields and their original asOf travel together; failures/auth belong to this attempt.

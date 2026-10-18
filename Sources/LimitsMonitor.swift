@@ -9,6 +9,7 @@ import CoreText
 import ImageIO
 import Darwin
 import Security
+import CryptoKit
 
 // Reserved helper modes fail closed BEFORE selftests and ordinary globals, even
 // for malformed/mixed flags. No helper failure can fall through into app startup.
@@ -84,6 +85,63 @@ private final class SyncNoRedirects: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
     }
+}
+
+private let syncMaxGistBody = 16 * 1024 * 1024
+private let syncMaxMachineBody = 8 * 1024 * 1024
+private let syncMaxTotalBody = 64 * 1024 * 1024
+private let syncBodyTooLarge = "Sync response exceeds body limit"
+// An internal transport option, stripped before making a network request.
+private let syncBodyLimitHeader = "X-CCL-Body-Limit"
+
+/// The serialized delegate queue owns the result until completion signals the waiter.
+/// Retain at most cap + 1 bytes, including when a server ignores Content-Length.
+private final class SyncBoundedHTTP: NSObject, URLSessionDataDelegate {
+    let cap: Int
+    let done = DispatchSemaphore(value: 0)
+    var status = 0
+    var data = Data()
+    var headers: [String: String] = [:]
+    var error: String?
+    init(cap: Int) { self.cap = cap }
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Raw redirects are validated one hop at a time by the reader.
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let h = response as? HTTPURLResponse {
+            status = h.statusCode
+            for (k, v) in h.allHeaderFields { headers[String(describing: k).lowercased()] = String(describing: v) }
+        }
+        // Never consume a redirect's body, even for a refused hop.
+        completionHandler((300..<400).contains(status) ? .cancel : .allow)
+    }
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        let remaining = max(0, cap + 1 - data.count)
+        data.append(contentsOf: chunk.prefix(remaining))
+        if data.count > cap { error = syncBodyTooLarge; dataTask.cancel() }
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError failure: Error?) {
+        if error == nil, !(300..<400).contains(status) { error = failure?.localizedDescription }
+        done.signal()
+    }
+}
+
+private func boundedSyncHTTP(_ request: URLRequest, cap: Int, timeout: Double) -> SyncHTTPResult {
+    let delegate = SyncBoundedHTTP(cap: cap)
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpShouldSetCookies = false
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    defer { session.invalidateAndCancel() }
+    let task = session.dataTask(with: request)
+    task.resume()
+    guard delegate.done.wait(timeout: .now() + timeout + 5) != .timedOut else {
+        task.cancel(); return (0, nil, "timeout", [:])
+    }
+    return (delegate.status, delegate.data, delegate.error, delegate.headers)
 }
 
 private func requestHTTP(_ url: String, method: String, headers: [String: String], body: Data?,
@@ -1385,7 +1443,26 @@ private func syncHTTP(_ url: String, _ method: String, _ headers: [String: Strin
     guard !authenticated || syncAPIOrigin(url) else { return (0, nil, "GitHub API origin required", [:]) }
     let oauth = method == "POST" && syncOAuthEndpoint(url)
     if method == "POST", body != nil, !authenticated, !oauth { return (0, nil, "OAuth endpoint required", [:]) }
+    if method == "GET" {
+        guard authenticated || syncRawURL(url), let u = URL(string: url) else { return (0, nil, "Raw URL refused", [:]) }
+        let maximum = authenticated ? syncMaxGistBody : syncMaxMachineBody
+        let requested = headers[syncBodyLimitHeader].flatMap { Int($0) } ?? maximum
+        var request = URLRequest(url: u, timeoutInterval: timeout)
+        request.httpMethod = method
+        for (k, v) in headers where k != syncBodyLimitHeader { request.setValue(v, forHTTPHeaderField: k) }
+        return boundedSyncHTTP(request, cap: min(maximum, max(0, requested)), timeout: timeout)
+    }
     return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: authenticated || oauth)
+}
+
+/// Exact ASCII authority and slash, with no userinfo, alternate port, fragment or controls.
+private func syncRawURL(_ value: String) -> Bool {
+    guard value.hasPrefix("https://gist.githubusercontent.com/"),
+          value.unicodeScalars.allSatisfy({ $0.value > 32 && $0.value < 127 }),
+          let url = URLComponents(string: value), url.scheme == "https",
+          url.host == "gist.githubusercontent.com", url.percentEncodedHost == "gist.githubusercontent.com",
+          url.user == nil, url.password == nil, url.port == nil, url.fragment == nil else { return false }
+    return true
 }
 
 func syncKeychainTimeout() -> String { tr("Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s") }
@@ -1398,12 +1475,19 @@ func syncKeychainReadError(_ result: SyncKeychainRead) -> String {
     }
 }
 
-struct SyncCachedMachine: Codable { var id: String; var name: String; var os: String; var updated: Date? }
+struct SyncCachedMachine: Codable {
+    var id: String; var name: String; var os: String; var updated: Date?
+    var lastSeenAt: Date? = nil
+}
 struct SyncRemoteCache: Codable {
     var authEpoch: String?
     var authUserID: String?
     var machines: [SyncCachedMachine] = []
     var days: [String: [String: [String: DayModelUsage]]] = [:]
+    var gistId: String? = nil
+    var accounts: [RemoteAccount]? = nil
+    var captions: [String: RemoteCaption]? = nil
+    var unattributedDays: [String: [String: [String: DayModelUsage]]]? = nil
 }
 
 /// Pure account-binding check shared by loading, cached render reads and fixtures.
@@ -2149,7 +2233,50 @@ final class GitHubSync {
         var data: Data? = nil
         if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
         let r = transport(url, method, h, data, 20)
+        if method == "GET", r.err == syncBodyTooLarge || (r.data?.count ?? 0) > syncMaxGistBody {
+            return (0, nil, r.headers, syncBodyTooLarge)
+        }
         return (r.status, r.data.flatMap { try? JSONSerialization.jsonObject(with: $0) }, r.headers, r.err)
+    }
+
+    /// No bearer/cookies are carried across hops. Refusals are file-level failures.
+    private func readRaw(_ raw: String, cap: Int) -> (reply: SyncHTTPResult, refused: Bool) {
+        var url = raw
+        for hop in 0...3 {
+            guard syncRawURL(url) else { return ((0, nil, "Raw URL refused", [:]), true) }
+            let reply = transport(url, "GET", ["User-Agent": "ClaudeCodexLimits", syncBodyLimitHeader: String(cap)], nil, 20)
+            guard (300..<400).contains(reply.status) else { return (reply, false) }
+            let headers = GitHubSync.normalizedHeaders(reply.headers)
+            guard hop < 3, [301, 302, 303, 307, 308].contains(reply.status),
+                  let location = headers["location"],
+                  location.unicodeScalars.allSatisfy({ $0.value > 32 && $0.value < 127 }),
+                  let next = URL(string: location, relativeTo: URL(string: url))?.absoluteURL.absoluteString,
+                  syncRawURL(next) else { return (reply, true) }
+            url = next
+        }
+        return ((0, nil, "Raw redirect refused", [:]), true)
+    }
+
+    private func rejectedRaw(now: Date) -> [String: Double] {
+        let stored = defaults.dictionary(forKey: "syncRejectedRaw") ?? [:]
+        var result: [String: Double] = [:]
+        for (key, value) in stored {
+            guard key.count == 16, key.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                  let time = value as? Double, time.isFinite,
+                  time <= now.timeIntervalSince1970, time > now.timeIntervalSince1970 - 86400 else { continue }
+            result[key] = time
+        }
+        return result
+    }
+
+    private func rejectRaw(_ raw: String, in rejected: inout [String: Double], now: Date) {
+        let key = SHA256.hash(data: Data(raw.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        rejected[key] = now.timeIntervalSince1970
+        while rejected.count > 64 {
+            guard let oldest = rejected.keys.min(by: { (rejected[$0] ?? 0, $0) < (rejected[$1] ?? 0, $1) }) else { break }
+            rejected.removeValue(forKey: oldest)
+        }
+        defaults.set(rejected, forKey: "syncRejectedRaw")
     }
 
     // MARK: sign-in (OAuth Device Flow)
@@ -2671,6 +2798,9 @@ final class GitHubSync {
         if g.status == 404 {
             for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
         }
+        if g.err == syncBodyTooLarge {
+            recordError(tr("Слишком большой ответ синхронизации (предел 16 МиБ)", "Sync response too large (16 MiB limit)")); return
+        }
         if handle(g.status, headers: g.headers, request: "GET /gists/{id}", token: token) { return }
         guard let gist = g.json as? [String: Any], syncIsPrivate(gist["public"]) else {
             // Rediscover on the next cycle; never write into a public/unknown-visibility gist.
@@ -2678,7 +2808,7 @@ final class GitHubSync {
             recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response"))
             return
         }
-        guard let files = gist["files"] as? [String: [String: Any]] else {
+        guard let files = gist["files"] as? [String: Any] else {
             recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
         }
 
@@ -2692,13 +2822,43 @@ final class GitHubSync {
         }
 
         var contents: [String: String] = [:]
-        for (name, f) in files where name.hasPrefix("machine-") && name.hasSuffix(".json") && name != myFile {
+        let names = files.keys.filter { $0.hasPrefix("machine-") && $0.hasSuffix(".json") }.sorted()
+        var readWarning: String? = names.count > 64
+            ? tr("Слишком большой ответ синхронизации (предел 64 файла)", "Sync response too large (64 file limit)") : nil
+        var total = 0
+        let readAt = Date()
+        var rejected = rejectedRaw(now: readAt)
+        defaults.set(rejected, forKey: "syncRejectedRaw")
+        // Select before excluding this machine, matching the Linux reader's slot budget.
+        for name in names.prefix(64) {
+            guard name != myFile, let f = files[name] as? [String: Any] else { continue }
+            guard total < syncMaxTotalBody else {
+                readWarning = tr("Слишком большой ответ синхронизации (предел 64 МиБ)", "Sync response too large (64 MiB limit)"); break
+            }
             var content = f["content"] as? String
-            if (f["truncated"] as? Bool) == true {
+            if (f["truncated"] as? Bool) == true || (content == nil && f["raw_url"] != nil) {
                 guard let raw = f["raw_url"] as? String else {
                     recordError(tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url")); return
                 }
-                let r = transport(raw, "GET", ["User-Agent": "ClaudeCodexLimits"], nil, 20)
+                let key = SHA256.hash(data: Data(raw.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+                if rejected[key] != nil {
+                    readWarning = tr("Файл синхронизации пропущен: raw ранее отклонён", "Sync file skipped: previously refused raw URL"); continue
+                }
+                let cap = min(syncMaxMachineBody, syncMaxTotalBody - total)
+                let result = readRaw(raw, cap: cap)
+                if result.refused {
+                    rejectRaw(raw, in: &rejected, now: readAt)
+                    readWarning = tr("Файл синхронизации пропущен: недопустимый raw URL или редирект", "Sync file skipped: invalid raw URL or refused redirect"); continue
+                }
+                let r = result.reply
+                if r.err == syncBodyTooLarge || (r.data?.count ?? 0) > cap {
+                    rejectRaw(raw, in: &rejected, now: readAt)
+                    total += cap + 1
+                    readWarning = total > syncMaxTotalBody
+                        ? tr("Слишком большой ответ синхронизации (предел 64 МиБ)", "Sync response too large (64 MiB limit)")
+                        : tr("Слишком большой файл синхронизации (предел 8 МиБ)", "Sync file too large (8 MiB limit)")
+                    continue
+                }
                 if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) { return }
                 guard r.status == 200, let data = r.data, !data.isEmpty,
                       let text = String(data: data, encoding: .utf8) else {
@@ -2706,9 +2866,20 @@ final class GitHubSync {
                 }
                 content = text
             }
-            if let c = content { contents[name] = c }
+            if let c = content {
+                let size = c.utf8.count
+                total += size
+                if total > syncMaxTotalBody {
+                    readWarning = tr("Слишком большой ответ синхронизации (предел 64 МиБ)", "Sync response too large (64 MiB limit)"); break
+                }
+                if size > syncMaxMachineBody {
+                    readWarning = tr("Слишком большой файл синхронизации (предел 8 МиБ)", "Sync file too large (8 MiB limit)"); continue
+                }
+                contents[name] = c
+            }
         }
-        var cache = GitHubSync.merge(contents, excluding: machineId)
+        var cache = mergeV11(contents, excluding: machineId, now: readAt)
+        cache.gistId = gid
         cache.authEpoch = cycleBinding?.epoch; cache.authUserID = cycleBinding?.userID
         let publish = {
             // Both file and memory publication are fenced. A stale callback may neither
@@ -2723,6 +2894,7 @@ final class GitHubSync {
             d.set(ok, forKey: "syncLastOkAt")
             d.removeObject(forKey: "syncLastError"); d.removeObject(forKey: "syncLastErrorAt")
             self.setUI { $0.machines = ms; $0.lastSync = ok; $0.lastUploadAt = pushed; $0.lastError = nil; $0.lastErrorAt = nil }
+            if let warning = readWarning { self.recordError(warning) }
         }
         if let owner = authOwner {
             guard let access = cycleAccess, owner.withCurrentAccess(access, publish) else {
