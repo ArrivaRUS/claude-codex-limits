@@ -157,7 +157,9 @@ to the shared file format require bumping `schema` and updating both sides.
   *Read rules → Validation (C7)* to the v1 envelope (`machine.*`, `tz`, keys of `days`).
 - An absent `updated` is accepted. If present, it must parse as an ISO-8601 timestamp;
   **fractional seconds are accepted** on both platforms. An invalid timestamp (including null)
-  or one older than 45 days rejects the file.
+  or one older than 45 days rejects the file. Digits in any timestamp are ASCII `0-9` only, on both
+  ports (Linux narrows `\d` in `common._TS_RE` to `[0-9]`; decision 2026-10-18): a non-ASCII digit
+  (e.g. U+FF12) makes the timestamp invalid.
 - The six counters (`input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h`, `turns`) default
   to zero when missing. Each supplied value must be an integer in **0…10^15**; booleans are not
   numbers. An invalid counter rejects the entire model record. Linux requires a JSON integer
@@ -171,16 +173,20 @@ to the shared file format require bumping `schema` and updating both sides.
   Malformed remote counters/structures must not crash the app.
   Machines' transcripts are disjoint, so valid counts give the account total for what ran in the CLIs.
 - **Truncated-file failure.** A `raw_url` response other than `200` (e.g. `404`, `429`, `5xx`; `3xx` is
-  covered below), a network failure, or a missing/empty body fails the whole cycle as in v1: keep the
+  covered below) or a network failure fails the whole cycle as in v1: keep the
   previous remote merge/cache and do not advance the last-success time (`syncLastOkAt` / `lastOkAt`).
-  macOS also fails on invalid UTF-8, recording
-  `Empty or unreadable GET raw_url response`. Linux decodes nonempty bytes with UTF-8 replacement:
-  invalid bytes alone do not fail the cycle; the resulting text goes through normal JSON/file
-  validation and may be skipped. Invalid JSON in an otherwise readable file is a file-level skip
-  on both platforms. If a truncated file has no `raw_url`, macOS fails the cycle; Linux keeps the
+  If a truncated file has no `raw_url`, macOS fails the cycle; Linux keeps the
   inline content if present, otherwise skips it. Raw `403`/`429` uses the backoff rules below;
   raw `401` is an unauthenticated read error and never starts the token-revocation checks.
   A write already completed earlier in the cycle keeps its push hash/upload time even if reading fails.
+- **Unreadable raw body (file-level, S1, both ports).** A raw `200` with an empty body or a body that is not
+  valid UTF-8 skips **only that file**: the other files are merged, the remote cache is written and the
+  last-success time advances; the cycle records a visible error without the URL or gist id (same visibility
+  as a refused raw, below). Its bytes count toward the 64 MiB budget before the skip (*Reader limits*).
+  Linux decodes nonempty bytes with UTF-8 replacement, so invalid bytes reach normal JSON/file validation
+  and are skipped there. Before C1 fix cycle 1 an empty body still failed the whole cycle on Linux
+  (`sync.py`, `r.status != 200 or not r.data`) and macOS failed on invalid UTF-8.
+  Invalid JSON in an otherwise readable file is a file-level skip on both platforms.
 - **Refused raw transport (file-level).** A `raw_url` outside `https://gist.githubusercontent.com/` or a refused
   redirect (*Token boundary → raw rule*) skips only that file: the other files are merged, the remote cache is
   written and the last-success time advances, but the cycle still records a visible error (Linux: `res.ok = false`,
@@ -489,13 +495,16 @@ UTC; strings are shown only as plain text.
     a product, day or model key of the root `days` → that entry skipped.
   - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
-- **Read deadline (Linux).** The read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
+- **Read deadline (60 s per read phase).** Linux: the read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
   every `raw_url` body) shares one deadline of **60 s**. Once it is spent the remaining raw files are skipped without a
   download, the files already read are merged and the pass is **partial**: the read counts (cache written, last-success
   time advances, coordination runs), but the error «Чтение синхронизации прервано по сроку» is recorded in `lastError`.
   A raw body still in progress when the deadline hits is dropped the same way. No completed read within the deadline →
   no session: nothing is announced and the machine polls on its own schedule. Known limitation (A4): the single reopen
   (*Write rules*) starts its own 60 s, so the worst pass is about 2 × 60 s of reading.
+  Each Linux request waits at most `min(30 s, remaining)`. **macOS** (decision 2026-10-18, T2 S6): the `raw_url` reads
+  of one cycle share the same **60 s** per read phase (`RL_RAW_READ_DEADLINE` in the self-tests); a read starts only
+  before the deadline and its timeout never exceeds the remainder; files already read are merged and the error is visible.
 - **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1).
   Hitting any limit below still records a visible error («слишком большой ответ/файл синхронизации», Linux:
   `res.ok = false`, `lastError`; no backoff), while the other files are merged, the remote cache is written and the
@@ -518,8 +527,12 @@ UTC; strings are shown only as plain text.
   local). The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
   product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the whole root usage of that product
   goes to «account not specified» and that product's account `days` are **not** added — no double count.
-- A source machine is offline when its `lastSeenAt` is older than 30 min. Files without `lastSeenAt` fall back to
-  `updated`: they come from older writers without limit snapshots, so the offline card state does not apply to them.
+- **Card freshness (display, reader).** A remote card's source machine is offline when its `lastSeenAt` is older than
+  30 min. If `lastSeenAt` is absent, unparsable or later than `now + 60` (S3), the reader uses the file's `updated`
+  instead — this covers v1 files from 3.2.7 / 0.4.5, which never write `lastSeenAt` (synth §F, decision 2026-10-18 m7).
+- **Coordination liveness is a separate rule** (B2, *Liveness* below): there a missing or unparsable `lastSeenAt` makes
+  the record **not alive**, with no fallback to `updated`. It governs only poll suppression and the tie-break (§decide),
+  never how a card is shown.
   Links on remote cards are product constants, never taken from the file.
 - **Trust in other machines' fields** — they may only **postpone** my polling, never make it more frequent than my Auto.
   Coordination runs only when my own schedule is due; it considers other machines' records for my `(product, label)`.
