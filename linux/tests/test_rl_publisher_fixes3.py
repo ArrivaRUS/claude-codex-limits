@@ -14,6 +14,10 @@ Blocking points of publisher.run_pass (code at 4fe990e, linux/ccl/publisher.py),
   state_write      _save of the provider result (:411)
   patch2           PATCH №2 — result announcement / heartbeat (:421)
   flush_pending    limits.flush_pending() (:464, finally, still under quota)
+  provider_first   (two products, fix cycle 2 of A4) the request of the FIRST product of a pass, killed on EVERY pass
+                   → the other product is still requested (C1) — A4-22 in test_rl_a4_fix2.py (this harness is
+                   Claude-only); provider after a slow first request / slow PATCH №1 → the attempt is journalled at the
+                   moment of each provider call (N1) — A4-21 there.
 Not points: file_lock("quota", 30 s) and usage.refresh() precede every durable step of the pass (a kill there is a tick
 that did not happen, nothing to journal); the identity-change _save (:382) and the _save after PATCH №2 (:428) are local
 writes after the last network step of their branch (a kill there leaves `attemptPublished=False` → the next tick echoes).
