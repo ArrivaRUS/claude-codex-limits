@@ -1,7 +1,7 @@
 """REMOTE-LIMITS A5 — incident 2026-10-18: on a headless publisher the GitHub token went to the Secret Service.
 Sources: decisions/log.md «2026-10-18 — A5: токен GitHub ушёл в Secret Service вопреки S4»; docs/prd-remote-limits.md
 F3 P1 («токен GitHub хранится в существующем файловом бэкенде 0600 (S4)») and S4 («только в файловом бэкенде 0600»).
-Test-plan IDs A5-01…A5-11 (docs/test-plan-remote-limits.md §A5). Written BEFORE the fix (red): every red test fails on
+Test-plan IDs A5-01…A5-18 (docs/test-plan-remote-limits.md §A5). Written BEFORE the fix (red): every red test fails on
 a missing behaviour, never on its harness. Tests marked GUARD are green now on purpose and must stay green.
 
 Where the token is chosen today (both paths are pinned, the incident went through the second one):
@@ -40,6 +40,38 @@ IDs:
          (real state produced by a login in this sandbox, V2 and legacy) → rc 0, settings as A4-01, warning (Russian,
          install.sh speaks Russian only), `sync-state.json` byte-for-byte unchanged, no credential file. GUARD: token
          in the file → no warning.
+
+Fix cycle A5 №1 (docs/review-remote-limits-a5-s4.md M1; docs/security-remote-limits-a5-s4-t2.md M1–M5, m6–m8, §6):
+  A5-12  M1  publisher + pre-0.3.1 state ({login}, no tokenGeneration/tokenBackend), an UNLOCKED legacy SS item:
+         `ensure_access`, the pass (`open_cycle`) and `status` never construct/read the SS (`_ss` factory and `get`
+         = 0), no request, the re-login hint. A legacy FILE on a publisher: SS untouched, outcome either read from the
+         file or `publisher_file_required` (both keep S4).
+  A5-13  M2  settings.json present but not JSON / not a dict / empty / unreadable (EACCES) → fail-closed (contract
+         below): `login_backend()` and `vault.store` → file with no CreateItem; a pass over an SS token reads nothing.
+         GUARD: a MISSING settings.json keeps the previous choice (SS when unlocked).
+  A5-14  M3  publisher, old V2 token in a LOCKED SS, `login` again without `logout` (the locked item cannot be
+         deleted): the new token is in the file and `status` prints ONE line about the leftover (contract below);
+         `get` = 0.
+  A5-15  M4  `publisher --enable` races a login — strict: the token never reaches the SS once `publisher: true` is
+         on disk: (a) V2 backend chosen as SS, then enable, then accept_login → no CreateItem, no SS item (login
+         may fail or land in the file); (b) `CredentialStore.stage_refresh` with an SS ref on a publisher → not
+         `ready`, no CreateItem; (c) legacy `vault.store` re-checks the policy right before CreateItem.
+  A5-16  M5/m8  `_real_guard` hardening — `test_zz_isolation.TestGuardSelfTest` (synthetic home in the sandbox).
+  A5-17  m6  publisher + V2 ref with backend `keychain` → `publisher_file_required`, `get` = 0, no request, hint.
+  A5-18  m7  `publisher --enable` (en/ru) and install.sh warnings carry «where the keyring is unlocked» /
+         «там, где хранилище разблокировано».
+
+  M2 contract (tester): `publisher_requires_file()` is fail-closed — settings.json that EXISTS but cannot be read,
+  parsed, or is not a JSON object counts as a publisher for the token (file only, Secret Service never read or
+  written). Only an ABSENT settings.json means «not a publisher». No unit/marker heuristics: stricter, no D-Bus, no
+  dependence on systemd being reachable. (Optional for the developer, not tested: a status line «settings.json is
+  unreadable — the GitHub token is kept in a file only».)
+  M3 contract: `status` line (en) `Note: an old copy of the token is left in the Secret Service — run ccl-sync logout
+  where the keyring is unlocked, then ccl-sync login`; ru `… старая копия токена осталась в хранилище секретов —
+  выполните ccl-sync logout там, где хранилище разблокировано, затем ccl-sync login`. Checked: exactly one line with
+  «old copy»/«старая копия», containing «Secret Service»/«хранилищ», «unlocked»/«разблокирован», logout → login.
+  m7 contract: enable/install warnings end «… run ccl-sync logout where the keyring is unlocked, then ccl-sync
+  login» / «… выполните ccl-sync logout там, где хранилище разблокировано, затем ccl-sync login».
 
 Text contract chosen by the tester (developer: implement exactly this, or ask Yurka). Tests check the marked parts:
   * login «Done» line (existing format): en `Done. GitHub: <login>  (token in file <path>)`,
@@ -465,6 +497,247 @@ class TestA510InstallWarns(Base):
             rc, out = self.cli_login()
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.warning(self.install_over(self.state_bytes())), [])
+
+
+# ==== Fix cycle A5 №1 (docs/review-remote-limits-a5-s4.md M1; docs/security-remote-limits-a5-s4-t2.md M1–M4, m6, m7) ====
+class FixBase(Base):
+    def permissive_transport(self):
+        """Every request answers 503 and is recorded: a request must not crash the pass, only be counted."""
+        requests = []
+
+        def any_request(url, method, headers, body, timeout):
+            requests.append((method, url))
+            return env.resp(503, {"message": "fixture"})
+        sync.transport = any_request          # restored by SyncEnv.tearDown
+        return requests
+
+    def spy(self, fake, name):
+        guard = patch.object(fake, name, wraps=getattr(fake, name))
+        mock = guard.start()
+        self.addCleanup(guard.stop)
+        return mock
+
+    def corrupt_settings(self, how):
+        path = common.SETTINGS_PATH
+        if how == "eacces":
+            os.chmod(path, 0)                    # restored by the caller before the next variant
+            return
+        with open(path, "w") as f:
+            f.write({"not-json": "{publisher: true", "not-dict": "[]", "empty": ""}[how])
+
+
+class TestA512LegacyStateWithoutGeneration(FixBase):
+    """M1: a pre-0.3.1 state ({login} without tokenGeneration/tokenBackend) on a publisher never reaches the SS."""
+
+    def setUp(self):
+        super().setUp()
+        self.ss.items["legacy"] = self.token                  # the old keyring item, UNLOCKED
+        self.publisher(True)
+        self.st().update(login="me", gistId=env.GIST, discoveredAt=0)
+        self.assertFalse(self.st().has("tokenGeneration"))
+        self.get = self.spy(self.ss, "get")
+        self.factory = patch.object(vault, "_ss", wraps=vault._ss)
+        self.ss_factory = self.factory.start()
+        self.addCleanup(self.factory.stop)
+
+    def test_ensure_access_and_read(self):
+        result = sync.ensure_access(reason="status")
+        self.assertNotEqual(result.kind, "ready")
+        self.assertEqual((self.get.call_count, self.ss_factory.call_count), (0, 0), "S4: Secret Service не читается")
+
+    def test_pass_records_relogin_hint(self):
+        requests = self.permissive_transport()
+        self.assertIsNone(sync.open_cycle(auto=True))
+        self.assertEqual((self.get.call_count, requests), (0, []))
+        self.assertTrue(hint_ok(self.st().get("lastError")), self.st().get("lastError"))
+
+    def test_status_hint(self):
+        self.permissive_transport()
+        out = self.status()
+        self.assertEqual(self.get.call_count, 0)
+        self.assertTrue(hint_ok(self.github_line(out)), out)
+        self.assertNotIn("unlock KWallet", out)
+
+    def test_legacy_file_still_without_secret_service(self):
+        """A legacy FILE on a publisher: S4 holds either way — read from the file or ask to sign in again —
+        but the Secret Service is never contacted (contract: no SS discovery on a publisher)."""
+        del self.ss.items["legacy"]
+        common.ensure_dirs()
+        with open(common.TOKEN_FILE_PATH, "w") as f:
+            f.write(self.token + "\n")
+        result = sync.ensure_access(reason="status")
+        self.assertEqual((self.get.call_count, self.ss_factory.call_count), (0, 0))
+        self.assertIn((result.kind, result.reason), (("ready", None), ("actionRequired", "publisher_file_required")))
+
+
+class TestA513CorruptSettingsFailClosed(FixBase):
+    """M2: settings.json present but unreadable / not JSON / not a dict → the S4 policy is NOT lifted.
+    Contract (tester): `publisher` unknown because settings.json exists but cannot be used → treat as a publisher
+    for the token (file only, never read the SS). A MISSING settings.json keeps the previous behaviour."""
+    CASES = ("not-json", "not-dict", "empty", "eacces")
+
+    def test_login_backend_and_store_choose_file(self):
+        self.enable_v2_login()
+        for how in self.CASES:
+            with self.subTest(how=how):
+                self.publisher(True)
+                self.corrupt_settings(how)
+                try:
+                    self.assertEqual(self.auth_owner.store.login_backend(), "file")
+                    create_item = self.spy(self.ss, "set")
+                    with common.file_lock("sync") as held:
+                        self.assertTrue(held)
+                        generation, backend = vault.store(env.make_token())
+                        vault.delete_ref(generation, backend)
+                    self.assertEqual((backend, create_item.call_count), ("file", 0))
+                finally:
+                    os.chmod(common.SETTINGS_PATH, 0o600)
+
+    def test_pass_does_not_read_secret_service(self):
+        ref = self.v2_login_in_secret_service()
+        get = self.spy(self.v2ss, "get")
+        requests = self.permissive_transport()
+        for how in self.CASES:
+            with self.subTest(how=how):
+                get.reset_mock()
+                del requests[:]
+                self.publisher(True)
+                self.corrupt_settings(how)
+                try:
+                    self.assertIsNone(sync.open_cycle(auto=True))
+                    self.assertEqual((get.call_count, requests), (0, []), "fail-closed: SS не читается")
+                finally:
+                    os.chmod(common.SETTINGS_PATH, 0o600)
+        self.assertIn(ref["generation"], self.v2ss.items)
+
+    def test_guard_missing_settings_keeps_secret_service(self):
+        self.enable_v2_login()
+        if os.path.exists(common.SETTINGS_PATH):
+            os.unlink(common.SETTINGS_PATH)
+        common.settings().reload()
+        self.assertEqual(self.auth_owner.store.login_backend(), "secret-service")
+
+
+class TestA514LeftoverCopyAfterRelogin(FixBase):
+    """M3: publisher, the old V2 token in a LOCKED SS, `login` again without `logout` (SSH / timer environment):
+    the new token goes to the file, the old copy cannot be deleted — `status` says so (contract: a line with
+    «old copy … Secret Service … ccl-sync logout where the keyring is unlocked, then ccl-sync login»)."""
+
+    def test_status_reports_the_leftover(self):
+        ref = self.v2_login_in_secret_service()
+        self.lock_v2(ref)
+        original_delete = self.v2ss.delete
+        self.v2ss.delete = lambda generation: False if generation in self.v2ss.locked else original_delete(generation)
+        rc, out = self.cli_login(env.make_token())
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.credential()[1]["backend"], "file", "стенд: новый вход — в файл")
+        get = self.spy(self.v2ss, "get")
+        for lang, words in (("en", ("old copy", "Secret Service", "unlocked")),
+                            ("ru", ("старая копия", "хранилищ", "разблокирован"))):
+            with self.subTest(lang=lang):
+                self.lang(lang)
+                out = self.status()
+                lines = [ln for ln in out.splitlines() if words[0] in ln]
+                self.assertEqual(len(lines), 1, out)
+                for word in words[1:]:
+                    self.assertIn(word, lines[0])
+                self.assertTrue(hint_ok(lines[0]), lines[0])
+        self.assertEqual(get.call_count, 0)
+
+
+class TestA515EnableRacesLogin(FixBase):
+    """M4: `publisher --enable` lands while a login is in flight. Strict contract: the token NEVER reaches the SS
+    once `publisher: true` is on disk — the write layer re-checks the policy right before CreateItem."""
+
+    def test_v2_login_backend_chosen_before_enable(self):
+        self.enable_v2_login()
+        self.publisher(False)
+        store = self.auth_owner.store
+        original = store.login_backend
+
+        def chosen_then_enabled():
+            backend = original()
+            self.publisher(True)                     # `publisher --enable` wins the race right here
+            return backend
+        create_item = self.spy(self.v2ss, "set")
+        with patch.object(store, "login_backend", side_effect=chosen_then_enabled):
+            rc, out = self.cli_login()
+        self.assertEqual(create_item.call_count, 0, "S4: после включения издателя CreateItem не вызывается")
+        self.assertEqual(self.v2ss.items, {})
+        if rc == 0:
+            self.assertEqual(self.credential()[1]["backend"], "file")
+
+    def test_v2_refresh_into_secret_service_refused(self):
+        self.enable_v2_login()
+        self.publisher(True)
+        create_item = self.spy(self.v2ss, "set")
+        ref = dict(generation="ab" * 16, backend="secret-service", epoch="cd" * 16)
+        result = self.auth_owner.store.stage_refresh(ref, "fixture-envelope")
+        self.assertNotEqual(result, "ready")
+        self.assertEqual((create_item.call_count, self.v2ss.items), (0, {}))
+
+    def test_legacy_store_rechecks_before_create_item(self):
+        self.publisher(False)
+        real_factory = vault._ss
+
+        def factory_after_enable():
+            self.publisher(True)                     # enabled after store() began, before CreateItem
+            return real_factory()
+        create_item = self.spy(self.ss, "set")
+        with patch.object(vault, "_ss", side_effect=factory_after_enable), common.file_lock("sync") as held:
+            self.assertTrue(held)
+            generation, backend = vault.store(self.token)
+            vault.delete_ref(generation, backend)
+        self.assertEqual((create_item.call_count, self.ss.items), (0, {}))
+        self.assertEqual(backend, "file")
+
+
+class TestA517KeychainBackend(FixBase):
+    """m6: a V2 ref with backend `keychain` (valid_ref accepts it; Linux reads it as SS) on a publisher."""
+
+    def test_keychain_ref_is_not_read(self):
+        ref = self.v2_login_in_secret_service()
+        st = self.st()
+        manifest = json.loads(json.dumps(st.get("authV2")))
+        manifest["active"]["backend"] = "keychain"
+        st.update(authV2=manifest)
+        get = self.spy(self.v2ss, "get")
+        requests = self.permissive_transport()
+        result = sync.ensure_access(reason="status")
+        self.assertEqual((result.kind, result.reason), ("actionRequired", "publisher_file_required"))
+        self.assertIsNone(sync.open_cycle(auto=True))
+        self.assertEqual((get.call_count, requests), (0, []))
+        self.assertTrue(hint_ok(self.github_line(self.status())))
+        self.assertIn(ref["generation"], self.v2ss.items)
+
+
+class TestA518WarningsSayWhereToLogout(FixBase):
+    """m7: the `publisher --enable` and install.sh warnings carry «where the keyring is unlocked»
+    (ru «там, где хранилище разблокировано»), like the status hint."""
+
+    def enable_warning(self):
+        self.publisher(False)
+        rc, out = self.run_cli("publisher", "--enable")
+        self.assertEqual(rc, 0, out)
+        return [ln for ln in out.splitlines() if ln.startswith(("Warning", "Внимание"))]
+
+    def test_enable_warning(self):
+        for lang, phrase in (("en", "where the keyring is unlocked"), ("ru", "там, где хранилище разблокировано")):
+            with self.subTest(lang=lang):
+                self.v2_login_in_secret_service()
+                self.lang(lang)
+                lines = self.enable_warning()
+                self.assertEqual(len(lines), 1)
+                self.assertIn(phrase, lines[0])
+
+    def test_install_warning(self):
+        self.v2_login_in_secret_service()
+        with open(common.SYNC_STATE_PATH, "rb") as f:
+            state = f.read()
+        lines = [ln for ln in TestA510InstallWarns.install_over(self, state).splitlines()
+                 if "Внимание" in ln and "хранилищ" in ln]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("там, где хранилище разблокировано", lines[0])
 
 
 if __name__ == "__main__":
