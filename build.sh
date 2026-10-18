@@ -13,8 +13,11 @@ echo "==> building $APP_NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-BUILD_SOURCE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccl-swift-build.XXXXXX")"
+CCL_BUILD_TMP="${CCL_BUILD_TMP:-$DIR/.build-tmp}"
+mkdir -p "$CCL_BUILD_TMP"
+BUILD_SOURCE_DIR="$(mktemp -d "$CCL_BUILD_TMP/ccl-swift-build.XXXXXX")"
 trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
+CODESIGN_LOG="$BUILD_SOURCE_DIR/codesign.err"
 cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
 # Match Info.plist's macOS 13.0 minimum for the current build architecture.
 /usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/QuotaRefresh.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" "$DIR/Sources/RemoteLimitsSelfTests.swift" "$DIR/Sources/RemoteLimits.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
@@ -61,15 +64,15 @@ echo "==> code-signing (ad-hoc)"
 signed=0
 for attempt in 1 2 3 4 5 6 7 8; do
     xattr -cr "$APP"
-    if codesign --force --deep -s - "$APP" 2>/tmp/ccl_codesign.err \
-       && codesign -v "$APP" 2>>/tmp/ccl_codesign.err; then
+    if codesign --force --deep -s - "$APP" 2>"$CODESIGN_LOG" \
+       && codesign -v "$APP" 2>>"$CODESIGN_LOG"; then
         signed=1; break
     fi
     echo "   sign/verify attempt $attempt lost the FinderInfo race, retrying…" >&2
 done
 if [ "$signed" != 1 ]; then
     echo "!! codesign FAILED for $APP after 8 attempts" >&2
-    cat /tmp/ccl_codesign.err >&2 || true
+    cat "$CODESIGN_LOG" >&2 || true
     exit 1
 fi
 echo "==> signed & verified"

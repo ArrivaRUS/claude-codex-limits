@@ -550,7 +550,7 @@ def merge(contents, my_id, now=None):
         try:
             text = contents[name]
             if isinstance(text, (bytes, bytearray)):
-                text = text.decode("utf-8", "replace")
+                text = text.decode("utf-8")
             obj = json.loads(text)
         except (ValueError, TypeError, RecursionError):
             continue
@@ -1144,7 +1144,10 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                                            "Sync file skipped: invalid raw URL or refused redirect")
                     continue
                 if r.error == _BODY_TOO_LARGE:
-                    _reject_raw(st, rejected, key)
+                    # Only exceeding the file's own cap justifies a 24 h refusal.
+                    # The remaining total budget applies to this cycle alone.
+                    if cap == MAX_MACHINE_BODY:
+                        _reject_raw(st, rejected, key)
                     # Bounded reads consumed cap + 1 bytes even though Resp drops
                     # the rejected body. Count them before considering the next file.
                     total += cap + 1
@@ -1155,7 +1158,7 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                                                "Sync response too large (64 MiB limit)")
                         break
                     continue
-                if r.status != 200 or not r.data:
+                if r.status != 200:
                     if ((r.error in (_READ_TIMEOUT, common.HTTP_DEADLINE) or _read_timeout(30) <= 0)
                             and not _rate_limited(r)):
                         read_error = common.tr("Чтение синхронизации прервано по сроку", _READ_TIMEOUT)
@@ -1165,9 +1168,9 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                     _fail(st, res, "GET raw_url: " + status_text(r))
                     res.remote = load_remote()
                     return res
-                # Keep bytes until JSON parsing, so the budget measures the wire
-                # body, not the length of replacement characters after decoding.
-                text = r.data
+                # Keep wire bytes until size accounting, before decoding or
+                # skipping unreadable/empty bodies.
+                text = r.data if r.data is not None else b""
             size = _content_size(text)
             if size is None:
                 continue
@@ -1181,8 +1184,18 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                 break
             if size > MAX_MACHINE_BODY:
                 continue
-            if text:
-                contents[name] = text
+            if isinstance(text, (bytes, bytearray)):
+                try:
+                    text = text.decode("utf-8")
+                except UnicodeDecodeError:
+                    read_error = common.tr("Файл синхронизации пропущен: неверный UTF-8",
+                                           "Sync file skipped: invalid UTF-8")
+                    continue
+            if not text:
+                read_error = common.tr("Файл синхронизации пропущен: пустое тело",
+                                       "Sync file skipped: empty body")
+                continue
+            contents[name] = text
         remote = merge(contents, common.machine_id())
         remote["fetched"] = time.time()
         if active[1] == "credential-v2":

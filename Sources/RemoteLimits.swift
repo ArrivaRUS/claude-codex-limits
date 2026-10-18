@@ -100,16 +100,31 @@ struct AccountView {
     var state: RemoteCardState
 }
 
+func accountLabelKey(gistId: String) -> String? {
+    guard !gistId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    return SHA256.hash(data: Data(("ccl-label-key-v1|" + gistId).utf8))
+        .map { String(format: "%02x", $0) }.joined()
+}
+
 func accountLabel(product: String, localId: String, gistId: String) -> String? {
-    guard ["claude", "codex"].contains(product),
-          !gistId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    guard let key = accountLabelKey(gistId: gistId) else { return nil }
+    return accountLabel(product: product, localId: localId, labelKey: key)
+}
+
+// A persisted cache needs only this derived key, never the gist identity itself.
+func accountLabel(product: String, localId: String, labelKey: String) -> String? {
+    guard ["claude", "codex"].contains(product), labelKey.utf8.count == 64,
+          labelKey.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
     let id = localId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     guard (8...64).contains(id.utf8.count), id.utf8.allSatisfy({
         (48...57).contains($0) || (97...122).contains($0) || $0 == 45
     }) else { return nil }
-    let key = SHA256.hash(data: Data(("ccl-label-key-v1|" + gistId).utf8))
+    let hex = Array(labelKey.utf8)
+    func nibble(_ byte: UInt8) -> UInt8 { byte <= 57 ? byte - 48 : byte - 87 }
+    var key = Data()
+    for i in stride(from: 0, to: hex.count, by: 2) { key.append(nibble(hex[i]) * 16 + nibble(hex[i + 1])) }
     let message = Data(("ccl-account-v1|" + product + "|" + id).utf8)
-    let digest = HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: Data(key)))
+    let digest = HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key))
     return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
 }
 
@@ -117,7 +132,7 @@ func machineTag(setting: String, hostname: String) -> String {
     let raw = setting.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         ? String(hostname.split(separator: ".", omittingEmptySubsequences: false).first ?? "") : setting
     // Writer sanitization differs deliberately from the reader's whole-field rejection.
-    let clean = String(String.UnicodeScalarView(raw.unicodeScalars.filter { !RemoteLimitsWire.unsafe($0) }))
+    let clean = String(String.UnicodeScalarView(raw.unicodeScalars.filter { !RemoteLimitsWire.isUnsafe($0) }))
     let ascii = clean.decomposedStringWithCompatibilityMapping.unicodeScalars.filter { $0.value < 128 }
     let lower = String(String.UnicodeScalarView(ascii)).lowercased()
     let tag = lower.replacingOccurrences(of: "[^a-z0-9-]+", with: "-", options: .regularExpression)
@@ -129,7 +144,90 @@ func machineTag(setting: String, hostname: String) -> String {
 private enum RemoteLimitsWire {
     static let counters = ["input", "output", "cacheRead", "cacheWrite5m", "cacheWrite1h", "turns"]
 
-    static func unsafe(_ scalar: Unicode.Scalar) -> Bool {
+    // NSNumber may erase whether the sender wrote 1, 1.0 or 1e0. Before
+    // Foundation parses the object, reject decimal/exponent tokens for fields
+    // whose wire contract requires an integer. All other bytes stay unchanged.
+    static func strictIntegerJSON(_ content: String) -> Data {
+        let bytes = Array(content.utf8)
+        let fields = Set(counters + ["schema", "resetCredits", "interval"])
+        var i = 0, copied = 0
+        var integerValue = false
+        var result = Data()
+        func whitespace(_ byte: UInt8) -> Bool { byte == 32 || byte == 9 || byte == 10 || byte == 13 }
+        func delimiter(_ byte: UInt8) -> Bool {
+            switch byte {
+            case 9, 10, 13, 32, 44, 58, 91, 93, 123, 125: return true
+            default: return false
+            }
+        }
+        while i < bytes.count {
+            let byte = bytes[i]
+            if byte == 34 { // Read a complete JSON string; an escaped quote is not its end.
+                let start = i
+                i += 1
+                while i < bytes.count {
+                    if bytes[i] == 92 { i = min(i + 2, bytes.count) }
+                    else if bytes[i] == 34 { i += 1; break }
+                    else { i += 1 }
+                }
+                var next = i
+                while next < bytes.count && whitespace(bytes[next]) { next += 1 }
+                integerValue = false
+                if next < bytes.count, bytes[next] == 58 {
+                    // Decode escapes in property names exactly as the object parser does.
+                    let key = (try? JSONSerialization.jsonObject(with: Data(bytes[start..<i]),
+                                                                 options: [.fragmentsAllowed])) as? String
+                    integerValue = key.map { fields.contains($0) } ?? false
+                }
+            } else if byte == 45 || (48...57).contains(byte) {
+                let start = i
+                while i < bytes.count && !delimiter(bytes[i]) { i += 1 }
+                if integerValue && nonIntegerToken(bytes[start..<i]) {
+                    result.append(contentsOf: bytes[copied..<start])
+                    result.append(contentsOf: [110, 117, 108, 108]) // null is present, so counters do not default to zero.
+                    copied = i
+                }
+                integerValue = false
+            } else {
+                if !whitespace(byte) && byte != 58 { integerValue = false }
+                i += 1
+            }
+        }
+        result.append(contentsOf: bytes[copied..<bytes.count])
+        return result
+    }
+
+    // Only a complete, valid JSON number may be replaced. Replacing a malformed
+    // token could otherwise turn invalid JSON into a valid, accepted document.
+    static func nonIntegerToken(_ bytes: ArraySlice<UInt8>) -> Bool {
+        var i = bytes.startIndex
+        let end = bytes.endIndex
+        func digit(_ byte: UInt8) -> Bool { (48...57).contains(byte) }
+        if i < end && bytes[i] == 45 { i += 1 }
+        guard i < end else { return false }
+        if bytes[i] == 48 { i += 1 }
+        else {
+            guard (49...57).contains(bytes[i]) else { return false }
+            while i < end && digit(bytes[i]) { i += 1 }
+        }
+        var nonInteger = false
+        if i < end && bytes[i] == 46 {
+            nonInteger = true; i += 1
+            let start = i
+            while i < end && digit(bytes[i]) { i += 1 }
+            guard i > start else { return false }
+        }
+        if i < end && (bytes[i] == 69 || bytes[i] == 101) {
+            nonInteger = true; i += 1
+            if i < end && (bytes[i] == 43 || bytes[i] == 45) { i += 1 }
+            let start = i
+            while i < end && digit(bytes[i]) { i += 1 }
+            guard i > start else { return false }
+        }
+        return i == end && nonInteger
+    }
+
+    static func isUnsafe(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.properties.generalCategory {
         case .control, .format, .surrogate: return true
         default: return false
@@ -138,7 +236,7 @@ private enum RemoteLimitsWire {
 
     static func text(_ value: Any?, limit: Int? = nil, nfc: Bool = false) -> String? {
         guard let value = value as? String,
-              !value.unicodeScalars.contains(where: unsafe),
+              !value.unicodeScalars.contains(where: isUnsafe),
               limit.map({ value.unicodeScalars.count <= $0 }) ?? true else { return nil }
         let result = nfc ? value.precomposedStringWithCanonicalMapping : value
         guard limit.map({ result.unicodeScalars.count <= $0 }) ?? true else { return nil }
@@ -158,13 +256,9 @@ private enum RemoteLimitsWire {
         return n.intValue
     }
 
-    // The established macOS v1 reader accepts an exactly bridgeable JSON 1.0.
-    // Keep that compatibility for the envelope and all v1 usage counters, while v1.1
-    // schedule/resetCredits retain their stricter JSON-integer contract.
+    // Usage and envelope fields have the same strict JSON-integer contract as v1.1.
     static func legacyInteger(_ value: Any?, maximum: Int) -> Int? {
-        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-              let n = value as? Int, (0...maximum).contains(n) else { return nil }
-        return n
+        integer(value, maximum: maximum)
     }
 
     static func percent(_ value: Any?) -> Double? {
@@ -173,12 +267,17 @@ private enum RemoteLimitsWire {
         return n.doubleValue
     }
 
-    /// Bounded, Gregorian ISO parsing, including fractions and numeric offsets.
-    /// Foundation's permissive date normalization must not turn month 13 into a date.
+    // Account metadata and lastSeenAt reject controls before parsing (Linux _epoch).
     static func date(_ value: Any?) -> Date? {
-        guard let raw = value as? String, raw.utf8.count <= 4096,
-              let safe = text(raw, limit: 4096) else { return nil }
-        let s = safe.trimmingCharacters(in: .whitespaces)
+        guard let safe = text(value, limit: 4096) else { return nil }
+        return isoDate(safe)
+    }
+
+    /// The envelope's updated uses unrestricted ISO parsing (Linux parse_iso).
+    /// Gregorian validation prevents Foundation from normalizing month 13.
+    static func isoDate(_ value: Any?) -> Date? {
+        guard let raw = value as? String else { return nil }
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let pattern = "^([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2}):([0-9]{2})(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?$"
         guard let re = try? NSRegularExpression(pattern: pattern),
               let match = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
@@ -269,10 +368,58 @@ private enum RemoteLimitsWire {
             if let n = s["backoff"] as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() { backoff = n.boolValue }
             a.schedule = RemoteSchedule(mode: mode, interval: interval, nextAt: date(s["nextAt"]), backoff: backoff)
         }
-        // Bound sanitized metadata, before copying usage and machine provenance.
-        guard let metadata = try? JSONEncoder().encode(a), metadata.count <= 4096 else { return nil }
+        // Dates retain their original ISO strings for the wire-size contract.
+        let wire = metadata(a, original: v)
+        guard let bytes = try? JSONSerialization.data(withJSONObject: wire, options: [.withoutEscapingSlashes]),
+              bytes.count <= 4096 else { return nil }
         a.days = days(v["days"])
         return a
+    }
+
+    static func windowMetadata(_ value: Any?) -> [String: Any]? {
+        guard let raw = value as? [String: Any], let clean = window(raw) else { return nil }
+        var out: [String: Any] = ["pct": raw["pct"]!]
+        if clean.resetAt != nil { out["resetAt"] = raw["resetAt"] }
+        return out
+    }
+
+    // Recreate the allow-listed wire dictionary, including explicit nulls and
+    // empty containers; Codable's Date representation is not the wire format.
+    static func metadata(_ account: RemoteAccount, original: [String: Any]) -> [String: Any] {
+        var out: [String: Any] = ["product": account.product, "status": account.status,
+                                  "label": account.label.map { $0 as Any } ?? NSNull()]
+        for (key, value) in [("plan", account.plan), ("tier", account.tier),
+                             ("expiredReason", account.expiredReason), ("labelReason", account.labelReason),
+                             ("attemptKind", account.attemptKind)] {
+            if let value = value { out[key] = value }
+        }
+        for (key, value) in [("asOf", account.asOf), ("attemptAt", account.attemptAt), ("retryUntil", account.retryUntil)] {
+            if value != nil { out[key] = original[key] }
+        }
+        if original["retryUntil"] is NSNull { out["retryUntil"] = NSNull() }
+        if let raw = original["windows"] as? [String: Any] {
+            var windows: [String: Any] = [:]
+            for key in ["session", "weekly"] {
+                if let clean = windowMetadata(raw[key]) { windows[key] = clean }
+            }
+            out["windows"] = windows
+        }
+        if let raw = original["models"] as? [Any] {
+            out["models"] = raw.prefix(8).compactMap { value -> [String: Any]? in
+                guard let model = value as? [String: Any], var clean = windowMetadata(model),
+                      let name = text(model["name"], limit: 48, nfc: true) else { return nil }
+                clean["name"] = name
+                return clean
+            }
+        }
+        if let credits = account.resetCredits { out["resetCredits"] = credits }
+        if let schedule = account.schedule, let raw = original["schedule"] as? [String: Any] {
+            var clean: [String: Any] = ["mode": schedule.mode, "interval": schedule.interval]
+            if schedule.nextAt != nil { clean["nextAt"] = raw["nextAt"] }
+            if let backoff = schedule.backoff { clean["backoff"] = backoff }
+            out["schedule"] = clean
+        }
+        return out
     }
 
     static func add(_ source: RemoteDays, to target: inout RemoteDays) {
@@ -323,11 +470,11 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
         bytes += size
         if bytes > 64 * 1024 * 1024 { break }
         guard size <= 8 * 1024 * 1024,
-              let obj = (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any],
+              let obj = (try? JSONSerialization.jsonObject(with: RemoteLimitsWire.strictIntegerJSON(content))) as? [String: Any],
               RemoteLimitsWire.legacyInteger(obj["schema"], maximum: 1) == 1,
               let machine = obj["machine"] as? [String: Any], let id = RemoteLimitsWire.text(machine["id"]), !id.isEmpty,
               id != myId, !seen.contains(id), name == "machine-\(id).json" else { continue }
-        let updated = RemoteLimitsWire.date(obj["updated"])
+        let updated = RemoteLimitsWire.isoDate(obj["updated"])
         if obj["updated"] != nil && updated == nil { continue }
         if let updated = updated, updated < now.addingTimeInterval(-45 * 86400) { continue }
         seen.insert(id)
@@ -335,8 +482,11 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
         let machineName = tag.isEmpty ? "?" : tag
         let os = RemoteLimitsWire.text(machine["os"], limit: 64) ?? ""
         let lastSeen = RemoteLimitsWire.date(obj["lastSeenAt"])
-        var cached = SyncCachedMachine(id: id, name: machineName, os: os, updated: updated)
-        cached.lastSeenAt = lastSeen
+        let displayCeiling = now.addingTimeInterval(60)
+        let displayUpdated = updated.flatMap { $0 <= displayCeiling ? $0 : nil }
+        let displayLastSeen = lastSeen.flatMap { $0 <= displayCeiling ? $0 : nil }
+        var cached = SyncCachedMachine(id: id, name: machineName, os: os, updated: displayUpdated)
+        cached.lastSeenAt = displayLastSeen
         result.machines.append(cached)
 
         let root = RemoteLimitsWire.productDays(obj["days"])
@@ -348,7 +498,12 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
         var accounts: [RemoteAccount] = []
         for raw in ((obj["accounts"] as? [Any]) ?? []).prefix(64) {
             guard var a = RemoteLimitsWire.account(raw) else { continue }
-            a.machineId = id; a.machineName = machineName; a.machineLastSeenAt = lastSeen ?? updated
+            a.machineId = id; a.machineName = machineName
+            a.machineLastSeenAt = displayLastSeen ?? displayUpdated
+            if a.machineLastSeenAt == nil && (lastSeen != nil || updated != nil) {
+                // Future provenance is not evidence that this machine is online.
+                a.machineLastSeenAt = .distantPast
+            }
             if let index = accounts.firstIndex(where: { $0.product == a.product && $0.label == a.label }) {
                 if let date = a.asOf, accounts[index].asOf.map({ date > $0 }) ?? true { accounts[index] = a }
             } else if accounts.count < 8 { accounts.append(a) }
@@ -384,7 +539,9 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
             for key in rawCaptions.keys.sorted() {
                 guard RemoteLimitsWire.label(key) != nil, let raw = rawCaptions[key] as? [String: Any],
                       let text = RemoteLimitsWire.text(raw["text"], limit: 32, nfc: true) else { continue }
-                let caption = RemoteCaption(text: text, setAt: RemoteLimitsWire.date(raw["setAt"]))
+                let setAt = RemoteLimitsWire.date(raw["setAt"])
+                if let setAt = setAt, setAt > now.addingTimeInterval(60) { continue }
+                let caption = RemoteCaption(text: text, setAt: setAt)
                 if captions[key] == nil || (caption.setAt.map { new in captions[key]?.setAt.map { new > $0 } ?? true } ?? false) {
                     captions[key] = caption
                 }
@@ -409,11 +566,18 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
         var own = product == "claude" ? local.0 : local.1
         own.source = nil
         let localId = localIds[product]
-        let localLabel = localId.flatMap { accountLabel(product: product, localId: $0, gistId: remote.gistId ?? "") }
+        let labelKey = remote.labelKey ?? remote.gistId.flatMap { accountLabelKey(gistId: $0) }
+        let localLabel = localId.flatMap { id in
+            labelKey.flatMap { accountLabel(product: product, localId: id, labelKey: $0) }
+        }
         var groups: [String: [RemoteAccount]] = [:]
         if enabled {
-            for a in remote.accounts ?? [] where a.product == product {
+            for var a in remote.accounts ?? [] where a.product == product {
                 guard let label = RemoteLimitsWire.label(a.label), !hidden.contains(label) else { continue }
+                if let last = a.machineLastSeenAt, last > now.addingTimeInterval(60) {
+                    let updated = remote.machines.first { $0.id == a.machineId }?.updated
+                    a.machineLastSeenAt = updated.flatMap { $0 <= now.addingTimeInterval(60) ? $0 : nil } ?? .distantPast
+                }
                 groups[label, default: []].append(a)
             }
         }
@@ -440,7 +604,7 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                     || (remoteNormal == localNormal && best.asOf! > own.asOf!)
                 if takeRemote {
                     chosen = best
-                    values = RemoteLimitsWire.limitData(best)
+                    values = RemoteLimitsWire.limitData(best, onto: values)
                 }
             }
             // Status is the newest attempt, separate from the winning values.
@@ -470,7 +634,11 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
             } else { state = .fresh }
             let tier = chosen?.tier ?? (!isLocal ? latest?.tier : nil)
             return AccountView(product: product, label: label, historyKey: historyKey,
-                caption: label.flatMap { remote.captions?[$0]?.text }
+                caption: label.flatMap { key -> String? in
+                    guard enabled, let caption = remote.captions?[key],
+                          caption.setAt.map({ $0 <= now.addingTimeInterval(60) }) ?? true else { return nil }
+                    return caption.text
+                }
                     ?? RemoteLimitsWire.caption(product: product, plan: values.plan, tier: tier, machines: machines),
                 data: values, isLocal: isLocal, tier: tier,
                 usageDays: usage, machines: machines, state: state)
@@ -503,10 +671,11 @@ private extension RemoteLimitsWire {
         return tags.isEmpty ? head : head + " · " + tags
     }
 
-    static func limitData(_ account: RemoteAccount) -> LimitData {
-        var data = LimitData()
+    static func limitData(_ account: RemoteAccount, onto original: LimitData) -> LimitData {
+        var data = original
         data.session = account.windows?.session?.pct; data.sessionReset = account.windows?.session?.resetAt
         data.weekly = account.windows?.weekly?.pct; data.weeklyReset = account.windows?.weekly?.resetAt
+        data.scoped = nil
         if let model = account.models?.max(by: { $0.pct < $1.pct }) {
             data.scoped = ScopedLimit(name: model.name, percent: model.pct, reset: model.resetAt, severity: nil)
         }
@@ -516,11 +685,22 @@ private extension RemoteLimitsWire {
     }
 
     static func source(_ snapshot: RemoteAccount, status: RemoteAccount, now: Date) -> RemoteSource {
-        let next = snapshot.schedule?.nextAt ?? snapshot.asOf.map { $0.addingTimeInterval(Double(snapshot.schedule?.interval ?? 900)) }
+        let interval = Double(snapshot.schedule?.interval ?? 900)
+        let nextAt = snapshot.schedule?.nextAt.flatMap { $0 <= now.addingTimeInterval(interval + 60) ? $0 : nil }
+        let next = nextAt ?? snapshot.asOf.map { $0.addingTimeInterval(interval) }
         var result = RemoteSource(machineId: snapshot.machineId, machineName: snapshot.machineName)
-        result.asOf = snapshot.asOf; result.attemptAt = status.attemptAt; result.nextAt = snapshot.schedule?.nextAt
+        result.asOf = snapshot.asOf; result.attemptAt = status.attemptAt; result.nextAt = nextAt
         result.interval = snapshot.schedule?.interval; result.mode = snapshot.schedule?.mode; result.status = status.status
-        result.retryUntil = status.retryUntil; result.lastSeenAt = status.machineLastSeenAt
+        let attempt = (status.attemptAt ?? status.asOf).flatMap { $0 <= now.addingTimeInterval(60) ? $0 : nil }
+        let retryCeiling = attempt.map { $0.addingTimeInterval(86400) }
+        if let retry = status.retryUntil {
+            if let ceiling = retryCeiling {
+                result.retryUntil = min(retry, ceiling)
+            } else if retry <= now.addingTimeInterval(60) {
+                result.retryUntil = retry
+            }
+        }
+        result.lastSeenAt = status.machineLastSeenAt
         result.freshUntil = next.map { $0.addingTimeInterval(1200) }
         result.statusMachineId = status.machineId; result.statusMachineName = status.machineName
         result.expiredReason = status.expiredReason; result.backoff = snapshot.schedule?.backoff
