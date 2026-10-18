@@ -9,6 +9,13 @@ Recording dependencies are memory-only and call actual admission/completion APIs
 
 ## Frozen inputs submitted for isolation review
 
+> **2026-10-18, C1 fix cycle 1 (tester): new inputs, NOT yet approved or run.** Since `e3a5ac6` `QuotaRefresh.swift`
+> (SHA-256 `3904af40d8a09675a58a75f05f3aface4077a12c89e098c00fd08f0c8c36872e`) has `LimitData.source: RemoteSource?`;
+> the type lives in `RemoteLimits.swift` with app-only types, so the old two-file compile broke. `run.sh` now adds
+> `RemoteSourceStub.swift` (`struct RemoteSource {}`, SHA-256 `1064949e3717a4ac86ea4bc0b022119dcc1d8390b381d6d4a7043131903e0671`)
+> only when `QuotaRefresh.swift` does not declare `RemoteSource` itself (review proposes moving it there — then no stub,
+> but a new pin). Pins below this note are historical. Runner SHA after the change: see `sha256sum run.sh` in the C1 report.
+
 - Git HEAD: `189a60d19edfbd9fb2ace659d392ca9258ab541a` (uncommitted shared-tree changes).
 - Production pure source SHA-256:
   `b118084f80c26a4c86fe24417b3c5dd229ff14f686906b974feeea8af717e41b`.

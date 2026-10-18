@@ -339,6 +339,14 @@ Swift: C1/C4 — новые секции `--sync-selftest`, C2/C3 — `--subscri
 самом селфтесте из `machine-v11.json` + сгенерированных файлов. Запуск: `bash build.sh && "<app>/Contents/MacOS/ClaudeCodexLimits" --sync-selftest`
 (exit 0, ни одной строки `FAIL`). Контракт имён — шапка файла и отчёт tester C1.
 
+**Цикл правок C1 №1 (tester, 2026-10-18):** C1-09…C1-17 — ревью `docs/review-remote-limits-c1.md` (решения M1/M2/m7), C1-18…C1-20 —
+T2 `docs/security-remote-limits-c1-t2.md` §5 (там черновые номера C1-09…C1-11; S4 = C1-10, S5 = C1-13, S6 = C1-14; S7 — живая проба §6 п. 2).
+Swift — тот же файл и раннер; новый контракт один: последний параметр `GitHubSync.init(…, clock: @escaping () -> Date = { Date() })`.
+C1-07 изменён под S2 (вместо «`gistId` переживает круг» — «gist id нет в закодированном кэше, метки группируются после decode»).
+C1-11 — GUARD (код уже так). Linux — `linux/tests/test_rl_contract_fixes3.py` (C1-10, C1-18 пустое тело — RED; остальное GUARD-эталон).
+Стенд `fixtures/manual-refresh-independent/run.sh` снова самодостаточен: `RemoteSourceStub.swift` подключается, только если
+`QuotaRefresh.swift` сам не объявляет `RemoteSource`; пины обновлены (новые входы — на одобрение изоляции).
+
 | ID | Вход | Ожидание | Фикстура |
 |---|---|---|---|
 | C1-01 | `label-vectors.json`; пустой/короткий/кириллический `localId`, чужой продукт, пустой gist id | те же метки, что A1-01 (паритет Python ↔ Swift); без валидных входов метки нет (`^[0-9a-z-]{8,64}$` после strip+lower, N12) | golden |
@@ -349,6 +357,18 @@ Swift: C1/C4 — новые секции `--sync-selftest`, C2/C3 — `--subscri
 | C1-06 | V5 с `now`: каждое из условий 2/3/4/5/6 отдельно, все пары и все вместе; `signed_out`; `retryUntil` в прошлом; `error` со свежим `asOf`; границы `freshUntil` ±1 с (через `nextAt` и через `asOf + interval`) и 30 мин `lastSeenAt`; Auto 4 ч; без `lastSeenAt` / мусор → по `updated`; 7 (`off`/`revoked`/`awaitingCode`) | приоритет 7 > 6 > 5 > 3 > 4 > 2 > 1; `freshUntil = (nextAt ?? asOf+I) + 20 мин`, `source.freshUntil` равен ему; ровно 30 мин — не офлайн, +1 с — 5; Auto 4 ч / 3 ч 50 мин / `lastSeenAt` 5 мин → 1, 40 мин → 5; 7 → удалённых `AccountView` нет и локальная карточка без чужих значений (№14); контроль: при входе чужое новее показано на локальной | сгенерированные файлы + `ReaderSyncState` |
 | C1-07 | старый `sync-remote.json` без `lastSeenAt`/`accounts`; кэш v1.1 encode → decode; `asOf` +10 мин | декодируется, новые поля `nil`, привязка и `days` целы; v1.1 переживает круг; карточка с будущим `asOf` рисуется, не «устарело» (возраст 0); «темп не считаем» — в C3-05 | — |
 | C1-08 | `machineTag(setting:hostname:)`: векторы `sanitize-vectors.json` (тег мака по умолчанию владельца — `macbook`; Linux-умолчание `linux` → у мака `mac`) | те же результаты, что A1-11; форма `[a-z0-9-]{1,16}`, запрещённые подстроки отсутствуют | golden |
+| C1-09 | **RED** M1 (ревью C1): локальный Claude = аккаунт `vps`, локальный `asOf` старше; у локального `auth = .expired`, `credentialIssue`, `refreshInFlight`, `permissionRequestInFlight`, `pollFailed`, `nextPollAt`, `localRetryAt`, `serverRetryAt`, `error`, свои `plan`/`resetCredits`/`scoped`. GUARD: чужой аккаунт с теми же локальными флагами | значения показания (session/weekly/resets/scoped/plan/resetCredits/asOf/apiFresh/fromCache) и `source` — от `vps`; всё остальное — локальное. GUARD: удалённая карточка другого аккаунта без локальных флагов | `machine-v11.json` |
+| C1-10 | **RED** M2 (ревью C1, оба порта): 8 raw × 7,875 МиБ (63 МиБ), затем валидный файл 2 МиБ (cap = остаток 1 МиБ); следующий цикл без больших файлов. GUARD: 8 МиБ + 1 | в этом цикле пропущен, ошибка видна, в `syncRejectedRaw`/`rejectedRaw` его нет; следующий цикл качает и сливает. GUARD: > 8 МиБ — в кэше, следующий цикл без загрузки | Swift `rlSyncOnce`; Linux `TestC110BudgetRemainderNotCached` |
+| C1-11 | GUARD m7: без `lastSeenAt` 5/40 мин по `updated`; мусор `lastSeenAt`; `lastSeenAt` 5 мин при `updated` 2 ч; 40 мин при `updated` 1 мин | 1 / 5 / 1 / 1 / 5 — оффлайн по `lastSeenAt`, без него по `updated` (код уже так; правится `sync-protocol.md:521-522`) | сгенерированные файлы |
+| C1-12 | **RED** minor: запись с `asOf` длинной дроби ровно 4096 / 4097 байт по мере Linux; то же с `label: null`, `plan` с «/», `retryUntil: null` | 4096 — принята, 4097 — отброшена (мера `json.dumps(…, ensure_ascii=False, separators)` очищенной записи без `days`, ISO-строки как в файле). Linux — GUARD | Linux `TestC112MetadataCapMeasure` |
+| C1-13 | **RED** minor (= T2 S5): POST `/login/device/code` 200 с 16 МиБ + 1 валидного JSON. GUARD: PATCH 200 с эхом 16 МиБ + 1 | кода входа нет, вход не висит в `awaitingCode`, ошибка видна. GUARD: запись подтверждена (`syncPushHash`), ошибки нет (как Linux `gh`) | `SelfTestHTTP`; шов сокета — §6 п. 6 |
+| C1-14 | **RED** minor (= T2 S6): 5 raw-файлов, каждый «занимает» 25 с на внедрённых часах `GitHubSync(…, clock:)` | чтения начинаются только до срока `RL_RAW_READ_DEADLINE` (30 с по брифу → 2 из 5); таймаут каждого ≤ остатка; прочитанные слиты, ошибка видна, `syncLastOkAt` есть | Linux: 60 с на всю фазу чтения — §6 п. 7 |
+| C1-15 | **RED** minor: `updated` с `\n`/`\t`/`\r\n`/U+0085/U+2028/U+3000 по краям, дробь 5000 знаков; asOf с хвостом U+2028. GUARD: ZWSP/NUL/месяц 13/текст/число/null; `lastSeenAt`/`asOf` с `\n` | файл принят, `updated` разобран (Linux `parse_iso`: `str.strip()`, без предела длины); asOf с U+2028 разобран. GUARD: файл пропущен; поля с Cc отброшены | Linux `TestC115UpdatedReference` |
+| C1-16 | **RED** minor: `schema` 1.0 / 1e0; счётчики 5.0 / 1e2 | файл отвергнут; модель пропущена, целая модель цела. Linux — GUARD | Linux `TestC116IntegersReference` |
+| C1-17 | **RED** minor: выход из GitHub при непустом `syncRejectedRaw` | ключ удалён | memory defaults |
+| C1-18 | **RED** T2 S1 (major): raw 200 с 2 МиБ невалидного UTF-8 и пустое тело 200 среди хороших; 63 МиБ + 1 МиБ бинарного + следующий файл | пропущен только этот файл, остальные слиты, `syncLastOkAt` сдвинулся, ошибка без URL/gist id; бинарные байты в бюджете — следующий файл не запрошен. Linux: бинарное — GUARD, **пустое тело — RED** (тот же дефект, `sync.py:1158`) | Linux `TestC118UnreadableRawReference` |
+| C1-19 | **RED** T2 S2: цикл с записью v1.1; перезапуск (decode `sync-remote.json`); C1-07 круг encode → decode | в файле 0 вхождений gist id (только счётчик); после decode локальный Claude группируется с меткой `vps`. Контракт: `gistId` может оставаться полем в памяти, на диск — производный ключ | — |
+| C1-20 | **RED** T2 S3: чужие `nextAt` 2099 / `now + I + 60` / `+ 61`; `lastSeenAt` 2099 / `now + 60` / `+ 61` при `updated` 40 мин; `retryUntil` 2099; подпись `setAt` 2099 против нормальной (оба порядка файлов); `updated` 2099 без `lastSeenAt` | `freshUntil = asOf + I + 20 мин`, через 1 с — 2; граница `+60` принята; `lastSeenAt` в будущем → по `updated` → 5, `now + 60` — жива; «ожидание сервиса» ≤ 24 ч от `attemptAt`; нормальная подпись побеждает; карточки «онлайн» нет (нет или 5) | сгенерированные файлы |
 
 ### C2 — macOS: настройки, деньги, история (`--subscriptions-selftest`)
 
@@ -408,7 +428,7 @@ Swift: C1/C4 — новые секции `--sync-selftest`, C2/C3 — `--subscri
 |---|---|---|---|
 | C6-01 | синтетические журналы O1 двух машин: пары 899/900 с, окна `publish failed`, `label_changed` посреди окна | редьюсер G1 считает пары по метке, сшивает метки по `label_changed`, периоды «gist недоступен» выделяет отдельно; G2 = число `token_refresh` с записью | `tools/` скрипт сведения + pure-тест |
 
-**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 8 · C2 — 8 · C3 — 11 · C4 — 11 · C5 — 2 · C6 — 1. **Всего 114 ID**, из них Linux 74 (+1 общий C5-01), Swift 39; плюс ручные проверки A5 и визуальная приёмка C3/C6.
+**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 20 · C2 — 8 · C3 — 11 · C4 — 11 · C5 — 2 · C6 — 1. **Всего 126 ID**, из них Linux 74 (+1 общий C5-01), Swift 51 (C1-10/12/15/16/18 — и Linux-эталон); плюс ручные проверки A5 и визуальная приёмка C3/C6.
 
 ## 3. Ручные проверки (Юрка) и визуальная приёмка
 
@@ -457,3 +477,8 @@ Milestone закрыт, когда все его ID зелёные, полный
    правится одна проверка в `rlC104`. Решение за Юркой.
 6. **C1 через транспорт:** подделка `SyncHTTP` отдаёт тело целиком, поэтому «чтение обрывается на cap + 1 с сокета» в Swift не доказано
    (у Linux — локальный HTTP-сервер, A1-14). Нужен шов предела тела в `requestHTTP`, иначе остаётся ручной проверкой.
+7. **C1-14 срок чтения raw:** бриф — 30 с; Linux — 60 с на всю фазу чтения (`_read_budget`, включая GET `/gists/{id}`), каждый запрос
+   ≤ min(30 с, остаток); T2 S6 советует 60 с как у Linux. Тест параметризован константой `RL_RAW_READ_DEADLINE`. Решение за Юркой.
+8. **C1-15 цифры не-ASCII:** Linux `\d` в `_TS_RE` принимает Unicode-цифры (например, U+FF12) в любом времени; Swift — только `[0-9]`.
+   В тест не вошло: либо сузить Linux (`re.ASCII`), либо оставить расхождение. Решение за Юркой.
+9. **C1-17 паритет:** Linux `sync.logout()` тоже не чистит `rejectedRaw` в `sync-state.json`. Тест только на Swift (как в брифе).

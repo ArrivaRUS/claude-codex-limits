@@ -858,7 +858,16 @@ private func rlC107(_ fx: RLFixtures?, _ expect: RLExpect) {
         r.add("asOf", back?.accounts?.first(where: { $0.label == RL_CLAUDE_V11 })?.asOf == rlDate("2026-10-12T10:15:02Z"))
         r.add("lastSeenAt", back?.machines.first?.lastSeenAt == rlDate("2026-10-12T10:15:03Z"))
         r.add("captions", back?.captions?[RL_CLAUDE_V11]?.text == "команда")
-        r.add("gistId", back?.gistId == RL_G1)
+        // S2 (T2 C1, decision 2026-10-18): the gist id is never written to sync-remote.json, yet labels still resolve after
+        // decode (the cache keeps a derived, irreversible label key). `gistId` may stay an in-memory field — tests set it.
+        let encoded = (try? JSONEncoder().encode(cache)).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        r.add("S2: gist id not in the encoded cache (\(encoded.components(separatedBy: RL_G1).count - 1) occurrences)",
+              !encoded.isEmpty && !encoded.contains(RL_G1))
+        let reloaded = back.map { rlResolve($0, claude: rlLocal(10, asOf: rlDate("2026-10-12T10:19:00Z")), ids: ["claude": RL_UUID_A],
+                                            now: rlDate("2026-10-12T10:20:00Z")).filter { $0.product == "claude" } } ?? []
+        r.add("S2: after decode the local Claude still groups with the vps label",
+              reloaded.count == 1 && reloaded.first?.isLocal == true && reloaded.first?.label == RL_CLAUDE_V11
+              && reloaded.first?.machines.contains("vps") == true)
         expect(r.failed.isEmpty, "C1-07 v1.1 remote cache survives encode → decode (sync-remote.json)" + r.suffix)
     }
 
@@ -895,6 +904,591 @@ private func rlC108(_ fx: RLFixtures, _ expect: RLExpect) {
     expect(c.failed.isEmpty, "C1-08 machineTag() = Linux A1-11 vectors (owner tag «macbook», default «mac»)" + c.suffix)
 }
 
+// MARK: - C1 fix cycle 1 (tester, 2026-10-18; red before the fix)
+//
+// Sources: docs/review-remote-limits-c1.md (M1, M2, minor), decisions/log.md 2026-10-18 «C1 ревью: M1, M2, m7».
+// C1-09 M1 local base kept · C1-10 M2 refused-raw cache only for the 8 MiB cap · C1-11 m7 offline by lastSeenAt, else updated
+// (GUARD: the code already does it; the fix is in sync-protocol.md) · C1-12 4 KiB metadata measured like Linux ·
+// C1-13 POST/PATCH responses bounded (16 MiB) · C1-14 raw read deadline (injected clock) · C1-15 `updated` parsed like Linux ·
+// C1-16 JSON 1.0 / 1e0 is not an integer · C1-17 sign-out clears syncRejectedRaw.
+// Linux reference for C1-10/12/15/16 (same vectors): linux/tests/test_rl_contract_fixes3.py.
+// New contract for the developer — one addition only:
+//   GitHubSync.init(…, authOwner: …, clock: @escaping () -> Date = { Date() })   — LAST parameter; the sync cycle's read clock
+//   (the raw-read deadline; may also stamp syncRejectedRaw). Production passes nothing.
+// Not a test (review, for the developer): rename `RemoteLimitsWire.unsafe` → `isUnsafe` (contextual keyword in Swift ≥ 6.2).
+
+/// Deadline for reading other machines' raw files in one sync cycle (decision brief 2026-10-18: 30 s). Linux differs:
+/// `_read_budget` = 60 s for the whole read phase (GET /gists included), each request ≤ min(30 s, remaining). If Юрка picks the
+/// Linux number, change only this constant — every C1-14 expectation is derived from it.
+private let RL_RAW_READ_DEADLINE: TimeInterval = 30
+private let RL_FIX_GIST = "rl-fix-gist"
+private let RL_RAW_BASE = "https://gist.githubusercontent.com/u/rl-fix-gist/raw/abc/"
+
+private func rlRawRef(_ name: String) -> [String: Any] {
+    ["truncated": true, "raw_url": RL_RAW_BASE + name, "content": ""]
+}
+private func rlOthers(_ s: GitHubSync) -> [String] { s.ui.machines.filter { !$0.isSelf }.map { $0.name }.sorted() }
+
+/// One sync cycle through GitHubSync with an in-memory gist (no network, no Keychain, memory defaults). `reset` clears the
+/// defaults first; otherwise the previous cycle's defaults (syncRejectedRaw, syncPushHash) carry over — like an app restart.
+private func rlSyncOnce(_ defaults: MemorySelfTestDefaults, _ root: String, files: [String: Any], raw: [String: Data],
+                        reset: Bool, patchReply: SyncHTTPResult = (200, Data("{}".utf8), nil, [:]))
+    -> (sync: GitHubSync, rawGets: [String]) {
+    let gistURL = "https://api.github.com/gists/" + RL_FIX_GIST
+    if reset {
+        defaults.clear()
+        defaults.set("selftest-login", forKey: "syncLogin")
+        defaults.set(RL_FIX_GIST, forKey: "syncGistId")
+        defaults.set(Date(), forKey: "syncDiscoveredAt")
+    }
+    var all = files
+    all[SYNC_MANIFEST] = ["content": "{}"]
+    all["machine-selftest-mac.json"] = ["content": "{}"]
+    let gist: [String: Any] = ["id": RL_FIX_GIST, "public": false, "created_at": "2026-01-01T00:00:00Z", "files": all]
+    let body = (try? JSONSerialization.data(withJSONObject: gist)) ?? Data()
+    let http = SelfTestHTTP { c in
+        if c.url == gistURL && c.method == "GET" { return (200, body, nil, [:]) }
+        if c.url == gistURL && c.method == "PATCH" { return patchReply }
+        if c.method == "GET", let data = raw[c.url] { return (200, data, nil, [:]) }
+        return (599, nil, nil, [:])
+    }
+    let sync = GitHubSync(transport: http.transport, keychain: ScriptedSyncKeychain(store: SelfTestKeychainStore("rl-selftest-token")),
+                          defaults: defaults, remotePath: root + "/rl-remote-fix.json", machineId: "selftest-mac",
+                          revokeRecheckDelay: 0)
+    sync.syncSynchronously()
+    let gets = http.calls.filter { $0.method == "GET" && $0.url.hasPrefix("https://gist.githubusercontent.com/") }.map { $0.url }
+    return (sync, gets)
+}
+
+// MARK: C1-09 (M1) a winning remote snapshot rewrites only the reading fields of the local card
+
+private func rlC109(_ fx: RLFixtures, _ expect: RLExpect) {
+    let now = rlDate("2026-10-12T10:20:00Z")
+    guard let v11 = fx.text("machine-v11.json") else { expect(false, "C1-09 machine-v11.json readable"); return }
+    let cache = rlCache(["machine-fixturevps.json": v11], now: now)
+    func busyLocal() -> LimitData {
+        var d = LimitData()
+        d.session = 10; d.weekly = 11
+        d.sessionReset = rlDate("2026-10-12T11:00:00Z"); d.weeklyReset = rlDate("2026-10-14T00:00:00Z")
+        d.scoped = ScopedLimit(name: "local-model", percent: 12, reset: nil, severity: "normal")
+        d.plan = "pro"; d.resetCredits = 7
+        d.asOf = rlDate("2026-10-12T10:00:00Z")          // older than the vps Claude snapshot (10:15:02) → vps wins V3
+        d.apiFresh = true; d.fromCache = false
+        d.auth = .expired                                 // «вход истёк» of THIS Mac
+        d.credentialIssue = .readInteractionRequired      // Keychain access request
+        d.refreshInFlight = true                          // manual refresh spinner
+        d.permissionRequestInFlight = true
+        d.pollFailed = true
+        d.nextPollAt = rlDate("2026-10-12T10:30:00Z")
+        d.localRetryAt = 1_791_800_123
+        d.serverRetryAt = 1_791_800_456
+        d.error = "HTTP 401"
+        return d
+    }
+    // The local Claude account IS the vps account (label(G1, claude, UUID_A) == RL_CLAUDE_V11).
+    let views = rlResolve(cache, claude: busyLocal(), ids: ["claude": RL_UUID_A], now: now).filter { $0.product == "claude" }
+    let d = views.first?.data
+    var c = RLChecks()
+    c.add("one local card (got \(views.map(rlKey)))", views.count == 1 && views.first?.isLocal == true)
+    c.add("precondition: the vps snapshot won V3 (source vps)", d?.source?.machineName == "vps")
+    c.add("session 42.5 / weekly 61 from vps", d?.session == 42.5 && d?.weekly == 61)
+    c.add("sessionReset from vps", d?.sessionReset == rlDate("2026-10-12T13:00:00Z"))
+    c.add("asOf from vps", d?.asOf == rlDate("2026-10-12T10:15:02Z"))
+    c.add("plan from vps", d?.plan == "max")
+    c.add("scoped from the vps models", d?.scoped?.name == "Fable 5.1")
+    c.add("resetCredits from vps (absent), not the local 7", d?.resetCredits == nil)
+    c.add("apiFresh false (not a live answer to this Mac)", d?.apiFresh == false)
+    c.add("present", d?.present == true)
+    c.add("auth .expired kept (got \(d.map { "\($0.auth)" } ?? "no card"))", d?.auth == .expired)
+    c.add("credentialIssue kept", d?.credentialIssue == .readInteractionRequired)
+    c.add("refreshInFlight kept", d?.refreshInFlight == true)
+    c.add("permissionRequestInFlight kept", d?.permissionRequestInFlight == true)
+    c.add("pollFailed kept", d?.pollFailed == true)
+    c.add("nextPollAt kept", d?.nextPollAt == rlDate("2026-10-12T10:30:00Z"))
+    c.add("localRetryAt kept", d?.localRetryAt == 1_791_800_123)
+    c.add("serverRetryAt kept", d?.serverRetryAt == 1_791_800_456)
+    c.add("error kept", d?.error == "HTTP 401")
+    expect(c.failed.isEmpty, "C1-09 M1: a remote snapshot winning the LOCAL card rewrites only session/weekly/resets/scoped/plan/"
+           + "resetCredits/asOf/apiFresh/fromCache + source; auth, credentialIssue, refreshInFlight, permissionRequestInFlight, "
+           + "pollFailed, nextPollAt, localRetryAt, serverRetryAt, error stay local (decision 2026-10-18)" + c.suffix)
+
+    // GUARD: a different local Claude account never lends its local state to the remote vps card.
+    let other = rlResolve(cache, claude: busyLocal(), ids: ["claude": RL_UUID_C], now: now)
+        .filter { $0.product == "claude" && !$0.isLocal }
+    let r = other.first?.data
+    var g = RLChecks()
+    g.add("one remote card", other.count == 1 && other.first?.label == RL_CLAUDE_V11)
+    g.add("auth .ok", r?.auth == .ok)
+    g.add("no spinner / prompt", r?.refreshInFlight == false && r?.permissionRequestInFlight == false)
+    g.add("no local schedule / error", r?.nextPollAt == nil && r?.credentialIssue == nil && r?.error == nil)
+    expect(g.failed.isEmpty, "C1-09 (guard) a remote card of another account carries no local auth/refresh state" + g.suffix)
+}
+
+// MARK: C1-10 (M2) only the own 8 MiB excess goes to syncRejectedRaw, not the exhausted total budget
+
+private func rlC110(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    let mib = 1024 * 1024
+    let part = 8 * mib - mib / 8                         // 7.875 MiB; 8 parts = 63 MiB read
+    var files: [String: Any] = [:]
+    var raw: [String: Data] = [:]
+    for i in 0..<8 {
+        let name = "machine-b\(i).json"
+        files[name] = rlRawRef(name)
+        raw[RL_RAW_BASE + name] = Data(rlPadded("b\(i)", bytes: part).utf8)
+    }
+    let two = "machine-c-two.json", twoURL = RL_RAW_BASE + two
+    files[two] = rlRawRef(two)
+    raw[twoURL] = Data(rlPadded("c-two", bytes: 2 * mib).utf8)   // a valid 2 MiB file; its cap = 64 − 63 = 1 MiB
+    func rejectedCount() -> Int { defaults.dictionary(forKey: "syncRejectedRaw")?.count ?? 0 }
+
+    let first = rlSyncOnce(defaults, root, files: files, raw: raw, reset: true)
+    var a = RLChecks()
+    a.add("precondition: the 2 MiB file was requested with 1 MiB of budget left", first.rawGets.filter { $0 == twoURL }.count == 1)
+    a.add("skipped in this cycle", !rlOthers(first.sync).contains("pc-c-two"))
+    a.add("files already read merged", rlOthers(first.sync).contains("pc-b0"))
+    a.add("budget error visible", first.sync.ui.lastError != nil)
+    a.add("not cached in syncRejectedRaw (got \(rejectedCount()) entries)", rejectedCount() == 0)
+    expect(a.failed.isEmpty, "C1-10 M2: a body over the remaining 64 MiB budget (cap < 8 MiB) is skipped in this cycle only, "
+           + "never cached for 24 h (sync-protocol.md «Reader limits»)" + a.suffix)
+
+    let second = rlSyncOnce(defaults, root, files: [two: rlRawRef(two)], raw: raw, reset: false)
+    var b = RLChecks()
+    b.add("downloaded again (got \(second.rawGets.count) raw GETs)", second.rawGets == [twoURL])
+    b.add("merged", rlOthers(second.sync).contains("pc-c-two"))
+    expect(b.failed.isEmpty, "C1-10 M2: the next cycle with a free budget reads and merges that file" + b.suffix)
+
+    // GUARD: the own 8 MiB excess is cached; the next cycle skips it without a download, visibly.
+    let over = "machine-over.json", overURL = RL_RAW_BASE + over
+    let overRaw = [overURL: Data(rlPadded("over", bytes: 8 * mib + 1).utf8)]
+    let o1 = rlSyncOnce(defaults, root, files: [over: rlRawRef(over)], raw: overRaw, reset: true)
+    let cachedAfterFirst = rejectedCount()
+    let o2 = rlSyncOnce(defaults, root, files: [over: rlRawRef(over)], raw: overRaw, reset: false)
+    var c = RLChecks()
+    c.add("first cycle downloads it once", o1.rawGets == [overURL])
+    c.add("cached: 1 entry (got \(cachedAfterFirst))", cachedAfterFirst == 1)
+    c.add("next cycle: no download", o2.rawGets.isEmpty)
+    c.add("next cycle: skip visible", o2.sync.ui.lastError != nil)
+    expect(c.failed.isEmpty, "C1-10 (guard) a raw body over 8 MiB is refused for 24 h (N9)" + c.suffix)
+
+    defaults.clear()
+    try? FileManager.default.removeItem(atPath: root + "/rl-remote-fix.json")
+}
+
+// MARK: C1-11 (m7, GUARD) offline by lastSeenAt; without it — by updated
+
+private func rlC111(_ expect: RLExpect) {
+    let now = rlDate("2026-10-12T12:00:00Z")
+    let asOf = now.addingTimeInterval(-300)
+    func state(updatedAgo: TimeInterval?, lastSeenAgo: TimeInterval?, lastSeenRaw: String? = nil) -> Int? {
+        let record = rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: asOf.addingTimeInterval(900))
+        var seen: Any? = nil
+        if let s = lastSeenRaw { seen = s } else if let ago = lastSeenAgo { seen = now.addingTimeInterval(-ago) }
+        var updated: Date? = nil
+        if let ago = updatedAgo { updated = now.addingTimeInterval(-ago) }
+        let file = rlMachineFile("fixturevps", name: "vps", updated: updated, lastSeenAt: seen, accounts: [record])
+        let card = rlResolve(rlCache(["machine-fixturevps.json": file], now: now), now: now)
+            .filter { $0.product == "claude" && !$0.isLocal }
+        return card.count == 1 ? card[0].state.rawValue : nil
+    }
+    var c = RLChecks()
+    c.add("no lastSeenAt (v1-era writer), updated 5 min → 1", state(updatedAgo: 300, lastSeenAgo: nil) == 1)
+    c.add("no lastSeenAt, updated 40 min → 5 (offline by updated)", state(updatedAgo: 2400, lastSeenAgo: nil) == 5)
+    c.add("lastSeenAt «garbage», updated 5 min → 1", state(updatedAgo: 300, lastSeenAgo: nil, lastSeenRaw: "garbage") == 1)
+    c.add("lastSeenAt 5 min wins over updated 2 h → 1", state(updatedAgo: 7200, lastSeenAgo: 300) == 1)
+    c.add("lastSeenAt 40 min wins over updated 1 min → 5", state(updatedAgo: 60, lastSeenAgo: 2400) == 5)
+    expect(c.failed.isEmpty, "C1-11 m7 (guard): card offline (5) by lastSeenAt, without it by updated (synth §F, decision "
+           + "2026-10-18); strict «no lastSeenAt → not alive» is coordination-only (C4)" + c.suffix)
+}
+
+// MARK: C1-12 (minor) the 4 KiB metadata cap is measured like Linux
+
+/// Linux `validate_entry`: json.dumps(out, ensure_ascii=False, separators=(",", ":")) of the sanitized record BEFORE `days`,
+/// times as the ORIGINAL ISO strings, `"label":null` / `"retryUntil":null` counted, `/` not escaped. The wire string below is
+/// built by hand with exactly that shape; linux/tests/test_rl_contract_fixes3.py TestC112 proves the same arithmetic on Linux.
+private func rlC112(_ expect: RLExpect) {
+    let now = rlDate("2026-10-12T10:20:00Z")
+    let dateHead = "2026-10-12T10:00:00."
+    func run(_ record: [String: Any]) -> [RemoteAccount] {
+        let file = rlMachineFile("fixturemeta", name: "meta", updated: now, lastSeenAt: now, accounts: [record])
+        return mergeV11(["machine-fixturemeta.json": file], excluding: "selftest-mac", now: now).accounts ?? []
+    }
+    func digits(_ total: Int, _ head: String, _ tail: String) -> String {
+        String(repeating: "1", count: total - head.utf8.count - tail.utf8.count)
+    }
+    func labelled(_ total: Int) -> [String: Any] {
+        let head = "{\"product\":\"codex\",\"label\":\"aaaaaaaaaaaaaaa1\",\"status\":\"ok\",\"asOf\":\"" + dateHead
+        let tail = "Z\"}"
+        return ["product": "codex", "label": "aaaaaaaaaaaaaaa1", "status": "ok", "asOf": dateHead + digits(total, head, tail) + "Z"]
+    }
+    func unlabelled(_ total: Int) -> [String: Any] {
+        let plan = "max/team/x"
+        let head = "{\"product\":\"codex\",\"label\":null,\"status\":\"ok\",\"plan\":\"" + plan + "\",\"asOf\":\"" + dateHead
+        let tail = "Z\",\"retryUntil\":null}"
+        return ["product": "codex", "label": NSNull(), "status": "ok", "plan": plan,
+                "asOf": dateHead + digits(total, head, tail) + "Z", "retryUntil": NSNull()]
+    }
+    func hasLabelled(_ a: [RemoteAccount]) -> Bool { a.contains { $0.label == "aaaaaaaaaaaaaaa1" } }
+    func hasNull(_ a: [RemoteAccount]) -> Bool { a.contains { $0.product == "codex" && $0.label == nil } }
+    let kept = run(labelled(4096))
+    var c = RLChecks()
+    c.add("labelled, 4096 bytes → kept", hasLabelled(kept))
+    c.add("labelled, 4096 bytes → its long-fraction asOf parsed", kept.first { $0.label == "aaaaaaaaaaaaaaa1" }?.asOf != nil)
+    c.add("labelled, 4097 bytes → dropped (JSONEncoder counts asOf as a Double)", !hasLabelled(run(labelled(4097))))
+    c.add("label null + «/» + retryUntil null, 4096 → kept", hasNull(run(unlabelled(4096))))
+    c.add("label null + «/» + retryUntil null, 4097 → dropped", !hasNull(run(unlabelled(4097))))
+    expect(c.failed.isEmpty, "C1-12 4 KiB metadata cap measured on the sanitized wire record with original ISO strings "
+           + "(Linux accounts.validate_entry)" + c.suffix)
+}
+
+// MARK: C1-13 (minor) POST/PATCH responses are bounded like GET (16 MiB)
+
+private func rlC113(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    let mib = 1024 * 1024
+    func padded(_ head: String, _ total: Int) -> Data {
+        let tail = "\"}"
+        return Data((head + String(repeating: "x", count: total - head.utf8.count - tail.utf8.count) + tail).utf8)
+    }
+    // GUARD: a confirmed 2xx PATCH with a huge echo stays a successful write (Linux gh(): no response body is needed).
+    let echo = padded("{\"id\":\"" + RL_FIX_GIST + "\",\"pad\":\"", 16 * mib + 1)
+    let patched = rlSyncOnce(defaults, root, files: [:], raw: [:], reset: true, patchReply: (200, echo, nil, [:]))
+    expect(defaults.string(forKey: "syncPushHash") != nil && patched.sync.ui.lastError == nil,
+           "C1-13 (guard) PATCH 200 with a 16 MiB + 1 echo: the write is confirmed, no error (Linux gh)")
+
+    // POST /login/device/code answering 16 MiB + 1 bytes of valid JSON → the body is refused, no user code is shown.
+    defaults.clear()
+    let big = padded("{\"device_code\":\"dc\",\"user_code\":\"UC-BIG\",\"interval\":1,\"expires_in\":2,\"pad\":\"", 16 * mib + 1)
+    let http = SelfTestHTTP { c in
+        if c.url == "https://github.com/login/device/code" { return (200, big, nil, [:]) }
+        return (599, nil, nil, [:])
+    }
+    let s = GitHubSync(transport: http.transport, keychain: ScriptedSyncKeychain(store: SelfTestKeychainStore(nil)),
+                       defaults: defaults, remotePath: root + "/rl-remote-login.json", machineId: "selftest-mac",
+                       revokeRecheckDelay: 0)
+    s.startLogin()
+    let end = Date().addingTimeInterval(5)
+    while Date() < end && s.ui.userCode == nil && s.ui.phase == .awaitingCode { Thread.sleep(forTimeInterval: 0.02) }
+    let shown = s.ui.userCode, phase = s.ui.phase, error = s.ui.error
+    s.cancelLogin()
+    _ = s.selfTestWaitForQueue()
+    let asked = http.calls.contains { $0.method == "POST" && $0.url == "https://github.com/login/device/code" }
+    var c = RLChecks()
+    c.add("precondition: the device code was requested", asked)
+    c.add("no user code shown (got \(shown ?? "nil"))", shown == nil)
+    c.add("sign-in left awaitingCode", phase != .awaitingCode)
+    c.add("sign-in error visible", error != nil)
+    expect(c.failed.isEmpty, "C1-13 POST answered with 16 MiB + 1 bytes → refused like any over-cap body (Linux _transport "
+           + "max_body on every response, review minor LimitsMonitor.swift:1455)" + c.suffix)
+    defaults.clear()
+    try? FileManager.default.removeItem(atPath: root + "/rl-remote-fix.json")
+    try? FileManager.default.removeItem(atPath: root + "/rl-remote-login.json")
+}
+
+// MARK: C1-14 (minor) one deadline for reading raw files (injected clock)
+
+private final class RLFakeClock {
+    var now: Date
+    var raws: [(offset: TimeInterval, timeout: Double)] = []
+    init(_ now: Date) { self.now = now }
+}
+
+private func rlC114(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    let gistURL = "https://api.github.com/gists/" + RL_FIX_GIST
+    let step: TimeInterval = 25                          // each raw file «takes» 25 s on the injected clock
+    let start = Date()                                   // only an origin: every expectation is relative to it
+    let clock = RLFakeClock(start)
+    defaults.clear()
+    defaults.set("selftest-login", forKey: "syncLogin")
+    defaults.set(RL_FIX_GIST, forKey: "syncGistId")
+    defaults.set(start, forKey: "syncDiscoveredAt")
+    var files: [String: Any] = [SYNC_MANIFEST: ["content": "{}"], "machine-selftest-mac.json": ["content": "{}"]]
+    var rawFiles: [String: Data] = [:]
+    for i in 0..<5 {
+        let name = "machine-d\(i).json"
+        files[name] = rlRawRef(name)
+        rawFiles[RL_RAW_BASE + name] = Data(rlSmall("d\(i)").utf8)
+    }
+    let raw = rawFiles
+    let gist: [String: Any] = ["id": RL_FIX_GIST, "public": false, "created_at": "2026-01-01T00:00:00Z", "files": files]
+    let body = (try? JSONSerialization.data(withJSONObject: gist)) ?? Data()
+    let transport: SyncHTTP = { url, method, _, _, timeout in
+        if url == gistURL && method == "GET" { return (200, body, nil, [:]) }
+        if url == gistURL && method == "PATCH" { return (200, Data("{}".utf8), nil, [:]) }
+        if method == "GET", let data = raw[url] {
+            clock.raws.append((offset: clock.now.timeIntervalSince(start), timeout: timeout))
+            clock.now = clock.now.addingTimeInterval(step)
+            return (200, data, nil, [:])
+        }
+        return (599, nil, nil, [:])
+    }
+    let sync = GitHubSync(transport: transport, keychain: ScriptedSyncKeychain(store: SelfTestKeychainStore("rl-selftest-token")),
+                          defaults: defaults, remotePath: root + "/rl-remote-deadline.json", machineId: "selftest-mac",
+                          revokeRecheckDelay: 0, clock: { clock.now })
+    sync.syncSynchronously()
+    let allowed = min(5, Int((RL_RAW_READ_DEADLINE / step).rounded(.up)))   // reads that START before the deadline
+    let seen = clock.raws.map { "\(Int($0.offset))s→\($0.timeout)s" }.joined(separator: ", ")
+    var c = RLChecks()
+    c.add("raw reads started before the deadline only: \(allowed) of 5 (got \(clock.raws.count): \(seen))", clock.raws.count == allowed)
+    c.add("each raw request is given at most the remaining time (\(seen))",
+          !clock.raws.isEmpty && clock.raws.allSatisfy { $0.timeout > 0 && $0.timeout <= RL_RAW_READ_DEADLINE - $0.offset + 0.001 })
+    c.add("files read before the deadline merged (got \(rlOthers(sync)))", rlOthers(sync) == (0..<allowed).map { "pc-d\($0)" })
+    c.add("deadline visible", sync.ui.lastError != nil)
+    c.add("a partial read still counts as a sync (syncLastOkAt)", defaults.object(forKey: "syncLastOkAt") != nil)
+    expect(c.failed.isEmpty, "C1-14 raw files of one cycle share one \(Int(RL_RAW_READ_DEADLINE)) s deadline on the injected "
+           + "clock (review minor LimitsMonitor.swift:2836; Linux _read_timeout)" + c.suffix)
+    defaults.clear()
+    try? FileManager.default.removeItem(atPath: root + "/rl-remote-deadline.json")
+}
+
+// MARK: C1-15 (minor) `updated` parsed like Linux sync.merge
+
+/// Linux parses `updated` with plain common.parse_iso: Python str.strip() (\t \n \v \f \r \x1c–\x1f space \x85 \xa0 U+1680
+/// U+2000–U+200A U+2028 U+2029 U+202F U+205F U+3000) and NO length cap; account times and lastSeenAt go through _epoch
+/// (_text(…, 4096) rejects Cc/Cf first, then the same strip). Swift today: text(limit: 4096) + trim .whitespaces for all of them.
+/// Divergence left OUT on purpose (question to Юрка): Python `\d` also matches non-ASCII digits (e.g. U+FF12), Swift does not.
+private func rlC115(_ expect: RLExpect) {
+    let now = rlDate("2026-10-12T10:20:00Z")
+    let iso = "2026-10-12T10:00:00Z", want = rlDate(iso)
+    func machineObj(_ id: String, _ updated: Any) -> [String: Any] {
+        ["schema": 1, "machine": ["id": id, "name": id, "os": "T"], "updated": updated, "days": [String: Any]()]
+    }
+    func merged(_ id: String, _ updated: Any) -> SyncCachedMachine? {
+        mergeV11(["machine-\(id).json": rlJSON(machineObj(id, updated))], excluding: "selftest-mac", now: now)
+            .machines.first { $0.id == id }
+    }
+    var c = RLChecks()
+    let spaced: [(String, String)] = [("\\n after", iso + "\n"), ("\\t before", "\t" + iso), ("\\r\\n after", iso + "\r\n"),
+                                      ("U+0085 after", iso + "\u{85}"), ("U+2028 after", iso + "\u{2028}"),
+                                      ("U+3000 before", "\u{3000}" + iso)]
+    for (i, v) in spaced.enumerated() {
+        c.add("updated with \(v.0) → file kept, updated parsed", merged("w\(i)", v.1)?.updated == want)
+    }
+    let long = "2026-10-12T10:00:00." + String(repeating: "1", count: 5000) + "Z"
+    let longUpdated: Date? = merged("longfrac", long)?.updated
+    c.add("updated with 5000 fraction digits (> 4096 chars) → file kept",
+          longUpdated.map { abs($0.timeIntervalSince(want) - 0.111) < 0.01 } ?? false)
+    expect(c.failed.isEmpty, "C1-15 `updated` parsed like Linux sync.merge (common.parse_iso: str.strip(), no length cap); "
+           + "today such files are dropped whole" + c.suffix)
+
+    var g = RLChecks()
+    let bad: [(String, Any)] = [("ZWSP before", "\u{200B}" + iso), ("NUL after", iso + "\u{0}"),
+                                ("month 13", "2026-13-12T10:00:00Z"), ("«yesterday»", "yesterday"), ("a number", 123),
+                                ("null", NSNull())]
+    for (i, v) in bad.enumerated() { g.add("updated \(v.0) → file skipped", merged("bad\(i)", v.1) == nil) }
+    let recs: [[String: Any]] = [["product": "codex", "label": "aaaaaaaaaaaaaaa1", "status": "ok", "asOf": iso + "\n"],
+                                 ["product": "codex", "label": "aaaaaaaaaaaaaaa2", "status": "ok", "asOf": iso + "\u{2028}"]]
+    var strict = machineObj("strict", iso)
+    strict["lastSeenAt"] = iso + "\n"
+    strict["accounts"] = recs
+    let r = mergeV11(["machine-strict.json": rlJSON(strict)], excluding: "selftest-mac", now: now)
+    g.add("lastSeenAt with \\n → nil (Cc drops the field)", r.machines.first?.lastSeenAt == nil && r.machines.count == 1)
+    let a1 = (r.accounts ?? []).first { $0.label == "aaaaaaaaaaaaaaa1" }
+    g.add("account asOf with \\n → nil, record kept", a1 != nil && a1?.asOf == nil)
+    expect(g.failed.isEmpty, "C1-15 (guard) unsafe/broken `updated` still drops the file; account times and lastSeenAt stay "
+           + "strict (Linux _epoch)" + g.suffix)
+    let a2 = (r.accounts ?? []).first { $0.label == "aaaaaaaaaaaaaaa2" }
+    expect(a2?.asOf == want, "C1-15 account asOf with a trailing U+2028 (Zl passes _text, parse_iso strips it) → parsed like Linux")
+}
+
+// MARK: C1-16 (minor) JSON 1.0 / 1e0 is not an integer (schema, usage counters)
+
+private func rlC116(_ expect: RLExpect) {
+    let now = rlDate("2026-10-12T10:20:00Z")
+    var c = RLChecks()
+    for (i, raw) in ["1.0", "1e0"].enumerated() {
+        let text = "{\"schema\":\(raw),\"machine\":{\"id\":\"f\(i)\",\"name\":\"f\",\"os\":\"T\"},\"days\":{}}"
+        c.add("schema \(raw) → file rejected", mergeV11(["machine-f\(i).json": text], excluding: "selftest-mac", now: now).machines.isEmpty)
+    }
+    let zeros = "\"output\":0,\"cacheRead\":0,\"cacheWrite5m\":0,\"cacheWrite1h\":0,\"turns\":1"
+    let text = "{\"schema\":1,\"machine\":{\"id\":\"cnt\",\"name\":\"c\",\"os\":\"T\"},\"days\":{\"claude\":{\"2026-10-12\":{"
+        + "\"m-float\":{\"input\":5.0," + zeros + "},\"m-exp\":{\"input\":1e2," + zeros + "},"
+        + "\"m-int\":{\"input\":7," + zeros + "}}}}}"
+    let r = mergeV11(["machine-cnt.json": text], excluding: "selftest-mac", now: now)
+    let models = (r.days["claude"]?["2026-10-12"] ?? [:]).keys.sorted()
+    c.add("counters 5.0 / 1e2 → those model entries skipped (got \(models))", models == ["m-int"])
+    c.add("control: the integer entry kept", r.days["claude"]?["2026-10-12"]?["m-int"]?.input == 7 && r.machines.count == 1)
+    expect(c.failed.isEmpty, "C1-16 legacyInteger: JSON 1.0 / 1e0 / 5.0 / 1e2 are not integers (Linux `type(n) is int`)" + c.suffix)
+}
+
+// MARK: C1-17 (minor) sign-out clears syncRejectedRaw
+
+private func rlC117(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    defaults.clear()
+    defaults.set("selftest-login", forKey: "syncLogin")
+    defaults.set(["0123456789abcdef": Date().timeIntervalSince1970], forKey: "syncRejectedRaw")
+    let s = GitHubSync(transport: OFFLINE_SYNC_HTTP, keychain: ScriptedSyncKeychain(store: SelfTestKeychainStore("rl-selftest-token")),
+                       defaults: defaults, remotePath: root + "/rl-remote-logout.json", machineId: "selftest-mac",
+                       revokeRecheckDelay: 0)
+    s.logout()
+    let drained = s.selfTestWaitForQueue()
+    expect(drained && defaults.string(forKey: "syncLogin") == nil, "C1-17 (control) sign-out finished")
+    expect(defaults.object(forKey: "syncRejectedRaw") == nil,
+           "C1-17 sign-out clears syncRejectedRaw (review minor LimitsMonitor.swift:2469)")
+    defaults.clear()
+}
+
+// MARK: - C1 fix cycle 1, T2 findings (docs/security-remote-limits-c1-t2.md §3/§5; decision 2026-10-18 «C1 T2: S1–S3»)
+//
+// T2 §5 drafted these as C1-09…C1-11; renumbered C1-18 (S1), C1-19 (S2), C1-20 (S3) after the review IDs C1-09…C1-17.
+// S5 (POST/PATCH bound) = C1-13, S4 = M2 = C1-10, S6 = C1-14. S7 (JSON depth) stays a live probe on the Mac (T2 §6 п. 2).
+
+// MARK: C1-18 (S1) an unreadable or empty raw body skips that file only; its bytes count in the 64 MiB budget
+
+private func rlC118(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    let mib = 1024 * 1024
+    var binary = Data([0xFF, 0xFE])                                   // never valid UTF-8
+    binary.append(Data(repeating: 0xFF, count: 2 * mib - 2))
+    let names = ["machine-aa.json", "machine-bin.json", "machine-empty.json", "machine-zz.json"]
+    var files: [String: Any] = [:]
+    for n in names { files[n] = rlRawRef(n) }
+    let raw: [String: Data] = [RL_RAW_BASE + "machine-aa.json": Data(rlSmall("aa").utf8),
+                               RL_RAW_BASE + "machine-bin.json": binary,
+                               RL_RAW_BASE + "machine-empty.json": Data(),
+                               RL_RAW_BASE + "machine-zz.json": Data(rlSmall("zz").utf8)]
+    let r = rlSyncOnce(defaults, root, files: files, raw: raw, reset: true)
+    let error = r.sync.ui.lastError ?? ""
+    var c = RLChecks()
+    c.add("every raw file requested (got \(r.rawGets.count))", r.rawGets.count == 4)
+    c.add("the readable files merged (got \(rlOthers(r.sync)))", rlOthers(r.sync) == ["pc-aa", "pc-zz"])
+    c.add("syncLastOkAt advanced", defaults.object(forKey: "syncLastOkAt") != nil)
+    c.add("skip visible", !error.isEmpty)
+    c.add("error text carries no raw URL / gist id", !error.contains("githubusercontent") && !error.contains(RL_FIX_GIST)
+          && !error.contains("/raw/"))
+    expect(c.failed.isEmpty, "C1-18 S1: invalid UTF-8 (2 MiB FF FE…) and an empty 200 body skip only that file; the cycle merges "
+           + "the rest (sync-protocol.md «one bad record never stops the merge»)" + c.suffix)
+
+    // Budget: 63 MiB read, then exactly 1 MiB of binary → 64 MiB spent; the next file is not even requested.
+    var budgetFiles: [String: Any] = [:]
+    var budgetRaw: [String: Data] = [:]
+    for i in 0..<8 {
+        let n = "machine-b\(i).json"
+        budgetFiles[n] = rlRawRef(n)
+        budgetRaw[RL_RAW_BASE + n] = Data(rlPadded("b\(i)", bytes: 8 * mib - mib / 8).utf8)
+    }
+    budgetFiles["machine-c-bin.json"] = rlRawRef("machine-c-bin.json")
+    budgetRaw[RL_RAW_BASE + "machine-c-bin.json"] = Data(repeating: 0xFF, count: mib)
+    budgetFiles["machine-d-next.json"] = rlRawRef("machine-d-next.json")
+    budgetRaw[RL_RAW_BASE + "machine-d-next.json"] = Data(rlSmall("d-next").utf8)
+    let b = rlSyncOnce(defaults, root, files: budgetFiles, raw: budgetRaw, reset: true)
+    var g = RLChecks()
+    g.add("files before the binary merged", rlOthers(b.sync).contains("pc-b0") && rlOthers(b.sync).contains("pc-b7"))
+    g.add("syncLastOkAt advanced", defaults.object(forKey: "syncLastOkAt") != nil)
+    g.add("next file not requested (got \(b.rawGets.filter { $0.hasSuffix("machine-d-next.json") }.count))",
+          !b.rawGets.contains { $0.hasSuffix("machine-d-next.json") })
+    g.add("next file not merged", !rlOthers(b.sync).contains("pc-d-next"))
+    expect(g.failed.isEmpty, "C1-18 S1: the skipped binary body is counted in the 64 MiB budget before it is dropped (Sol)" + g.suffix)
+    defaults.clear()
+    try? FileManager.default.removeItem(atPath: root + "/rl-remote-fix.json")
+}
+
+// MARK: C1-19 (S2) the gist id never lands in sync-remote.json
+
+private func rlC119(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect: RLExpect) {
+    let now = Date()
+    guard let label = accountLabel(product: "claude", localId: RL_UUID_A, gistId: RL_FIX_GIST) else {
+        expect(false, "C1-19 precondition: accountLabel for the selftest gist"); return
+    }
+    let seen = now.addingTimeInterval(-60)
+    let vps = rlMachineFile("fixturevps", name: "vps", updated: seen, lastSeenAt: seen,
+                            accounts: [rlAcct("claude", label, asOf: seen, pct: 33, nextAt: seen.addingTimeInterval(900))])
+    let path = root + "/rl-remote-fix.json"
+    try? FileManager.default.removeItem(atPath: path)
+    _ = rlSyncOnce(defaults, root, files: ["machine-fixturevps.json": ["content": vps]], raw: [:], reset: true)
+    let bytes = FileManager.default.contents(atPath: path)
+    let text = bytes.map { String(decoding: $0, as: UTF8.self) } ?? ""
+    let occurrences = text.components(separatedBy: RL_FIX_GIST).count - 1         // a count only, never the value
+    var c = RLChecks()
+    c.add("precondition: the cycle wrote sync-remote.json", bytes != nil && !text.isEmpty)
+    c.add("gist id occurrences in the file = 0 (got \(occurrences))", bytes != nil && occurrences == 0)
+    let decoded = bytes.flatMap { try? JSONDecoder().decode(SyncRemoteCache.self, from: $0) }
+    var mine = LimitData(); mine.session = 10; mine.asOf = now.addingTimeInterval(-30); mine.apiFresh = true
+    let views = decoded.map {
+        resolveAccounts(local: (mine, rlAbsent()), localIds: ["claude": RL_UUID_A], remote: $0, hidden: [], menu: [:],
+                        sync: ReaderSyncState(phase: .on), now: now).filter { $0.product == "claude" }
+    } ?? []
+    c.add("after a restart (decode) the local Claude still groups with the vps record",
+          views.count == 1 && views.first?.isLocal == true && views.first?.label == label && views.first?.machines.contains("vps") == true)
+    expect(c.failed.isEmpty, "C1-19 S2: sync-remote.json keeps a derived label key, not the gist id (grep -c = 0)" + c.suffix)
+    defaults.clear()
+    try? FileManager.default.removeItem(atPath: path)
+}
+
+// MARK: C1-20 (S3) future foreign times cannot pin «fresh» / «online» / «service wait» / a caption
+
+private func rlC120(_ expect: RLExpect) {
+    let now = rlDate("2026-10-12T12:00:00Z")
+    let far = rlDate("2099-01-01T00:00:00Z")
+    func card(_ files: [String: String], at: Date) -> AccountView? {
+        let views = rlResolve(rlCache(files, now: at), now: at).filter { $0.product == "claude" && !$0.isLocal }
+        return views.count == 1 ? views[0] : nil
+    }
+    func vps(_ record: [String: Any], updated: Date?, lastSeen: Any?) -> [String: String] {
+        ["machine-fixturevps.json": rlMachineFile("fixturevps", name: "vps", updated: updated, lastSeenAt: lastSeen, accounts: [record])]
+    }
+    let asOf = now.addingTimeInterval(-60)
+    let seen = now.addingTimeInterval(-60)
+
+    // (a) nextAt: accepted only while ≤ now + interval + 60; beyond — fall back to asOf + interval.
+    var a = RLChecks()
+    let farNext = vps(rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: far), updated: seen, lastSeen: seen)
+    let fallback = asOf.addingTimeInterval(900 + 1200)
+    let farUntil: Date? = card(farNext, at: now)?.data.source?.freshUntil
+    a.add("nextAt 2099 → freshUntil = asOf + I + 20 min (got \(farUntil.map { rlStr($0) } ?? "nil"))", farUntil == fallback)
+    let lateSeen = fallback.addingTimeInterval(1 - 60)                 // keep the source online at the check time
+    let later = vps(rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: far), updated: lateSeen, lastSeen: lateSeen)
+    a.add("…and 1 s after it the card is stale (2), not fresh", card(later, at: fallback.addingTimeInterval(1))?.state.rawValue == 2)
+    let border = vps(rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: now.addingTimeInterval(960)),
+                     updated: seen, lastSeen: seen)
+    a.add("border: nextAt = now + I + 60 accepted", card(border, at: now)?.data.source?.freshUntil == now.addingTimeInterval(960 + 1200))
+    let over = vps(rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: now.addingTimeInterval(961)),
+                   updated: seen, lastSeen: seen)
+    a.add("border: nextAt = now + I + 61 → fallback", card(over, at: now)?.data.source?.freshUntil == fallback)
+    expect(a.failed.isEmpty, "C1-20(a) S3: a future nextAt (> now + interval + 60) never extends «fresh» (rule 2026-10-15)" + a.suffix)
+
+    // (b) lastSeenAt > now + 60 → not alive: falls back to updated.
+    var b = RLChecks()
+    let rec = rlAcct("claude", RL_CLAUDE_V11, asOf: asOf, pct: 40, interval: 900, nextAt: asOf.addingTimeInterval(900))
+    let old = now.addingTimeInterval(-2400)
+    b.add("lastSeenAt 2099, updated 40 min → offline (5)", card(vps(rec, updated: old, lastSeen: far), at: now)?.state.rawValue == 5)
+    b.add("lastSeenAt now + 61, updated 40 min → 5", card(vps(rec, updated: old, lastSeen: now.addingTimeInterval(61)), at: now)?.state.rawValue == 5)
+    b.add("border: lastSeenAt now + 60 is alive → 1", card(vps(rec, updated: old, lastSeen: now.addingTimeInterval(60)), at: now)?.state.rawValue == 1)
+    expect(b.failed.isEmpty, "C1-20(b) S3: a future lastSeenAt never pins «online»" + b.suffix)
+
+    // (c) retryUntil 2099: «service wait» (4) ends ≤ 24 h after the attempt.
+    var c = RLChecks()
+    let attempt = now
+    func retryCard(at: Date) -> Int? {
+        let r = rlAcct("claude", RL_CLAUDE_V11, status: "rate_limited", asOf: attempt, pct: 40, interval: 14400,
+                       nextAt: attempt.addingTimeInterval(14400), retryUntil: far)
+        let s = at.addingTimeInterval(-60)
+        return card(vps(r, updated: s, lastSeen: s), at: at)?.state.rawValue
+    }
+    c.add("control: 1 h after the attempt → 4", retryCard(at: attempt.addingTimeInterval(3600)) == 4)
+    c.add("24 h + 1 s after the attempt → not 4 (got \(retryCard(at: attempt.addingTimeInterval(86401)).map { String($0) } ?? "no card"))",
+          retryCard(at: attempt.addingTimeInterval(86401)) != 4)
+    expect(c.failed.isEmpty, "C1-20(c) S3: a far-future retryUntil shows «service wait» for ≤ 24 h after attemptAt" + c.suffix)
+
+    // (d) caption with setAt 2099 never beats a normal newer one, whatever the file order.
+    var d = RLChecks()
+    for (evilFile, goodFile) in [("machine-a-evil.json", "machine-z-good.json"), ("machine-z-evil.json", "machine-a-good.json")] {
+        let evilId = String(evilFile.dropFirst(8).dropLast(5)), goodId = String(goodFile.dropFirst(8).dropLast(5))
+        let files = [
+            evilFile: rlMachineFile(evilId, name: "evil", updated: seen, lastSeenAt: seen, accounts: [rec],
+                                    captions: [RL_CLAUDE_V11: ["text": "evil", "setAt": rlStr(far)]]),
+            goodFile: rlMachineFile(goodId, name: "good", updated: seen, lastSeenAt: seen, accounts: [],
+                                    captions: [RL_CLAUDE_V11: ["text": "good", "setAt": rlStr(now.addingTimeInterval(-60))]])]
+        let merged = mergeV11(files, excluding: "selftest-mac", now: now)
+        d.add("\(evilFile) first: merged caption = good (got \(merged.captions?[RL_CLAUDE_V11]?.text ?? "nil"))",
+              merged.captions?[RL_CLAUDE_V11]?.text == "good")
+        d.add("\(evilFile) first: card caption = good", card(files, at: now)?.caption == "good")
+    }
+    expect(d.failed.isEmpty, "C1-20(d) S3: a caption with setAt > now + 60 loses to a normal one" + d.suffix)
+
+    // (e) updated 2099 without lastSeenAt never pins «online»: the card is absent or offline, never fresh.
+    let futureUpdated = card(vps(rec, updated: far, lastSeen: nil), at: now)
+    expect(futureUpdated == nil || futureUpdated?.state.rawValue == 5,
+           "C1-20(e) S3: updated > now + 60 without lastSeenAt → no «online» card (got \(futureUpdated.map { String($0.state.rawValue) } ?? "no card"))")
+}
+
 // MARK: runner
 
 /// C1 entry point, called from the `--sync-selftest` block. Returns the number of failed checks.
@@ -918,12 +1512,25 @@ func runRemoteLimitsSelfTests(defaults: MemorySelfTestDefaults, root: String) ->
         rlC104(fx, expect)
         rlC105(fx, expect)
         rlC108(fx, expect)
+        rlC109(fx, expect)
     }
     rlC102T36(expect)
     rlC102Limits(expect)
     rlC102SyncLimits(defaults, root, expect)
     rlC106(expect)
     rlC107(fx, expect)
+    // C1 fix cycle 1 (2026-10-18)
+    rlC110(defaults, root, expect)
+    rlC111(expect)
+    rlC112(expect)
+    rlC113(defaults, root, expect)
+    rlC114(defaults, root, expect)
+    rlC115(expect)
+    rlC116(expect)
+    rlC117(defaults, root, expect)
+    rlC118(defaults, root, expect)
+    rlC119(defaults, root, expect)
+    rlC120(expect)
     print(failures == 0 ? "OK C1 remote-limits: all \(checks) checks passed" : "FAIL C1 remote-limits: \(failures) of \(checks) checks failed")
     return failures
 }
