@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-12.
 
+## 🔁 Точка возобновления · 2026-10-18 поздно · C1 цикл правок №1 в работе (стоп на сегодня)
+
+- **Состояние:** developer-codex (Sol, agent `a89a3cccbe61b2914`) делал цикл правок C1 №1 — в рабочем дереве его НЕЗАКОММИЧЕННЫЕ правки `Sources/LimitsMonitor.swift`, `Sources/RemoteLimits.swift`, `build.sh`, `linux/ccl/common.py`, `linux/ccl/sync.py`, `.gitignore`. При возобновлении: если отчёт Sol пришёл/есть — проверить его валидацию, закоммитить «macos+linux: C1 fix cycle 1 (M1, M2, S1–S3, C1-12…17, build.sh tmp)», push в `remote-limits`; если дерево в промежуточном состоянии — дождаться/перезапустить Sol с тем же брифом (объём: `docs/plans.md` §C1 + решения 2026-10-18; тесты `02f021e`+`54f77fe`, протокол `5600a59`).
+- **Дальше по C1:** попросить владельца `git -C ~/yurka-build/claude-codex-limits pull --ff-only` → `tools/remote/codex-job.sh macbook ccl --write -m gpt-6.1-sol --timeout 1800 --slug c1-fix1 --project claude-codex-limits < scratchpad/c1/build-brief.md` (теперь `build.sh` сам пишет временное внутри корня; селфтест `--sync-selftest --rl-fixtures`; ожидание: C1 48+12 OK, `run.sh` стенда) → code-reviewer r2 + T2-r2 по дифу цикла → живые пробы T2 §6 на маке (JSON-глубина, транспорт cap+1, права файлов) → закрыть C1 → C2 (tester красные → Sol → мак).
+- **Сделано вечером:** C1 код `e3a5ac6` собрался на маке с первого раза, 48/48 селфтестов OK (`74169b3`); ревью C1 (M1, M2, minor) и T2 C1 (S1–S3) → цикл правок; тесты `02f021e`; решения в `decisions/log.md` (2026-10-18 ×5). Диспетчер: `:net` реализован → T2 blocker → откачен (`aa0e30e` в HQ main, 930/930 PASS); доставка на мак — владелец делает `git pull` (раннбук `handoff/runbooks/2026-10-18-macbook-build-root-ccl.md`, выполнен владельцем 2026-10-18 ~19:20 MSK).
+- **Счётчики сессии 2026-10-18 (итог):** delegations = 24 запуска (security-analyst ×7, code-reviewer ×5, tester ×4, developer-codex ×5, developer ×1, tech-writer ×4) + ~12 возобновлений; yurka_direct_actions = 1 микроправка (константа 30→60 в Swift-тесте, 1 строка; выкатка A5, проверки VPS, revert в HQ, запуск сборки на маке — зона Юрки); 🤖 ≈ 16 ч 54 мин; 🙋 4 вопроса.
+
 ## 🔁 2026-10-18 ночь · срез C начат (мак), ветка `remote-limits` в origin
 
 - Владелец: суть — на маке видеть остаток лимитов Claude и расходы по обеим подпискам; мак 3.2.7 читает только v1 → **версия для мака не готова**. Маршрут: C1 → C2 → C3 → релиз macOS; C4 отложен. Push разрешён в ветку `remote-limits` (не main); merge/релиз — отдельное «да». Сессия Юрки — Fable 5.1 (лимиты сброшены).
