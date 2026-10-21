@@ -166,11 +166,7 @@ private func claudeQuotaKeychainHelper(_ request: ClaudeQuotaHelperRequest) -> I
         kSecMatchLimit as String: kSecMatchLimitOne]
     var found: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &found)
-    guard status == errSecSuccess else {
-        // Only these two native statuses justify the dedicated permission action.
-        if status == errSecInteractionNotAllowed || status == errSecInteractionRequired { return 36 }
-        return status == errSecItemNotFound ? 44 : status == errSecUserCanceled ? 37 : 1
-    }
+    guard status == errSecSuccess else { return claudeQuotaHelperFailureExit(status) }
     guard let item = found as? [String: Any], let data = item[kSecValueData as String] as? Data,
           data.count <= 128 * 1024 else { return 65 }
     if operation == "read" {
@@ -186,6 +182,12 @@ private func claudeQuotaKeychainHelper(_ request: ClaudeQuotaHelperRequest) -> I
     return githubAuthNativeExit(SecItemUpdate([kSecValuePersistentRef as String: reference] as CFDictionary,
         [kSecValueData as String: envelope.replacement] as CFDictionary))
     }
+}
+func claudeQuotaHelperFailureExit(_ status: OSStatus) -> Int32 {
+    // Only these native statuses justify the dedicated permission action. macOS 27 reports a
+    // quiet read outside the item's ACL as errSecAuthFailed, as the GitHub helper already handles.
+    if [errSecInteractionNotAllowed, errSecInteractionRequired, errSecAuthFailed].contains(status) { return 36 }
+    return status == errSecItemNotFound ? 44 : status == errSecUserCanceled ? 37 : 1
 }
 private let claudeQuotaKeychainFence = GitHubAuthProcessFence()
 private func claudeQuotaKeychain(_ operation: String, input: String? = nil) -> (status: SyncKeychainStatus, out: String) {
@@ -7159,6 +7161,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 manualCheck(quotaHelperInteraction(request, setAllowed: { _ in false }, operation: { nativeCalls += 1; return 0 }) == 70
                             && nativeCalls == 0, "UI-policy failure prohibits RPC")
             }
+        }
+        for (status, exit) in [(errSecInteractionNotAllowed, 36), (errSecInteractionRequired, 36), (errSecAuthFailed, 36),
+                               (errSecItemNotFound, 44), (errSecUserCanceled, 37), (errSecParam, 1)] as [(OSStatus, Int32)] {
+            manualCheck(claudeQuotaHelperFailureExit(status) == exit, "keychain status \(status) maps to helper exit \(exit)")
         }
         let noDate = LimitData(session: 0, weekly: 47)
         let failed = LimitData(error: "synthetic offline", auth: .expired)
