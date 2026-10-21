@@ -265,12 +265,12 @@ private final class ClaudeQuotaPendingCredential {
     }
 }
 private let claudeQuotaPendingCredential = ClaudeQuotaPendingCredential()
-private func persistClaudeQuotaUpdate(_ update: ClaudeQuotaUpdate) -> SyncKeychainStatus {
+private func persistClaudeQuotaUpdate(_ update: ClaudeQuotaUpdate, io: ClaudeQuotaIO) -> SyncKeychainStatus {
     guard let envelope = try? JSONEncoder().encode(update), let input = String(data: envelope, encoding: .utf8) else { return .failure(65) }
-    return claudeQuotaKeychain("update", input: input).status
+    return io.keychain("update", input).status
 }
-private func readClaudeQuotaCredential(_ permit: QuotaKeychainReadPermit?) -> QuotaCredentialRead {
-    let result = permit.map(claudeQuotaPermissionRead) ?? claudeQuotaKeychain("read")
+private func readClaudeQuotaCredential(_ permit: QuotaKeychainReadPermit?, io: ClaudeQuotaIO) -> QuotaCredentialRead {
+    let result = permit.map { io.permissionRead($0) } ?? io.keychain("read", nil)
     switch result.status {
     case .success: return .credentials(Data(result.out.utf8))
     case .missing: return .missing
@@ -327,13 +327,37 @@ func quotaFailureData(_ response: SyncHTTPResult, tokenEndpoint: Bool = false) -
     return result
 }
 
-func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil) -> LimitData {
+struct ClaudeQuotaIO {
+    var keychain: (_ operation: String, _ input: String?) -> (status: SyncKeychainStatus, out: String)
+    var permissionRead: (_ permit: QuotaKeychainReadPermit) -> (status: SyncKeychainStatus, out: String)
+    var http: (_ url: String, _ method: String, _ headers: [String: String], _ body: Data?, _ timeout: Double,
+               _ noRedirects: Bool) -> SyncHTTPResult
+
+    static let live: ClaudeQuotaIO = ClaudeQuotaIO(keychain: { operation, input in
+        if CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest") {
+            preconditionFailure("selftest cannot launch a Claude Keychain helper")
+        }
+        return claudeQuotaKeychain(operation, input: input)
+    }, permissionRead: { permit in
+        if CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest") {
+            preconditionFailure("selftest cannot launch an interactive Claude Keychain helper")
+        }
+        return claudeQuotaPermissionRead(permit)
+    }, http: { url, method, headers, body, timeout, noRedirects in
+        if CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest") {
+            preconditionFailure("selftest cannot request Claude provider endpoints")
+        }
+        return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: noRedirects)
+    })
+}
+
+func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO = .live) -> LimitData {
     guard productEnabled("claude") else { return LimitData(present: false) }
     var d = LimitData()
     let pending = claudeQuotaPendingCredential.snapshot()
     let resolution = quotaReconcilePendingCredential(pending,
-        read: { readClaudeQuotaCredential(readPermit) },
-        quietUpdate: { persistClaudeQuotaUpdate($0) == .success },
+        read: { readClaudeQuotaCredential(readPermit, io: io) },
+        quietUpdate: { persistClaudeQuotaUpdate($0, io: io) == .success },
         cancelled: { readPermit?.isCancelled == true })
     if resolution.retirePending, let pending = pending { claudeQuotaPendingCredential.clear(pending) }
     let data: Data
@@ -376,9 +400,9 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil) -> LimitData {
                                               "refresh_token": rt, "client_id": CLIENT_ID]
                 let body = try? JSONSerialization.data(withJSONObject: bodyObj)
                 if readPermit?.isCancelled == true { return LimitData(error: "permission cancelled", credentialIssue: .cancelled, auth: .keychainError) }
-                let resp = requestHTTP("https://api.anthropic.com/v1/oauth/token", method: "POST",
-                                headers: ["Content-Type": "application/json",
-                                          "User-Agent": UA, "Accept": "application/json"], body: body, timeout: 15, noRedirects: true)
+                let resp = io.http("https://api.anthropic.com/v1/oauth/token", "POST",
+                                ["Content-Type": "application/json",
+                                          "User-Agent": UA, "Accept": "application/json"], body, 15, true)
                 if resp.status == 200, let rd = resp.data,
                    let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
                    let newAt = tok["access_token"] as? String, !newAt.isEmpty {
@@ -393,7 +417,7 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil) -> LimitData {
                     }
                     let candidate = ClaudeQuotaUpdate(expected: data, replacement: outData)
                     claudeQuotaPendingCredential.set(candidate)
-                    guard persistClaudeQuotaUpdate(candidate) == .success else {
+                    guard persistClaudeQuotaUpdate(candidate, io: io) == .success else {
                         d.auth = .keychainError; d.error = "credential update unavailable"; d.credentialIssue = .writeUnavailable; return d
                     }
                     claudeQuotaPendingCredential.clear(candidate)
@@ -418,11 +442,11 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil) -> LimitData {
     }
 
     if readPermit?.isCancelled == true { return LimitData(error: "permission cancelled", credentialIssue: .cancelled, auth: .keychainError) }
-    let resp = requestHTTP("https://api.anthropic.com/api/oauth/usage", method: "GET",
-                    headers: ["Authorization": "Bearer \(at)", "User-Agent": UA,
+    let resp = io.http("https://api.anthropic.com/api/oauth/usage", "GET",
+                    ["Authorization": "Bearer \(at)", "User-Agent": UA,
                               "Accept": "application/json",
                               "anthropic-beta": "oauth-2025-04-20",
-                              "anthropic-version": "2023-06-01"], body: nil, timeout: 15, noRedirects: true)
+                              "anthropic-version": "2023-06-01"], nil, 15, true)
     guard resp.status == 200, let ud = resp.data,
           let j = (try? JSONSerialization.jsonObject(with: ud)) as? [String: Any]
     else {
@@ -721,35 +745,37 @@ struct UsageSample {
     let session: Double?, weekly: Double?, scoped: Double?
     let scopedName: String?
     let sessionReset: Double?, weeklyReset: Double?
+    var acct: String = "l:legacy"
 }
 
 final class UsageHistory {
-    static let shared = UsageHistory()
+    static let shared = UsageHistory(path: HISTORY_PATH)
     private let q = DispatchQueue(label: "ccl.history")
+    private let path: String
     private var all: [UsageSample] = []
 
-    /// Read the file once at launch; drop anything older than the retention window and
-    /// rewrite the file compacted so it can't grow without bound.
-    func load() {
+    init(path: String) { self.path = path }
+
+    func load(now: Date = Date()) {
         q.sync {
-            guard let data = try? Data(contentsOf: URL(fileURLWithPath: HISTORY_PATH)) else { return }
-            let cutoff = Date().timeIntervalSince1970 - HISTORY_KEEP_DAYS * 86400
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return }
+            let cutoff = now.timeIntervalSince1970 - HISTORY_KEEP_DAYS * 86400
             var out: [UsageSample] = []
             for line in data.split(separator: 0x0A) {
                 guard let o = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-                      let t = o["t"] as? Double, t >= cutoff, let p = o["p"] as? String else { continue }
+                      let t = o["t"] as? Double, t.isFinite, t >= cutoff, let p = o["p"] as? String else { continue }
+                let acct = o["a"] as? String ?? "l:legacy"
                 out.append(UsageSample(t: t, product: p, session: o["s"] as? Double, weekly: o["w"] as? Double,
                                        scoped: o["m"] as? Double, scopedName: o["mn"] as? String,
-                                       sessionReset: o["sr"] as? Double, weeklyReset: o["wr"] as? Double))
+                                       sessionReset: o["sr"] as? Double, weeklyReset: o["wr"] as? Double, acct: acct))
             }
-            all = out
-            let compact = out.map { UsageHistory.line($0) }.joined()
-            try? compact.data(using: .utf8)?.write(to: URL(fileURLWithPath: HISTORY_PATH))
+            all = out.sorted { $0.t < $1.t }
+            try? all.map { UsageHistory.line($0) }.joined().write(toFile: path, atomically: true, encoding: .utf8)
         }
     }
 
     private static func line(_ s: UsageSample) -> String {
-        var o: [String: Any] = ["t": s.t, "p": s.product]
+        var o: [String: Any] = ["t": s.t, "p": s.product, "a": s.acct]
         if let v = s.session { o["s"] = v }; if let v = s.weekly { o["w"] = v }
         if let v = s.scoped { o["m"] = v }; if let v = s.scopedName { o["mn"] = v }
         if let v = s.sessionReset { o["sr"] = v }; if let v = s.weeklyReset { o["wr"] = v }
@@ -757,43 +783,56 @@ final class UsageHistory {
         return str + "\n"
     }
 
-    /// Record one live reading. Cached/errored/expired readings are skipped — a sample must
-    /// be a real observation of the backend, or the pace math would see a flat line.
-    func record(_ d: LimitData, product: String) {
-        guard productEnabled(product), d.present, d.error == nil, d.auth == .ok, !d.fromCache, d.session != nil || d.weekly != nil else { return }
-        guard !d.pollFailed, let at = d.asOf, at.timeIntervalSince1970.isFinite, at <= Date() else { return }
+    // Runs only on q, so a repeat cannot append another file line.
+    private func append(_ s: UsageSample) {
+        guard !all.contains(where: { $0.acct == s.acct && $0.t == s.t && (s.acct != "l:legacy" || $0.product == s.product) }) else { return }
+        let text = UsageHistory.line(s)
+        guard !text.isEmpty, let data = text.data(using: .utf8) else { return }
+        do {
+            try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            if let file = FileHandle(forWritingAtPath: path) {
+                defer { file.closeFile() }
+                file.seekToEndOfFile(); file.write(data)
+            } else { try data.write(to: URL(fileURLWithPath: path)) }
+            all.append(s)
+            all.sort { $0.t < $1.t }
+        } catch { return }
+    }
+
+    /// Local polling keeps its own product gate; imported readings do not share it.
+    func record(_ d: LimitData, product: String, acct: String, now: Date = Date()) {
+        guard productEnabled(product), d.present, d.error == nil, d.auth == .ok, !d.fromCache,
+              d.session != nil || d.weekly != nil || d.scoped != nil,
+              !d.pollFailed, let at = d.asOf, at.timeIntervalSince1970.isFinite, at <= now else { return }
         let s = UsageSample(t: at.timeIntervalSince1970, product: product, session: d.session, weekly: d.weekly,
                             scoped: d.scoped?.percent, scopedName: d.scoped?.name,
-                            sessionReset: d.sessionReset?.timeIntervalSince1970, weeklyReset: d.weeklyReset?.timeIntervalSince1970)
+                            sessionReset: d.sessionReset?.timeIntervalSince1970, weeklyReset: d.weeklyReset?.timeIntervalSince1970, acct: acct)
         q.async {
-            guard productEnabled(product), self.all.last(where: { $0.product == product }).map({ $0.t < s.t }) ?? true else { return }
-            self.all.append(s)
-            let str = UsageHistory.line(s)
-            if let fh = FileHandle(forWritingAtPath: HISTORY_PATH) {
-                fh.seekToEndOfFile(); fh.write(str.data(using: .utf8)!); fh.closeFile()
-            } else {
-                try? str.data(using: .utf8)?.write(to: URL(fileURLWithPath: HISTORY_PATH))
-            }
+            guard productEnabled(product) else { return }
+            self.append(s)
         }
+    }
+
+    func recordRemote(product: String, label: String, _ s: UsageSample) {
+        guard s.product == product, s.t.isFinite, label.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil else { return }
+        var sample = s; sample.acct = label
+        q.async { self.append(sample) }
     }
 
     /// Docs screenshots only: in-memory samples, nothing written.
     func useForPreview(_ s: [UsageSample]) { q.sync { all = s } }
 
-    func samples(_ product: String, since: Date) -> [UsageSample] {
-        guard productEnabled(product) else { return [] }
-        let c = since.timeIntervalSince1970
-        return q.sync { all.filter { $0.product == product && $0.t >= c } }
+    func samples(_ product: String, acct: String, since: Date) -> [UsageSample] {
+        let cutoff = since.timeIntervalSince1970
+        return q.sync { all.filter { $0.product == product && $0.acct == acct && $0.t >= cutoff } }
     }
 
-    /// Pace over the last `minutes` for one metric, in % per hour — the "current" pace as
-    /// opposed to the average since the window opened. Nil until there are two samples that
-    /// far apart inside the same window (a reset in between would read as a huge negative).
-    func recentRate(_ product: String, metric: (UsageSample) -> Double?, minutes: Double, now: Date = Date()) -> Double? {
-        let pts = samples(product, since: now.addingTimeInterval(-minutes * 60)).filter { $0.t <= now.timeIntervalSince1970 }.compactMap { s in metric(s).map { (s.t, $0) } }
+    func recentRate(_ product: String, acct: String, metric: (UsageSample) -> Double?, minutes: Double, now: Date) -> Double? {
+        let pts = samples(product, acct: acct, since: now.addingTimeInterval(-minutes * 60))
+            .filter { $0.t <= now.timeIntervalSince1970 }.compactMap { s in metric(s).map { (s.t, $0) } }
         guard let first = pts.first, let last = pts.last, last.0 - first.0 >= 600 else { return nil }
         let dv = last.1 - first.1
-        if dv < 0 { return nil }                                 // a reset happened inside the span
+        guard dv >= 0 else { return nil }
         return dv / ((last.0 - first.0) / 3600)
     }
 }
@@ -1057,13 +1096,17 @@ func modelDisplayName(_ id: String) -> String {
 /// from what the backends tell us about the plan. Codex plan names aren't public pricing,
 /// so that side is an estimate until the user sets it (`flag` says which).
 func subscriptionUSD(_ product: String, plan: String?) -> (usd: Double, estimated: Bool) {
+    subscriptionUSD(product, plan: plan, tier: nil, isLocal: true)
+}
+
+func subscriptionUSD(_ product: String, plan: String?, tier: String?, isLocal: Bool) -> (usd: Double, estimated: Bool) {
     let d = UserDefaults.standard
     let key = product == "claude" ? "subClaude" : "subCodex"
-    if d.object(forKey: key) != nil { return (d.double(forKey: key), false) }
+    if isLocal, d.object(forKey: key) != nil { return (d.double(forKey: key), false) }
     if product == "claude" {
-        let tier = d.string(forKey: "claudeTier") ?? ""
-        if tier.contains("max_20x") { return (200, false) }
-        if tier.contains("max_5x") { return (100, false) }
+        let tier = (isLocal ? d.string(forKey: "claudeTier") : tier) ?? ""
+        if tier.contains("max_20x") || (!isLocal && plan?.contains("max_20x") == true) { return (200, false) }
+        if tier.contains("max_5x") || (!isLocal && plan?.contains("max_5x") == true) { return (100, false) }
         if tier.contains("pro") || plan == "pro" { return (20, false) }
         return (200, true)
     }
@@ -1080,8 +1123,8 @@ struct DayUsage { let day: String; let byModel: [(model: String, tokens: Int, us
 
 /// Per-day rollup for the last `days` calendar days (oldest first), with per-model splits
 /// sorted by cost so the biggest consumer sits at the bottom of a stacked bar.
-func dailyUsage(_ product: String, days: Int, index: UsageIndex) -> [DayUsage] {
-    let today = Calendar.current.startOfDay(for: Date())
+func dailyUsage(_ product: String, days: Int, index: UsageIndex, now: Date = Date()) -> [DayUsage] {
+    let today = Calendar.current.startOfDay(for: now)
     return (0..<days).reversed().map { back -> DayUsage in
         let d = Calendar.current.date(byAdding: .day, value: -back, to: today)!
         let key = dayKey(d)
@@ -1229,7 +1272,7 @@ func advancedProduct(_ d: LimitData, product: String, index: UsageIndex) -> Adva
         return StackedDay(day: dd.day, weekday: wd == 1 ? 7 : wd - 1, usd: dd.usd, turns: dd.turns,
                           parts: parts.map { (model: $0.0, usd: $0.1) }, isToday: dd.day == todayKey)
     }
-    let first = UsageHistory.shared.samples(product, since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
+    let first = UsageHistory.shared.samples(product, acct: localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
     return AdvancedProduct(product: product, limits: pacedLimits(d, product: product), resetCredits: d.resetCredits,
                            days7: stacked, legend: top + (hasOther ? ["other"] : []),
                            calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0,
@@ -1299,18 +1342,18 @@ func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
     if product == "claude" || d.session != nil {
         out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
                               pace: snapshotWindowPace(used: d.session, reset: d.sessionReset, windowH: 5,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.session }, minutes: 60, now: $0) }), color: 0, used: d.session))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.session }, minutes: 60, now: $0) }), color: 0, used: d.session))
     }
     // Order (Alex, 2026-09-24): session → per-model week (Fable) → all-models week. The
     // per-model limit is the one that actually bites first, so it sits right under the session.
     if let s = d.scoped {
         out.append(PacedLimit(id: "scoped", name: tr("Неделя · ", "Week · ") + s.name,
                               pace: snapshotWindowPace(used: s.percent, reset: s.reset, windowH: 168,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.scoped }, minutes: 180, now: $0) }), color: 2, used: s.percent))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.scoped }, minutes: 180, now: $0) }), color: 2, used: s.percent))
     }
     out.append(PacedLimit(id: "weekly", name: product == "claude" ? tr("Неделя · все модели", "Week · all models") : tr("Неделя", "Week"),
                           pace: snapshotWindowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
-                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, metric: { $0.weekly }, minutes: 180, now: $0) }), color: 1, used: d.weekly))
+                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.weekly }, minutes: 180, now: $0) }), color: 1, used: d.weekly))
     return out
 }
 
@@ -2082,6 +2125,7 @@ final class GitHubSync {
     private var keychainRetryWork: DispatchWorkItem?
     private var keychainRetryID: UUID?
     var onChange: (() -> Void)?
+    var onRead: ((SyncRemoteCache, Date) -> Void)?
     // Offline race tests only; checkpoints run on q, outside the UI lock.
     var selfTestLoginCheckpoint: ((String) -> Void)?
     private func loginCheckpoint(_ point: String) {
@@ -2137,6 +2181,11 @@ final class GitHubSync {
         let snapshot = authOwner?.snapshot() // Nonsecret memory snapshot; no credential I/O.
         lock.lock(); defer { lock.unlock() }
         return _ui.phase == .on && syncCacheMatches(_remote, snapshot: snapshot) ? _remote.days : [:]
+    }
+    func remoteSnapshot() -> SyncRemoteCache {
+        let snapshot = authOwner?.snapshot()
+        lock.lock(); defer { lock.unlock() }
+        return _ui.phase == .on && syncCacheMatches(_remote, snapshot: snapshot) ? _remote : SyncRemoteCache()
     }
     /// `f` runs under the lock — it must not call anything that takes the lock again
     /// (machineList(), ui, remoteDays()); compute those first and capture the values.
@@ -2974,7 +3023,7 @@ final class GitHubSync {
             }
             self.lock.lock(); self._remote = cache; self.lock.unlock()
             let ms = self.machineList()
-            let ok = Date(), pushed = d.object(forKey: "syncPushedAt") as? Date
+            let ok = readAt, pushed = d.object(forKey: "syncPushedAt") as? Date
             d.set(ok, forKey: "syncLastOkAt")
             d.removeObject(forKey: "syncLastError"); d.removeObject(forKey: "syncLastErrorAt")
             self.setUI { $0.machines = ms; $0.lastSync = ok; $0.lastUploadAt = pushed; $0.lastError = nil; $0.lastErrorAt = nil }
@@ -2988,7 +3037,12 @@ final class GitHubSync {
             // gate between this cycle's access check, API calls and publication.
             owner.cleanupRetiredCredentials()
             setUI { $0.keychainRetryAvailable = owner.keychainRetryDelay() != nil }
-        } else { try? publish() }
+        } else {
+            do { try publish() } catch { return }
+        }
+        // The auth owner's publication fence has been released. A reader callback may
+        // inspect UI/auth state without recursively acquiring that fence.
+        onRead?(cache, readAt)
 
     }
 
@@ -3034,13 +3088,195 @@ final class GitHubSync {
 }
 
 /// Local index plus every other machine's days from the gist — what the history draws from.
-func mergedUsageIndex(_ sync: GitHubSync = .shared) -> UsageIndex {
+func mergedUsageIndex(_ sync: GitHubSync = .shared, hidden: Set<String> = hiddenAccounts()) -> UsageIndex {
     var ix = UsageLogs.shared.snapshot()
-    ix.days = ix.days.filter { productEnabled($0.key) }
-    for (p, byDay) in sync.remoteDays() where productEnabled(p) {
-        for (day, byModel) in byDay { for (m, u) in byModel { ix.add(p, day, m, u) } }
+    let remote = sync.remoteSnapshot()
+    let localIds = readerLocalSnapshot.snapshot().ids
+    let labelKey = remote.labelKey ?? remote.gistId.flatMap { accountLabelKey(gistId: $0) }
+    if let key = labelKey {
+        for (product, id) in localIds {
+            if let label = accountLabel(product: product, localId: id, labelKey: key), hidden.contains(label) {
+                ix.days.removeValue(forKey: product)
+            }
+        }
+    }
+    let remoteDays: RemoteProductDays
+    if let accounts = remote.accounts {
+        var days = remote.unattributedDays ?? [:]
+        for account in accounts {
+            guard let label = account.label, !hidden.contains(label) else { continue }
+            for (day, models) in account.days { for (model, usage) in models {
+                var current = days[account.product, default: [:]][day, default: [:]][model, default: DayModelUsage()]
+                current.add(usage)
+                days[account.product, default: [:]][day, default: [:]][model] = current
+            } }
+        }
+        remoteDays = days
+    } else { remoteDays = remote.days } // v1 cache: all days are unattributed.
+    for (product, byDay) in remoteDays {
+        for (day, models) in byDay { for (model, usage) in models { ix.add(product, day, model, usage) } }
     }
     return ix
+}
+
+// The sync queue consumes a memory snapshot, never main-thread AppKit state.
+private final class ReaderLocalSnapshot {
+    private let lock = NSLock()
+    private var local = (LimitData(present: false), LimitData(present: false))
+    private var ids: [String: String] = [:]
+    func update(local: (LimitData, LimitData), ids: [String: String], identityProducts: Set<String>) {
+        lock.lock(); defer { lock.unlock() }
+        self.local = local
+        // Preserve each unchanged/fallback reading's identity. An unidentifiable new
+        // reading removes its old binding rather than inheriting another login.
+        for product in identityProducts { self.ids[product] = ids[product] }
+    }
+    func snapshot() -> (local: (LimitData, LimitData), ids: [String: String]) {
+        lock.lock(); defer { lock.unlock() }; return (local, ids)
+    }
+}
+private let readerLocalSnapshot = ReaderLocalSnapshot()
+
+/// Decode only the requested identity string. Other JSON values are skipped in place,
+/// with bounded recursion; CLI projects, tokens and unrelated account fields are not retained.
+private struct LocalIdentityJSON {
+    let bytes: [UInt8]
+    var offset = 0
+    var identity: String?
+    enum Invalid: Error { case json }
+    mutating func whitespace() {
+        while offset < bytes.count && [UInt8(9), 10, 13, 32].contains(bytes[offset]) { offset += 1 }
+    }
+    mutating func string(decode: Bool) throws -> String? {
+        guard offset < bytes.count, bytes[offset] == 34 else { throw Invalid.json }
+        let start = offset; offset += 1
+        while offset < bytes.count {
+            if bytes[offset] == 92 {
+                offset += 1
+                guard offset < bytes.count else { throw Invalid.json }
+                if bytes[offset] == 117 {
+                    guard offset + 4 < bytes.count else { throw Invalid.json }
+                    for digit in bytes[(offset + 1)...(offset + 4)] {
+                        guard (48...57).contains(digit) || (65...70).contains(digit) || (97...102).contains(digit) else { throw Invalid.json }
+                    }
+                    offset += 5
+                } else {
+                    guard [UInt8(34), 92, 47, 98, 102, 110, 114, 116].contains(bytes[offset]) else { throw Invalid.json }
+                    offset += 1
+                }
+            }
+            else if bytes[offset] == 34 {
+                offset += 1
+                if !decode { return nil }
+                guard let text = (try? JSONSerialization.jsonObject(with: Data(bytes[start..<offset]), options: [.fragmentsAllowed])) as? String
+                else { throw Invalid.json }
+                return text
+            } else {
+                guard bytes[offset] >= 32 else { throw Invalid.json }
+                offset += 1
+            }
+        }
+        throw Invalid.json
+    }
+    mutating func value(path: ArraySlice<String>, depth: Int = 0) throws {
+        guard depth <= 64 else { throw Invalid.json }
+        whitespace()
+        guard offset < bytes.count else { throw Invalid.json }
+        switch bytes[offset] {
+        case 123: // object
+            offset += 1; whitespace()
+            if offset < bytes.count, bytes[offset] == 125 { offset += 1; return }
+            while true {
+                whitespace()
+                let key = try string(decode: !path.isEmpty)
+                whitespace()
+                guard offset < bytes.count, bytes[offset] == 58 else { throw Invalid.json }
+                offset += 1
+                if let first = path.first, key == first {
+                    identity = nil
+                    if path.count == 1 {
+                        whitespace(); identity = nil
+                        if offset < bytes.count, bytes[offset] == 34 { identity = try string(decode: true) }
+                        else { try value(path: [], depth: depth + 1) }
+                    } else { try value(path: path.dropFirst(), depth: depth + 1) }
+                } else { try value(path: [], depth: depth + 1) }
+                whitespace()
+                guard offset < bytes.count else { throw Invalid.json }
+                if bytes[offset] == 125 { offset += 1; return }
+                guard bytes[offset] == 44 else { throw Invalid.json }; offset += 1
+            }
+        case 91: // array: it cannot contain the requested object path
+            offset += 1; whitespace()
+            if offset < bytes.count, bytes[offset] == 93 { offset += 1; return }
+            while true {
+                try value(path: [], depth: depth + 1); whitespace()
+                guard offset < bytes.count else { throw Invalid.json }
+                if bytes[offset] == 93 { offset += 1; return }
+                guard bytes[offset] == 44 else { throw Invalid.json }; offset += 1
+            }
+        case 34: _ = try string(decode: false)
+        default:
+            let start = offset
+            while offset < bytes.count && ![UInt8(9), 10, 13, 32, 44, 93, 125].contains(bytes[offset]) { offset += 1 }
+            guard offset > start,
+                  (try? JSONSerialization.jsonObject(with: Data(bytes[start..<offset]), options: [.fragmentsAllowed])) != nil else { throw Invalid.json }
+        }
+    }
+    mutating func read(_ path: [String]) -> String? {
+        do {
+            try value(path: path[...]); whitespace()
+            guard offset == bytes.count, let id = identity?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  id.range(of: "^[0-9a-z-]{8,64}$", options: .regularExpression) != nil else { return nil }
+            return id
+        } catch { return nil }
+    }
+}
+
+private func readLocalAccountIds(products: Set<String> = ["claude", "codex"]) -> [String: String] {
+    // Selftests and previews never inspect the user's login files.
+    guard !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) else { return [:] }
+    var ids: [String: String] = [:]
+    for (product, file, path) in [("claude", HOME + "/.claude.json", ["oauthAccount", "accountUuid"]),
+                                  ("codex", HOME + "/.codex/auth.json", ["tokens", "account_id"])] where products.contains(product) && productEnabled(product) {
+        guard let handle = FileHandle(forReadingAtPath: file) else { continue }
+        let data = try? handle.read(upToCount: 8 * 1024 * 1024 + 1)
+        try? handle.close()
+        guard let data = data, data.count <= 8 * 1024 * 1024, String(data: data, encoding: .utf8) != nil else { continue }
+        var parser = LocalIdentityJSON(bytes: Array(data))
+        ids[product] = parser.read(path)
+    }
+    return ids
+}
+
+private func localHistoryKey(_ product: String) -> String {
+    let snapshot = readerLocalSnapshot.snapshot()
+    // Hidden labels and the active gist must not change the local history identity.
+    let views = resolveAccounts(local: (LimitData(), LimitData()), localIds: snapshot.ids, remote: SyncRemoteCache(),
+                                hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: Date())
+    return views.first { $0.product == product && $0.isLocal }?.historyKey ?? "l:legacy"
+}
+
+let POLL_LOG_PATH = DATA_DIR + "/poll-log.jsonl"
+private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
+
+@discardableResult func appendPollLog(_ events: [[String: Any]], path: String = POLL_LOG_PATH) -> Bool {
+    pollLogQueue.sync {
+        var payload = Data()
+        for event in events {
+            guard let line = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) else { return false }
+            payload.append(line); payload.append(10)
+        }
+        do {
+            try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+            guard fd >= 0 else { return false }
+            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            defer { try? file.close() }
+            guard fchmod(fd, 0o600) == 0 else { return false }
+            try file.write(contentsOf: payload)
+            return true
+        } catch { return false }
+    }
 }
 
 // MARK: - Severity & colors
@@ -4459,7 +4695,7 @@ func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
     guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
     let present = cards.map { $0.product }
     let p = advHistProduct(present)
-    let noHistory = UsageHistory.shared.samples(p, since: Date(timeIntervalSince1970: 0)).isEmpty
+    let noHistory = UsageHistory.shared.samples(p, acct: localHistoryKey(p), since: Date(timeIntervalSince1970: 0)).isEmpty
     return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
 }
 
@@ -6458,7 +6694,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
             let c = (cache["claude"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
             let x = (cache["codex"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
+            // Legacy cache has no persisted account id. Keep it unlabelled until
+            // a fresh reading supplies a matching identity; today's CLI login may differ.
             render(c, x)
+        }
+        GitHubSync.shared.onRead = { cache, at in
+            let snapshot = readerLocalSnapshot.snapshot()
+            let ui = GitHubSync.shared.ui
+            readerDidSync(cache, at: at, local: snapshot.local, localIds: snapshot.ids, hidden: hiddenAccounts(),
+                          sync: ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at)),
+                          history: .shared, pollLog: POLL_LOG_PATH)
         }
         GitHubSync.shared.onChange = { [weak self] in
             GitHubSync.shared.recheckKeychainRetry()
@@ -6631,7 +6876,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if product == "claude" { claudeReadPermit = permit }
             var poll = autoStates[product] ?? AutoPollState(); poll.begin(now); autoStates[product] = poll
             DispatchQueue.global(qos: .utility).async { [weak self] in
+                let identityProducts: Set<String> = [product]
+                let beforeIds = readLocalAccountIds(products: identityProducts)
                 let response = product == "claude" ? fetchClaude(readPermit: permit) : fetchCodex(live: live)
+                let afterIds = readLocalAccountIds(products: identityProducts)
+                // A login switch during the request makes the new reading unlabelled.
+                let readingIds = beforeIds[product] == afterIds[product] ? afterIds : [:]
                 DispatchQueue.main.async {
                     guard let self = self else { return }
                     if let permit = permit, self.claudeReadPermit === permit { permit.cancel(); self.claudeReadPermit = nil }
@@ -6659,7 +6909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     poll.serverRetryAt = response.serverRetryAt
                     self.autoStates[product] = poll
                     self.saveAutoStates()
-                    self.render(claude, codex, sampleProducts: [product])
+                    self.render(claude, codex, sampleProducts: [product], readingIds: readingIds)
                 }
             }
         }
@@ -6714,13 +6964,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return result
     }
 
-    func render(_ claude: LimitData, _ codex: LimitData, sampleProducts: Set<String> = []) {
+    func render(_ claude: LimitData, _ codex: LimitData, sampleProducts: Set<String> = [],
+                readingIds: [String: String] = [:]) {
         let claude = limitsWithPollStatus(selectedLimits(claude, product: "claude"), product: "claude")
         let codex = limitsWithPollStatus(selectedLimits(codex, product: "codex"), product: "codex")
         last = (claude, codex)
+        let identityProducts = Set(sampleProducts.filter {
+            let data = $0 == "claude" ? claude : codex
+            return data.apiFresh && !data.fromCache
+        })
+        readerLocalSnapshot.update(local: (claude, codex), ids: readingIds, identityProducts: identityProducts)
         applyTrayImage(claude, codex)
-        if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude") }
-        if sampleProducts.contains("codex") { UsageHistory.shared.record(codex, product: "codex") }
+        if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude", acct: localHistoryKey("claude")) }
+        if sampleProducts.contains("codex") { UsageHistory.shared.record(codex, product: "codex", acct: localHistoryKey("codex")) }
         let updated = [claude.asOf, codex.asOf].compactMap { $0 }.max()
         panelCtrl.update(claude: claude, codex: codex, interval: interval, updated: updated)
         if !sampleProducts.isEmpty { checkAlarms(claude, codex) }
@@ -8907,7 +9163,7 @@ if CommandLine.arguments.contains("--advanced-dump") {
                          p.projectedPct.map { String(format: "%.0f%%", $0) } ?? "—", p.runsOutAt.map { f.string(from: $0) } ?? "lasts", p.recentRatePerH.map { String(format: "%.2f", $0) } ?? "n/a"))
         }
     }
-    print("history samples:", UsageHistory.shared.samples("claude", since: Date(timeIntervalSince1970: 0)).count, "/", UsageHistory.shared.samples("codex", since: Date(timeIntervalSince1970: 0)).count)
+    print("history samples:", UsageHistory.shared.samples("claude", acct: localHistoryKey("claude"), since: Date(timeIntervalSince1970: 0)).count, "/", UsageHistory.shared.samples("codex", acct: localHistoryKey("codex"), since: Date(timeIntervalSince1970: 0)).count)
     exit(0)
 }
 

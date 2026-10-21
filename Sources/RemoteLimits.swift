@@ -723,3 +723,76 @@ private extension RemoteLimitsWire {
         return .fresh
     }
 }
+
+// MARK: - Account settings, history import and money (C2)
+
+func hiddenAccounts(defaults: UserDefaults = .standard) -> Set<String> {
+    Set(defaults.object(forKey: "hiddenAccounts") as? [String] ?? [])
+}
+
+func menuAccountSelection(defaults: UserDefaults = .standard) -> [String: String] {
+    defaults.object(forKey: "menuAccount") as? [String: String] ?? [:]
+}
+
+func menuAccount(_ product: String, views: [AccountView], selected: [String: String]) -> AccountView? {
+    let accounts = views.filter { $0.product == product }
+    if let label = selected[product], let chosen = accounts.first(where: { $0.label == label }) { return chosen }
+    return accounts.first(where: { $0.isLocal }) ?? accounts.first
+}
+
+func accountUsageIndex(_ view: AccountView, local: UsageIndex) -> UsageIndex {
+    var index = UsageIndex()
+    index.days[view.product] = view.usageDays
+    if view.isLocal {
+        for (day, models) in local.days[view.product] ?? [:] {
+            for (model, usage) in models { index.add(view.product, day, model, usage) }
+        }
+    }
+    return index
+}
+
+func moneySummary(_ view: AccountView, local: UsageIndex, days: Int = 35, now: Date) -> MoneySummary {
+    let rows = dailyUsage(view.product, days: days, index: accountUsageIndex(view, local: local), now: now)
+    let active = rows.filter { $0.turns > 0 }
+    let total = rows.reduce(0) { $0 + $1.usd }
+    let price = subscriptionUSD(view.product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal)
+    return MoneySummary(days: days, activeDays: active.count, usdApi: total,
+                        perCalendarDay: days > 0 ? total / Double(days) : 0,
+                        perActiveDay: active.isEmpty ? 0 : total / Double(active.count),
+                        subMonthly: price.usd, subEstimated: price.estimated)
+}
+
+func readerCardStateEvents(_ views: [AccountView], now: Date) -> [[String: Any]] {
+    let iso = ISO8601DateFormatter()
+    iso.timeZone = TimeZone(secondsFromGMT: 0)
+    return views.map { view in
+        let age: Any
+        if let asOf = view.data.asOf {
+            let elapsed = now.timeIntervalSince(asOf)
+            let seconds = max(0, elapsed.rounded(.down))
+            if elapsed.isFinite && seconds < Double(Int.max) { age = Int(seconds) }
+            else { age = NSNull() }
+        } else { age = NSNull() }
+        let label: Any
+        if let valid = RemoteLimitsWire.label(view.label) { label = valid } else { label = NSNull() }
+        return ["ev": "reader_card_state", "ts": iso.string(from: now), "product": view.product,
+                "label": label, "state": view.state.rawValue, "age": age]
+    }
+}
+
+func readerDidSync(_ cache: SyncRemoteCache, at now: Date, local: (LimitData, LimitData), localIds: [String: String],
+                   hidden: Set<String>, sync: ReaderSyncState, history: UsageHistory, pollLog: String) {
+    for account in cache.accounts ?? [] {
+        guard let label = RemoteLimitsWire.label(account.label), let asOf = account.asOf,
+              asOf.timeIntervalSince1970.isFinite, asOf <= now.addingTimeInterval(300),
+              account.windows?.session != nil || account.windows?.weekly != nil || !(account.models ?? []).isEmpty else { continue }
+        let scoped = account.models?.max { $0.pct < $1.pct }
+        history.recordRemote(product: account.product, label: label,
+            UsageSample(t: asOf.timeIntervalSince1970, product: account.product, session: account.windows?.session?.pct,
+                        weekly: account.windows?.weekly?.pct, scoped: scoped?.pct, scopedName: scoped?.name,
+                        sessionReset: account.windows?.session?.resetAt?.timeIntervalSince1970,
+                        weeklyReset: account.windows?.weekly?.resetAt?.timeIntervalSince1970, acct: label))
+    }
+    let views = resolveAccounts(local: local, localIds: localIds, remote: cache, hidden: hidden, menu: [:], sync: sync, now: now)
+    appendPollLog(readerCardStateEvents(views, now: now), path: pollLog)
+}
