@@ -8418,17 +8418,37 @@ if CommandLine.arguments.contains("--sync-selftest") {
         expect(redirect.calls.count == 1 && (rd.ui.lastError ?? "").contains("302"), "M4 302 on an authorized request ends the cycle")
     }
 
-    // 5. raw_url 200 with an empty / invalid UTF-8 body (and other raw errors): cycle fails, last success kept.
+    // 5. Unreadable raw_url 200 skips one file; HTTP failures keep the last success and cache.
     do {
         let okAt = Date(timeIntervalSince1970: 1_790_000_000)
         let sentinel = Data("{\"machines\":[],\"days\":{}}".utf8)
         let truncated: [String: Any] = ["machine-aa.json": ["truncated": true, "raw_url": rawURL]]
-        let cases: [(String, SyncHTTPResult, String)] = [
-            ("200 empty", (200, Data(), nil, [:]), "Пустой или нечитаемый"),
-            ("200 nil body", (200, nil, nil, [:]), "Пустой или нечитаемый"),
-            ("200 invalid UTF-8", (200, Data([0xff, 0xfe, 0xc3, 0x28]), nil, [:]), "Пустой или нечитаемый"),
-            ("401", reply(401), "GET raw_url"), ("403", reply(403), "GET raw_url"), ("500", reply(500), "GET raw_url")]
-        for (label, rawReply, text) in cases {
+        let unreadable: [(String, SyncHTTPResult)] = [
+            ("200 empty", (200, Data(), nil, [:])),
+            ("200 nil body", (200, nil, nil, [:])),
+            ("200 invalid UTF-8", (200, Data([0xff, 0xfe, 0xc3, 0x28]), nil, [:]))]
+        for (label, rawReply) in unreadable {
+            freshDefaults()
+            selfTestDefaults.set(okAt, forKey: "syncLastOkAt")
+            try? sentinel.write(to: URL(fileURLWithPath: remoteFile))
+            let http = SelfTestHTTP { c in
+                if c.url == gistURL && c.method == "GET" { return reply(200, gistBody(extra: truncated)) }
+                if c.url == gistURL && c.method == "PATCH" { return reply(200, [String: Any]()) }
+                if c.url == rawURL { return rawReply }
+                return reply(599)
+            }
+            let s = makeSync(http, SelfTestKeychainStore(tokA))
+            s.syncSynchronously()
+            let advanced = (selfTestDefaults.object(forKey: "syncLastOkAt") as? Date) != okAt
+            let remoteChanged = (try? Data(contentsOf: URL(fileURLWithPath: remoteFile))) != sentinel
+            // --sync-selftest fixes appLang() to Russian.
+            expect(advanced && remoteChanged && (s.ui.lastError ?? "").contains("нечитаемый ответ")
+                   && !http.calls.contains { $0.url == api + "/user" } && !selfTestDefaults.bool(forKey: "syncRevoked"),
+                   "M5 raw_url \(label): file skipped, syncLastOkAt and cache updated, no /user check")
+        }
+        let failures: [(String, SyncHTTPResult)] = [
+            ("401", reply(401)), ("403", reply(403)), ("500", reply(500))]
+        for (label, rawReply) in failures {
             freshDefaults()
             selfTestDefaults.set(okAt, forKey: "syncLastOkAt")
             try? sentinel.write(to: URL(fileURLWithPath: remoteFile))
@@ -8442,7 +8462,7 @@ if CommandLine.arguments.contains("--sync-selftest") {
             s.syncSynchronously()
             let kept = (selfTestDefaults.object(forKey: "syncLastOkAt") as? Date) == okAt
             let remoteKept = (try? Data(contentsOf: URL(fileURLWithPath: remoteFile))) == sentinel
-            expect(kept && remoteKept && (s.ui.lastError ?? "").contains(text) && !http.calls.contains { $0.url == api + "/user" }
+            expect(kept && remoteKept && (s.ui.lastError ?? "").contains("GET raw_url") && !http.calls.contains { $0.url == api + "/user" }
                    && !selfTestDefaults.bool(forKey: "syncRevoked"),
                    "M5 raw_url \(label): cycle failed, syncLastOkAt and cache kept, no /user check")
         }

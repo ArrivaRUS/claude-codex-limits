@@ -210,12 +210,13 @@ class TestRawUrlFailures(env.SyncEnv):
 
     def test_raw_errors(self):
         cases = [("403 plain", T(403), False), ("403 limited", T(403, headers={"x-ratelimit-remaining": "0"}), True),
-                 ("429", T(429, headers={"retry-after": "30"}), True), ("200 empty", T(200, raw=b""), False),
-                 ("200 no body", T(200), False), ("500", T(500), False), ("0", T(0), False),
+                 ("429", T(429, headers={"retry-after": "30"}), True), ("500", T(500), False), ("0", T(0), False),
                  ("401", T(401), False)]
         for label, r, backoff in cases:
             with self.subTest(label):
-                self.st().update(backoffUntil=None, lastError=None)
+                self.st().update(lastOkAt=self.ok_at, backoffUntil=None, lastError=None)
+                with open(common.SYNC_REMOTE_PATH, "wb") as f:
+                    f.write(self.remote_before)
                 res = self.run_raw(r)
                 self.assertFalse(res.ok)
                 st = self.st()
@@ -230,6 +231,43 @@ class TestRawUrlFailures(env.SyncEnv):
                     self.assertGreater(float(st.get("backoffUntil")), time.time())
                 else:
                     self.assertIsNone(st.get("backoffUntil"))
+
+    def test_raw_unreadable_body_skips_file(self):
+        cases = [("200 empty", T(200, raw=b""), "empty body"),
+                 ("200 no body", T(200), "empty body"),
+                 ("200 invalid UTF-8", T(200, raw=b"\xff\xfe\xc3("), "invalid UTF-8")]
+        for label, r, reason in cases:
+            with self.subTest(label):
+                self.st().update(lastOkAt=self.ok_at, backoffUntil=None, lastError=None)
+                with open(common.SYNC_REMOTE_PATH, "wb") as f:
+                    f.write(self.remote_before)
+                self.gh.calls.clear()
+                self.gh.on("GET", "/gists/g1", self.ok_gist({
+                    "machine-aa.json": {"truncated": True, "raw_url": self.RAW},
+                    "machine-zz.json": env.machine_json("zz"),
+                }))
+                self.gh.on("GET", self.RAW, r)
+                res = self.cycle()
+                st = self.st()
+                self.assertGreater(float(st.get("lastOkAt")), self.ok_at)
+                with open(common.SYNC_REMOTE_PATH, "rb") as f:
+                    self.assertNotEqual(f.read(), self.remote_before)
+                ids = [m.get("id") for m in res.remote["machines"]]
+                self.assertIn("zz", ids)
+                self.assertNotIn("aa", ids)
+                self.assertNotIn("sentinel", ids)
+                self.assertTrue(res.partial)
+                self.assertFalse(res.ok, "Linux reports a partial read as not ok")
+                warning = (common.tr("Файл синхронизации пропущен: пустое тело", "Sync file skipped: empty body")
+                           if reason == "empty body" else
+                           common.tr("Файл синхронизации пропущен: неверный UTF-8", "Sync file skipped: invalid UTF-8"))
+                self.assertIn(warning, st.get("lastError"))
+                self.assertNotIn(self.RAW, st.get("lastError"))
+                self.assertNotIn("g1", st.get("lastError"))
+                self.assertIsNone(st.get("backoffUntil"))
+                self.assertFalse(st.get("revoked"))
+                self.assertNotIn(("GET", "/user"), self.gh.urls())
+                self.assertEqual(len(self.gh.calls), 2)
 
 
 class TestDiscovery(env.SyncEnv):

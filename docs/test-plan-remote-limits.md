@@ -343,7 +343,7 @@ Swift: C1/C4 — новые секции `--sync-selftest`, C2/C3 — `--subscri
 T2 `docs/security-remote-limits-c1-t2.md` §5 (там черновые номера C1-09…C1-11; S4 = C1-10, S5 = C1-13, S6 = C1-14; S7 — живая проба §6 п. 2).
 Swift — тот же файл и раннер; новый контракт один: последний параметр `GitHubSync.init(…, clock: @escaping () -> Date = { Date() })`.
 C1-07 изменён под S2 (вместо «`gistId` переживает круг» — «gist id нет в закодированном кэше, метки группируются после decode»).
-C1-11 — GUARD (код уже так). Linux — `linux/tests/test_rl_contract_fixes3.py` (C1-10, C1-18 пустое тело — RED; остальное GUARD-эталон).
+C1-11 — GUARD (код уже так). Linux — `linux/tests/test_rl_contract_fixes3.py` (C1-10 — RED; C1-18 — GUARD green по S1, включая пустое тело; остальное GUARD-эталон).
 Стенд `fixtures/manual-refresh-independent/run.sh` снова самодостаточен: `RemoteSourceStub.swift` подключается, только если
 `QuotaRefresh.swift` сам не объявляет `RemoteSource`; пины обновлены (новые входы — на одобрение изоляции).
 
@@ -366,9 +366,10 @@ C1-11 — GUARD (код уже так). Linux — `linux/tests/test_rl_contract_
 | C1-15 | **RED** minor: `updated` с `\n`/`\t`/`\r\n`/U+0085/U+2028/U+3000 по краям, дробь 5000 знаков; asOf с хвостом U+2028. GUARD: ZWSP/NUL/месяц 13/текст/число/null; `lastSeenAt`/`asOf` с `\n` | файл принят, `updated` разобран (Linux `parse_iso`: `str.strip()`, без предела длины); asOf с U+2028 разобран. GUARD: файл пропущен; поля с Cc отброшены | Linux `TestC115UpdatedReference` |
 | C1-16 | **RED** minor: `schema` 1.0 / 1e0; счётчики 5.0 / 1e2 | файл отвергнут; модель пропущена, целая модель цела. Linux — GUARD | Linux `TestC116IntegersReference` |
 | C1-17 | **RED** minor: выход из GitHub при непустом `syncRejectedRaw` | ключ удалён | memory defaults |
-| C1-18 | **RED** T2 S1 (major): raw 200 с 2 МиБ невалидного UTF-8 и пустое тело 200 среди хороших; 63 МиБ + 1 МиБ бинарного + следующий файл | пропущен только этот файл, остальные слиты, `syncLastOkAt` сдвинулся, ошибка без URL/gist id; бинарные байты в бюджете — следующий файл не запрошен. Linux: бинарное — GUARD, **пустое тело — RED** (тот же дефект, `sync.py:1158`) | Linux `TestC118UnreadableRawReference` |
+| C1-18 | GUARD green T2 S1 (major): raw 200 с 2 МиБ невалидного UTF-8 и пустое тело 200 среди хороших; 63 МиБ + 1 МиБ бинарного + следующий файл | пропущен только этот файл, остальные слиты, `syncLastOkAt` сдвинулся, ошибка без URL/gist id; бинарные байты в бюджете — следующий файл не запрошен. Linux: бинарное и пустое тело — GUARD green по S1 | Linux `TestC118UnreadableRawReference` |
 | C1-19 | **RED** T2 S2: цикл с записью v1.1; перезапуск (decode `sync-remote.json`); C1-07 круг encode → decode | в файле 0 вхождений gist id (только счётчик); после decode локальный Claude группируется с меткой `vps`. Контракт: `gistId` может оставаться полем в памяти, на диск — производный ключ | — |
 | C1-20 | **RED** T2 S3: чужие `nextAt` 2099 / `now + I + 60` / `+ 61`; `lastSeenAt` 2099 / `now + 60` / `+ 61` при `updated` 40 мин; `retryUntil` 2099; подпись `setAt` 2099 против нормальной (оба порядка файлов); `updated` 2099 без `lastSeenAt` | `freshUntil = asOf + I + 20 мин`, через 1 с — 2; граница `+60` принята; `lastSeenAt` в будущем → по `updated` → 5, `now + 60` — жива; «ожидание сервиса» ≤ 24 ч от `attemptAt`; нормальная подпись побеждает; карточки «онлайн» нет (нет или 5) | сгенерированные файлы |
+| C1-21 | GUARD S1: raw HTTP failure 401/403/429/500/0 (Swift M5: 401/403/500) отдельно от raw 200 empty / no body / invalid UTF-8; перед каждым случаем восстановлены время и sentinel-кэш | HTTP failure: время/кэш сохранены, ошибка `GET raw_url`, backoff только при ограничении; нечитаемый raw 200: файл пропущен, время/кэш обновлены, предупреждение без URL/gist id, хорошая машина слита (Linux: `partial = True`, `ok = False`). В обоих случаях нет `/user` и revoked | Linux `TestRawUrlFailures.test_raw_errors`, `test_raw_unreadable_body_skips_file`; Swift M5 |
 
 ### C2 — macOS: настройки, деньги, история (`--subscriptions-selftest`)
 
