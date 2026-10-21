@@ -9,6 +9,7 @@
 - **Допущения:** plans.md «Допущения» (офлайн-тесты по урокам 006/011; сборка мака через remote-hands; граница UID на VPS как в v1; Linux-трей — вторая очередь).
 - **Блокеры / ждём владельца:** «да» на `never` по умолчанию; перед A5 — `ccl-sync login` на VPS и остановка старого трея на `:20`; П4-б — пересоздать gist после выкатки (имя владельца в истории ревизий старого gist); П6-б — `chmod 700 ~/.codex` на VPS.
 - **Команды:** plans.md «Команды валидации». Smoke после A5 (Юрка на VPS): `stat -c '%y %s' ~/.claude/.credentials.json ~/.codex/auth.json` до/после суток против `credentialWrite=0` в O1; файл машины в gist глазами; `journalctl --user -u ccl-sync`; `ccl-sync status`.
+- **A5 сутки (2026-10-21):** издатель на VPS прошёл суточную проверку §7 — G1/G2/риск 1 ✅, 230 публикаций без ошибок, journald и файл машины без секретов; детали — [remote-limits-verification.md](remote-limits-verification.md). Открыто: скриншот старых читателей (мак 3.2.7) от владельца.
 - **Аудит-лог:** 2026-10-12 — G1/G2b/G4 приняты (`decisions/log.md`); synth v2 и T1 закоммичены `c950fb1`; execution-pack записан (этот блок, plans.md); правки synth после T1 и замера — не закоммичены (ждут коммита Юрки). Делегирования и время — `HEARTBEAT.md`, `time.local.md`.
 
 # LINUX-COMPACT · 2026-10-08
