@@ -7362,8 +7362,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     let payload = (try! JSONSerialization.jsonObject(with: Data(sync.selfTestFile().utf8))) as! [String: Any]
     let days = payload["days"] as! [String: Any]
     check(days["claude"] == nil && days["codex"] != nil, "sync upload excludes disabled subscription")
-    let merged = mergedUsageIndex(sync)
-    check(merged.days["claude"] == nil && merged.days["codex"] != nil, "remote history cannot restore disabled subscription")
+    // C2-01 (U2): «remote history cannot restore disabled subscription» is retired — remote usage of a visible account
+    // survives a disabled local poll. Rewritten in Sources/RemoteLimitsC2SelfTests.swift (c2C201, registered below).
     check(!selectedLimits(c, product: "claude").present && advCards(c, x).map { $0.product } == ["codex"],
           "cached readings cannot restore disabled cards")
     check(!showMissingProduct(advCards(c, x)), "disabled Claude has no setup invitation")
@@ -7431,6 +7431,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             manualCheck(feedback.action != .allowKeychain, "only interaction-required exposes permission action: \(issue)")
         }
     }
+    // REMOTE-LIMITS C2 (Sources/RemoteLimitsC2SelfTests.swift): settings, money, history, reader_card_state. Runs before the
+    // first AppKit use (NSApplication.shared below aborts in the remote-hands sandbox without WindowServer). Needs no AppKit.
+    let remoteLimitsC2Failures = runRemoteLimitsC2SelfTests(defaults: defaults, select: select)
+    select(false, true)   // the state the checks above left (single-subscription panel)
+    check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-08)")
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,

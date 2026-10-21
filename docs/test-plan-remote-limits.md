@@ -373,16 +373,24 @@ C1-11 — GUARD (код уже так). Linux — `linux/tests/test_rl_contract_
 
 ### C2 — macOS: настройки, деньги, история (`--subscriptions-selftest`)
 
+Написаны красными 2026-10-21 (tester): `Sources/RemoteLimitsC2SelfTests.swift`, вход `runRemoteLimitsC2SelfTests(defaults:select:)` в блоке
+`--subscriptions-selftest` **до** первого `NSApplication.shared` (в песочнице remote-hands без WindowServer всё после него падает с 134);
+AppKit, отрисовка и шрифты в C2 не нужны. Старая проверка «remote history cannot restore disabled subscription» снята, её замена — C2-01
+(c2C201, «remote usage of a visible account survives a disabled local poll»). Новая фикстура `fixtures/remote-limits/machine-v11-c2.json`
+(Claude Max 20x · 1, Codex A expired · 3, Codex B ожидание сервиса · 4, Codex C для скрытия; machine.id — UUID). Контракт имён — шапка
+файла и отчёт tester C2. «Нет диалогов» после миграции N3 селфтест не доказывает (0 запусков helper и 0 записей defaults; окно — §4).
+C2-07 — модельная проверка выбора аккаунта; вид строки меню — C3-08.
+
 | ID | Вход | Ожидание | Ловушка |
 |---|---|---|---|
-| C2-01 | `monitor_claude = false`, чужие `asOf` Claude из gist | темп и история по `acct` (метка) считаются; переписанный селфтест ~7108: «remote usage of a visible account survives a disabled local poll»; `fetchClaude()` не читает Keychain | счётчик Keychain/helper = 0 (013) |
-| C2-02 | tier `max_20x` / `max_5x` / `pro` / нет tier; локальный `claudeTier = max_5x` | $200 / $100 / $20 без «оценки»; без tier — запасной с «оценкой»; локальный tier к чужому не применён | — |
-| C2-03 | два Codex-аккаунта | раздельные дни, календарь, деньги; общая сумма не выдана за один аккаунт | — |
-| C2-04 | история: строка без `a`; дубль `(acct, t)`; локальный ключ после смены gist | `l:legacy`; дубль не пишется; локальный `l:`-ключ не меняется | — |
-| C2-05 | миграция N3: прежний `productEnabled(claude) = false` | «опрос выключен», `hiddenAccounts` пуст, диалогов нет; карточка VPS видна после входа в GitHub; 0 запросов к Anthropic | Keychain-счётчик 0, транспорт-ловушка |
-| C2-06 | `hiddenAccounts = {метка}` | нет в карточках, строке меню, расходе; тело PATCH файла мака не изменилось от скрытия | Ledger PATCH |
-| C2-07 | `menuAccount`: по умолчанию; выбранный скрыт или пропал | локальный, иначе первый по V2; при пропаже — снова по умолчанию | — |
-| C2-08 | `reader_card_state` (PRD §5): успешный синк с 3 видимыми аккаунтами в разных состояниях V5; скрытый аккаунт; синк `.failed` | в `poll-log.jsonl` по строке на видимый аккаунт: метка, состояние V5, возраст показания; скрытого нет; при `.failed` строк нет; сканер A1-10 чист; файл 0600 | записывающий журнал, сентинели |
+| C2-01 | `monitor_claude = false`, чужие `asOf` Claude из gist | темп и история по `acct` (метка) считаются; переписанный селфтест ~7108: «remote usage of a visible account survives a disabled local poll»; `fetchClaude()` не читает Keychain | счётчик Keychain/helper = 0 (013) · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C201` |
+| C2-02 | tier `max_20x` / `max_5x` / `pro` / нет tier; локальный `claudeTier = max_5x` | $200 / $100 / $20 без «оценки»; без tier — запасной с «оценкой»; локальный tier к чужому не применён | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C202` |
+| C2-03 | два Codex-аккаунта | раздельные дни, календарь, деньги; общая сумма не выдана за один аккаунт | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C203` |
+| C2-04 | история: строка без `a`; дубль `(acct, t)`; локальный ключ после смены gist | `l:legacy`; дубль не пишется; локальный `l:`-ключ не меняется | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C204` |
+| C2-05 | миграция N3: прежний `productEnabled(claude) = false` | «опрос выключен», `hiddenAccounts` пуст, диалогов нет; карточка VPS видна после входа в GitHub; 0 запросов к Anthropic | Keychain-счётчик 0, транспорт-ловушка · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C205` |
+| C2-06 | `hiddenAccounts = {метка}` | нет в карточках, строке меню, расходе; тело PATCH файла мака не изменилось от скрытия | Ledger PATCH · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C206` |
+| C2-07 | `menuAccount`: по умолчанию; выбранный скрыт или пропал | локальный, иначе первый по V2; при пропаже — снова по умолчанию | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C207` |
+| C2-08 | `reader_card_state` (PRD §5): успешный синк с 3 видимыми аккаунтами в разных состояниях V5; скрытый аккаунт; синк `.failed` | в `poll-log.jsonl` по строке на видимый аккаунт: метка, состояние V5, возраст показания; скрытого нет; при `.failed` строк нет; сканер A1-10 чист; файл 0600 | записывающий журнал, сентинели · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C208` |
 
 ### C3 — macOS UI (`--subscriptions-selftest` + PNG)
 

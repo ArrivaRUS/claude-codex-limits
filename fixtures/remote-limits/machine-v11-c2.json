@@ -1,0 +1,205 @@
+{
+ "schema": 1,
+ "machine": {
+  "id": "5a1e0c2d-7b3f-4e8a-9d61-0f2c4b8e6a13",
+  "name": "vps",
+  "os": "Ubuntu 26.04",
+  "app": "linux 0.5.0"
+ },
+ "updated": "2026-10-12T10:15:03Z",
+ "tz": "Etc/UTC",
+ "lastSeenAt": "2026-10-12T10:15:03Z",
+ "days": {
+  "claude": {
+   "2026-10-12": {
+    "claude-fable-5-1": {
+     "input": 2000,
+     "output": 500,
+     "cacheRead": 100000,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 12
+    }
+   }
+  },
+  "codex": {
+   "2026-10-10": {
+    "gpt-6-astra": {
+     "input": 1000,
+     "output": 100,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 3
+    }
+   },
+   "2026-10-11": {
+    "gpt-6-astra": {
+     "input": 4000,
+     "output": 400,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 5
+    },
+    "gpt-6-sol": {
+     "input": 7000,
+     "output": 700,
+     "cacheRead": 0,
+     "cacheWrite5m": 0,
+     "cacheWrite1h": 0,
+     "turns": 7
+    }
+   }
+  }
+ },
+ "accounts": [
+  {
+   "product": "claude",
+   "label": "f4b718320ee15b3a",
+   "plan": "max",
+   "tier": "default_claude_max_20x",
+   "status": "ok",
+   "asOf": "2026-10-12T10:15:02Z",
+   "attemptAt": "2026-10-12T10:15:00Z",
+   "attemptKind": "auto",
+   "windows": {
+    "session": {
+     "pct": 42.5,
+     "resetAt": "2026-10-12T13:00:00Z"
+    },
+    "weekly": {
+     "pct": 61.0,
+     "resetAt": "2026-10-15T07:00:00Z"
+    }
+   },
+   "schedule": {
+    "mode": "auto",
+    "interval": 900,
+    "nextAt": "2026-10-12T10:30:00Z",
+    "backoff": false
+   },
+   "retryUntil": null,
+   "days": {
+    "2026-10-12": {
+     "claude-fable-5-1": {
+      "input": 2000,
+      "output": 500,
+      "cacheRead": 100000,
+      "cacheWrite5m": 0,
+      "cacheWrite1h": 0,
+      "turns": 12
+     }
+    }
+   }
+  },
+  {
+   "product": "codex",
+   "label": "f683db167afc0b47",
+   "plan": "pro",
+   "status": "expired",
+   "expiredReason": "cli_refresh_pending",
+   "asOf": "2026-10-12T06:40:11Z",
+   "attemptAt": "2026-10-12T10:15:00Z",
+   "attemptKind": "auto",
+   "windows": {
+    "session": {
+     "pct": 12.0,
+     "resetAt": "2026-10-12T11:40:00Z"
+    }
+   },
+   "schedule": {
+    "mode": "auto",
+    "interval": 3600,
+    "nextAt": "2026-10-12T11:15:00Z",
+    "backoff": true
+   },
+   "retryUntil": null,
+   "days": {
+    "2026-10-10": {
+     "gpt-6-astra": {
+      "input": 1000,
+      "output": 100,
+      "cacheRead": 0,
+      "cacheWrite5m": 0,
+      "cacheWrite1h": 0,
+      "turns": 3
+     }
+    }
+   }
+  },
+  {
+   "product": "codex",
+   "label": "c2b0000000000b02",
+   "plan": "plus",
+   "status": "rate_limited",
+   "asOf": "2026-10-12T10:00:00Z",
+   "attemptAt": "2026-10-12T10:14:00Z",
+   "attemptKind": "auto",
+   "windows": {
+    "session": {
+     "pct": 30.0,
+     "resetAt": "2026-10-12T12:00:00Z"
+    },
+    "weekly": {
+     "pct": 20.0,
+     "resetAt": "2026-10-16T00:00:00Z"
+    }
+   },
+   "schedule": {
+    "mode": "auto",
+    "interval": 900,
+    "backoff": true
+   },
+   "retryUntil": "2026-10-12T11:14:00Z",
+   "days": {
+    "2026-10-11": {
+     "gpt-6-astra": {
+      "input": 4000,
+      "output": 400,
+      "cacheRead": 0,
+      "cacheWrite5m": 0,
+      "cacheWrite1h": 0,
+      "turns": 5
+     }
+    }
+   }
+  },
+  {
+   "product": "codex",
+   "label": "c2c0000000000c03",
+   "plan": "plus",
+   "status": "ok",
+   "asOf": "2026-10-12T10:10:00Z",
+   "attemptAt": "2026-10-12T10:10:00Z",
+   "attemptKind": "auto",
+   "windows": {
+    "session": {
+     "pct": 5.0,
+     "resetAt": "2026-10-12T15:00:00Z"
+    }
+   },
+   "schedule": {
+    "mode": "auto",
+    "interval": 900,
+    "nextAt": "2026-10-12T10:25:00Z",
+    "backoff": false
+   },
+   "retryUntil": null,
+   "days": {
+    "2026-10-11": {
+     "gpt-6-sol": {
+      "input": 7000,
+      "output": 700,
+      "cacheRead": 0,
+      "cacheWrite5m": 0,
+      "cacheWrite1h": 0,
+      "turns": 7
+     }
+    }
+   }
+  }
+ ],
+ "unattributedDays": {},
+ "captions": {}
+}
