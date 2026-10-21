@@ -3,7 +3,7 @@
 set -eu
 
 ccl_fixture_root=$(CDPATH= cd -P -- "$(dirname -- "$0")/../.." && pwd -P)
-ccl_run_dir=$(mktemp -d /private/tmp/ccl-manual-refresh-independent-run.XXXXXX)
+ccl_run_dir=$(mktemp -d "${CCL_BUILD_TMP:-${TMPDIR:-/private/tmp}}/ccl-manual-refresh-independent-run.XXXXXX")
 mkdir "$ccl_run_dir/home" "$ccl_run_dir/tmp" "$ccl_run_dir/module-cache"
 cp "$ccl_fixture_root/Sources/QuotaRefresh.swift" "$ccl_run_dir/QuotaRefresh.swift"
 cp "$ccl_fixture_root/fixtures/manual-refresh-independent/ManualRefreshIndependent.swift" "$ccl_run_dir/ManualRefreshIndependent.swift"

@@ -277,7 +277,11 @@ private enum RemoteLimitsWire {
     /// Gregorian validation prevents Foundation from normalizing month 13.
     static func isoDate(_ value: Any?) -> Date? {
         guard let raw = value as? String else { return nil }
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripCharacters = CharacterSet(charactersIn:
+            "\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{001C}\u{001D}\u{001E}\u{001F}\u{0020}\u{0085}\u{00A0}\u{1680}"
+            + "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}"
+            + "\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}")
+        let s = raw.trimmingCharacters(in: stripCharacters)
         let pattern = "^([0-9]{4})-([0-9]{2})-([0-9]{2})[T ]([0-9]{2}):([0-9]{2}):([0-9]{2})(\\.[0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?$"
         guard let re = try? NSRegularExpression(pattern: pattern),
               let match = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)),
