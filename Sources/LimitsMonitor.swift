@@ -739,7 +739,7 @@ let dayKeyFormatter: DateFormatter = {
 }()
 func dayKey(_ d: Date) -> String { dayKeyFormatter.string(from: d) }
 
-struct UsageSample {
+struct UsageSample: Sendable {
     let t: Double                 // epoch seconds
     let product: String           // "claude" | "codex"
     let session: Double?, weekly: Double?, scoped: Double?
@@ -748,7 +748,8 @@ struct UsageSample {
     var acct: String = "l:legacy"
 }
 
-final class UsageHistory {
+// `all` and file access are confined to q; the queue and path never change.
+final class UsageHistory: @unchecked Sendable {
     static let shared = UsageHistory(path: HISTORY_PATH)
     private let q = DispatchQueue(label: "ccl.history")
     private let path: String
@@ -816,7 +817,7 @@ final class UsageHistory {
     func recordRemote(product: String, label: String, _ s: UsageSample) {
         guard s.product == product, s.t.isFinite, label.range(of: "^[0-9a-f]{16}$", options: .regularExpression) != nil else { return }
         var sample = s; sample.acct = label
-        q.async { self.append(sample) }
+        q.async { [sample] in self.append(sample) }
     }
 
     /// Docs screenshots only: in-memory samples, nothing written.
@@ -3119,16 +3120,34 @@ func mergedUsageIndex(_ sync: GitHubSync = .shared, hidden: Set<String> = hidden
     return ix
 }
 
+/// Select data and its identity together, including the second selection against disk cache.
+/// A failed request's current login cannot identify readings from rollout/legacy cache.
+func readerQuotaCompletion(_ response: LimitData, previous: LimitData, previousId: String?,
+                           readingId: String?, cached: LimitData? = nil) -> (data: LimitData, id: String?) {
+    func select(_ current: (data: LimitData, id: String?), old: LimitData, oldId: String?) -> (data: LimitData, id: String?) {
+        // These are quotaSelectSnapshot's exact previous-selection conditions. Equal
+        // values/timestamps do not prove provenance: ties belong to the new result.
+        let oldIsNewer = old.asOf.map { oldTime in current.data.asOf.map { oldTime > $0 } ?? true } ?? false
+        let keepsOld = !current.data.apiFresh && quotaHasReadings(old)
+            && (!quotaHasReadings(current.data) || oldIsNewer)
+        return (quotaSelectSnapshot(current.data, previous: old), keepsOld ? oldId : current.id)
+    }
+    var selected = select((response, response.apiFresh && !response.fromCache ? readingId : nil),
+                          old: previous, oldId: previousId)
+    if let cached = cached { selected = select(selected, old: cached, oldId: nil) }
+    return selected
+}
+
 // The sync queue consumes a memory snapshot, never main-thread AppKit state.
-private final class ReaderLocalSnapshot {
+final class ReaderLocalSnapshot {
     private let lock = NSLock()
     private var local = (LimitData(present: false), LimitData(present: false))
     private var ids: [String: String] = [:]
     func update(local: (LimitData, LimitData), ids: [String: String], identityProducts: Set<String>) {
         lock.lock(); defer { lock.unlock() }
         self.local = local
-        // Preserve each unchanged/fallback reading's identity. An unidentifiable new
-        // reading removes its old binding rather than inheriting another login.
+        // Each completed product supplies the identity of its selected reading, even
+        // when nil. UI-only re-renders have no identityProducts and keep their IDs.
         for product in identityProducts { self.ids[product] = ids[product] }
     }
     func snapshot() -> (local: (LimitData, LimitData), ids: [String: String]) {
@@ -3268,13 +3287,56 @@ private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
         }
         do {
             try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            let fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+            let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
             guard fd >= 0 else { return false }
-            let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-            defer { try? file.close() }
+            defer { close(fd) }
             guard fchmod(fd, 0o600) == 0 else { return false }
-            try file.write(contentsOf: payload)
-            return true
+            func truncate(to length: off_t) -> Bool {
+                while ftruncate(fd, length) != 0 {
+                    if errno != EINTR { return false }
+                }
+                return true
+            }
+            let end = lseek(fd, 0, SEEK_END)
+            guard end >= 0 else { return false }
+            // Recover a crash/failed rollback tail before appending another JSON line.
+            // Scan backwards in bounded chunks, keeping only newline-terminated data.
+            var validEnd: off_t = 0
+            var cursor = end
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while cursor > 0 {
+                let count = Int(min(cursor, off_t(buffer.count)))
+                let start = cursor - off_t(count)
+                let readOK = buffer.withUnsafeMutableBytes { bytes -> Bool in
+                    var offset = 0
+                    while offset < count {
+                        let n = pread(fd, bytes.baseAddress!.advanced(by: offset), count - offset, start + off_t(offset))
+                        if n < 0 && errno == EINTR { continue }
+                        guard n > 0 else { return false }
+                        offset += n
+                    }
+                    return true
+                }
+                guard readOK else { return false }
+                if let newline = buffer[..<count].lastIndex(of: 10) {
+                    validEnd = start + off_t(newline) + 1
+                    break
+                }
+                cursor = start
+            }
+            guard validEnd == end || truncate(to: validEnd) else { return false }
+            let written = payload.withUnsafeBytes { bytes -> Bool in
+                var offset = 0
+                while offset < bytes.count {
+                    let n = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                    if n < 0 && errno == EINTR { continue }
+                    guard n > 0 else { return false }
+                    offset += n
+                }
+                return true
+            }
+            if !written { _ = truncate(to: validEnd) }
+            return written
         } catch { return false }
     }
 }
@@ -6897,19 +6959,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     let previous = self.last ?? (LimitData(present: false), LimitData(present: false))
                     let old = product == "claude" ? previous.0 : previous.1
-                    var result = response
-                    result = quotaSelectSnapshot(result, previous: old)
-                    var claude = product == "claude" ? result : previous.0
-                    var codex = product == "codex" ? result : previous.1
                     // Shared cache is serialized on main, after selection validation, never in workers.
-                    self.cacheQuotaCompletion(product, claude: &claude, codex: &codex)
-                    let completed = product == "claude" ? claude : codex
+                    let selected = self.cacheQuotaCompletion(product, response: response, previous: old,
+                        previousId: readerLocalSnapshot.snapshot().ids[product], readingId: readingIds[product])
+                    let claude = product == "claude" ? selected.data : previous.0
+                    let codex = product == "codex" ? selected.data : previous.1
+                    let completed = selected.data
                     var poll = self.autoStates[product] ?? AutoPollState()
                     poll.observe(completed, now: Date().timeIntervalSince1970)
                     poll.serverRetryAt = response.serverRetryAt
                     self.autoStates[product] = poll
                     self.saveAutoStates()
-                    self.render(claude, codex, sampleProducts: [product], readingIds: readingIds)
+                    self.render(claude, codex, sampleProducts: [product],
+                                readingIds: selected.id.map { [product: $0] } ?? [:])
                 }
             }
         }
@@ -6919,22 +6981,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !scheduled { panelCtrl.view.needsDisplay = true }
     }
 
-    private func cacheQuotaCompletion(_ product: String, claude: inout LimitData, codex: inout LimitData) {
+    private func cacheQuotaCompletion(_ product: String, response: LimitData, previous: LimitData,
+                                      previousId: String?, readingId: String?) -> (data: LimitData, id: String?) {
         var cache: [String: Any] = [:]
         if let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { cache = object }
-        var result = product == "claude" ? claude : codex
-        if !result.apiFresh, let stored = cache[product] as? [String: Any] {
-            let snapshot = dict2ld(stored)
-            result = quotaSelectSnapshot(result, previous: snapshot)
-        }
-        if result.apiFresh {
-            cache[product] = ld2dict(result)
+        let selected = readerQuotaCompletion(response, previous: previous, previousId: previousId, readingId: readingId,
+                                              cached: (cache[product] as? [String: Any]).map(dict2ld))
+        if selected.data.apiFresh {
+            cache[product] = ld2dict(selected.data)
             if let data = try? JSONSerialization.data(withJSONObject: cache) {
                 try? data.write(to: URL(fileURLWithPath: CACHE_PATH), options: .atomic)
             }
         }
-        if product == "claude" { claude = result } else { codex = result }
+        return selected
     }
 
     @objc func refreshNow() { doRefresh(live: true) }   // user-initiated → live Codex
@@ -6969,11 +7029,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let claude = limitsWithPollStatus(selectedLimits(claude, product: "claude"), product: "claude")
         let codex = limitsWithPollStatus(selectedLimits(codex, product: "codex"), product: "codex")
         last = (claude, codex)
-        let identityProducts = Set(sampleProducts.filter {
-            let data = $0 == "claude" ? claude : codex
-            return data.apiFresh && !data.fromCache
-        })
-        readerLocalSnapshot.update(local: (claude, codex), ids: readingIds, identityProducts: identityProducts)
+        readerLocalSnapshot.update(local: (claude, codex), ids: readingIds, identityProducts: sampleProducts)
         applyTrayImage(claude, codex)
         if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude", acct: localHistoryKey("claude")) }
         if sampleProducts.contains("codex") { UsageHistory.shared.record(codex, product: "codex", acct: localHistoryKey("codex")) }
@@ -7691,7 +7747,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     // first AppKit use (NSApplication.shared below aborts in the remote-hands sandbox without WindowServer). Needs no AppKit.
     let remoteLimitsC2Failures = runRemoteLimitsC2SelfTests(defaults: defaults, select: select)
     select(false, true)   // the state the checks above left (single-subscription panel)
-    check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-08)")
+    check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-09)")
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,

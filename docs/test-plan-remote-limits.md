@@ -383,14 +383,15 @@ C2-07 — модельная проверка выбора аккаунта; в�
 
 | ID | Вход | Ожидание | Ловушка |
 |---|---|---|---|
-| C2-01 | `monitor_claude = false`, чужие `asOf` Claude из gist | темп и история по `acct` (метка) считаются; переписанный селфтест ~7108: «remote usage of a visible account survives a disabled local poll»; `fetchClaude()` не читает Keychain | счётчик Keychain/helper = 0 (013) · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C201` |
-| C2-02 | tier `max_20x` / `max_5x` / `pro` / нет tier; локальный `claudeTier = max_5x` | $200 / $100 / $20 без «оценки»; без tier — запасной с «оценкой»; локальный tier к чужому не применён | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C202` |
-| C2-03 | два Codex-аккаунта | раздельные дни, календарь, деньги; общая сумма не выдана за один аккаунт | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C203` |
-| C2-04 | история: строка без `a`; дубль `(acct, t)`; локальный ключ после смены gist | `l:legacy`; дубль не пишется; локальный `l:`-ключ не меняется | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C204` |
-| C2-05 | миграция N3: прежний `productEnabled(claude) = false` | «опрос выключен», `hiddenAccounts` пуст, диалогов нет; карточка VPS видна после входа в GitHub; 0 запросов к Anthropic | Keychain-счётчик 0, транспорт-ловушка · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C205` |
-| C2-06 | `hiddenAccounts = {метка}` | нет в карточках, строке меню, расходе; тело PATCH файла мака не изменилось от скрытия | Ledger PATCH · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C206` |
-| C2-07 | `menuAccount`: по умолчанию; выбранный скрыт или пропал | локальный, иначе первый по V2; при пропаже — снова по умолчанию | — · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C207` |
-| C2-08 | `reader_card_state` (PRD §5): успешный синк с 3 видимыми аккаунтами в разных состояниях V5; скрытый аккаунт; синк `.failed` | в `poll-log.jsonl` по строке на видимый аккаунт: метка, состояние V5, возраст показания; скрытого нет; при `.failed` строк нет; сканер A1-10 чист; файл 0600 | записывающий журнал, сентинели · **RED** `Sources/RemoteLimitsC2SelfTests.swift:c2C208` |
+| C2-01 | `monitor_claude = false`, чужие `asOf` Claude из gist | темп и история по `acct` (метка) считаются; переписанный селфтест ~7108: «remote usage of a visible account survives a disabled local poll»; `fetchClaude()` не читает Keychain | счётчик Keychain/helper = 0 (013) · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C201` |
+| C2-02 | tier `max_20x` / `max_5x` / `pro` / нет tier; локальный `claudeTier = max_5x` | $200 / $100 / $20 без «оценки»; без tier — запасной с «оценкой»; локальный tier к чужому не применён | — · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C202` |
+| C2-03 | два Codex-аккаунта | раздельные дни, календарь, деньги; общая сумма не выдана за один аккаунт | — · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C203` |
+| C2-04 | история: строка без `a`; дубль `(acct, t)`; локальный ключ после смены gist | `l:legacy`; дубль не пишется; локальный `l:`-ключ не меняется | — · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C204` |
+| C2-05 | миграция N3: прежний `productEnabled(claude) = false` | «опрос выключен», `hiddenAccounts` пуст, диалогов нет; карточка VPS видна после входа в GitHub; 0 запросов к Anthropic | Keychain-счётчик 0, транспорт-ловушка · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C205` |
+| C2-06 | `hiddenAccounts = {метка}` | нет в карточках, строке меню, расходе; тело PATCH файла мака не изменилось от скрытия | Ledger PATCH · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C206` |
+| C2-07 | `menuAccount`: по умолчанию; выбранный скрыт или пропал | локальный, иначе первый по V2; при пропаже — снова по умолчанию | — · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C207` |
+| C2-08 | `reader_card_state` (PRD §5): успешный синк с 3 видимыми аккаунтами в разных состояниях V5; скрытый аккаунт; синк `.failed` | в `poll-log.jsonl` по строке на видимый аккаунт: метка, состояние V5, возраст показания; скрытого нет; при `.failed` строк нет; сканер A1-10 чист; файл 0600 | записывающий журнал, сентинели · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C208` |
+| C2-09 | успешный API Codex A → вход B → live error → новый rollout B вместо кэша A; симметричный сценарий Claude | показание B неатрибутировано; `reader_card_state` не приписывает B метку A; история по `l:`-ключу A не пополняется | синтетические входы, API и rollout; записывающий журнал и история · **RED до сборки** `Sources/RemoteLimitsC2SelfTests.swift:c2C209` |
 
 ### C3 — macOS UI (`--subscriptions-selftest` + PNG)
 
@@ -437,7 +438,7 @@ C2-07 — модельная проверка выбора аккаунта; в�
 |---|---|---|---|
 | C6-01 | синтетические журналы O1 двух машин: пары 899/900 с, окна `publish failed`, `label_changed` посреди окна | редьюсер G1 считает пары по метке, сшивает метки по `label_changed`, периоды «gist недоступен» выделяет отдельно; G2 = число `token_refresh` с записью | `tools/` скрипт сведения + pure-тест |
 
-**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 20 · C2 — 8 · C3 — 11 · C4 — 11 · C5 — 2 · C6 — 1. **Всего 126 ID**, из них Linux 74 (+1 общий C5-01), Swift 51 (C1-10/12/15/16/18 — и Linux-эталон); плюс ручные проверки A5 и визуальная приёмка C3/C6.
+**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 20 · C2 — 9 · C3 — 11 · C4 — 11 · C5 — 2 · C6 — 1. **Всего 127 ID**, из них Linux 74 (+1 общий C5-01), Swift 52 (C1-10/12/15/16/18 — и Linux-эталон); плюс ручные проверки A5 и визуальная приёмка C3/C6.
 
 ## 3. Ручные проверки (Юрка) и визуальная приёмка
 

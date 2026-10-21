@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - REMOTE-LIMITS C2 selftests (tester, 2026-10-21; written red before the code, P13)
 //
-// Sources of truth: docs/plans.md «C2 — macOS: настройки, деньги, история», docs/test-plan-remote-limits.md §C2 (C2-01…C2-08)
+// Sources of truth: docs/plans.md «C2 — macOS: настройки, деньги, история», docs/test-plan-remote-limits.md §C2 (C2-01…C2-09)
 // and its trace rows (F7, F8, G3/G4 + PRD §5 `reader_card_state`, RL-16/V8, U1–U3, N1–N3), arch/plan-synth.md §F («История
 // темпа (№13)», «Настройки, деньги, UI»), arch/plan-claude.md §F (N1/N2, U3, V8), docs/prd-remote-limits.md U1–U3, N1–N3, V8,
 // §5; design/remote-limits-ux.md §4 (V5), §6, §9 (N3: no dialogs). Lessons 006/011/012/013.
@@ -19,7 +19,12 @@ import Foundation
 // Contract these tests compile against (developer: LimitsMonitor.swift / RemoteLimits.swift). Names from synth §F and
 // plans.md where they exist (`UsageSample.acct`, `record(d, product:, acct:)`, `recordRemote(product:, label:, sample)`,
 // `hiddenAccounts`, `menuAccount`, `mergedUsageIndex`, `subscriptionUSD(tier:)`, `reader_card_state`, poll-log.jsonl); the rest
-// chosen by the tester and listed in the C2 report:
+// chosen by the tester and listed in the C2 report (C2-09: docs/review-remote-limits-c2.md, major identity transfer):
+//
+//   func readerQuotaCompletion(_ response: LimitData, previous: LimitData, previousId: String?, readingId: String?,
+//                              cached: LimitData? = nil) -> (data: LimitData, id: String?)
+//       // Runtime selection and identity travel together: fresh → readingId; retained previous → previousId;
+//       // a new fallback or disk cache → nil. ReaderLocalSnapshot.update publishes this result for sampleProducts.
 //
 //   // 013 trap: every Claude Keychain helper launch and provider request of fetchClaude goes through `io`.
 //   struct ClaudeQuotaIO {                                   // stored properties exactly in this order (memberwise init)
@@ -725,6 +730,95 @@ private func c2C208(_ root: String, _ fixture: String?, _ expect: C2Expect) {
     expect(d.failed.isEmpty, "C2-08 reader_card_state carries no caption/e-mail/path/token/local id even when the inputs do" + d.suffix)
 }
 
+// MARK: C2-09 a fallback from another login never inherits the previous reading's identity (review major)
+
+private func c2C209(_ root: String, _ expect: C2Expect) {
+    let now = c2Date(C2_NOW)
+    // Codex reproduces API A → login B → live error → newer rollout B beats cache A.
+    // The same identity boundary applies to Claude. All responses and account IDs here are synthetic.
+    for (product, idA, labelA) in [("codex", C2_UUID_C, C2_CODEX_A), ("claude", C2_UUID_A, C2_CLAUDE)] {
+        let idB = "c2-fixture-" + product + "-account-b"
+        let store = ReaderLocalSnapshot()
+        func publish(_ completion: (data: LimitData, id: String?)) {
+            let current = store.snapshot().local
+            let local = product == "claude" ? (completion.data, current.1) : (current.0, completion.data)
+            var ids: [String: String] = [:]
+            ids[product] = completion.id       // Use the production decision; never manually clear the binding.
+            store.update(local: local, ids: ids, identityProducts: [product])
+        }
+        let apiA = c2Local(20, asOf: now.addingTimeInterval(-900))
+        let first = readerQuotaCompletion(apiA, previous: c2Absent(), previousId: nil, readingId: idA)
+        publish(first)
+        let initial = store.snapshot()
+        // An independent, older remote A must remain legal; only the row carrying B's age must be unattributed.
+        let remoteA = c2MachineFile(C2_VPS_ID, name: "vps", seen: now, accounts: [
+            c2Acct(product, labelA, asOf: now.addingTimeInterval(-1200), pct: 11)
+        ])
+        let cache = c2Cache([C2_VPS_FILE: remoteA], now: now)
+        let initialViews = c2Resolve(cache, claude: initial.local.0, codex: initial.local.1, ids: initial.ids, now: now)
+        guard let initialView = initialViews.first(where: { $0.product == product && $0.isLocal }) else {
+            expect(false, "C2-09 \(product): initial local A exists"); continue
+        }
+        let keyA = initialView.historyKey
+        let path = root + "/c2-09-" + product + "-history.jsonl"
+        let history = UsageHistory(path: path)
+        history.record(first.data, product: product, acct: keyA, now: now)
+        let before = history.samples(product, acct: keyA, since: .distantPast)  // flush local record
+        let beforeLines = c2Lines(path).filter { ($0["a"] as? String) == keyA }.map { c2JSON($0) }
+        var start = C2Checks()
+        start.add("successful A binds its ID", first.id == idA && initial.ids[product] == idA && initialView.label == labelA)
+        start.add("A has a local history key", keyA.hasPrefix("l:") && keyA != "l:legacy"
+                  && (product != "codex" || keyA == C2_LOCAL_CODEX_KEY))
+        start.add("A history seeded once", before.count == 1 && before.first?.session == 20 && beforeLines.count == 1)
+        expect(start.failed.isEmpty, "C2-09 \(product): successful local API A seeds identity and history" + start.suffix)
+
+        var diskA = apiA; diskA.apiFresh = false; diskA.fromCache = true
+        var rolloutB = c2Local(73, asOf: now.addingTimeInterval(-60))
+        rolloutB.apiFresh = false; rolloutB.fromCache = true
+        rolloutB.error = "synthetic live request failed after login B"; rolloutB.pollFailed = true
+        let next = readerQuotaCompletion(rolloutB, previous: first.data, previousId: initial.ids[product],
+                                         readingId: idB, cached: diskA)
+        publish(next)
+        let selected = store.snapshot()
+        let data = product == "claude" ? selected.local.0 : selected.local.1
+        let views = c2Resolve(cache, claude: selected.local.0, codex: selected.local.1, ids: selected.ids, now: now)
+        let local = views.first { $0.product == product && $0.isLocal }
+        var chosen = C2Checks()
+        chosen.add("newer B wins old A memory and disk", data.session == 73 && data.weekly == 73 && data.asOf == rolloutB.asOf)
+        chosen.add("live failure retained", !data.apiFresh && data.fromCache && data.error == rolloutB.error && data.pollFailed)
+        chosen.add("new fallback has no verified identity", next.id == nil && selected.ids[product] == nil)
+        chosen.add("local B never resolves to A", local != nil && local?.label == nil && local?.data.session == 73
+                   && local?.historyKey != keyA)
+        expect(chosen.failed.isEmpty, "C2-09 \(product): login B + live failure + newer fallback cannot inherit A" + chosen.suffix)
+
+        // Follow the real consumers with the helper's published data/IDs; local history and reader journal are temporary.
+        if let local = local { history.record(data, product: product, acct: local.historyKey, now: now) }
+        let log = root + "/c2-09-" + product + "-poll.jsonl"
+        readerDidSync(cache, at: now, local: selected.local, localIds: selected.ids, hidden: [],
+                      sync: ReaderSyncState(phase: .on), history: history, pollLog: log)
+        let after = history.samples(product, acct: keyA, since: .distantPast)   // flush both history consumers
+        let afterLines = c2Lines(path).filter { ($0["a"] as? String) == keyA }.map { c2JSON($0) }
+        let rows = c2Lines(log).filter { ($0["product"] as? String) == product }
+        let rowsB = rows.filter { ($0["age"] as? NSNumber)?.intValue == 60 }
+        let rowsA = rows.filter { ($0["label"] as? String) == labelA }
+        var consumers = C2Checks()
+        consumers.add("journal has reader events", rows.count == 2 && rows.allSatisfy { ($0["ev"] as? String) == "reader_card_state" })
+        consumers.add("B age row has null label", rowsB.count == 1 && rowsB.first?["label"] is NSNull)
+        consumers.add("independent remote A remains distinct", rowsA.count == 1 && (rowsA.first?["age"] as? NSNumber)?.intValue == 1200)
+        consumers.add("A history unchanged after consumers", after.count == before.count
+                      && after.map { $0.t } == before.map { $0.t } && after.map { $0.session } == before.map { $0.session }
+                      && after.map { $0.weekly } == before.map { $0.weekly } && afterLines == beforeLines)
+        consumers.add("no B timestamp under A local key", !after.contains { $0.t == rolloutB.asOf?.timeIntervalSince1970 })
+        expect(consumers.failed.isEmpty, "C2-09 \(product): reader_card_state never labels B as A; A local history receives nothing new" + consumers.suffix)
+
+        // Control: a failed attempt without a newer reading really retains A and therefore must retain A's ID.
+        let held = readerQuotaCompletion(LimitData(error: "synthetic no newer reading"), previous: first.data,
+                                         previousId: initial.ids[product], readingId: idB)
+        expect(held.id == idA && held.data.session == apiA.session && held.data.asOf == apiA.asOf && held.data.fromCache,
+               "C2-09 \(product): retaining the actual previous A snapshot preserves A's identity")
+    }
+}
+
 // MARK: runner
 
 /// C2 entry point, called at the end of the `--subscriptions-selftest` block. `select(claude, codex)` sets the `monitor_*`
@@ -749,6 +843,7 @@ func runRemoteLimitsC2SelfTests(defaults: MemorySelfTestDefaults, select: (Bool,
     c2C206(root, fixture, defaults, select, expect)
     c2C207(fixture, defaults, expect)
     c2C208(root, fixture, expect)
+    c2C209(root, expect)
     for key in ["claudeTier", "subClaude", "hiddenAccounts", "menuAccount"] { defaults.removeObject(forKey: key) }
     select(true, true)
     try? FileManager.default.removeItem(atPath: root)

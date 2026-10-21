@@ -785,6 +785,7 @@ func readerDidSync(_ cache: SyncRemoteCache, at now: Date, local: (LimitData, Li
     for account in cache.accounts ?? [] {
         guard let label = RemoteLimitsWire.label(account.label), let asOf = account.asOf,
               asOf.timeIntervalSince1970.isFinite, asOf <= now.addingTimeInterval(300),
+              asOf >= now.addingTimeInterval(-HISTORY_KEEP_DAYS * 86400),
               account.windows?.session != nil || account.windows?.weekly != nil || !(account.models ?? []).isEmpty else { continue }
         let scoped = account.models?.max { $0.pct < $1.pct }
         history.recordRemote(product: account.product, label: label,
