@@ -391,7 +391,7 @@ C2-07 — модельная проверка выбора аккаунта; в�
 | C2-06 | `hiddenAccounts = {метка}` | нет в карточках, строке меню, расходе; тело PATCH файла мака не изменилось от скрытия | Ledger PATCH · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C206` |
 | C2-07 | `menuAccount`: по умолчанию; выбранный скрыт или пропал | локальный, иначе первый по V2; при пропаже — снова по умолчанию | — · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C207` |
 | C2-08 | `reader_card_state` (PRD §5): успешный синк с 3 видимыми аккаунтами в разных состояниях V5; скрытый аккаунт; синк `.failed` | в `poll-log.jsonl` по строке на видимый аккаунт: метка, состояние V5, возраст показания; скрытого нет; при `.failed` строк нет; сканер A1-10 чист; файл 0600 | записывающий журнал, сентинели · **GREEN 2026-10-21 (мак a10a3d0)** `Sources/RemoteLimitsC2SelfTests.swift:c2C208` |
-| C2-09 | успешный API Codex A → вход B → live error → новый rollout B вместо кэша A; симметричный сценарий Claude | показание B неатрибутировано; `reader_card_state` не приписывает B метку A; история по `l:`-ключу A не пополняется | синтетические входы, API и rollout; записывающий журнал и история · **RED до сборки** `Sources/RemoteLimitsC2SelfTests.swift:c2C209` |
+| C2-09 | успешный API Codex A → вход B → live error → новый rollout B вместо кэша A; симметричный сценарий Claude | показание B неатрибутировано; `reader_card_state` не приписывает B метку A; история по `l:`-ключу A не пополняется | синтетические входы, API и rollout; записывающий журнал и история · **GREEN 2026-10-21 (мак d101fef) |
 
 ### C3 — macOS UI (`--subscriptions-selftest` + PNG)
 

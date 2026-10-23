@@ -44,7 +44,7 @@ bash build.sh && APP="dist/Claude Codex Limits.app/Contents/MacOS/ClaudeCodexLim
 | B1 | Трей `delegated`: без записей состояния, воркер под `quota`, кнопка → проход | A3 | [ ] |
 | B2 | Linux-трей publish-only (вторая очередь) | B1, C1 | [ ] |
 | C1 | macOS: merge v1.1, `RemoteAccount`, `ReaderSyncState`, `resolveAccounts`, пределы читателя | A1 | [x] 2026-10-21 |
-| C2 | macOS: настройки N1–N3, деньги U3, история по `acct` | C1 | [ ] |
+| C2 | macOS: настройки N1–N3, деньги U3, история по `acct` | C1 | [x] 2026-10-21 |
 | C3 | macOS: UI карточек, состояния V5, строка меню, тег, превью 7 состояний | C2, UX | [ ] |
 | C4 | macOS: издатель мака, B2 через `syncNow(completion)`, `credentialWrite: never`, poll-log | C3, A5 | [ ] |
 | C5 | Подписи `captions` и список N1 (Should) | C4 | [ ] |
@@ -143,7 +143,7 @@ T1: П5-б.
 T1: П4-в (читатель), П5-д, П5-е.
 Из ревью A1: N10 — чужая запись с `asOf` в далёком будущем не выигрывает карточку у локального свежего чтения (то же в B2); свой файл занимает один из 64 слотов — как в Linux (п. 1 ревью); открытый вопрос N11 — общий ли `tokens.account_id` у Codex в воркспейсе ChatGPT Team (проверить до C1, для владельца — один личный аккаунт).
 
-## C2 — macOS: настройки, деньги, история `[ ]` (2026-10-21: код `a10a3d0` собрался на маке, C2-01…C2-08 25/25 OK, стенд run.sh 1089 OK; ревью Astra `docs/review-remote-limits-c2.md` FAIL — 1 major (ID вместе с показанием) + 3 minor → цикл правок №1 + C2-09, затем мак)
+## C2 — macOS: настройки, деньги, история `[x]` (2026-10-21: код `a10a3d0` + цикл правок №1 `d101fef` по ревью Astra `docs/review-remote-limits-c2.md`; мак `d101fef`: C2 33/33 OK вкл. C2-09, C1 72/72, стенд 1089 OK)
 
 Зависит от: C1. Файлы: `Sources/LimitsMonitor.swift` (`monitor_*` → «опрашивать на этом Маке», `hiddenAccounts`, `menuAccount`, `mergedUsageIndex` по `hiddenAccounts`, `subscriptionUSD(tier:)`, `UsageHistory` с ключом `acct`, селфтест ~7108 переписан).
 Задачи: история по `acct` (локальный отпечаток / метка), `recordRemote` без `productEnabled`, дедуп `(acct, t)`; аудит `productEnabled` по synth §F (оставить в `fetchClaude`/`fetchCodex`/`UsageLogs.scan`/`snapshotJSON`/`record` — урок 013); событие `reader_card_state` в `~/.claude-limits-monitor/poll-log.jsonl` при каждом успешном синке — по каждому видимому аккаунту: метка, состояние V5, возраст показания, без ПДн (PRD §5, под замер G3/G4; решение Юрки; Linux-читатель — вторая очередь).
