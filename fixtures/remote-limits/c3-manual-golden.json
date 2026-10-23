@@ -1,0 +1,52 @@
+[
+  {
+    "language": "ru",
+    "phase": "reading",
+    "text": "Читаем GitHub…"
+  },
+  {
+    "language": "ru",
+    "phase": "checked",
+    "text": "GitHub проверен 15:45"
+  },
+  {
+    "language": "ru",
+    "phase": "cooldown",
+    "text": "Повтор через 12 с"
+  },
+  {
+    "language": "ru",
+    "phase": "failed",
+    "text": "GitHub не ответил"
+  },
+  {
+    "language": "ru",
+    "phase": "pollAllowed",
+    "text": "Опрос можно с 15:58"
+  },
+  {
+    "language": "en",
+    "phase": "reading",
+    "text": "Reading GitHub…"
+  },
+  {
+    "language": "en",
+    "phase": "checked",
+    "text": "GitHub checked 15:45"
+  },
+  {
+    "language": "en",
+    "phase": "cooldown",
+    "text": "Retry in 12 s"
+  },
+  {
+    "language": "en",
+    "phase": "failed",
+    "text": "GitHub didn't respond"
+  },
+  {
+    "language": "en",
+    "phase": "pollAllowed",
+    "text": "Poll allowed at 15:58"
+  }
+]

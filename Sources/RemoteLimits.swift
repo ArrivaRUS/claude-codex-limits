@@ -559,7 +559,8 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
 }
 
 func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache,
-                     hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView] {
+                     hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date,
+                     localMachineName: String = "mac") -> [AccountView] {
     var views: [AccountView] = []
     let enabled: Bool
     switch sync.phase { case .on: enabled = true; case .off, .revoked, .awaitingCode: enabled = false }
@@ -626,7 +627,7 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
             var usage: RemoteDays = [:]
             for a in ordered { RemoteLimitsWire.add(a.days, to: &usage) }
             let names = Set(ordered.map { $0.machineName })
-            let machines = (isLocal ? ["mac"] : []) + names.sorted().filter { !isLocal || $0 != "mac" }
+            let machines = (isLocal ? [localMachineName] : []) + names.sorted().filter { !isLocal || $0 != localMachineName }
             let historyKey: String
             if isLocal, let id = localId {
                 let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -796,4 +797,275 @@ func readerDidSync(_ cache: SyncRemoteCache, at now: Date, local: (LimitData, Li
     }
     let views = resolveAccounts(local: local, localIds: localIds, remote: cache, hidden: hidden, menu: [:], sync: sync, now: now)
     appendPollLog(readerCardStateEvents(views, now: now), path: pollLog)
+}
+
+// MARK: - Remote card presentation (C3)
+// No preferences, credentials, runtime clocks or renderer calls in this model.
+enum RemoteManualPhase {
+    case idle, reading, checked(Date), cooldown(Int), failed, pollAllowed(Date)
+}
+struct RemoteCardPresentation {
+    var simpleTitle: String, advancedTitle: String, planBadge: String, machineSuffix: String
+    var sourceLine: String, statusLine: String, statusTone: String, advancedBadge: String
+    var action: String?
+    var tooltip: String, accessibilityLabel: String, accessibilityValue: String, cardHit: String
+    var paceNotice: String?
+    var sessionResetText: String
+    var sessionDimmed: Bool, showsValues: Bool
+}
+struct RemoteAutoFooter {
+    var products: [String]
+    var noSubscriptions: Bool
+    var tooltip: String
+}
+
+// One immutable scene feeds the card draw, Auto, accessibility and display event.
+// Visibility never alters the polling set; the current two-slot projection is
+// explicit so logging describes exactly the cards part A can display.
+struct RemoteAccountFrame {
+    let now: Date
+    let sync: ReaderSyncState
+    let allViews: [AccountView]
+    let visibleViews: [AccountView]
+    let displayedViews: [AccountView]
+}
+func remoteAccountFrame(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache,
+                        hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date,
+                        localMachineName: String = "mac") -> RemoteAccountFrame {
+    let all = resolveAccounts(local: local, localIds: localIds, remote: remote, hidden: [], menu: menu,
+                              sync: sync, now: now, localMachineName: localMachineName)
+    let visible = all.filter { view in view.label.map { !hidden.contains($0) } ?? true }
+    let displayed = ["claude", "codex"].compactMap { menuAccount($0, views: visible, selected: menu) }
+    return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: displayed)
+}
+
+private func remoteManualIsActive(_ phase: RemoteManualPhase, now: Date) -> Bool {
+    switch phase {
+    case .idle: return false
+    case .checked(let at): return (0..<60).contains(now.timeIntervalSince(at))
+    default: return true
+    }
+}
+
+func remoteCardActionURL(product: String) -> String {
+    product == "claude" ? "https://claude.ai/settings/usage" : "https://chatgpt.com/codex/cloud/settings/analytics#usage"
+}
+func limitCanFix(remote view: AccountView) -> Bool {
+    view.isLocal && limitCanFix(product: view.product, auth: view.data.auth)
+}
+func snapshotHorizon(_ d: LimitData) -> TimeInterval {
+    guard let source = d.source else { return SNAPSHOT_MAX_AGE }
+    if let end = source.freshUntil, let at = d.asOf ?? source.asOf,
+       end.timeIntervalSince1970.isFinite, at.timeIntervalSince1970.isFinite {
+        return max(0, end.timeIntervalSince(at))
+    }
+    return Double(max(0, source.interval ?? 900)) + 1200
+}
+func remotePaceTimeValid(_ d: LimitData, now: Date) -> Bool {
+    guard let at = d.asOf, at.timeIntervalSince1970.isFinite else { return false }
+    return at <= now.addingTimeInterval(d.source == nil ? 0 : 300)
+}
+func remoteCardTimestamp(_ date: Date?, now: Date, timeZone: TimeZone) -> String {
+    guard let date = date, date.timeIntervalSince1970.isFinite,
+          (0..<253402300800).contains(date.timeIntervalSince1970) else { return "—" }
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+    let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = timeZone
+    f.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "HH:mm" : "dd.MM HH:mm"
+    return f.string(from: date)
+}
+private func remoteDisplayText(_ text: String, limit: Int) -> String {
+    let scalars = text.precomposedStringWithCanonicalMapping.unicodeScalars.filter { !RemoteLimitsWire.isUnsafe($0) }
+    return String(String.UnicodeScalarView(scalars.prefix(limit)))
+}
+private func remoteStatusMachine(_ view: AccountView) -> String {
+    remoteDisplayText(view.data.source?.statusMachineName ?? view.data.source?.machineName ?? view.machines.first ?? "?", limit: 16)
+}
+func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteManualPhase,
+                     lang: String, wide: Bool, now: Date, timeZone: TimeZone) -> String {
+    let en = lang == "en", source = view.data.source
+    func t(_ ru: String, _ english: String) -> String { en ? english : ru }
+    func time(_ date: Date?) -> String { remoteCardTimestamp(date, now: now, timeZone: timeZone) }
+    switch phase {
+    case .reading: return t("Читаем GitHub…", "Reading GitHub…")
+    case .checked(let at):
+        if (0..<60).contains(now.timeIntervalSince(at)) { return t("GitHub проверен ", "GitHub checked ") + time(at) }
+    case .cooldown(let seconds): return t("Повтор через \(max(0, seconds)) с", "Retry in \(max(0, seconds)) s")
+    case .failed: return t("GitHub не ответил", "GitHub didn't respond")
+    case .pollAllowed(let at): return t("Опрос можно с ", "Poll allowed at ") + time(at)
+    case .idle: break
+    }
+    let machine = remoteStatusMachine(view), product = view.product == "claude" ? "Claude Code" : "Codex"
+    switch state {
+    case .fresh: return ""
+    case .stale: return t("Данные устарели", "Data is stale")
+    case .signInRequired:
+        if source?.status == "signed_out" {
+            return wide ? t("На машине \(machine) нет входа в \(product)", "\(product) isn't signed in on \(machine)")
+                : t("На \(machine) нет входа", "Not signed in on \(machine)")
+        }
+        return wide ? t("На машине \(machine) нужно обновить вход \(product)", "\(product) sign-in needs renewing on \(machine)")
+            : t("Обновите вход на \(machine)", "Renew sign-in on \(machine)")
+    case .serviceWait:
+        return source?.retryUntil.map { t("Пауза сервиса до ", "Service wait until ") + time($0) }
+            ?? t("Пауза сервиса", "Service wait")
+    case .offline:
+        return wide ? t("Машина \(machine) не на связи с \(time(source?.lastSeenAt))", "\(machine) has been offline since \(time(source?.lastSeenAt))")
+            : t("\(machine) не на связи с \(time(source?.lastSeenAt))", "\(machine) offline since \(time(source?.lastSeenAt))")
+    case .syncStalled: return t("Синхронизация стоит ›", "Sync stalled ›")
+    case .signedOut: return t("Войдите в GitHub ›", "Sign in to GitHub ›")
+    }
+}
+
+func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,
+                            now: Date, timeZone: TimeZone, manual: RemoteManualPhase = .idle) -> RemoteCardPresentation {
+    let en = language == "en", source = view.data.source, state = view.state
+    func t(_ ru: String, _ english: String) -> String { en ? english : ru }
+    func time(_ date: Date?) -> String { remoteCardTimestamp(date, now: now, timeZone: timeZone) }
+    let product = view.product == "claude" ? "Claude Code" : "Codex"
+    let machine = remoteDisplayText(source?.machineName ?? view.machines.first ?? "?", limit: 16)
+    let statusMachine = remoteStatusMachine(view)
+    let machines = view.machines.map { remoteDisplayText($0, limit: 16) }
+    let tags = machines.prefix(2).joined(separator: ", ") + (machines.count > 2 ? " +\(machines.count - 2)" : "")
+    let defaultCaption = RemoteLimitsWire.caption(product: view.product, plan: view.data.plan, tier: view.tier, machines: machines)
+    let caption = remoteDisplayText(view.caption, limit: 128)
+    let custom = !caption.isEmpty && caption != defaultCaption
+    let plainLocal = view.isLocal && source == nil && machines.count <= 1
+    let shortProduct = view.product == "claude" ? "Claude" : "Codex"
+    let simple = custom ? caption : (plainLocal ? product : shortProduct + (tags.isEmpty ? "" : " · " + tags))
+    let plan: String
+    if view.tier?.contains("20x") == true { plan = "Max 20x" }
+    else if view.tier?.contains("5x") == true { plan = "Max 5x" }
+    else { plan = remoteDisplayText(view.data.plan?.capitalized ?? "", limit: 48) }
+    var line1 = ""
+    if state != .signedOut {
+        if view.data.asOf == nil { line1 = t("Нет данных с ", "No data from ") + machine }
+        else {
+            var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+            let previousDay = !calendar.isDate(view.data.asOf!, inSameDayAs: now)
+            line1 = (narrow && previousDay ? t("С ", "From ") : t("Данные с ", "Data from ")) + machine + t(" от ", " at ") + time(view.data.asOf)
+        }
+    }
+    var line2 = remoteCardLine2(view, state: state, phase: manual, lang: language, wide: !narrow, now: now, timeZone: timeZone)
+    let activeManual = remoteManualIsActive(manual, now: now)
+    if state == .signedOut, sync.phase == .revoked, !activeManual { line2 = t("Войдите в GitHub заново ›", "Sign in to GitHub again ›") }
+    let tone: String, badge: String
+    switch state {
+    case .fresh: tone = "none"; badge = ""
+    case .stale: tone = "textMid"; badge = t("устарело", "stale")
+    case .signInRequired: tone = "amber"; badge = t("вход на ", "sign-in on ") + statusMachine
+    case .serviceWait: tone = "amber"; badge = t("пауза", "wait")
+    case .offline: tone = "amber"; badge = t("нет связи", "offline")
+    case .syncStalled, .signedOut: tone = "ADV_LINK"; badge = t("нет синка", "no sync")
+    }
+    var lines: [String] = activeManual && !line2.isEmpty ? [line2] : []
+    switch state {
+    case .fresh: break
+    case .stale: lines.append(t("\(statusMachine) на связи, но новых данных нет с \(time(view.data.asOf)).", "\(statusMachine) is online but has no newer data since \(time(view.data.asOf))."))
+    case .signInRequired:
+        if source?.status == "signed_out" {
+            lines.append(t("На машине \(statusMachine) не выполнен вход в \(product). Войдите там. На этом Mac ничего делать не нужно.", "\(product) isn't signed in on \(statusMachine). Sign in there. Nothing to do on this Mac."))
+        } else {
+            lines.append(t("Вход \(product) истёк на машине \(statusMachine). Откройте \(product) на \(statusMachine) (CLI обновит вход сам) или войдите там заново. На этом Mac ничего делать не нужно.", "The \(product) sign-in expired on \(statusMachine). Open \(product) on \(statusMachine) (the CLI renews it itself) or sign in there again. Nothing to do on this Mac."))
+        }
+    case .serviceWait:
+        if let until = source?.retryUntil {
+            lines.append(t("Сервис попросил \(statusMachine) подождать до \(time(until)). До этого времени этот аккаунт не опрашивает ни один компьютер.", "The service asked \(statusMachine) to wait until \(time(until)). No computer polls this account before then."))
+        } else { lines.append(t("Сервис попросил \(statusMachine) подождать.", "The service asked \(statusMachine) to wait.")) }
+    case .offline: lines.append(t("Файл машины \(statusMachine) в GitHub не обновлялся с \(time(source?.lastSeenAt)).", "The \(statusMachine) file in GitHub hasn't been updated since \(time(source?.lastSeenAt))."))
+    case .syncStalled: if let warning = sync.warning { lines.append(warning) }
+    case .signedOut: lines.append(t("Аккаунты без входа на этом компьютере видны только через GitHub. Войдите в GitHub в настройках.", "Accounts not signed in on this computer are visible only via GitHub. Sign in to GitHub in Settings."))
+    }
+    if case .pollAllowed = manual {
+        lines.append(t("Последний запрос по аккаунту — \(time(source?.attemptAt)) (\(statusMachine)). Не чаще раза в 15 минут со всех компьютеров; GitHub перечитан, сервис не опрашивали.", "Last request for this account: \(time(source?.attemptAt)) (\(statusMachine)). At most once per 15 minutes across all computers; GitHub re-read, provider not polled."))
+    }
+    if state != .signedOut {
+        if view.data.asOf != nil { lines.append(t("Данные: ", "Data: ") + time(view.data.asOf) + " (\(machine))") }
+        if let seconds = source?.interval {
+            let duration = seconds % 3600 == 0 ? t("\(seconds / 3600) ч", "\(seconds / 3600) h") : t("\(seconds / 60) мин", "\(seconds / 60) min")
+            let schedule = source?.mode == "auto" ? t("Авто · ", "Auto · ") + duration : t("каждые ", "every ") + duration
+            lines.append(t("Расписание \(machine): ", "\(machine) schedule: ") + schedule + (source?.backoff == true ? t(", пауза после ошибки", ", paused after an error") : ""))
+        }
+        if let next = source?.nextAt { lines.append(t("Следующая попытка \(machine): ", "Next attempt on \(machine): ") + time(next)) }
+        if let seen = source?.lastSeenAt { lines.append(t("\(statusMachine) на связи: ", "\(statusMachine) last seen: ") + time(seen)) }
+        if [.offline, .syncStalled].contains(state) || source?.status == "error" {
+            let last: String
+            switch source?.status {
+            case "expired", "signed_out": last = t("нужен вход \(product)", "\(product) sign-in needed")
+            case "rate_limited": last = source?.retryUntil.map { t("пауза сервиса до ", "service wait until ") + time($0) } ?? t("пауза сервиса", "service wait")
+            case "error": last = t("ошибка обновления", "update failed")
+            default: last = ""
+            }
+            if !last.isEmpty { lines.append(t("Последний статус \(statusMachine): ", "Last \(statusMachine) status: ") + last) }
+        }
+        if remotePaceTimeValid(view.data, now: now) { lines.append(t("Темп и прогноз — от данных ", "Pace and forecast from data at ") + time(view.data.asOf)) }
+        else if let at = view.data.asOf, at > now.addingTimeInterval(300) {
+            lines.append(t("Время данных \(machine) в будущем — темп не считаем", "\(machine) data time is in the future — pace paused"))
+        }
+    }
+    let tooltip = lines.filter { !$0.isEmpty }.joined(separator: "\n")
+    let reset = view.data.sessionReset.map { $0 <= now ? t("окно сброшено", "window reset") : time($0) } ?? "—"
+    return RemoteCardPresentation(simpleTitle: simple, advancedTitle: custom ? caption : product, planBadge: plan,
+        machineSuffix: custom || plainLocal || tags.isEmpty ? "" : "· " + tags, sourceLine: line1,
+        statusLine: line2, statusTone: line2.isEmpty ? "none" : (tone == "none" ? "textMid" : tone), advancedBadge: badge,
+        action: state == .syncStalled || state == .signedOut ? "syncsettings" : nil,
+        tooltip: tooltip, accessibilityLabel: caption, accessibilityValue: tooltip,
+        cardHit: "open:" + remoteCardActionURL(product: view.product),
+        paceNotice: remotePaceTimeValid(view.data, now: now) ? nil : t("Нет свежих данных · темп не считаем", "No fresh data · pace paused"),
+        sessionResetText: reset, sessionDimmed: metricIsStale(view.data, metric: "session", now: now), showsValues: state != .signedOut)
+}
+
+func remoteAutoFooter(views: [AccountView], enabled: Set<String>, intervals: [String: TimeInterval], language: String) -> RemoteAutoFooter {
+    let products = ["claude", "codex"].filter { product in
+        enabled.contains(product) && views.contains { $0.product == product && $0.isLocal && $0.data.present && $0.data.auth == .ok }
+    }
+    let en = language == "en"
+    guard !products.isEmpty else {
+        return RemoteAutoFooter(products: [], noSubscriptions: true, tooltip: en
+            ? "This computer polls nothing. Accounts from other computers update on their own schedule, shown in the card tooltip."
+            : "Этот компьютер ничего не опрашивает. Аккаунты с других компьютеров обновляются по их расписанию — оно в подсказке карточки.")
+    }
+    let rows = products.map { product -> String in
+        let seconds = intervals[product] ?? 1800
+        let duration = seconds >= 3600 ? "\(Int(seconds / 3600))" + (en ? " h" : " ч") : "\(Int(seconds / 60))" + (en ? " min" : " мин")
+        return (product == "claude" ? "Claude Code" : "Codex") + " → " + duration
+    }
+    return RemoteAutoFooter(products: products, noSubscriptions: false, tooltip: (en ? "Auto: " : "Авто: ") + rows.joined(separator: "; "))
+}
+
+// Deterministic verdict for remote snapshots. The existing local formatter stays
+// in LimitsMonitor.swift so its localized month/day wording does not change.
+func advVerdict(_ row: AdvRow, data: LimitData, now: Date, language: String) -> String {
+    let en = language == "en"
+    func t(_ ru: String, _ english: String) -> String { en ? english : ru }
+    func moment(_ at: Date) -> String { remoteCardTimestamp(at, now: now, timeZone: .current) }
+    guard remotePaceTimeValid(data, now: now) else { return t("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    if row.kind == .stale {
+        let reset = row.limit?.pace.map { $0.reset <= now } == true
+        return data.asOf.map { t(reset ? "Окно сброшено · снимок " : "по данным на ", reset ? "Window reset · snapshot " : "as of ") + moment($0) }
+            ?? t("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
+    }
+    guard let p = row.limit?.pace else {
+        return row.limit?.used != nil ? t("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
+            : t("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
+    }
+    func percent(_ value: Double) -> String { String(Int(value.rounded())) + "%" }
+    if let at = data.asOf, now.timeIntervalSince(at) > snapshotHorizon(data) {
+        return p.projectedPct.map { t("Прогноз на снимке: ", "Snapshot forecast: ") + percent($0) }
+            ?? t("На снимке мало данных для темпа", "Not enough pace data in snapshot")
+    }
+    switch row.kind {
+    case .exhausted: return t("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + moment(p.reset)
+    case .tooEarly: return t("Мало данных для темпа · сброс в ", "Not enough data for pace · resets at ") + moment(p.reset)
+    default: break
+    }
+    if let at = p.runsOutAt {
+        let minutes = max(0, Int(p.reset.timeIntervalSince(at) / 60))
+        let span = minutes >= 60 ? t("\(minutes / 60) ч", "\(minutes / 60) h") : t("\(minutes) мин", "\(minutes) min")
+        return t("Кончится в ", "Runs out at ") + moment(at) + t(", за ", ", ") + span + t(" до сброса", " before reset")
+    }
+    if let projected = p.projectedPct {
+        return t(projected.rounded() >= 85 ? "Хватит впритык (прогноз " : "Хватит до сброса (прогноз ",
+                 projected.rounded() >= 85 ? "Barely lasts (forecast " : "Lasts until reset (forecast ") + percent(projected) + ")"
+    }
+    return t("Хватит до сброса", "Lasts until reset")
 }

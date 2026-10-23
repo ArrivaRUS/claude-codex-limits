@@ -1251,7 +1251,7 @@ struct AdvancedProduct {
     let firstSample: Date?                 // when utilization sampling began (nil = never)
 }
 
-func advancedProduct(_ d: LimitData, product: String, index: UsageIndex) -> AdvancedProduct {
+func advancedProduct(_ d: LimitData, product: String, index: UsageIndex, acct: String? = nil) -> AdvancedProduct {
     let days = dailyUsage(product, days: 42, index: index)
     let last7 = Array(days.suffix(7))
     let todayKey = dayKey(Date())
@@ -1273,8 +1273,8 @@ func advancedProduct(_ d: LimitData, product: String, index: UsageIndex) -> Adva
         return StackedDay(day: dd.day, weekday: wd == 1 ? 7 : wd - 1, usd: dd.usd, turns: dd.turns,
                           parts: parts.map { (model: $0.0, usd: $0.1) }, isToday: dd.day == todayKey)
     }
-    let first = UsageHistory.shared.samples(product, acct: localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
-    return AdvancedProduct(product: product, limits: pacedLimits(d, product: product), resetCredits: d.resetCredits,
+    let first = UsageHistory.shared.samples(product, acct: acct ?? localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
+    return AdvancedProduct(product: product, limits: pacedLimits(d, product: product, acct: acct), resetCredits: d.resetCredits,
                            days7: stacked, legend: top + (hasOther ? ["other"] : []),
                            calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0,
                            money: moneySummary(product, plan: d.plan, index: index), firstSample: first)
@@ -1334,8 +1334,10 @@ func windowPace(used: Double?, reset: Date?, windowH: Double, recentRate: Double
 
 /// The windows the Advanced view lists for a product, in display order.
 struct PacedLimit { let id: String; let name: String; let pace: WindowPace?; let color: Int; var used: Double? = nil }   // color: 0 session, 1 weekly, 2 scoped
-func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
+func pacedLimits(_ d: LimitData, product: String, acct: String? = nil, now: Date = Date()) -> [PacedLimit] {
     let h = UsageHistory.shared
+    let historyKey = acct ?? localHistoryKey(product)
+    let paceNow: Date? = d.source == nil ? nil : now
     var out: [PacedLimit] = []
     // Codex no longer has a 5-hour window (Alex, 2026-09-24): show its session row only if the
     // backend actually reports one, never as a permanent "inactive" placeholder. Claude's
@@ -1343,18 +1345,18 @@ func pacedLimits(_ d: LimitData, product: String) -> [PacedLimit] {
     if product == "claude" || d.session != nil {
         out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
                               pace: snapshotWindowPace(used: d.session, reset: d.sessionReset, windowH: 5,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.session }, minutes: 60, now: $0) }), color: 0, used: d.session))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.session }, minutes: 60, now: $0) }, now: paceNow), color: 0, used: d.session))
     }
     // Order (Alex, 2026-09-24): session → per-model week (Fable) → all-models week. The
     // per-model limit is the one that actually bites first, so it sits right under the session.
     if let s = d.scoped {
         out.append(PacedLimit(id: "scoped", name: tr("Неделя · ", "Week · ") + s.name,
                               pace: snapshotWindowPace(used: s.percent, reset: s.reset, windowH: 168,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.scoped }, minutes: 180, now: $0) }), color: 2, used: s.percent))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.scoped }, minutes: 180, now: $0) }, now: paceNow), color: 2, used: s.percent))
     }
     out.append(PacedLimit(id: "weekly", name: product == "claude" ? tr("Неделя · все модели", "Week · all models") : tr("Неделя", "Week"),
                           pace: snapshotWindowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
-                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: localHistoryKey(product), metric: { $0.weekly }, minutes: 180, now: $0) }), color: 1, used: d.weekly))
+                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.weekly }, minutes: 180, now: $0) }, now: paceNow), color: 1, used: d.weekly))
     return out
 }
 
@@ -2205,7 +2207,8 @@ final class GitHubSync {
         machineIdNeedsSave = true   // Persist only in a real sync cycle; selftest stays read-only.
         return id
     }()
-    lazy var machineName: String = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+    lazy var machineName: String = machineTag(setting: defaults.string(forKey: "machineName") ?? "macbook",
+                                               hostname: ProcessInfo.processInfo.hostName)
     var osName: String {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         return "macOS \(v.majorVersion).\(v.minorVersion)"
@@ -3639,16 +3642,18 @@ func fmtReset(_ d: Date?) -> String {
 /// can say so plainly instead of passing off old numbers (and a past reset time) as current.
 /// Freshness is the age of the observation, independent of a later failed request.
 let SNAPSHOT_MAX_AGE: TimeInterval = 14400
-func snapshotWindowPace(used: Double?, reset: Date?, windowH: Double, asOf: Date?, recentRate: Double? = nil) -> WindowPace? {
+func snapshotWindowPace(used: Double?, reset: Date?, windowH: Double, asOf: Date?, recentRate: Double? = nil, now: Date? = nil) -> WindowPace? {
     guard let at = asOf, at.timeIntervalSince1970.isFinite,
+          now.map({ at <= $0.addingTimeInterval(300) }) ?? true,
           let used = used, used.isFinite, used >= 0,
           let reset = reset, reset.timeIntervalSince1970.isFinite,
           reset > at, reset.timeIntervalSince(at) <= windowH * 3600 else { return nil }
     return windowPace(used: used, reset: reset, windowH: windowH, recentRate: recentRate, now: at)
 }
 func metricIsStale(_ d: LimitData, metric: String, now: Date = Date()) -> Bool {
-    guard let at = d.asOf, at.timeIntervalSince1970.isFinite,
-          (0...SNAPSHOT_MAX_AGE).contains(now.timeIntervalSince(at)) else { return true }
+    guard let at = d.asOf, at.timeIntervalSince1970.isFinite else { return true }
+    let age = d.source == nil ? now.timeIntervalSince(at) : max(0, now.timeIntervalSince(at))
+    guard (0...snapshotHorizon(d)).contains(age) else { return true }
     let used: Double?, reset: Date?, hours: Double
     switch metric {
     case "session": (used, reset, hours) = (d.session, d.sessionReset, 5)
@@ -3656,7 +3661,7 @@ func metricIsStale(_ d: LimitData, metric: String, now: Date = Date()) -> Bool {
     default: (used, reset, hours) = (d.weekly, d.weeklyReset, 168)
     }
     guard let reset = reset, reset > now else { return true }
-    return snapshotWindowPace(used: used, reset: reset, windowH: hours, asOf: at) == nil
+    return snapshotWindowPace(used: used, reset: reset, windowH: hours, asOf: at, now: d.source == nil ? nil : now) == nil
 }
 func isStale(_ d: LimitData, _ now: Date = Date()) -> Bool {
     d.present && ["session", "weekly", "model"].allSatisfy { metricIsStale(d, metric: $0, now: now) }
@@ -3715,7 +3720,7 @@ struct Hit {
     var tooltip: String? = nil
 }
 func isQuotaAction(_ id: String) -> Bool {
-    id == "refresh" || ["retryquota:", "restorequota:", "allowquota:", "cancelquota:"].contains { id.hasPrefix($0) }
+    id == "refresh" || id.hasPrefix("syncsettings:") || ["retryquota:", "restorequota:", "allowquota:", "cancelquota:"].contains { id.hasPrefix($0) }
 }
 /// Inline actions precede their enclosing card; passive feedback never consumes a click.
 func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
@@ -3889,8 +3894,8 @@ func setC1Top() -> CGFloat { setCap1() + SET_CAP_H }
 
 /// Does this card render the per-model row? Only a healthy, live card does — the
 /// sign-in-problem and stale layouts replace the reset rows with a status message.
-func showsScopedRow(_ d: LimitData) -> Bool {
-    d.present && d.scoped != nil && d.auth == .ok && !isStale(d)
+func showsScopedRow(_ d: LimitData, remote: Bool = false) -> Bool {
+    d.present && d.scoped != nil && (remote || (d.auth == .ok && !isStale(d)))
 }
 /// Extra height the cards (and so the panel) need for the per-model row.
 func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
@@ -3898,7 +3903,9 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 }
 /// Height of the main panel for the given data — grows when a per-model limit is shown.
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
-    PANEL_H + scopedRowExtra(claude, codex) + (hasQuotaCards(claude, codex) ? QUOTA_CARD_FOOTER_H : 0)
+    let views = displayedCardViews(claude, codex)
+    let scoped = views.contains { showsScopedRow($0.data, remote: !$0.isLocal) } ? SCOPED_ROW_H : scopedRowExtra(claude, codex)
+    return PANEL_H + scoped + (hasQuotaCards(claude, codex) ? QUOTA_CARD_FOOTER_H : 0)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
 let APP_VERSION = "3.2.7"
@@ -3980,7 +3987,13 @@ func loadAutoPollStates() -> [String: AutoPollState] {
     return states.filter { AUTO_STEPS.contains($0.value.interval) && $0.value.lastAttempt >= 0 }
 }
 func pollSegments() -> [(ru: String, en: String, sec: TimeInterval)] { POLL_CHOICES + [("А", "A", 0)] }
-func pollSelected(_ sec: TimeInterval, manual: TimeInterval, autoIntervals: [String: TimeInterval] = [:]) -> Bool {
+func pollSelected(_ sec: TimeInterval, manual: TimeInterval, autoIntervals: [String: TimeInterval] = [:], views: [AccountView]? = nil) -> Bool {
+    if let views = views {
+        if sec == 0 { return autoPollEnabled() }
+        let model = remoteAutoFooter(views: views, enabled: Set(["claude", "codex"].filter { productEnabled($0) }), intervals: autoIntervals, language: appLang())
+        guard !model.noSubscriptions else { return false }
+        return autoPollEnabled() ? model.products.contains { autoIntervals[$0] == sec } : abs(manual - sec) < 1
+    }
     if sec == 0 { return autoPollEnabled() }
     guard !monitoringPaused() else { return false }
     guard autoPollEnabled() else { return sec != 0 && abs(manual - sec) < 1 }
@@ -3997,7 +4010,13 @@ func pollAccessibleTitle(_ sec: TimeInterval) -> String {
     default: return tr("Авто", "Auto")
     }
 }
-func pollTooltip(_ sec: TimeInterval, autoIntervals: [String: TimeInterval]) -> String {
+func pollTooltip(_ sec: TimeInterval, autoIntervals: [String: TimeInterval], views: [AccountView]? = nil) -> String {
+    if let views = views {
+        let model = remoteAutoFooter(views: views, enabled: Set(["claude", "codex"].filter { productEnabled($0) }), intervals: autoIntervals, language: appLang())
+        if model.noSubscriptions || (sec == 0 && autoPollEnabled()) { return model.tooltip }
+        let names = model.products.filter { autoIntervals[$0] == sec }.map { $0 == "claude" ? "Claude Code" : "Codex" }
+        return pollAccessibleTitle(sec) + (autoPollEnabled() && !names.isEmpty ? tr("\nАвто: ", "\nAuto: ") + names.joined(separator: "; ") : "")
+    }
     guard !monitoringPaused() else { return tr("Нет включённых подписок", "No subscriptions enabled") }
     let title = pollAccessibleTitle(sec)
     guard autoPollEnabled() else { return title }
@@ -4130,7 +4149,7 @@ func drawPower(_ ctx: CGContext, _ r: CGRect, _ color: NSColor) {
 
 /// Shared 360-point footer; Auto paint only consumes an interval snapshot.
 func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: TimeInterval,
-                    updated: Date?, autoIntervals: [String: TimeInterval], advanced: Bool = false) -> [Hit] {
+                    updated: Date?, autoIntervals: [String: TimeInterval], advanced: Bool = false, views: [AccountView]? = nil) -> [Hit] {
     let H = size.height, auto = autoPollEnabled()
     var hits: [Hit] = []
     func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
@@ -4158,11 +4177,11 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
     fill(rect(16, top, 160, 24), radius: 8, color: gray(1, 0.06))
     for (i, seg) in POLL_CHOICES.enumerated() {
         let r = rect(16 + CGFloat(i) * 40, top, 40, 24)
-        let selected = pollSelected(seg.sec, manual: interval, autoIntervals: autoIntervals)
+        let selected = pollSelected(seg.sec, manual: interval, autoIntervals: autoIntervals, views: views)
         if selected { fill(r.insetBy(dx: 2, dy: 2), radius: 6, color: gray(1, advanced ? 0.18 : 0.13)) }
         textC(attr(tr(seg.ru, seg.en), advanced ? 12 : 11, selected ? .semibold : advanced ? .medium : .regular,
                    gray(1, selected ? 0.95 : 0.5)), x: r.midX, y: top, h: 24, align: 1)
-        hits.append(Hit(id: "iv\(Int(seg.sec))", rect: r, tooltip: pollTooltip(seg.sec, autoIntervals: autoIntervals)))
+        hits.append(Hit(id: "iv\(Int(seg.sec))", rect: r, tooltip: pollTooltip(seg.sec, autoIntervals: autoIntervals, views: views)))
     }
     let autoHit = rect(176, top, 40, 24), capsule = rect(181, top + 2, 30, 20)
     let path = CGPath(roundedRect: capsule, cornerWidth: 10, cornerHeight: 10, transform: nil)
@@ -4180,7 +4199,7 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
     ctx.setLineWidth(1); ctx.strokePath()
     let labelColor = color(217, 229, 255)
     textC(attr(tr("А", "A"), 12, .semibold, auto ? gray(1, 1) : labelColor), x: autoHit.midX, y: top, h: 24, align: 1)
-    hits.append(Hit(id: "iv0", rect: autoHit, tooltip: pollTooltip(0, autoIntervals: autoIntervals)))
+    hits.append(Hit(id: "iv0", rect: autoHit, tooltip: pollTooltip(0, autoIntervals: autoIntervals, views: views)))
     let power = rect(320, top, 24, 24)
     drawPower(ctx, power.insetBy(dx: 4, dy: 4), gray(1, advanced ? 0.5 : 0.6))
     hits.append(Hit(id: "quit", rect: power))
@@ -4189,8 +4208,56 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
 
 // Refresh feedback belongs to the provider card, never to a second panel background.
 let QUOTA_CARD_FOOTER_H: CGFloat = 32
+// Part B can supply all accounts to its layout; part A projects one account per
+// existing product slot. Preview seams never initialize live sync or credentials.
+var REMOTE_ACCOUNT_VIEWS_PREVIEW: [AccountView]? = nil
+var REMOTE_MANUAL_PHASE: RemoteManualPhase = .idle
+// Scoped to one actual NSView.draw on the main thread. Pure bitmap renderers
+// never install a frame or emit events; defer below restores any outer scene.
+private var REMOTE_ACCOUNT_FRAME: RemoteAccountFrame? = nil
+private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: Date) -> RemoteAccountFrame {
+    let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
+    let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
+    let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now))
+    let hidden = hiddenAccounts(), menu = menuAccountSelection()
+    if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
+        let visible = all.filter { view in view.label.map { !hidden.contains($0) } ?? true }
+        return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible,
+            displayedViews: ["claude", "codex"].compactMap { menuAccount($0, views: visible, selected: menu) })
+    }
+    let cache = isolated ? SyncRemoteCache() : GitHubSync.shared.remoteSnapshot()
+    return remoteAccountFrame(local: (selectedLimits(claude, product: "claude"), selectedLimits(codex, product: "codex")),
+        localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids, remote: cache, hidden: hidden, menu: menu,
+        sync: sync, now: now,
+        localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"))
+}
+func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date(), includeHidden: Bool = false) -> [AccountView] {
+    // Auto describes polling, which continues when a card is hidden (N1).
+    // Card selection and reader-state logging keep the default visibility filter.
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)
+    return includeHidden ? frame.allViews : frame.visibleViews
+}
+func displayedCardViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date()) -> [AccountView] {
+    (REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)).displayedViews
+}
+func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> RemoteCardPresentation {
+    let at = REMOTE_ACCOUNT_FRAME?.now ?? now
+    let sync: ReaderSyncState
+    if let frame = REMOTE_ACCOUNT_FRAME { sync = frame.sync }
+    else {
+        let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
+        let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
+        sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
+    }
+    return remoteCardPresentation(view, sync: sync, language: appLang(), narrow: narrow, now: at,
+                                  timeZone: .current, manual: REMOTE_MANUAL_PHASE)
+}
+func remoteToneColor(_ tone: String) -> NSColor {
+    tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
+        : (tone == "ADV_LINK" ? ADV_LINK : gray(1, 0.5))
+}
 func hasQuotaCards(_ claude: LimitData, _ codex: LimitData) -> Bool {
-    (productEnabled("claude") && claude.present) || (productEnabled("codex") && codex.present)
+    !displayedCardViews(claude, codex).isEmpty
 }
 func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> QuotaRefreshFeedback {
     quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
@@ -4255,22 +4322,46 @@ func quotaActionID(_ feedback: QuotaRefreshFeedback, product: String) -> String?
     }
 }
 /// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
-func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false) -> [Hit] {
-    let now = Date().timeIntervalSince1970
+func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
+                         view: AccountView? = nil) -> [Hit] {
+    let now = (REMOTE_ACCOUNT_FRAME?.now ?? Date()).timeIntervalSince1970
     let feedback = quotaFeedback(data, now: now)
     let inset: CGFloat = advanced ? 11 : 14
     let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: 32)
     let error = !data.refreshInFlight && (data.auth != .ok || data.pollFailed || data.error != nil || (data.serverRetryAt ?? 0) > now)
     let ink = error ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1) : gray(1, 0.5)
-    func line(_ value: String, rect: CGRect, weight: NSFont.Weight, color: NSColor) {
+    func line(_ value: String, rect: CGRect, weight: NSFont.Weight, color: NSColor, truncate: Bool = true) {
         let original = CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, weight), cg(color)))
         let ellipsis = CTLineCreateWithAttributedString(ctAttr("…", ctFont(10, weight), cg(color)))
-        let fitted = CTLineCreateTruncatedLine(original, Double(rect.width), .end, ellipsis) ?? original
+        let fitted = truncate ? (CTLineCreateTruncatedLine(original, Double(rect.width), .end, ellipsis) ?? original) : original
         ctx.textMatrix = .identity; ctx.textPosition = CGPoint(x: rect.minX, y: rect.midY - 3.5)
         CTLineDraw(fitted, ctx)
     }
-    line(quotaCompactStatus(data, now: now), rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular, color: ink)
-    var hits = [Hit(id: "quotafeedback:" + product, rect: footer, tooltip: quotaTooltip(data, now: now))]
+    let model = view.map { cardPresentation($0, narrow: !advanced && card.width < 300, now: Date(timeIntervalSince1970: now)) }
+    var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
+    if let source = data.source {
+        func fits(_ text: String) -> Bool { lineWidth(CTLineCreateWithAttributedString(ctAttr(text, ctFont(10, .regular), cg(gray(1, 0.5))))) <= footer.width }
+        if !fits(sourceLine) {
+            sourceLine = sourceLine.replacingOccurrences(of: tr("Данные с ", "Data from "), with: tr("С ", "From "))
+        }
+        if !fits(sourceLine), source.machineName.count > 8 {
+            sourceLine = sourceLine.replacingOccurrences(of: source.machineName, with: String(source.machineName.prefix(8)) + "…")
+        }
+    }
+    line(sourceLine, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
+         color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
+    let tooltip = view?.isLocal == false ? (model?.tooltip ?? "")
+        : [quotaTooltip(data, now: now), data.source != nil ? model?.tooltip ?? "" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
+    var hits = [Hit(id: "quotafeedback:" + product, rect: footer, tooltip: tooltip)]
+    if view?.isLocal == false, let model = model {
+        if !model.statusLine.isEmpty {
+            let rect = CGRect(x: footer.minX - 4, y: footer.minY, width: footer.width + 8, height: 24)
+            line(model.statusLine, rect: CGRect(x: footer.minX, y: footer.minY + 2, width: footer.width, height: 14),
+                 weight: model.action == nil ? .regular : .medium, color: remoteToneColor(model.statusTone))
+            if let action = model.action { hits.append(Hit(id: action + ":" + product, rect: rect, tooltip: tooltip)) }
+        }
+        return hits
+    }
     let title = quotaCompactAction(feedback, data: data, now: now)
     if !title.isEmpty {
         let width = min(footer.width, ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10, .medium), cg(ADV_LINK))))) + 8)
@@ -4376,13 +4467,17 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
 
     let pad: CGFloat = 16
 
-    // which products are present
-    var prods: [(LimitData, String, String, String, String)] = []   // (data, name, icon, url, product)
-    if productEnabled("claude"), hasQuotaCards(claude, codex) {
-        prods.append((claude, "Claude Code", "claude_128.png", "https://claude.ai/settings/usage", "claude"))
-    }
-    if productEnabled("codex"), hasQuotaCards(claude, codex) {
-        prods.append((codex, "Codex", "codex_128.png", "https://chatgpt.com/codex/cloud/settings/analytics#usage", "codex"))
+    // Keep the two existing product slots; the multi-account grid belongs to C3 part B.
+    let cardViews = displayedCardViews(claude, codex)
+    var prods: [(LimitData, String, String, String, String)] = []
+    for product in ["claude", "codex"] {
+        if let view = cardViews.first(where: { $0.product == product }) {
+            let model = cardPresentation(view, narrow: cardViews.count > 1)
+            prods.append((view.data, model.simpleTitle, product + "_128.png", remoteCardActionURL(product: product), product))
+        } else if productEnabled(product), !cardViews.isEmpty {
+            prods.append((LimitData(present: false), product == "claude" ? "Claude Code" : "Codex",
+                          product + "_128.png", remoteCardActionURL(product: product), product))
+        }
     }
 
     // header — the app's OWN icon + subtitle of present products
@@ -4404,11 +4499,13 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     }
 
     // cards
-    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + scopedRowExtra(claude, codex) + (prods.isEmpty ? 0 : QUOTA_CARD_FOOTER_H), gap: CGFloat = 12
+    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + (cardViews.contains { showsScopedRow($0.data, remote: !$0.isLocal) } ? SCOPED_ROW_H : 0) + (prods.isEmpty ? 0 : QUOTA_CARD_FOOTER_H), gap: CGFloat = 12
     let cardW = (W - pad * 2 - gap) / 2
 
     func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String, product: String) {
         let r = rectTL(x, cardsTop, w, cardH)
+        let view = cardViews.first { $0.product == product }
+        let remote = view?.isLocal == false
         if !d.present {
             roundFill(r, 14, gray(1, 0.02))
             ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
@@ -4427,12 +4524,12 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         roundFill(r, 14, gray(1, 0.04)); roundStroke(r, 14, gray(1, 0.06), 1)
         // Claude sign-in problems (states 1 & 2) make the whole card tap-to-fix; everything
         // else opens the product's usage page in the browser.
-        let canFix = limitCanFix(product: product, auth: d.auth)
-        hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r))
+        let canFix = view.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: d.auth)
+        hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r, tooltip: view?.caption))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
 
-        hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product)
+        hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product, view: view)
         let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
 
         // A sign-in problem replaces the gauges with an honest status + (when recoverable)
@@ -4452,7 +4549,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
                 text(attr(label, 11, .semibold, amber), x: cxp, topY: pTop + 6, align: 1)
             }
         }
-        switch d.auth {
+        switch remote ? AuthState.ok : d.auth {
         case .loggedOut:
             problemBody(tr("Вход не выполнен", "Not signed in"),
                         canFix ? tr("нужен вход Claude Code CLI", "sign in via Claude Code CLI") : nil, showFix: canFix)
@@ -4511,7 +4608,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
-        if canFix || stale || limitPollFailed(d) {
+        if !remote && (canFix || stale || limitPollFailed(d)) {
             // Keep the last good read distinct from the CLI's sign-in state.
             let copy = limitSimpleStaleCopy(d, product: product)
             let msg1 = copy.snapshot
@@ -4532,7 +4629,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
             text(attr(limitResetText(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
             // Per-model weekly limit — named by the backend, so a future model needs no code change.
-            if showsScopedRow(d), let s = d.scoped {
+            if showsScopedRow(d, remote: remote), let s = d.scoped {
                 let l3 = l2 + SCOPED_ROW_H
                 dot(lx, centerTopY: l3 + 5, scopedCol)
                 text(attr(s.name, 10.5, .regular, textMid), x: lx + 11, topY: l3)
@@ -4557,7 +4654,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
 
     // footer
     let footTop = cardsTop + cardH + 14
-    hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated, autoIntervals: autoIntervals)
+    hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated, autoIntervals: autoIntervals, views: displayAccountViews(claude, codex, includeHidden: true))
 
     // credit line (authorship + version + clickable GitHub), like the reference app.
     // Anchored BELOW the interval row rather than at a fixed offset from the top: the cards
@@ -4704,6 +4801,9 @@ func withPollStatus(_ data: LimitData, state: AutoPollState?, next: Date?) -> Li
     return data
 }
 func limitSnapshotNotice(_ d: LimitData) -> String {
+    if d.source != nil {
+        return remotePaceTimeValid(d, now: Date()) ? "" : tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
+    }
     guard d.auth == .ok, let at = d.asOf, at.timeIntervalSince1970.isFinite,
           at <= Date(), [(d.session, d.sessionReset, 5.0), (d.weekly, d.weeklyReset, 168.0),
                         (d.scoped?.percent, d.scoped?.reset, 168.0)].contains(where: {
@@ -4722,19 +4822,21 @@ struct AdvCard {
     let product: String, data: LimitData, name: String, icon: String, url: String
     let paused: Bool
     let rows: [AdvRow]
-    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data).isEmpty ? 0 : 1) + (limitCanFix(product: product, auth: data.auth) ? 1 : 0)) }
+    var account: AccountView? = nil
+    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data).isEmpty ? 0 : 1) + ((account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: data.auth)) ? 1 : 0)) }
     var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight + QUOTA_CARD_FOOTER_H }
 }
 
 func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
-    func card(_ d: LimitData, _ product: String) -> AdvCard {
-        let paused = d.auth != .ok || isStale(d)
-        let invalidTime = d.asOf.map { !$0.timeIntervalSince1970.isFinite || $0 > Date() } ?? true
-        var limits = pacedLimits(d, product: product)
+    func card(_ view: AccountView) -> AdvCard {
+        let d = view.data, product = view.product, now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
+        let paused = (view.isLocal && d.auth != .ok) || isStale(d, now)
+        let invalidTime = !remotePaceTimeValid(d, now: now)
+        var limits = pacedLimits(d, product: product, acct: view.historyKey, now: now)
         if product == "codex" { limits.sort { a, _ in a.id == "weekly" } }        // Codex: week first
         var rows: [AdvRow] = limits.map { l in
-            guard let p = l.pace else { return AdvRow(limit: l, kind: .inactive, credits: nil) }
-            if d.auth != .ok || invalidTime || p.reset <= Date() { return AdvRow(limit: l, kind: .stale, credits: nil) }
+            guard let p = l.pace else { return AdvRow(limit: l, kind: d.source != nil && invalidTime ? .stale : .inactive, credits: nil) }
+            if (view.isLocal && d.auth != .ok) || invalidTime || p.reset <= now { return AdvRow(limit: l, kind: .stale, credits: nil) }
             if p.used >= 100 { return AdvRow(limit: l, kind: .exhausted, credits: nil) }
             if p.elapsedH < 10.0 / 60 || p.used < 2 { return AdvRow(limit: l, kind: .tooEarly, credits: nil) }
             return AdvRow(limit: l, kind: .full, credits: nil)
@@ -4744,12 +4846,9 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
                        name: product == "claude" ? "Claude Code" : "Codex",
                        icon: product == "claude" ? "claude_128.png" : "codex_128.png",
                        url: product == "claude" ? "https://claude.ai/settings/usage" : "https://chatgpt.com/codex/cloud/settings/analytics#usage",
-                       paused: paused, rows: rows)
+                       paused: paused, rows: rows, account: view)
     }
-    var out: [AdvCard] = []
-    if productEnabled("claude"), claude.present { out.append(card(claude, "claude")) }
-    if productEnabled("codex"), codex.present { out.append(card(codex, "codex")) }
-    return out
+    return displayedCardViews(claude, codex).map { card($0) }
 }
 
 func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
@@ -4757,7 +4856,7 @@ func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
     guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
     let present = cards.map { $0.product }
     let p = advHistProduct(present)
-    let noHistory = UsageHistory.shared.samples(p, acct: localHistoryKey(p), since: Date(timeIntervalSince1970: 0)).isEmpty
+    let noHistory = UsageHistory.shared.samples(p, acct: cards.first { $0.product == p }?.account?.historyKey ?? localHistoryKey(p), since: Date(timeIntervalSince1970: 0)).isEmpty
     return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
 }
 
@@ -4944,7 +5043,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     let cards = advCards(claude, codex)
     var y: CGFloat = 58
 
-    func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowAsOf: Date?) {
+    func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowData: LimitData) {
         if row.kind == .credits {
             let n = row.credits ?? 0
             let on = n > 0
@@ -4982,7 +5081,8 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         case .exhausted: verdictColor = ADV_CRIT; verdictWeight = .semibold
         default: verdictColor = textMid; verdictWeight = .regular
         }
-        var verdict = advVerdict(row, asOf: rowAsOf)
+        let verdict = rowData.source == nil ? advVerdict(row, asOf: rowData.asOf)
+            : advVerdict(row, data: rowData, now: REMOTE_ACCOUNT_FRAME?.now ?? Date(), language: appLang())
         var va = attr(verdict, 12.5, verdictWeight, verdictColor)
         if width(va) > ADV_IW {                                   // spec §3.2 truncation ladder
             var s = verdict.replacingOccurrences(of: tr(" до сброса", " before reset"), with: "")
@@ -5025,24 +5125,37 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let ch = c.height
         let card = rectTL(ADV_CX, y, ADV_CW, ch)
         roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
-        let canFix = limitCanFix(product: c.product, auth: c.data.auth)
+        let canFix = c.account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: c.product, auth: c.data.auth)
+        let presentation = c.account.map { cardPresentation($0, narrow: false) }
+        let remote = c.account?.isLocal == false
         // header
         let y0 = y + 9
         if let img = loadCGImage(assetPath(c.icon)) { ctx.draw(img, in: rectTL(ADV_IX, y0 + 1, 16, 16)) }
-        let name = attr(c.name, 13, .semibold, textHi)
+        let name = attr(presentation?.advancedTitle ?? c.name, 13, .semibold, textHi)
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
-        if c.paused || limitPollFailed(c.data) {
-            let r = pill(attr(limitDataBadge(c.data), 9.5, .semibold, ADV_WARN, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: ADV_WARN.withAlphaComponent(0.16), stroke: ADV_WARN.withAlphaComponent(0.42))
+        let warningBadge = remote ? (presentation?.advancedBadge ?? "") : ((c.paused || limitPollFailed(c.data)) ? limitDataBadge(c.data) : "")
+        if !warningBadge.isEmpty {
+            let ink = remote ? remoteToneColor(presentation?.statusTone ?? "textMid") : ADV_WARN
+            let r = pill(attr(warningBadge, 9.5, .semibold, ink, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7,
+                         fill: ink.withAlphaComponent(0.16), stroke: ink.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
-        if let plan = c.data.plan {
-            let label = c.product == "claude" ? (plan == "max" ? (UserDefaults.standard.string(forKey: "claudeTier")?.contains("20x") == true ? "Max 20x" : "Max") : plan.capitalized) : plan
-            pill(attr(label, 9.5, .semibold, gray(1, 0.60), kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
+        let planLabel: String
+        if remote { planLabel = presentation?.planBadge ?? "" }
+        else if let plan = c.data.plan {
+            planLabel = c.product == "claude" ? (plan == "max" ? (UserDefaults.standard.string(forKey: "claudeTier")?.contains("20x") == true ? "Max 20x" : "Max") : plan.capitalized) : plan
+        } else { planLabel = "" }
+        if !planLabel.isEmpty {
+            let r = pill(attr(planLabel, 9.5, .semibold, gray(1, 0.60), kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
+            px = r.maxX + 5
+        }
+        if let suffix = presentation?.machineSuffix, !suffix.isEmpty {
+            textC(attr(suffix, 11, .regular, textMid), x: px, topY: y0 + 1, h: 16)
         }
         let arrow = rectTL(322, y0 + 3, 12, 12)
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
-        hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix ? card : arrow.insetBy(dx: -8, dy: -8)))
+        hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix || remote ? card : arrow.insetBy(dx: -8, dy: -8), tooltip: c.account?.caption))
         var ry = y + 29
         do {
             let notice = limitSnapshotNotice(c.data)
@@ -5056,11 +5169,11 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             ry += c.noticeHeight
         }
         for (i, row) in c.rows.enumerated() {
-            drawRow(row, topY: ry, dimmed: (c.paused || row.kind == .stale) && row.kind != .credits, rowAsOf: c.data.asOf)
+            drawRow(row, topY: ry, dimmed: (c.paused || row.kind == .stale) && row.kind != .credits, rowData: c.data)
             ry += row.height
             if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
         }
-        hits += drawQuotaCardFooter(ctx, card: card, data: c.data, product: c.product, advanced: true)
+        hits += drawQuotaCardFooter(ctx, card: card, data: c.data, product: c.product, advanced: true, view: c.account)
         y += ch + 5
     }
     if showMissingProduct(cards) {
@@ -5118,8 +5231,10 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     }
     if expanded {
         let ix = mergedUsageIndex()
-        let d = hp == "claude" ? claude : codex
-        let ap = advancedProduct(d, product: hp, index: ix)
+        let selectedCard = cards.first { $0.product == hp }
+        let d = selectedCard?.data ?? (hp == "claude" ? claude : codex)
+        let historyIndex = selectedCard?.account.map { accountUsageIndex($0, local: UsageLogs.shared.snapshot()) } ?? ix
+        let ap = advancedProduct(d, product: hp, index: historyIndex, acct: selectedCard?.account?.historyKey)
         let by = hy + 18 + 4 + warnH                // body top
         // -- 7-day stacked bars (x 26…216) --
         let cx0 = ADV_IX, cy0 = by
@@ -5235,7 +5350,8 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         var ry = my + 23
         var notes: [String] = []
         for c in cards {
-            let m = moneySummary(c.product, plan: c.data.plan, index: ix)
+            let m = c.account.map { moneySummary($0, local: UsageLogs.shared.snapshot(), now: Date()) }
+                ?? moneySummary(c.product, plan: c.data.plan, index: ix)
             let nm = NSMutableAttributedString(attributedString: attr(c.product == "claude" ? "Claude" : "Codex", 10.5, .semibold, textHi))
             nm.append(attr(" · " + (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + tr("/мес", "/mo"), 10.5, .regular, textMid))
             textC(nm, x: colX[0], topY: ry, h: 13)
@@ -5263,7 +5379,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     // ---- footer ----
     let footTop = H - 35 - ADV_CREDIT_H
     hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated,
-                           autoIntervals: autoIntervals, advanced: true)
+                           autoIntervals: autoIntervals, advanced: true, views: displayAccountViews(claude, codex, includeHidden: true))
     // credit line: author · version · GitHub
     do {
         let divTop = footTop + 22 + 8
@@ -6060,6 +6176,7 @@ final class LimitsPanelView: NSView {
     var onRefresh: (() -> Void)?
     var onRefreshProduct: ((String) -> Void)?
     var onClaudePermission: ((Bool) -> Void)?
+    var onAccountsDisplayed: (([AccountView], Date) -> Void)?
     private var quotaButtons: [NSButton] = []
     var mainScroll: CGFloat = 0
     private var mainScroller: NSScroller?
@@ -6126,6 +6243,10 @@ final class LimitsPanelView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        let previousFrame = REMOTE_ACCOUNT_FRAME
+        let frame = mode == .main ? captureAccountFrame(claude, codex, now: Date()) : nil
+        REMOTE_ACCOUNT_FRAME = frame
+        defer { REMOTE_ACCOUNT_FRAME = previousFrame }
         if mode == .settings || mode == .sounds {
             hits = drawSettings(ctx, size: bounds.size, about: about, soundsPage: mode == .sounds, copied: copiedCmd)
         } else if mode == .whatsnew {
@@ -6175,7 +6296,7 @@ final class LimitsPanelView: NSView {
             let title = hit.id == "refresh" ? tr("Обновить сейчас", "Refresh now")
                 : (hit.id.hasPrefix("retryquota:") ? tr("Повторить", "Retry") : tr("Восстановить доступ", "Restore access")) + " · " + name
             let pollInterval = hit.id.hasPrefix("iv") ? Double(hit.id.dropFirst(2)) : nil
-            let accessibleTitle = pollInterval.map { pollAccessibleTitle($0) }
+            let accessibleTitle = hit.id.hasPrefix("syncsettings:") ? tr("Настройки GitHub", "GitHub settings") : pollInterval.map { pollAccessibleTitle($0) }
                 ?? (hit.id == "allowquota:claude" ? tr("Разрешить доступ к Связке ключей · Claude Code", "Allow Keychain access · Claude Code")
                 : hit.id == "cancelquota:claude" ? tr("Отменить запрос разрешения · Claude Code", "Cancel permission request · Claude Code") : title
                 )
@@ -6184,7 +6305,7 @@ final class LimitsPanelView: NSView {
             button.toolTip = hit.id == "refresh" ? accessibleTitle : accessibleTitle + "\n" + (hit.tooltip ?? "")
             if let sec = pollInterval {
                 button.toolTip = hit.tooltip
-                button.setAccessibilityValue((pollSelected(sec, manual: interval, autoIntervals: autoIntervals)
+                button.setAccessibilityValue((pollSelected(sec, manual: interval, autoIntervals: autoIntervals, views: displayAccountViews(claude, codex, includeHidden: true))
                     ? tr("Выбрано · ", "Selected · ") : "") + (hit.tooltip ?? accessibleTitle))
             }
             button.focusRingType = .default; button.setAccessibilityRole(.button)
@@ -6207,7 +6328,9 @@ final class LimitsPanelView: NSView {
                 let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
                 let element = NSAccessibilityElement()
                 element.setAccessibilityRole(.staticText); element.setAccessibilityFrame(screenRect)
-                element.setAccessibilityLabel(hit.id.hasSuffix("claude") ? "Claude Code" : "Codex")
+                let product = hit.id.hasSuffix("claude") ? "claude" : "codex"
+                let account = displayedCardViews(claude, codex).first { $0.product == product }
+                element.setAccessibilityLabel(account?.caption ?? (product == "claude" ? "Claude Code" : "Codex"))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityValue(hit.tooltip ?? "")
                 accessibleChildren.append(element)
@@ -6215,21 +6338,26 @@ final class LimitsPanelView: NSView {
             setAccessibilityChildren(accessibleChildren)
         } else { setAccessibilityChildren(nil) }
         removeAllToolTips()
-        for h in hits where h.id.hasPrefix("quotafeedback:") {
+        for h in hits where h.tooltip != nil && (h.id.hasPrefix("quotafeedback:") || h.id.hasPrefix("open:") || h.id == "claudefix") {
             let rect = h.rect.intersection(bounds)
             if !rect.isNull && !rect.isEmpty { addToolTip(rect, owner: self, userData: nil) }
         }
+        // The same immutable views/clock were consumed by cards, footers and AX.
+        // An ordinary show()/needsDisplay redraw therefore logs time-only state changes too.
+        if let frame = frame { onAccountsDisplayed?(frame.displayedViews, frame.now) }
     }
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
                        userData data: UnsafeMutableRawPointer?) -> String {
         if let feedback = hits.first(where: { $0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }) { return feedback.tooltip ?? "" }
+        if let hit = hits.first(where: { $0.tooltip != nil && $0.rect.contains(point) }) { return hit.tooltip ?? "" }
         return onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
     }
 
     @objc private func quotaButtonClicked(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         if id == "refresh" { onRefresh?() }
+        else if id.hasPrefix("syncsettings:") { setMode(.settings) }
         else if id == "allowquota:claude" { onClaudePermission?(true) }
         else if id == "cancelquota:claude" { onClaudePermission?(false) }
         else if id.hasPrefix("retryquota:") { onRefreshProduct?(String(id.dropFirst(11))) }
@@ -6280,7 +6408,7 @@ final class LimitsPanelView: NSView {
             case "allowquota:claude": onClaudePermission?(true)
             case "cancelquota:claude": onClaudePermission?(false)
             case "quit": onQuit?()
-            case "settings": setMode(.settings)
+            case "settings", "syncsettings:claude", "syncsettings:codex": setMode(.settings)
             case "back": setMode(.main)
             case "backsettings": setMode(.settings)
             case "whatsnew": onWhatsNew?()
@@ -6687,6 +6815,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         publishAutoIntervals()
         panelCtrl.onInterval = { [weak self] sec in self?.setInterval(sec) }
         panelCtrl.onRefresh = { [weak self] in self?.doRefresh(live: true) }
+        if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
+            panelCtrl.view.onAccountsDisplayed = { views, now in
+                appendPollLog(readerCardStateEvents(views, now: now))
+            }
+        }
         panelCtrl.view.onRefreshProduct = { [weak self] product in self?.doRefresh(live: true, only: product) }
         panelCtrl.view.onClaudePermission = { [weak self] allow in
             guard let self = self else { return }
@@ -6770,7 +6903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         GitHubSync.shared.onChange = { [weak self] in
             GitHubSync.shared.recheckKeychainRetry()
             // Main and Settings heights both depend on sync state (orange line, status rows).
-            guard let v = self?.panelCtrl.view else { return }
+            guard let self = self, let v = self.panelCtrl?.view else { return }
             if v.mode == .settings || v.mode == .main { v.resizeToContent() } else { v.needsDisplay = true }
         }
         GitHubSync.shared.load()
@@ -7748,6 +7881,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     let remoteLimitsC2Failures = runRemoteLimitsC2SelfTests(defaults: defaults, select: select)
     select(false, true)   // the state the checks above left (single-subscription panel)
     check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-09)")
+    check(runRemoteLimitsC3SelfTests() == 0, "C3 remote-limits model selftests (part A)")
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,
