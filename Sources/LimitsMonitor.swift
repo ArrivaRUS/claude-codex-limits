@@ -2599,19 +2599,19 @@ final class GitHubSync {
     }
 
     private func recordError(_ message: String) {
-        let now = Date()
+        let now = clock()
         defaults.set(message, forKey: "syncLastError"); defaults.set(now, forKey: "syncLastErrorAt")
         let pushed = defaults.object(forKey: "syncPushedAt") as? Date
         setUI { $0.lastError = message; $0.lastErrorAt = now; $0.lastUploadAt = pushed }
     }
 
     private func keychainTimedOut() {
-        keychainBackoffUntil = Date().addingTimeInterval(SYNC_KEYCHAIN_BACKOFF)
+        keychainBackoffUntil = clock().addingTimeInterval(SYNC_KEYCHAIN_BACKOFF)
         recordError(syncKeychainTimeout())
     }
 
     private func readKeychain(userInitiated: Bool = false) -> SyncKeychainRead {
-        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        guard userInitiated || clock() >= keychainBackoffUntil else { return .timedOut }
         let result = keychain.read()
         if userInitiated {
             switch result {
@@ -2624,7 +2624,7 @@ final class GitHubSync {
     }
 
     private func writeKeychain(_ token: String, userInitiated: Bool = false) -> SyncKeychainStatus {
-        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        guard userInitiated || clock() >= keychainBackoffUntil else { return .timedOut }
         let result = keychain.write(token)
         if userInitiated && result == .success { keychainBackoffUntil = .distantPast }
         if result == .timedOut { keychainTimedOut() }
@@ -2632,7 +2632,7 @@ final class GitHubSync {
     }
 
     private func deleteKeychain(userInitiated: Bool = false) -> SyncKeychainStatus {
-        guard userInitiated || Date() >= keychainBackoffUntil else { return .timedOut }
+        guard userInitiated || clock() >= keychainBackoffUntil else { return .timedOut }
         let result = keychain.delete()
         if userInitiated && (result == .success || result == .missing) { keychainBackoffUntil = .distantPast }
         if result == .timedOut { keychainTimedOut() }
@@ -2729,7 +2729,7 @@ final class GitHubSync {
 
     private func applyBackoff(_ status: Int, headers: [String: String]) {
         guard GitHubSync.rateLimited(status, headers: headers) else { return }
-        let h = GitHubSync.normalizedHeaders(headers), now = Date()
+        let h = GitHubSync.normalizedHeaders(headers), now = clock()
         var delay: TimeInterval = 15 * 60
         if let raw = h["retry-after"], let seconds = Double(raw), seconds.isFinite, seconds >= 0 {
             delay = seconds
@@ -2777,6 +2777,22 @@ final class GitHubSync {
     // MARK: push + pull
 
     func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
+
+    /// Manual reader path: shares serialization, auth fencing and backoff with sync.
+    /// It never scans local usage, creates a gist or publishes a machine file.
+    func readNow(completion: @escaping (Bool) -> Void) {
+        q.async {
+            self.syncBody(force: false, allowRetry: false, readOnly: true) { success in
+                DispatchQueue.main.async { completion(success) }
+            }
+        }
+    }
+    /// Offline test seam; injected dependencies only, with no concurrent q work.
+    func readSynchronously() -> Bool {
+        var success = false
+        syncBody(force: false, allowRetry: false, readOnly: true) { success = $0 }
+        return success
+    }
 
     /// Synchronous test seam; use injected dependencies and do not overlap with q work.
     func syncSynchronously(force: Bool = false) { syncBody(force: force, allowRetry: false) }
@@ -2833,18 +2849,21 @@ final class GitHubSync {
         return (best?.id, false)
     }
 
-    private func syncBody(force: Bool, allowRetry: Bool = true) {
+    private func syncBody(force: Bool, allowRetry: Bool = true, readOnly: Bool = false,
+                          completion: ((Bool) -> Void)? = nil) {
+        var readSucceeded = false
+        defer { completion?(readSucceeded) }
         let ownedToken: String?
         if let owner = authOwner {
             ownedToken = projectAuth(owner.ensureAccess(reason: "sync"))
-            guard ownedToken != nil, ui.phase != .awaitingCode, Date() >= backoffUntil else { return }
+            guard ownedToken != nil, ui.phase != .awaitingCode, clock() >= backoffUntil else { return }
         } else {
             ownedToken = nil
-            guard ui.phase == .on, Date() >= backoffUntil, Date() >= keychainBackoffUntil else { return }
+            guard ui.phase == .on, clock() >= backoffUntil, clock() >= keychainBackoffUntil else { return }
         }
         let cycleAccess = capturedAccess
         let cycleBinding = authOwner?.snapshot()
-        retryWork?.cancel(); retryWork = nil
+        if !readOnly { retryWork?.cancel(); retryWork = nil }
         transientFailure = false
         defer {
             if allowRetry && transientFailure {
@@ -2853,7 +2872,7 @@ final class GitHubSync {
                 q.asyncAfter(deadline: .now() + 60, execute: retry)
             }
         }
-        let d = defaults, attempt = Date()
+        let d = defaults, attempt = clock()
         d.set(attempt, forKey: "syncLastAttemptAt")
         setUI { $0.lastAttemptAt = attempt; if $0.firstAttemptAt == nil { $0.firstAttemptAt = attempt } }
         let credential: SyncKeychainRead = ownedToken.map { .token($0) } ?? readKeychain()
@@ -2861,9 +2880,9 @@ final class GitHubSync {
             if case .missing = credential, d.string(forKey: "syncLogin") != nil { setUI { $0.phase = .revoked } }
             recordError(syncKeychainReadError(credential)); return
         }
-        let snap = snapshotJSON()
+        let snap = readOnly ? (days: [String: Any](), hash: "") : snapshotJSON()
         let myFile = "machine-\(machineId).json"
-        if machineIdNeedsSave {
+        if !readOnly && machineIdNeedsSave {
             do {
                 try FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
                 try (machineId + "\n").write(toFile: MACHINE_ID_PATH, atomically: true, encoding: .utf8)
@@ -2878,10 +2897,10 @@ final class GitHubSync {
         // written into the gist we moved to.
         if let cur = gistId {
             let last = d.object(forKey: "syncDiscoveredAt") as? Date ?? .distantPast
-            if Date().timeIntervalSince(last) > 86400 {
+            if clock().timeIntervalSince(last) > 86400 {
                 let f = findGist(token)
                 if f.failed { return }
-                d.set(Date(), forKey: "syncDiscoveredAt")
+                d.set(clock(), forKey: "syncDiscoveredAt")
                 if let id = f.id, id != cur {
                     gistId = id
                     d.set(id, forKey: "syncGistId")
@@ -2895,7 +2914,8 @@ final class GitHubSync {
             if f.failed { return }
             if let id = f.id { gistId = id }
             else {
-                let manifest = "{\"about\":\"https://github.com/ArrivaRUS/claude-codex-limits/blob/main/docs/sync-protocol.md\",\"created\":\"\(ISO8601DateFormatter().string(from: Date()))\",\"schema\":1}"
+                guard !readOnly else { return }
+                let manifest = "{\"about\":\"https://github.com/ArrivaRUS/claude-codex-limits/blob/main/docs/sync-protocol.md\",\"created\":\"\(ISO8601DateFormatter().string(from: clock()))\",\"schema\":1}"
                 let c = gh("/gists", "POST", token: token, body: [
                     "description": "Claude Codex Limits — usage sync (do not edit)", "public": false,
                     "files": [SYNC_MANIFEST: ["content": manifest], myFile: ["content": machineFile(snap.days)]]])
@@ -2904,7 +2924,7 @@ final class GitHubSync {
                     recordError(tr("Некорректный ответ POST /gists", "Invalid POST /gists response")); return
                 }
                 gistId = id
-                d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
+                d.set(snap.hash, forKey: "syncPushHash"); d.set(clock(), forKey: "syncPushedAt")
                 // Did another machine create one at the same moment? Converge on the earliest.
                 let again = findGist(token)
                 if again.failed { return }
@@ -2913,7 +2933,7 @@ final class GitHubSync {
                     d.removeObject(forKey: "syncPushHash")
                 }
             }
-            d.set(Date(), forKey: "syncDiscoveredAt")
+            d.set(clock(), forKey: "syncDiscoveredAt")
             d.set(gistId, forKey: "syncGistId")
         }
         guard let gid = gistId else { return }
@@ -2936,13 +2956,13 @@ final class GitHubSync {
             recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
         }
 
-        if force || d.string(forKey: "syncPushHash") != snap.hash {
+        if !readOnly && (force || d.string(forKey: "syncPushHash") != snap.hash) {
             let p = gh("/gists/\(gid)", "PATCH", token: token, body: ["files": [myFile: ["content": machineFile(snap.days)]]])
             if p.status == 404 {
                 for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
             }
             if handle(p.status, headers: p.headers, request: "PATCH /gists/{id}", token: token) { return }
-            d.set(snap.hash, forKey: "syncPushHash"); d.set(Date(), forKey: "syncPushedAt")
+            d.set(snap.hash, forKey: "syncPushHash"); d.set(clock(), forKey: "syncPushedAt")
         }
 
         var contents: [String: String] = [:]
@@ -3047,6 +3067,7 @@ final class GitHubSync {
         // The auth owner's publication fence has been released. A reader callback may
         // inspect UI/auth state without recursively acquiring that fence.
         onRead?(cache, readAt)
+        readSucceeded = readWarning == nil
 
     }
 
@@ -3490,12 +3511,13 @@ func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString
     if d.auth == .loggedOut { return nil }                       // "sign in" → faint icon, no number
     let base = dark ? NSColor.white : NSColor.black
     // Fade each invalid/reset window independently; keep a valid weekly reading visible.
-    let stale = isStale(d)
+    let now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
+    let stale = isStale(d, now)
     let dim = cg(base.withAlphaComponent(stale ? 0.4 : 0.95))
     let faint = cg(base.withAlphaComponent(0.4))
-    let sessionStale = metricIsStale(d, metric: "session")
-    let weeklyStale = metricIsStale(d, metric: "weekly")
-    let modelStale = metricIsStale(d, metric: "model")
+    let sessionStale = metricIsStale(d, metric: "session", now: now)
+    let weeklyStale = metricIsStale(d, metric: "weekly", now: now)
+    let modelStale = metricIsStale(d, metric: "model", now: now)
     var parts: [(value: Double, color: CGColor)] = []
     for metric in trayMetrics() {
         switch metric {
@@ -3630,10 +3652,10 @@ func menuIcon(_ name: String, _ pt: CGFloat) -> NSImage? {
 
 // MARK: - Formatting
 
-func fmtReset(_ d: Date?) -> String {
+func fmtReset(_ d: Date?, now: Date = Date()) -> String {
     guard let d = d else { return "—" }
     let df = DateFormatter(); df.locale = Locale(identifier: appLang() == "en" ? "en_US" : "ru_RU")
-    if Calendar.current.isDateInToday(d) { df.setLocalizedDateFormatFromTemplate("HH:mm") }
+    if Calendar.current.isDate(d, inSameDayAs: now) { df.setLocalizedDateFormatFromTemplate("HH:mm") }
     else { df.setLocalizedDateFormatFromTemplate("d MMM HH:mm") }
     return df.string(from: d)
 }
@@ -3666,9 +3688,9 @@ func metricIsStale(_ d: LimitData, metric: String, now: Date = Date()) -> Bool {
 func isStale(_ d: LimitData, _ now: Date = Date()) -> Bool {
     d.present && ["session", "weekly", "model"].allSatisfy { metricIsStale(d, metric: $0, now: now) }
 }
-func limitResetText(_ reset: Date?) -> String {
-    if let reset = reset, reset <= Date() { return tr("окно сброшено", "window reset") }
-    return fmtReset(reset)
+func limitResetText(_ reset: Date?, now: Date = Date()) -> String {
+    if let reset = reset, reset <= now { return tr("окно сброшено", "window reset") }
+    return fmtReset(reset, now: now)
 }
 
 func pctText(_ v: Double?) -> String {
@@ -4212,6 +4234,7 @@ let QUOTA_CARD_FOOTER_H: CGFloat = 32
 // existing product slot. Preview seams never initialize live sync or credentials.
 var REMOTE_ACCOUNT_VIEWS_PREVIEW: [AccountView]? = nil
 var REMOTE_MANUAL_PHASE: RemoteManualPhase = .idle
+private var remoteManualRefresh: RemoteManualRefreshController?
 // Scoped to one actual NSView.draw on the main thread. Pure bitmap renderers
 // never install a frame or emit events; defer below restores any outer scene.
 private var REMOTE_ACCOUNT_FRAME: RemoteAccountFrame? = nil
@@ -4250,11 +4273,14 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> 
         sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
     }
     return remoteCardPresentation(view, sync: sync, language: appLang(), narrow: narrow, now: at,
-                                  timeZone: .current, manual: REMOTE_MANUAL_PHASE)
+                                  timeZone: .current, manual: remoteManualRefresh?.phase(now: at) ?? REMOTE_MANUAL_PHASE)
 }
 func remoteToneColor(_ tone: String) -> NSColor {
     tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
         : (tone == "ADV_LINK" ? ADV_LINK : gray(1, 0.5))
+}
+func remoteRefreshAvailable(_ claude: LimitData, _ codex: LimitData) -> Bool {
+    displayedCardViews(claude, codex).contains { !$0.isLocal || $0.data.source != nil }
 }
 func hasQuotaCards(_ claude: LimitData, _ codex: LimitData) -> Bool {
     !displayedCardViews(claude, codex).isEmpty
@@ -4339,13 +4365,16 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
     }
     let model = view.map { cardPresentation($0, narrow: !advanced && card.width < 300, now: Date(timeIntervalSince1970: now)) }
     var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
-    if let source = data.source {
+    if data.source != nil, let view = view {
         func fits(_ text: String) -> Bool { lineWidth(CTLineCreateWithAttributedString(ctAttr(text, ctFont(10, .regular), cg(gray(1, 0.5))))) <= footer.width }
+        let at = Date(timeIntervalSince1970: now)
         if !fits(sourceLine) {
-            sourceLine = sourceLine.replacingOccurrences(of: tr("Данные с ", "Data from "), with: tr("С ", "From "))
+            sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
+                                             now: at, timeZone: .current, compact: true)
         }
-        if !fits(sourceLine), source.machineName.count > 8 {
-            sourceLine = sourceLine.replacingOccurrences(of: source.machineName, with: String(source.machineName.prefix(8)) + "…")
+        if !fits(sourceLine) {
+            sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
+                                             now: at, timeZone: .current, compact: true, machineLimit: 8)
         }
     }
     line(sourceLine, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
@@ -4486,7 +4515,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
     let refreshRect = rectTL(W - pad - 24, pad - 2, 24, 24)
-    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), monitoringPaused() ? gray(1, 0.22) : textMid, weight: .semibold)
+    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), (monitoringPaused() && !remoteRefreshAvailable(claude, codex)) ? gray(1, 0.22) : textMid, weight: .semibold)
     hits.append(Hit(id: "refresh", rect: refreshRect))
     let gearRect = rectTL(W - pad - 24 - 26, pad - 2, 24, 24)
     drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
@@ -4506,6 +4535,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         let r = rectTL(x, cardsTop, w, cardH)
         let view = cardViews.first { $0.product == product }
         let remote = view?.isLocal == false
+        let now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
         if !d.present {
             roundFill(r, 14, gray(1, 0.02))
             ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
@@ -4572,9 +4602,9 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         let cx = x + w / 2, cyTop = cardsTop + 84
         // A frozen snapshot shouldn't masquerade as live: grey the ring + numbers and, below,
         // swap the reset times (which would otherwise show an impossible past moment) for a note.
-        let stale = isStale(d)
-        let sCol = metricIsStale(d, metric: "session") ? gray(1, 0.3) : metricColor(blue, d.session)
-        let wCol = metricIsStale(d, metric: "weekly") ? gray(1, 0.3) : metricColor(purple, d.weekly)
+        let stale = isStale(d, now)
+        let sCol = metricIsStale(d, metric: "session", now: now) ? gray(1, 0.3) : metricColor(blue, d.session)
+        let wCol = metricIsStale(d, metric: "weekly", now: now) ? gray(1, 0.3) : metricColor(purple, d.weekly)
         gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
         gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
         let sTxt = d.session == nil ? "—" : numText(d.session) + "%"
@@ -4601,7 +4631,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             }
             text(attr(label, 10, .semibold, color), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
-        let scopedCol = metricIsStale(d, metric: "model") ? gray(1, 0.3) : (d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR)
+        let scopedCol = metricIsStale(d, metric: "model", now: now) ? gray(1, 0.3) : (d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR)
         if !stale, let rc = d.resetCredits, rc >= 1 {
             pill("arrow.clockwise", "\(rc)", amber)
         } else if !stale, let s = d.scoped {
@@ -4624,16 +4654,16 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
             text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
-            text(attr(limitResetText(d.sessionReset), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
+            text(attr(limitResetText(d.sessionReset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
             dot(lx, centerTopY: l2 + 5, wCol)
             text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
-            text(attr(limitResetText(d.weeklyReset), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+            text(attr(limitResetText(d.weeklyReset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
             // Per-model weekly limit — named by the backend, so a future model needs no code change.
             if showsScopedRow(d, remote: remote), let s = d.scoped {
                 let l3 = l2 + SCOPED_ROW_H
                 dot(lx, centerTopY: l3 + 5, scopedCol)
                 text(attr(s.name, 10.5, .regular, textMid), x: lx + 11, topY: l3)
-                text(attr(limitResetText(s.reset), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
+                text(attr(limitResetText(s.reset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
             }
         }
     }
@@ -4800,12 +4830,12 @@ func withPollStatus(_ data: LimitData, state: AutoPollState?, next: Date?) -> Li
     data.nextPollAt = data.pollFailed ? next : nil
     return data
 }
-func limitSnapshotNotice(_ d: LimitData) -> String {
+func limitSnapshotNotice(_ d: LimitData, now: Date = Date()) -> String {
     if d.source != nil {
-        return remotePaceTimeValid(d, now: Date()) ? "" : tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
+        return remotePaceTimeValid(d, now: now) ? "" : tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
     }
     guard d.auth == .ok, let at = d.asOf, at.timeIntervalSince1970.isFinite,
-          at <= Date(), [(d.session, d.sessionReset, 5.0), (d.weekly, d.weeklyReset, 168.0),
+          at <= now, [(d.session, d.sessionReset, 5.0), (d.weekly, d.weeklyReset, 168.0),
                         (d.scoped?.percent, d.scoped?.reset, 168.0)].contains(where: {
               snapshotWindowPace(used: $0.0, reset: $0.1, windowH: $0.2, asOf: at) != nil
           })
@@ -4823,7 +4853,7 @@ struct AdvCard {
     let paused: Bool
     let rows: [AdvRow]
     var account: AccountView? = nil
-    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data).isEmpty ? 0 : 1) + ((account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: data.auth)) ? 1 : 0)) }
+    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data, now: REMOTE_ACCOUNT_FRAME?.now ?? Date()).isEmpty ? 0 : 1) + ((account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: data.auth)) ? 1 : 0)) }
     var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight + QUOTA_CARD_FOOTER_H }
 }
 
@@ -4851,8 +4881,14 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
     return displayedCardViews(claude, codex).map { card($0) }
 }
 
+private func renderedSyncWarning() -> String? {
+    // A captured nil is authoritative too: do not re-read state mid-frame.
+    if let frame = REMOTE_ACCOUNT_FRAME { return frame.sync.warning }
+    return syncWarning()
+}
+
 func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
-    let warn: CGFloat = syncWarning() != nil ? ADV_NOTICE : 0      // orange sync line under the header
+    let warn: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0      // orange sync line under the header
     guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
     let present = cards.map { $0.product }
     let p = advHistProduct(present)
@@ -4883,9 +4919,9 @@ func mainPanelHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 }
 
 // Spec §6.4 — reset moment for the metrics line: "11:50" today, else "пн, 03:00".
-func advResetShort(_ d: Date) -> String {
+func advResetShort(_ d: Date, now: Date = Date()) -> String {
     let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
-    if Calendar.current.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+    if Calendar.current.isDate(d, inSameDayAs: now) { f.dateFormat = "HH:mm"; return f.string(from: d) }
     f.dateFormat = "EEE, HH:mm"
     let s = f.string(from: d).replacingOccurrences(of: ".", with: "")
     return appLang() == "ru" ? s.lowercased() : s
@@ -5030,7 +5066,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     }
     let gearRect = rectTL(294, 21, 24, 24), refreshRect = rectTL(324, 21, 24, 24)
     drawSF(ctx, "gearshape", in: gearRect.insetBy(dx: 3, dy: 3), textMid)
-    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), monitoringPaused() ? gray(1, 0.22) : textMid, weight: .semibold)
+    drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), (monitoringPaused() && !remoteRefreshAvailable(claude, codex)) ? gray(1, 0.22) : textMid, weight: .semibold)
     hits.append(Hit(id: "settings", rect: gearRect))
     hits.append(Hit(id: "refresh", rect: refreshRect))
     if about.availVersion != nil || about.phase != .idle {
@@ -5115,7 +5151,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             m.append(attr(tr("план ", "plan ") + fmtPct(p.planPct) + " · ", 10.5, .regular, textMid))
             m.append(attr(fmtSignedPts(p.deltaPts), 10.5, .regular, p.deltaPts >= 0 ? ADV_WARN : textMid))
             let rate = row.kind == .tooEarly ? "—" : fmtRate(p)
-            m.append(attr(" · " + rate + " · " + tr("сброс ", "reset ") + advResetShort(p.reset), 10.5, .regular, textMid))
+            m.append(attr(" · " + rate + " · " + tr("сброс ", "reset ") + advResetShort(p.reset, now: REMOTE_ACCOUNT_FRAME?.now ?? Date()), 10.5, .regular, textMid))
             textC(m, x: ADV_IX, topY: yr + 46, h: 12)
         }
         if dimmed { ctx.restoreGState() }
@@ -5158,7 +5194,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix || remote ? card : arrow.insetBy(dx: -8, dy: -8), tooltip: c.account?.caption))
         var ry = y + 29
         do {
-            let notice = limitSnapshotNotice(c.data)
+            let notice = limitSnapshotNotice(c.data, now: REMOTE_ACCOUNT_FRAME?.now ?? Date())
             if !notice.isEmpty { textC(attr(notice, 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14) }
             if canFix {
                 let code = ctAttr("claude → /login", ctMono(10, .regular), cg(gray(1, 0.8)))
@@ -5203,7 +5239,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     let histCap = tr("История и деньги", "History & money") + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
     textC(caps(histCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
     // Stops above the orange sync line when there is one (hit-test takes the first match).
-    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, syncWarning() != nil ? hy + 18 - y : 35)))
+    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, renderedSyncWarning() != nil ? hy + 18 - y : 35)))
     do {   // Claude | Codex segmented, right-aligned
         let items = present.map { ($0, $0 == "claude" ? "Claude" : "Codex") }
         let widths = items.map { width(attr($0.1, 10.5, .semibold, textHi)) + 16 }
@@ -5223,7 +5259,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     // Sync stalled / revoked: one orange line under the header, in both collapsed and expanded
     // states — the totals below silently miss the other computers otherwise. Tap → Settings.
     var warnH: CGFloat = 0
-    if let w = syncWarning() {
+    if let w = renderedSyncWarning() {
         let a = fitAttr(w, maxW: ADV_IW) { attr($0, 10.5, .regular, ADV_WARN) }
         textC(a, x: ADV_IX, topY: hy + 18 + 1, h: ADV_NOTICE - 2)
         hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18, ADV_IW, ADV_NOTICE)))
@@ -6309,8 +6345,8 @@ final class LimitsPanelView: NSView {
                     ? tr("Выбрано · ", "Selected · ") : "") + (hit.tooltip ?? accessibleTitle))
             }
             button.focusRingType = .default; button.setAccessibilityRole(.button)
-            button.isEnabled = hit.id != "refresh" || !monitoringPaused()
-            if hit.id == "refresh" && monitoringPaused() {
+            button.isEnabled = hit.id != "refresh" || !monitoringPaused() || remoteRefreshAvailable(claude, codex)
+            if hit.id == "refresh" && !button.isEnabled {
                 button.toolTip = accessibleTitle + "\n" + tr("Выберите подписки в настройках", "Choose subscriptions in Settings")
             }
             if hit.id == "refresh" { button.keyEquivalent = "r"; button.keyEquivalentModifierMask = .command }
@@ -6402,7 +6438,7 @@ final class LimitsPanelView: NSView {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if let h = panelHit(at: p, hits: hits) {
-            if h.id == "refresh" && monitoringPaused() { return }
+            if h.id == "refresh" && monitoringPaused() && !remoteRefreshAvailable(claude, codex) { return }
             switch h.id {
             case "refresh": onRefresh?()
             case "allowquota:claude": onClaudePermission?(true)
@@ -6893,6 +6929,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // a fresh reading supplies a matching identity; today's CLI login may differ.
             render(c, x)
         }
+        remoteManualRefresh = RemoteManualRefreshController(clock: { Date() }, read: { completion in
+            GitHubSync.shared.readNow(completion: completion)
+        }, onChange: { [weak self] in self?.panelCtrl.view.needsDisplay = true })
         GitHubSync.shared.onRead = { cache, at in
             let snapshot = readerLocalSnapshot.snapshot()
             let ui = GitHubSync.shared.ui
@@ -7062,7 +7101,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard !scheduled, only == "claude", last?.0.credentialIssue == .readInteractionRequired else { return }
         }
         let now = Date().timeIntervalSince1970
-        for product in ["claude", "codex"] where only == nil || only == product {
+        var manualProducts = Set(["claude", "codex"])
+        if !scheduled && !permissionRequested {
+            let local = last ?? (LimitData(present: false), LimitData(present: false))
+            let views = displayedCardViews(local.0, local.1, now: Date(timeIntervalSince1970: now))
+            manualProducts = remoteManualProviderProducts(views: views, localIds: readerLocalSnapshot.snapshot().ids,
+                enabled: Set(["claude", "codex"].filter { productEnabled($0) }))
+            if only == nil || views.contains(where: { $0.product == only && !$0.isLocal }) {
+                remoteManualRefresh?.request()
+            }
+        }
+        for product in ["claude", "codex"] where (only == nil || only == product) && (scheduled || manualProducts.contains(product)) {
             var refresh = quotaState(product)
             let admission = refresh.admit(scheduled ? .scheduled : .manual, now: now, scheduledAt: scheduledAt(product))
             quotaStates[product] = refresh

@@ -586,8 +586,11 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 groups[label, default: []].append(a)
             }
         }
+        // A logged-out fetch is a present UI placeholder, not a local account.
+        // Keep the login prompt only when there is no remote account to display.
+        let hasLocal = own.present && (own.auth != .loggedOut || localId != nil || groups.isEmpty)
         var labels = Set(groups.keys)
-        if own.present, let label = localLabel, !hidden.contains(label) { labels.insert(label) }
+        if hasLocal, let label = localLabel, !hidden.contains(label) { labels.insert(label) }
 
         func make(_ label: String?, accounts: [RemoteAccount], isLocal: Bool) -> AccountView {
             let ordered = accounts.sorted { $0.machineId < $1.machineId }
@@ -648,10 +651,10 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 data: values, isLocal: isLocal, tier: tier,
                 usageDays: usage, machines: machines, state: state)
         }
-        if own.present && (localLabel == nil || !hidden.contains(localLabel!)) {
+        if hasLocal && (localLabel == nil || !hidden.contains(localLabel!)) {
             views.append(make(localLabel, accounts: localLabel.flatMap { groups[$0] } ?? [], isLocal: true))
         }
-        for label in labels.sorted() where !(own.present && label == localLabel) {
+        for label in labels.sorted() where !(hasLocal && label == localLabel) {
             views.append(make(label, accounts: groups[label] ?? [], isLocal: false))
         }
     }
@@ -804,6 +807,55 @@ func readerDidSync(_ cache: SyncRemoteCache, at now: Date, local: (LimitData, Li
 enum RemoteManualPhase {
     case idle, reading, checked(Date), cooldown(Int), failed, pollAllowed(Date)
 }
+// The caller owns this controller on one serial executor (main in production).
+// Both the clock and the read are injected; it cannot call a quota provider.
+final class RemoteManualRefreshController {
+    private let clock: () -> Date
+    private let read: (@escaping (Bool) -> Void) -> Void
+    private let onChange: () -> Void
+    private var flight: UUID?
+    private var startedAt: Date?
+    private var result: RemoteManualPhase = .idle
+    private var showCooldown = false
+
+    init(clock: @escaping () -> Date, read: @escaping (@escaping (Bool) -> Void) -> Void,
+         onChange: @escaping () -> Void = {}) {
+        self.clock = clock; self.read = read; self.onChange = onChange
+    }
+    func phase(now: Date) -> RemoteManualPhase {
+        if showCooldown, let at = startedAt {
+            let remaining = 30 - now.timeIntervalSince(at)
+            if remaining > 0 { return .cooldown(Int(ceil(min(30, remaining)))) }
+        }
+        if flight != nil { return .reading }
+        if case .checked(let at) = result, !(0..<60).contains(now.timeIntervalSince(at)) { return .idle }
+        return result
+    }
+    @discardableResult func request() -> Bool {
+        let now = clock()
+        if let at = startedAt, now.timeIntervalSince(at) < 30 {
+            showCooldown = true; onChange(); return false
+        }
+        guard flight == nil else { onChange(); return false }
+        let id = UUID()
+        flight = id; startedAt = now; showCooldown = false; result = .idle
+        onChange()
+        read { [weak self] success in
+            guard let self = self, self.flight == id else { return }
+            self.flight = nil; self.showCooldown = false
+            self.result = success ? .checked(self.clock()) : .failed
+            self.onChange()
+        }
+        return true
+    }
+}
+
+func remoteManualProviderProducts(views: [AccountView], localIds: [String: String], enabled: Set<String>) -> Set<String> {
+    Set(enabled.filter { product in
+        localIds[product] != nil || !views.contains { $0.product == product && !$0.isLocal }
+    })
+}
+
 struct RemoteCardPresentation {
     var simpleTitle: String, advancedTitle: String, planBadge: String, machineSuffix: String
     var sourceLine: String, statusLine: String, statusTone: String, advancedBadge: String
@@ -916,6 +968,19 @@ func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteM
     }
 }
 
+func remoteCardSourceLine(_ view: AccountView, language: String, narrow: Bool, now: Date,
+                          timeZone: TimeZone, compact: Bool = false, machineLimit: Int? = nil) -> String {
+    guard view.state != .signedOut else { return "" }
+    let en = language == "en"
+    var machine = remoteDisplayText(view.data.source?.machineName ?? view.machines.first ?? "?", limit: 16)
+    if let limit = machineLimit, machine.count > limit { machine = String(machine.prefix(limit)) + "…" }
+    guard let at = view.data.asOf else { return (en ? "No data from " : "Нет данных с ") + machine }
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+    let short = compact || (narrow && !calendar.isDate(at, inSameDayAs: now))
+    return (short ? (en ? "From " : "С ") : (en ? "Data from " : "Данные с ")) + machine
+        + (en ? " at " : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone)
+}
+
 func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,
                             now: Date, timeZone: TimeZone, manual: RemoteManualPhase = .idle) -> RemoteCardPresentation {
     let en = language == "en", source = view.data.source, state = view.state
@@ -936,17 +1001,13 @@ func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language
     if view.tier?.contains("20x") == true { plan = "Max 20x" }
     else if view.tier?.contains("5x") == true { plan = "Max 5x" }
     else { plan = remoteDisplayText(view.data.plan?.capitalized ?? "", limit: 48) }
-    var line1 = ""
-    if state != .signedOut {
-        if view.data.asOf == nil { line1 = t("Нет данных с ", "No data from ") + machine }
-        else {
-            var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
-            let previousDay = !calendar.isDate(view.data.asOf!, inSameDayAs: now)
-            line1 = (narrow && previousDay ? t("С ", "From ") : t("Данные с ", "Data from ")) + machine + t(" от ", " at ") + time(view.data.asOf)
-        }
-    }
-    var line2 = remoteCardLine2(view, state: state, phase: manual, lang: language, wide: !narrow, now: now, timeZone: timeZone)
-    let activeManual = remoteManualIsActive(manual, now: now)
+    let line1 = remoteCardSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
+    // Once sync is stalled, its recovery action supersedes a previous failed click.
+    let phase: RemoteManualPhase
+    if case .failed = manual, state == .syncStalled || state == .signedOut { phase = .idle }
+    else { phase = manual }
+    var line2 = remoteCardLine2(view, state: state, phase: phase, lang: language, wide: !narrow, now: now, timeZone: timeZone)
+    let activeManual = remoteManualIsActive(phase, now: now)
     if state == .signedOut, sync.phase == .revoked, !activeManual { line2 = t("Войдите в GitHub заново ›", "Sign in to GitHub again ›") }
     let tone: String, badge: String
     switch state {
@@ -1016,7 +1077,7 @@ func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language
 
 func remoteAutoFooter(views: [AccountView], enabled: Set<String>, intervals: [String: TimeInterval], language: String) -> RemoteAutoFooter {
     let products = ["claude", "codex"].filter { product in
-        enabled.contains(product) && views.contains { $0.product == product && $0.isLocal && $0.data.present && $0.data.auth == .ok }
+        enabled.contains(product) && views.contains { $0.product == product && $0.isLocal && $0.data.present && $0.data.auth != .loggedOut }
     }
     let en = language == "en"
     guard !products.isEmpty else {
@@ -1039,6 +1100,11 @@ func advVerdict(_ row: AdvRow, data: LimitData, now: Date, language: String) -> 
     func t(_ ru: String, _ english: String) -> String { en ? english : ru }
     func moment(_ at: Date) -> String { remoteCardTimestamp(at, now: now, timeZone: .current) }
     guard remotePaceTimeValid(data, now: now) else { return t("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    func percent(_ value: Double) -> String { String(Int(value.rounded())) + "%" }
+    if let at = data.asOf, now.timeIntervalSince(at) > snapshotHorizon(data) {
+        return row.limit?.pace?.projectedPct.map { t("Прогноз на снимке: ", "Snapshot forecast: ") + percent($0) }
+            ?? t("На снимке мало данных для темпа", "Not enough pace data in snapshot")
+    }
     if row.kind == .stale {
         let reset = row.limit?.pace.map { $0.reset <= now } == true
         return data.asOf.map { t(reset ? "Окно сброшено · снимок " : "по данным на ", reset ? "Window reset · snapshot " : "as of ") + moment($0) }
@@ -1047,11 +1113,6 @@ func advVerdict(_ row: AdvRow, data: LimitData, now: Date, language: String) -> 
     guard let p = row.limit?.pace else {
         return row.limit?.used != nil ? t("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
             : t("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
-    }
-    func percent(_ value: Double) -> String { String(Int(value.rounded())) + "%" }
-    if let at = data.asOf, now.timeIntervalSince(at) > snapshotHorizon(data) {
-        return p.projectedPct.map { t("Прогноз на снимке: ", "Snapshot forecast: ") + percent($0) }
-            ?? t("На снимке мало данных для темпа", "Not enough pace data in snapshot")
     }
     switch row.kind {
     case .exhausted: return t("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + moment(p.reset)
