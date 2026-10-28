@@ -1125,9 +1125,10 @@ struct DayUsage { let day: String; let byModel: [(model: String, tokens: Int, us
 /// Per-day rollup for the last `days` calendar days (oldest first), with per-model splits
 /// sorted by cost so the biggest consumer sits at the bottom of a stacked bar.
 func dailyUsage(_ product: String, days: Int, index: UsageIndex, now: Date = Date()) -> [DayUsage] {
-    let today = Calendar.current.startOfDay(for: now)
+    let calendar = remoteRenderCalendar()
+    let today = calendar.startOfDay(for: now)
     return (0..<days).reversed().map { back -> DayUsage in
-        let d = Calendar.current.date(byAdding: .day, value: -back, to: today)!
+        let d = calendar.date(byAdding: .day, value: -back, to: today)!
         let key = dayKey(d)
         let models = index.days[product]?[key] ?? [:]
         var rows: [(String, Int, Double)] = []
@@ -1150,7 +1151,7 @@ struct MoneySummary {
     var ratio: Double { subMonthly > 0 ? usdApi / (subMonthly * Double(days) / 30) : 0 }
 }
 func moneySummary(_ product: String, plan: String?, index: UsageIndex, days: Int = 35) -> MoneySummary {
-    let rows = dailyUsage(product, days: days, index: index)
+    let rows = dailyUsage(product, days: days, index: index, now: remoteRenderNow())
     let active = rows.filter { $0.turns > 0 }
     let total = rows.reduce(0) { $0 + $1.usd }
     let sub = subscriptionUSD(product, plan: plan)
@@ -1201,10 +1202,10 @@ func fmtSpanShort(_ hours: Double) -> String {
 
 /// A moment as people say it: "09:37" today, "сб 15:33" within the week, else "26 сен, 15:33".
 func fmtMoment(_ d: Date) -> String {
-    let cal = Calendar.current
-    let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
-    if cal.isDateInToday(d) { f.dateFormat = "HH:mm"; return f.string(from: d) }
-    if let week = cal.date(byAdding: .day, value: 6, to: Date()), d < week {
+    let cal = remoteRenderCalendar()
+    let f = DateFormatter(); f.timeZone = remoteRenderTimeZone(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
+    if cal.isDate(d, inSameDayAs: remoteRenderNow()) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+    if let week = cal.date(byAdding: .day, value: 6, to: remoteRenderNow()), d < week {
         f.dateFormat = "EEE HH:mm"; return f.string(from: d).replacingOccurrences(of: ".", with: "")
     }
     f.dateFormat = "d MMM, HH:mm"; return f.string(from: d).replacingOccurrences(of: ".", with: "")
@@ -1252,9 +1253,9 @@ struct AdvancedProduct {
 }
 
 func advancedProduct(_ d: LimitData, product: String, index: UsageIndex, acct: String? = nil) -> AdvancedProduct {
-    let days = dailyUsage(product, days: 42, index: index)
+    let days = dailyUsage(product, days: 42, index: index, now: remoteRenderNow())
     let last7 = Array(days.suffix(7))
-    let todayKey = dayKey(Date())
+    let todayKey = dayKey(remoteRenderNow())
     // legend: models ranked by spend across the 7 days; anything under 3% of a day → "other"
     var spend: [String: Double] = [:]
     for dd in last7 { for r in dd.byModel { spend[r.model, default: 0] += r.usd } }
@@ -1269,11 +1270,11 @@ func advancedProduct(_ d: LimitData, product: String, index: UsageIndex, acct: S
             else { other += r.usd }
         }
         if other > 0 { parts.append(("other", other)); hasOther = true }
-        let wd = Calendar.current.component(.weekday, from: dayKeyFormatter.date(from: dd.day) ?? Date())
+        let wd = remoteRenderCalendar().component(.weekday, from: dayKeyFormatter.date(from: dd.day) ?? remoteRenderNow())
         return StackedDay(day: dd.day, weekday: wd == 1 ? 7 : wd - 1, usd: dd.usd, turns: dd.turns,
                           parts: parts.map { (model: $0.0, usd: $0.1) }, isToday: dd.day == todayKey)
     }
-    let first = UsageHistory.shared.samples(product, acct: acct ?? localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
+    let first = REMOTE_RENDER_ISOLATED ? nil : UsageHistory.shared.samples(product, acct: acct ?? localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
     return AdvancedProduct(product: product, limits: pacedLimits(d, product: product, acct: acct), resetCredits: d.resetCredits,
                            days7: stacked, legend: top + (hasOther ? ["other"] : []),
                            calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0,
@@ -1335,8 +1336,9 @@ func windowPace(used: Double?, reset: Date?, windowH: Double, recentRate: Double
 /// The windows the Advanced view lists for a product, in display order.
 struct PacedLimit { let id: String; let name: String; let pace: WindowPace?; let color: Int; var used: Double? = nil }   // color: 0 session, 1 weekly, 2 scoped
 func pacedLimits(_ d: LimitData, product: String, acct: String? = nil, now: Date = Date()) -> [PacedLimit] {
-    let h = UsageHistory.shared
-    let historyKey = acct ?? localHistoryKey(product)
+    let now = REMOTE_ACCOUNT_FRAME?.now ?? now
+    let h: UsageHistory? = REMOTE_RENDER_ISOLATED ? nil : UsageHistory.shared
+    let historyKey = acct ?? (REMOTE_RENDER_ISOLATED ? "l:preview" : localHistoryKey(product))
     let paceNow: Date? = d.source == nil ? nil : now
     var out: [PacedLimit] = []
     // Codex no longer has a 5-hour window (Alex, 2026-09-24): show its session row only if the
@@ -1345,18 +1347,18 @@ func pacedLimits(_ d: LimitData, product: String, acct: String? = nil, now: Date
     if product == "claude" || d.session != nil {
         out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
                               pace: snapshotWindowPace(used: d.session, reset: d.sessionReset, windowH: 5,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.session }, minutes: 60, now: $0) }, now: paceNow), color: 0, used: d.session))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h?.recentRate(product, acct: historyKey, metric: { $0.session }, minutes: 60, now: $0) }, now: paceNow), color: 0, used: d.session))
     }
     // Order (Alex, 2026-09-24): session → per-model week (Fable) → all-models week. The
     // per-model limit is the one that actually bites first, so it sits right under the session.
     if let s = d.scoped {
         out.append(PacedLimit(id: "scoped", name: tr("Неделя · ", "Week · ") + s.name,
                               pace: snapshotWindowPace(used: s.percent, reset: s.reset, windowH: 168,
-                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.scoped }, minutes: 180, now: $0) }, now: paceNow), color: 2, used: s.percent))
+                                               asOf: d.asOf, recentRate: d.asOf.flatMap { h?.recentRate(product, acct: historyKey, metric: { $0.scoped }, minutes: 180, now: $0) }, now: paceNow), color: 2, used: s.percent))
     }
     out.append(PacedLimit(id: "weekly", name: product == "claude" ? tr("Неделя · все модели", "Week · all models") : tr("Неделя", "Week"),
                           pace: snapshotWindowPace(used: d.weekly, reset: d.weeklyReset, windowH: 168,
-                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h.recentRate(product, acct: historyKey, metric: { $0.weekly }, minutes: 180, now: $0) }, now: paceNow), color: 1, used: d.weekly))
+                                           asOf: d.asOf, recentRate: d.asOf.flatMap { h?.recentRate(product, acct: historyKey, metric: { $0.weekly }, minutes: 180, now: $0) }, now: paceNow), color: 1, used: d.weekly))
     return out
 }
 
@@ -3507,17 +3509,17 @@ func ctAttr(_ s: String, _ font: CTFont, _ color: CGColor) -> NSAttributedString
 /// then draws just a faint icon. Only the metrics the user picked are drawn, and only
 /// those this product actually has, so a Codex row never shows a "–" for a per-model
 /// limit that exists on the Claude side alone.
-func groupString(_ d: LimitData, dark: Bool, font: CTFont) -> NSAttributedString? {
-    if d.auth == .loggedOut { return nil }                       // "sign in" → faint icon, no number
+func groupString(_ d: LimitData, dark: Bool, font: CTFont, menuLine: RemoteMenuLine? = nil) -> NSAttributedString? {
+    if d.auth == .loggedOut && d.source == nil && menuLine == nil { return nil }                       // "sign in" → faint icon, no number
     let base = dark ? NSColor.white : NSColor.black
     // Fade each invalid/reset window independently; keep a valid weekly reading visible.
-    let now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
+    let now = remoteRenderNow()
     let stale = isStale(d, now)
-    let dim = cg(base.withAlphaComponent(stale ? 0.4 : 0.95))
+    let dim = cg(base.withAlphaComponent(menuLine?.punctuationAlpha ?? (stale ? 0.4 : 0.95)))
     let faint = cg(base.withAlphaComponent(0.4))
-    let sessionStale = metricIsStale(d, metric: "session", now: now)
-    let weeklyStale = metricIsStale(d, metric: "weekly", now: now)
-    let modelStale = metricIsStale(d, metric: "model", now: now)
+    let sessionStale = menuLine.map { $0.sessionAlpha == 0.4 } ?? metricIsStale(d, metric: "session", now: now)
+    let weeklyStale = menuLine.map { $0.weeklyAlpha == 0.4 } ?? metricIsStale(d, metric: "weekly", now: now)
+    let modelStale = menuLine.map { $0.scopedAlpha == 0.4 } ?? metricIsStale(d, metric: "model", now: now)
     var parts: [(value: Double, color: CGColor)] = []
     for metric in trayMetrics() {
         switch metric {
@@ -3561,6 +3563,15 @@ func loadCGImage(_ path: String) -> CGImage? {
 /// Menu-bar strip for the products that are present — transparent bg, supersample `s` (2 = retina).
 /// Two products → two compact stacked rows; one product → a single larger row; none → a dim "—".
 func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, badge: Bool = false) -> CGImage? {
+    let frame = REMOTE_ACCOUNT_FRAME
+    let presentation = frame.map { remoteMenuPresentation(views: $0.visibleViews, selected: menuAccountSelection(),
+        language: appLang(), dark: dark, now: $0.now, timeZone: remoteRenderTimeZone(), metrics: trayMetrics().map { $0.rawValue }) }
+    let products = frame.map { scene in
+        ["claude", "codex"].compactMap { product -> (LimitData, String)? in
+            guard let view = menuAccount(product, views: scene.visibleViews.filter { !$0.historyKey.hasPrefix("u:") }, selected: menuAccountSelection()) else { return nil }
+            return (view.data, product + "_128.png")
+        }
+    } ?? products
     let H: CGFloat = 22 * s            // full menu-bar height
     let padX: CGFloat = 1 * s
     let fg = cg(dark ? .white : .black)
@@ -3586,7 +3597,7 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, 
 
     // A nil line = "no number for this product" (not signed in / no data) → icon only.
     let lines: [CTLine?] = products.map { p in
-        groupString(p.0, dark: dark, font: font).map { CTLineCreateWithAttributedString($0) }
+        groupString(p.0, dark: dark, font: font, menuLine: p.0.source == nil && p.0.auth == .loggedOut ? nil : presentation?.lines.first { p.1.hasPrefix($0.product) }).map { CTLineCreateWithAttributedString($0) }
     }
     let textW = lines.compactMap { $0.map { ceil(lineWidth($0)) } }.max() ?? 0
     let textX = padX + iconSz + gapIcon
@@ -3607,7 +3618,7 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, 
         let iconY = (y0 + (rowH - iconSz) / 2).rounded()
         if let img = loadCGImage(assetPath(prod.1)) {
             // A "not signed in" product shows a faint icon so the row reads as inactive.
-            let dimIcon = prod.0.auth == .loggedOut
+            let dimIcon = prod.0.auth == .loggedOut && prod.0.source == nil
             if dimIcon { ctx.saveGState(); ctx.setAlpha(0.4) }
             ctx.draw(img, in: CGRect(x: padX, y: iconY, width: iconSz, height: iconSz))
             if dimIcon { ctx.restoreGState() }
@@ -3653,9 +3664,11 @@ func menuIcon(_ name: String, _ pt: CGFloat) -> NSImage? {
 // MARK: - Formatting
 
 func fmtReset(_ d: Date?, now: Date = Date()) -> String {
+    let now = REMOTE_ACCOUNT_FRAME?.now ?? now
     guard let d = d else { return "—" }
     let df = DateFormatter(); df.locale = Locale(identifier: appLang() == "en" ? "en_US" : "ru_RU")
-    if Calendar.current.isDate(d, inSameDayAs: now) { df.setLocalizedDateFormatFromTemplate("HH:mm") }
+    df.timeZone = remoteRenderTimeZone()
+    if remoteRenderCalendar().isDate(d, inSameDayAs: now) { df.setLocalizedDateFormatFromTemplate("HH:mm") }
     else { df.setLocalizedDateFormatFromTemplate("d MMM HH:mm") }
     return df.string(from: d)
 }
@@ -3747,7 +3760,7 @@ func isQuotaAction(_ id: String) -> Bool {
 /// Inline actions precede their enclosing card; passive feedback never consumes a click.
 func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
     hits.first { isQuotaAction($0.id) && $0.rect.contains(point) }
-        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }
+        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("moneyaccount:") && $0.rect.contains(point) }
 }
 
 let PANEL_W: CGFloat = 360
@@ -3856,7 +3869,7 @@ func fitAttr(_ s: String, maxW: CGFloat, _ make: (String) -> NSAttributedString)
 }
 /// The settings block stays hidden until the GitHub transport is built — no dead buttons.
 let SYNC_READY = true
-func syncBlockShown() -> Bool { advancedEnabled() && (SYNC_READY || SYNC_PREVIEW != nil) }
+func syncBlockShown() -> Bool { SYNC_READY || SYNC_PREVIEW != nil }
 func syncUIState() -> SyncUIState { SYNC_PREVIEW ?? GitHubSync.shared.ui }
 /// Other machines currently merged into the history (0 when sync is off).
 func syncOtherMachines() -> Int {
@@ -3889,7 +3902,37 @@ let SET_SYNC_TOP = SET_SYNC_CAP + SET_CAP_H
 func setSyncBlock() -> CGFloat { syncBlockShown() ? SET_CAP_H + setSyncCardH() + SET_GAP : 0 }
 /// Sounds are set once and forgotten, so in Settings they are one summary row «Звуки ›» that
 /// opens their own screen (PanelMode.sounds) — unfolded in place they didn't fit the screen.
-func setSndTop() -> CGFloat { SET_TRAY_TOP + SET_TRAY_H + SET_GAP + setSubBlock() + setSyncBlock() }
+private struct AccountSettingsLayout {
+    var model: RemoteSettingsModel
+    var views: [AccountView]
+    var accountsCap: CGFloat, accountsTop: CGFloat, accountsHeight: CGFloat
+    var trayCap: CGFloat, trayTop: CGFloat, trayHeight: CGFloat
+    var subCap: CGFloat, subTop: CGFloat, subHeight: CGFloat
+    var syncCap: CGFloat, syncTop: CGFloat, soundsTop: CGFloat
+}
+private func accountSettingsLayout() -> AccountSettingsLayout {
+    let snapshot = readerLocalSnapshot.snapshot()
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(snapshot.local.0, snapshot.local.1, now: remoteRenderNow())
+    let views = frame.allViews
+    let model = remoteSettingsModel(views: views, hidden: hiddenAccounts(),
+        polling: ["claude": productEnabled("claude"), "codex": productEnabled("codex")],
+        sync: frame.sync, advanced: advancedEnabled(), language: appLang())
+    var top = SET_PRODUCTS_TOP + SET_PRODUCTS_H + (model.showsV10 ? 20 : 0) + SET_GAP
+    let ac = top, at = ac + SET_CAP_H
+    let ah = CGFloat(model.accounts.count) * SET_ROW_H
+    if model.showsAccounts { top = at + ah + SET_GAP }
+    let tc = top, tt = tc + SET_CAP_H, th = SET_TRAY_H + CGFloat(model.menuProducts.count) * SET_ROW_H
+    top = tt + th + SET_GAP
+    let sc = top, st = sc + SET_CAP_H
+    let sh = CGFloat(views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) }.count) * SET_ROW_H
+    if advancedEnabled(), sh > 0 { top = st + sh + SET_GAP }
+    let yc = top, yt = yc + SET_CAP_H
+    if model.showsGitHub { top = yt + setSyncCardH() + SET_GAP }
+    return AccountSettingsLayout(model: model, views: views, accountsCap: ac, accountsTop: at, accountsHeight: ah,
+        trayCap: tc, trayTop: tt, trayHeight: th, subCap: sc, subTop: st, subHeight: sh,
+        syncCap: yc, syncTop: yt, soundsTop: top)
+}
+func setSndTop() -> CGFloat { accountSettingsLayout().soundsTop }
 /// Top of the «О ПРИЛОЖЕНИИ» caption, right under the sounds row.
 func setAboutCap() -> CGFloat { setSndTop() + SET_ROW_H + SET_GAP }
 /// On the sounds screen the first caption sits where «ОБЩИЕ» sits in Settings.
@@ -3917,7 +3960,7 @@ func setC1Top() -> CGFloat { setCap1() + SET_CAP_H }
 /// Does this card render the per-model row? Only a healthy, live card does — the
 /// sign-in-problem and stale layouts replace the reset rows with a status message.
 func showsScopedRow(_ d: LimitData, remote: Bool = false) -> Bool {
-    d.present && d.scoped != nil && (remote || (d.auth == .ok && !isStale(d)))
+    d.present && d.scoped != nil && (remote || (d.auth == .ok && !isStale(d, remoteRenderNow())))
 }
 /// Extra height the cards (and so the panel) need for the per-model row.
 func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
@@ -3926,8 +3969,8 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 /// Height of the main panel for the given data — grows when a per-model limit is shown.
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     let views = displayedCardViews(claude, codex)
-    let scoped = views.contains { showsScopedRow($0.data, remote: !$0.isLocal) } ? SCOPED_ROW_H : scopedRowExtra(claude, codex)
-    return PANEL_H + scoped + (hasQuotaCards(claude, codex) ? QUOTA_CARD_FOOTER_H : 0)
+    if views.isEmpty { return PANEL_H }
+    return CGFloat(remotePanelLayout(views: views, style: .simple, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
 let APP_VERSION = "3.2.7"
@@ -4230,29 +4273,100 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
 
 // Refresh feedback belongs to the provider card, never to a second panel background.
 let QUOTA_CARD_FOOTER_H: CGFloat = 32
-// Part B can supply all accounts to its layout; part A projects one account per
-// existing product slot. Preview seams never initialize live sync or credentials.
+// All visible accounts feed the card layout. The menu projection stays separate.
+// Preview seams never initialize live sync or credentials.
 var REMOTE_ACCOUNT_VIEWS_PREVIEW: [AccountView]? = nil
 var REMOTE_MANUAL_PHASE: RemoteManualPhase = .idle
 private var remoteManualRefresh: RemoteManualRefreshController?
-// Scoped to one actual NSView.draw on the main thread. Pure bitmap renderers
-// never install a frame or emit events; defer below restores any outer scene.
+// Scoped to one NSView draw or an explicit isolated bitmap scene. Only the
+// live NSView draw emits events; every scene restores its caller with defer.
 private var REMOTE_ACCOUNT_FRAME: RemoteAccountFrame? = nil
+private var REMOTE_RENDER_TIME_ZONE: TimeZone? = nil
+private var REMOTE_RENDER_ISOLATED = false
+func remoteRenderNow() -> Date { REMOTE_ACCOUNT_FRAME?.now ?? Date() }
+func remoteRenderCalendar() -> Calendar {
+    guard let zone = REMOTE_RENDER_TIME_ZONE else { return Calendar.current }
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = zone
+    return calendar
+}
+func remoteRenderTimeZone() -> TimeZone { REMOTE_RENDER_TIME_ZONE ?? .current }
+func withRemoteRenderScene<T>(frame: RemoteAccountFrame, timeZone: TimeZone,
+                              manual: RemoteManualPhase, body: () -> T) -> T {
+    let previousFrame = REMOTE_ACCOUNT_FRAME, previousZone = REMOTE_RENDER_TIME_ZONE
+    let previousManual = REMOTE_MANUAL_PHASE, previousIsolation = REMOTE_RENDER_ISOLATED
+    let previousDayCalendar = dayKeyFormatter.calendar, previousDayZone = dayKeyFormatter.timeZone
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
+    dayKeyFormatter.calendar = calendar; dayKeyFormatter.timeZone = timeZone
+    REMOTE_ACCOUNT_FRAME = frame; REMOTE_RENDER_TIME_ZONE = timeZone
+    REMOTE_MANUAL_PHASE = manual; REMOTE_RENDER_ISOLATED = true
+    defer {
+        REMOTE_ACCOUNT_FRAME = previousFrame; REMOTE_RENDER_TIME_ZONE = previousZone
+        REMOTE_MANUAL_PHASE = previousManual; REMOTE_RENDER_ISOLATED = previousIsolation
+        dayKeyFormatter.calendar = previousDayCalendar; dayKeyFormatter.timeZone = previousDayZone
+    }
+    return body()
+}
+private func renderedUsageIndex() -> UsageIndex {
+    REMOTE_RENDER_ISOLATED ? UsageIndex() : UsageLogs.shared.snapshot()
+}
+private func renderedHasHistory(_ view: AccountView?) -> Bool {
+    guard !REMOTE_RENDER_ISOLATED, let view = view else { return false }
+    return !UsageHistory.shared.samples(view.product, acct: view.historyKey, since: Date(timeIntervalSince1970: 0)).isEmpty
+}
+private func renderedMoneySummary(_ view: AccountView, local: UsageIndex, now: Date) -> MoneySummary {
+    let value = moneySummary(view, local: local, now: now)
+    guard let price = (UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double])?[view.historyKey] else { return value }
+    return MoneySummary(days: value.days, activeDays: value.activeDays, usdApi: value.usdApi,
+        perCalendarDay: value.perCalendarDay, perActiveDay: value.perActiveDay, subMonthly: price, subEstimated: false)
+}
+
+private func localAccountCaptions() -> [String: String] {
+    UserDefaults.standard.object(forKey: "localAccountCaptions") as? [String: String] ?? [:]
+}
+private func applyingLocalCaptions(_ views: [AccountView]) -> [AccountView] {
+    let captions = localAccountCaptions()
+    return views.map { value in
+        var value = value
+        if let text = captions[value.label ?? value.historyKey] {
+            let clean = remoteCaptionInput(text)
+            value.caption = clean.isEmpty ? remoteDefaultCaption(value) : clean
+        }
+        return value
+    }.sorted {
+        if $0.product != $1.product { return $0.product == "claude" }
+        if $0.isLocal != $1.isLocal { return $0.isLocal }
+        let order = $0.caption.localizedCaseInsensitiveCompare($1.caption)
+        return order == .orderedSame ? ($0.label ?? $0.historyKey) < ($1.label ?? $1.historyKey) : order == .orderedAscending
+    }
+}
 private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: Date) -> RemoteAccountFrame {
     let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
     let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
     let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now))
     let hidden = hiddenAccounts(), menu = menuAccountSelection()
     if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
-        let visible = all.filter { view in view.label.map { !hidden.contains($0) } ?? true }
-        return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible,
-            displayedViews: ["claude", "codex"].compactMap { menuAccount($0, views: visible, selected: menu) })
+        let all = applyingLocalCaptions(all)
+        let visible = all.filter { !hidden.contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+        return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
     }
     let cache = isolated ? SyncRemoteCache() : GitHubSync.shared.remoteSnapshot()
-    return remoteAccountFrame(local: (selectedLimits(claude, product: "claude"), selectedLimits(codex, product: "codex")),
+    let resolved = remoteAccountFrame(local: (selectedLimits(claude, product: "claude"), selectedLimits(codex, product: "codex")),
         localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids, remote: cache, hidden: hidden, menu: menu,
         sync: sync, now: now,
         localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"))
+    var all = applyingLocalCaptions(resolved.allViews)
+    // Unlabelled usage has no quota card, but remains manageable in Settings/history.
+    for product in ["claude", "codex"] {
+        let days = cache.unattributedDays?[product] ?? (cache.accounts == nil ? cache.days[product] : nil) ?? [:]
+        if !days.isEmpty {
+            all.append(AccountView(product: product, label: nil, historyKey: "u:" + product, caption: "",
+                data: LimitData(present: false), isLocal: false, tier: nil, usageDays: days,
+                machines: cache.machines.map { $0.name }, state: .fresh))
+        }
+    }
+    let visible = all.filter { !hidden.contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+    return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
 }
 func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date(), includeHidden: Bool = false) -> [AccountView] {
     // Auto describes polling, which continues when a card is hidden (N1).
@@ -4261,7 +4375,7 @@ func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Da
     return includeHidden ? frame.allViews : frame.visibleViews
 }
 func displayedCardViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date()) -> [AccountView] {
-    (REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)).displayedViews
+    (REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)).visibleViews.filter { !$0.historyKey.hasPrefix("u:") }
 }
 func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> RemoteCardPresentation {
     let at = REMOTE_ACCOUNT_FRAME?.now ?? now
@@ -4273,7 +4387,7 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> 
         sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
     }
     return remoteCardPresentation(view, sync: sync, language: appLang(), narrow: narrow, now: at,
-                                  timeZone: .current, manual: remoteManualRefresh?.phase(now: at) ?? REMOTE_MANUAL_PHASE)
+                                  timeZone: remoteRenderTimeZone(), manual: REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE : (remoteManualRefresh?.phase(now: at) ?? REMOTE_MANUAL_PHASE))
 }
 func remoteToneColor(_ tone: String) -> NSColor {
     tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
@@ -4286,7 +4400,8 @@ func hasQuotaCards(_ claude: LimitData, _ codex: LimitData) -> Bool {
     !displayedCardViews(claude, codex).isEmpty
 }
 func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> QuotaRefreshFeedback {
-    quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
+    let now = REMOTE_ACCOUNT_FRAME?.now.timeIntervalSince1970 ?? now
+    return quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
         failed: d.pollFailed || d.error != nil, authenticationRequired: d.auth != .ok,
         dataAt: d.asOf?.timeIntervalSince1970, nextAutomaticAt: d.nextPollAt?.timeIntervalSince1970,
         now: now, english: appLang() == "en", credentialIssue: d.credentialIssue, permissionPending: d.permissionRequestInFlight)
@@ -4294,7 +4409,7 @@ func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -
 func quotaTimestamp(_ value: Double?) -> String {
     guard let value = value, value.isFinite, value >= 0, value < 253402300800 else { return "—" }
     let date = Date(timeIntervalSince1970: value)
-    let f = DateFormatter(); f.dateFormat = Calendar.current.isDateInToday(date) ? "HH:mm" : "dd.MM HH:mm"
+    let f = DateFormatter(); f.timeZone = remoteRenderTimeZone(); f.dateFormat = remoteRenderCalendar().isDate(date, inSameDayAs: remoteRenderNow()) ? "HH:mm" : "dd.MM HH:mm"
     return f.string(from: date)
 }
 func quotaTooltip(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> String {
@@ -4370,24 +4485,29 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
         let at = Date(timeIntervalSince1970: now)
         if !fits(sourceLine) {
             sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
-                                             now: at, timeZone: .current, compact: true)
+                                             now: at, timeZone: remoteRenderTimeZone(), compact: true)
         }
         if !fits(sourceLine) {
             sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
-                                             now: at, timeZone: .current, compact: true, machineLimit: 8)
+                                             now: at, timeZone: remoteRenderTimeZone(), compact: true, machineLimit: 8)
         }
     }
     line(sourceLine, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
          color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
     let tooltip = view?.isLocal == false ? (model?.tooltip ?? "")
         : [quotaTooltip(data, now: now), data.source != nil ? model?.tooltip ?? "" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
-    var hits = [Hit(id: "quotafeedback:" + product, rect: footer, tooltip: tooltip)]
-    if view?.isLocal == false, let model = model {
+    let duplicate = REMOTE_ACCOUNT_FRAME?.visibleViews.filter { $0.product == product }.count ?? 0
+    let feedbackID = "quotafeedback:" + product + (duplicate > 1 ? ":" + (view?.historyKey ?? "") : "")
+    var hits = [Hit(id: feedbackID, rect: footer, tooltip: tooltip)]
+    if let view = view, let model = model, !view.isLocal || (view.data.source != nil && !model.statusLine.isEmpty) {
         if !model.statusLine.isEmpty {
             let rect = CGRect(x: footer.minX - 4, y: footer.minY, width: footer.width + 8, height: 24)
             line(model.statusLine, rect: CGRect(x: footer.minX, y: footer.minY + 2, width: footer.width, height: 14),
                  weight: model.action == nil ? .regular : .medium, color: remoteToneColor(model.statusTone))
-            if let action = model.action { hits.append(Hit(id: action + ":" + product, rect: rect, tooltip: tooltip)) }
+            if let action = model.action {
+                let identity = duplicate > 1 ? ":" + view.historyKey : ""
+                hits.append(Hit(id: action + ":" + product + identity, rect: rect, tooltip: tooltip))
+            }
         }
         return hits
     }
@@ -4496,24 +4616,18 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
 
     let pad: CGFloat = 16
 
-    // Keep the two existing product slots; the multi-account grid belongs to C3 part B.
     let cardViews = displayedCardViews(claude, codex)
-    var prods: [(LimitData, String, String, String, String)] = []
-    for product in ["claude", "codex"] {
-        if let view = cardViews.first(where: { $0.product == product }) {
-            let model = cardPresentation(view, narrow: cardViews.count > 1)
-            prods.append((view.data, model.simpleTitle, product + "_128.png", remoteCardActionURL(product: product), product))
-        } else if productEnabled(product), !cardViews.isEmpty {
-            prods.append((LimitData(present: false), product == "claude" ? "Claude Code" : "Codex",
-                          product + "_128.png", remoteCardActionURL(product: product), product))
-        }
+    let layout = remotePanelLayout(views: cardViews, style: .simple, now: remoteRenderNow())
+    let prods = cardViews.enumerated().map { i, view in
+        (view.data, cardPresentation(view, narrow: layout.cards[i].width < 300).simpleTitle,
+         view.product + "_128.png", remoteCardActionURL(product: view.product), view.product)
     }
 
     // header — the app's OWN icon + subtitle of present products
     let subtitle = prods.isEmpty ? (monitoringPaused() ? tr("сбор выключен", "monitoring paused") : tr("не найдено", "not found")) : prods.map { $0.1 }.joined(separator: " · ")
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
-    text(attr(subtitle, 11, .regular, textLo), x: pad + 40, topY: pad + 17)
+    text(fitAttr(subtitle, maxW: W - pad * 2 - 100) { attr($0, 11, .regular, textLo) }, x: pad + 40, topY: pad + 17)
     let refreshRect = rectTL(W - pad - 24, pad - 2, 24, 24)
     drawSF(ctx, "arrow.clockwise", in: refreshRect.insetBy(dx: 4, dy: 4), (monitoringPaused() && !remoteRefreshAvailable(claude, codex)) ? gray(1, 0.22) : textMid, weight: .semibold)
     hits.append(Hit(id: "refresh", rect: refreshRect))
@@ -4528,14 +4642,17 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     }
 
     // cards
-    let cardsTop: CGFloat = 58, cardH: CGFloat = 152 + (cardViews.contains { showsScopedRow($0.data, remote: !$0.isLocal) } ? SCOPED_ROW_H : 0) + (prods.isEmpty ? 0 : QUOTA_CARD_FOOTER_H), gap: CGFloat = 12
-    let cardW = (W - pad * 2 - gap) / 2
-
-    func drawCard(_ x: CGFloat, _ w: CGFloat, _ d: LimitData, name: String, icon: String, url: String, product: String) {
+    let cardsTop: CGFloat = 58
+    func drawCard(_ slot: CGRect, _ input: LimitData, name: String, icon: String, url: String, product: String, view: AccountView?) {
+        var d = input
+        if view?.state == .signedOut && view?.isLocal == false {
+            d.session = nil; d.weekly = nil; d.scoped = nil; d.resetCredits = nil
+            d.sessionReset = nil; d.weeklyReset = nil
+        }
+        let x = slot.minX, w = slot.width, cardsTop = slot.minY, cardH = slot.height
         let r = rectTL(x, cardsTop, w, cardH)
-        let view = cardViews.first { $0.product == product }
         let remote = view?.isLocal == false
-        let now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
+        let now = remoteRenderNow()
         if !d.present {
             roundFill(r, 14, gray(1, 0.02))
             ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
@@ -4557,7 +4674,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         let canFix = view.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: d.auth)
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r, tooltip: view?.caption))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
-        text(attr(name, 12.5, .semibold, gray(1, 0.9)), x: x + 39, topY: cardsTop + 15)
+        text(fitAttr(name, maxW: w - 64) { attr($0, 12.5, .semibold, gray(1, 0.9)) }, x: x + 39, topY: cardsTop + 15)
 
         hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product, view: view)
         let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
@@ -4668,11 +4785,11 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         }
     }
 
-    if prods.count >= 2 {
-        drawCard(pad, cardW, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3, product: prods[0].4)
-        drawCard(pad + cardW + gap, cardW, prods[1].0, name: prods[1].1, icon: prods[1].2, url: prods[1].3, product: prods[1].4)
-    } else if prods.count == 1 {
-        drawCard(pad, W - pad * 2, prods[0].0, name: prods[0].1, icon: prods[0].2, url: prods[0].3, product: prods[0].4)
+    if !prods.isEmpty {
+        for (i, product) in prods.enumerated() {
+            drawCard(layout.cards[i], product.0, name: product.1, icon: product.2, url: product.3,
+                     product: product.4, view: cardViews[i])
+        }
     } else {
         let empty = monitoringPaused() ? tr("Сбор статистики выключен", "Statistics collection is off")
             : tr("Выбранные подписки не найдены", "Selected subscriptions not found")
@@ -4680,10 +4797,15 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         let r = rectTL(pad, cardsTop + 90, W - pad * 2, 26)
         text(attr(tr("Выбрать подписки в настройках ›", "Choose subscriptions in Settings ›"), 11, .medium, ADV_LINK), x: W / 2, topY: cardsTop + 95, align: 1)
         hits.append(Hit(id: "settings", rect: r))
+        let hint = tr("Включите опрос или войдите в GitHub, чтобы видеть аккаунты с других компьютеров", "Turn on polling or sign in to GitHub to see accounts from other computers")
+        let hintAttr = attr(hint, 10.5, .regular, textMid)
+        let framesetter = CTFramesetterCreateWithAttributedString(hintAttr)
+        CTFrameDraw(CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0),
+            CGPath(rect: rectTL(pad + 8, cardsTop + 124, W - pad * 2 - 16, 34), transform: nil), nil), ctx)
     }
 
     // footer
-    let footTop = cardsTop + cardH + 14
+    let footTop = prods.isEmpty ? cardsTop + 152 + 14 : layout.intervalRect.minY
     hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated, autoIntervals: autoIntervals, views: displayAccountViews(claude, codex, includeHidden: true))
 
     // credit line (authorship + version + clickable GitHub), like the reference app.
@@ -4771,13 +4893,7 @@ struct AdvRow {
     let limit: PacedLimit?
     let kind: AdvRowKind
     let credits: Int?
-    var height: CGFloat {
-        switch kind {
-        case .full, .tooEarly, .exhausted: return ADV_ROW_FULL
-        case .inactive, .stale: return ADV_ROW_SHORT
-        case .credits: return ADV_ROW_CREDITS
-        }
-    }
+    var height: CGFloat { CGFloat(remoteAdvancedRowHeight(kind)) }
 }
 /// Auth recovery belongs to the CLI whose confirmed sign-in state we can classify.
 func limitCanFix(product: String, auth: AuthState) -> Bool {
@@ -4795,7 +4911,7 @@ func limitAuthBadge(_ auth: AuthState) -> String {
 }
 
 func limitPausedNotice(asOf: Date?) -> String {
-    guard let asOf = asOf, asOf.timeIntervalSince1970.isFinite, asOf <= Date() else { return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    guard let asOf = asOf, asOf.timeIntervalSince1970.isFinite, asOf <= remoteRenderNow() else { return tr("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
     return tr("Данные от ", "Data as of ") + advMomentLower(asOf) + tr(" · темп не считаем", " · pace paused")
 }
 
@@ -4819,9 +4935,9 @@ func limitPollFailed(_ d: LimitData) -> Bool { d.pollFailed || d.error != nil }
 func limitRetryNotice(_ d: LimitData, compact: Bool = false) -> String {
     let prefix = compact ? tr("Сбой · ", "Failed · ") : ""
     guard let at = d.nextPollAt else { return prefix + tr("повтор по расписанию", "scheduled retry") }
-    guard at > Date() else { return prefix + tr("повтор ожидается", "retry due") }
+    guard at > remoteRenderNow() else { return prefix + tr("повтор ожидается", "retry due") }
     guard at.timeIntervalSince1970 < 253402300800 else { return prefix + tr("ожидание сервиса", "waiting for service") }
-    let f = DateFormatter(); f.dateFormat = "HH:mm"
+    let f = DateFormatter(); f.timeZone = remoteRenderTimeZone(); f.dateFormat = "HH:mm"
     return prefix + tr("повтор в ", "retry at ") + f.string(from: at)
 }
 func withPollStatus(_ data: LimitData, state: AutoPollState?, next: Date?) -> LimitData {
@@ -4853,7 +4969,10 @@ struct AdvCard {
     let paused: Bool
     let rows: [AdvRow]
     var account: AccountView? = nil
-    var noticeHeight: CGFloat { ADV_NOTICE * ((limitSnapshotNotice(data, now: REMOTE_ACCOUNT_FRAME?.now ?? Date()).isEmpty ? 0 : 1) + ((account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: product, auth: data.auth)) ? 1 : 0)) }
+    var noticeHeight: CGFloat {
+        if let account = account { return ADV_NOTICE * CGFloat(remoteAdvancedNoticeLines(account, now: remoteRenderNow())) }
+        return ADV_NOTICE * ((limitSnapshotNotice(data, now: remoteRenderNow()).isEmpty ? 0 : 1) + (limitCanFix(product: product, auth: data.auth) ? 1 : 0))
+    }
     var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight + QUOTA_CARD_FOOTER_H }
 }
 
@@ -4861,15 +4980,12 @@ func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
     func card(_ view: AccountView) -> AdvCard {
         let d = view.data, product = view.product, now = REMOTE_ACCOUNT_FRAME?.now ?? Date()
         let paused = (view.isLocal && d.auth != .ok) || isStale(d, now)
-        let invalidTime = !remotePaceTimeValid(d, now: now)
         var limits = pacedLimits(d, product: product, acct: view.historyKey, now: now)
         if product == "codex" { limits.sort { a, _ in a.id == "weekly" } }        // Codex: week first
         var rows: [AdvRow] = limits.map { l in
-            guard let p = l.pace else { return AdvRow(limit: l, kind: d.source != nil && invalidTime ? .stale : .inactive, credits: nil) }
-            if (view.isLocal && d.auth != .ok) || invalidTime || p.reset <= now { return AdvRow(limit: l, kind: .stale, credits: nil) }
-            if p.used >= 100 { return AdvRow(limit: l, kind: .exhausted, credits: nil) }
-            if p.elapsedH < 10.0 / 60 || p.used < 2 { return AdvRow(limit: l, kind: .tooEarly, credits: nil) }
-            return AdvRow(limit: l, kind: .full, credits: nil)
+            let shown = !view.isLocal && view.state == .signedOut
+                ? PacedLimit(id: l.id, name: l.name, pace: nil, color: l.color, used: nil) : l
+            return AdvRow(limit: shown, kind: remoteAdvancedRowKind(view, metric: l.id, now: now), credits: nil)
         }
         if product == "codex" { rows.append(AdvRow(limit: nil, kind: .credits, credits: d.resetCredits ?? 0)) }
         return AdvCard(product: product, data: d,
@@ -4889,25 +5005,45 @@ private func renderedSyncWarning() -> String? {
 
 func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
     let warn: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0      // orange sync line under the header
-    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
-    let present = cards.map { $0.product }
-    let p = advHistProduct(present)
-    let noHistory = UsageHistory.shared.samples(p, acct: cards.first { $0.product == p }?.account?.historyKey ?? localHistoryKey(p), since: Date(timeIntervalSince1970: 0)).isEmpty
+    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn + (historyAccounts(cards).count >= 3 ? 22 : 0) }
+    let items = historyAccounts(cards)
+    let selected = selectedHistoryAccount(items)
+    let noHistory = !renderedHasHistory(selected)
     return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
+        + (items.count >= 3 ? 22 : 0) + CGFloat(max(0, items.count - 2)) * 19
+}
+
+private func historyAccounts(_ cards: [AdvCard]) -> [AccountView] {
+    let actual = cards.compactMap { $0.account }
+    let snapshot = readerLocalSnapshot.snapshot()
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(snapshot.local.0, snapshot.local.1, now: remoteRenderNow())
+    let unassigned = frame.allViews.filter {
+        $0.historyKey.hasPrefix("u:") && !hiddenAccounts().contains($0.historyKey)
+    }
+    return actual + unassigned
+}
+private func selectedHistoryAccount(_ accounts: [AccountView]) -> AccountView? {
+    let selected = UserDefaults.standard.string(forKey: "advHistAccount")
+    if let selected = selected, let view = accounts.first(where: { $0.historyKey == selected }) { return view }
+    let product = advHistProduct(accounts.map { $0.product })
+    return accounts.first { $0.product == product } ?? accounts.first
 }
 
 func showMissingProduct(_ cards: [AdvCard]) -> Bool {
-    cards.count == 1 && productEnabled(cards[0].product == "claude" ? "codex" : "claude")
+    cards.count == 1 && cards[0].account?.isLocal == true && cards[0].data.source == nil
+        && productEnabled(cards[0].product == "claude" ? "codex" : "claude")
 }
 
 func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     let cards = advCards(claude, codex)
-    if cards.isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
-    var h: CGFloat = 94
-    for c in cards { h += 5 + c.height }
-    if showMissingProduct(cards) { h += 5 + ADV_PLACEHOLDER }
-    h += 5 + advHistoryHeight(cards)
-    return h + ADV_CREDIT_H
+    if cards.isEmpty && historyAccounts(cards).isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
+    let accounts = historyAccounts(cards)
+    let selector: CGFloat = accounts.count >= 3 ? 22 : 0
+    let moneyExtra = advHistExpanded() ? CGFloat(max(0, accounts.count - 2)) * 19 : 0
+    let warning: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0
+    let baseHistory = advHistoryHeight(cards) - selector - moneyExtra - warning
+    let layout = remotePanelLayout(views: accounts, style: .advanced, now: remoteRenderNow(), historyHeight: Double(baseHistory))
+    return CGFloat(layout.windowHeight) + warning + (showMissingProduct(cards) ? 5 + ADV_PLACEHOLDER : 0)
 }
 /// Credit line under the footer (author · version · GitHub), same as in the Simple view —
 /// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
@@ -4921,7 +5057,8 @@ func mainPanelHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 // Spec §6.4 — reset moment for the metrics line: "11:50" today, else "пн, 03:00".
 func advResetShort(_ d: Date, now: Date = Date()) -> String {
     let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US")
-    if Calendar.current.isDate(d, inSameDayAs: now) { f.dateFormat = "HH:mm"; return f.string(from: d) }
+    f.timeZone = remoteRenderTimeZone()
+    if remoteRenderCalendar().isDate(d, inSameDayAs: now) { f.dateFormat = "HH:mm"; return f.string(from: d) }
     f.dateFormat = "EEE, HH:mm"
     let s = f.string(from: d).replacingOccurrences(of: ".", with: "")
     return appLang() == "ru" ? s.lowercased() : s
@@ -4932,7 +5069,7 @@ func advMomentLower(_ d: Date) -> String {
 }
 func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
     if row.kind == .stale {
-        let prefix = row.limit?.pace.map { $0.reset <= Date() } == true
+        let prefix = row.limit?.pace.map { $0.reset <= remoteRenderNow() } == true
             ? tr("Окно сброшено · снимок ", "Window reset · snapshot ") : tr("по данным на ", "as of ")
         return asOf.map { prefix + advMomentLower($0) } ?? limitPausedNotice(asOf: nil)
     }
@@ -4940,7 +5077,7 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
         return row.limit?.used != nil ? tr("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
             : tr("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
     }
-    if let at = asOf, Date().timeIntervalSince(at) > SNAPSHOT_MAX_AGE {
+    if let at = asOf, remoteRenderNow().timeIntervalSince(at) > SNAPSHOT_MAX_AGE {
         return p.projectedPct.map { tr("Прогноз на снимке: ", "Snapshot forecast: ") + fmtPct($0, decimals: 0) }
             ?? tr("На снимке мало данных для темпа", "Not enough pace data in snapshot")
     }
@@ -4963,7 +5100,7 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 @discardableResult
 private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
-    if advCards(claude, codex).isEmpty {
+    if historyAccounts(advCards(claude, codex)).isEmpty {
         return drawPanelBody(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
                          interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
     }
@@ -5157,9 +5294,12 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         if dimmed { ctx.restoreGState() }
     }
 
-    for c in cards {
-        let ch = c.height
-        let card = rectTL(ADV_CX, y, ADV_CW, ch)
+    let cardLayout = remotePanelLayout(views: cards.compactMap { $0.account }, style: .advanced, now: remoteRenderNow())
+    for (index, c) in cards.enumerated() {
+        let slot = cardLayout.cards[index]
+        y = slot.minY
+        let ch = slot.height
+        let card = rectTL(slot.minX, y, slot.width, ch)
         roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
         let canFix = c.account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: c.product, auth: c.data.auth)
         let presentation = c.account.map { cardPresentation($0, narrow: false) }
@@ -5167,13 +5307,17 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         // header
         let y0 = y + 9
         if let img = loadCGImage(assetPath(c.icon)) { ctx.draw(img, in: rectTL(ADV_IX, y0 + 1, 16, 16)) }
-        let name = attr(presentation?.advancedTitle ?? c.name, 13, .semibold, textHi)
+        let warningBadge = remote ? (presentation?.advancedBadge ?? "") : ((c.paused || limitPollFailed(c.data)) ? limitDataBadge(c.data) : "")
+        let planWidth = min(64, width(attr(presentation?.planBadge ?? c.data.plan ?? "", 9.5, .semibold, textMid)) + 14)
+        let badgeWidth: CGFloat = warningBadge.isEmpty ? 0 : min(85, width(attr(warningBadge, 9.5, .semibold, textMid)) + 14)
+        let suffixWidth = min(48, width(attr(presentation?.machineSuffix ?? "", 11, .regular, textMid)))
+        let titleWidth = max(95, 266 - planWidth - badgeWidth - suffixWidth)
+        let name = fitAttr(presentation?.advancedTitle ?? c.name, maxW: titleWidth) { attr($0, 13, .semibold, textHi) }
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
-        let warningBadge = remote ? (presentation?.advancedBadge ?? "") : ((c.paused || limitPollFailed(c.data)) ? limitDataBadge(c.data) : "")
         if !warningBadge.isEmpty {
             let ink = remote ? remoteToneColor(presentation?.statusTone ?? "textMid") : ADV_WARN
-            let r = pill(attr(warningBadge, 9.5, .semibold, ink, kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7,
+            let r = pill(fitAttr(warningBadge, maxW: max(20, min(71, 312 - px - planWidth - 7))) { attr($0, 9.5, .semibold, ink, kern: 0.19) }, x: px, topY: y0 + 1, h: 16, padX: 7,
                          fill: ink.withAlphaComponent(0.16), stroke: ink.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
@@ -5183,11 +5327,11 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             planLabel = c.product == "claude" ? (plan == "max" ? (UserDefaults.standard.string(forKey: "claudeTier")?.contains("20x") == true ? "Max 20x" : "Max") : plan.capitalized) : plan
         } else { planLabel = "" }
         if !planLabel.isEmpty {
-            let r = pill(attr(planLabel, 9.5, .semibold, gray(1, 0.60), kern: 0.19), x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
+            let r = pill(fitAttr(planLabel, maxW: max(12, 312 - px - 14)) { attr($0, 9.5, .semibold, gray(1, 0.60), kern: 0.19) }, x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
             px = r.maxX + 5
         }
         if let suffix = presentation?.machineSuffix, !suffix.isEmpty {
-            textC(attr(suffix, 11, .regular, textMid), x: px, topY: y0 + 1, h: 16)
+            textC(fitAttr(suffix, maxW: max(0, 312 - px)) { attr($0, 11, .regular, textMid) }, x: px, topY: y0 + 1, h: 16)
         }
         let arrow = rectTL(322, y0 + 3, 12, 12)
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
@@ -5227,8 +5371,9 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     }
 
     // ---- history & money ----
-    let present = cards.map { $0.product }
-    let hp = advHistProduct(present)
+    let historyViews = historyAccounts(cards)
+    let selectedAccount = selectedHistoryAccount(historyViews)
+    let hp = selectedAccount?.product ?? "claude"
     let expanded = advHistExpanded()
     let hh = advHistoryHeight(cards)
     let hcard = rectTL(ADV_CX, y, ADV_CW, hh)
@@ -5237,41 +5382,49 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
     let others = syncOtherMachines()
     let histCap = tr("История и деньги", "History & money") + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
-    textC(caps(histCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
-    // Stops above the orange sync line when there is one (hit-test takes the first match).
-    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, 200, renderedSyncWarning() != nil ? hy + 18 - y : 35)))
-    do {   // Claude | Codex segmented, right-aligned
-        let items = present.map { ($0, $0 == "claude" ? "Claude" : "Codex") }
-        let widths = items.map { width(attr($0.1, 10.5, .semibold, textHi)) + 16 }
-        let total = widths.reduce(0, +) + CGFloat(items.count - 1) + 4
-        let tx = ADV_IX + ADV_IW - total
-        roundFill(rectTL(tx, hy, total, 18), 9, gray(1, 0.07))
+    textC(fitAttr(histCap, maxW: historyViews.count >= 3 ? ADV_IW - 14 : 132) { caps($0, 9.5, textLo) }, x: ADV_IX + 14, topY: hy, h: 18)
+    var historyToggleWidth: CGFloat = 200
+    let selectorExtra: CGFloat = historyViews.count >= 3 ? 22 : 0
+    do {
+        let items = historyViews.map { view in
+            (view.historyKey, view.historyKey.hasPrefix("u:") ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : cardPresentation(view, narrow: false).simpleTitle)
+        }
+        let ownRow = items.count >= 3
+        let widths = ownRow ? Array(repeating: (ADV_IW - 4 - CGFloat(max(0, items.count - 1))) / CGFloat(max(1, items.count)), count: items.count)
+            : items.map { min(76, width(attr($0.1, 10.5, .semibold, textHi)) + 16) }
+        let total = ownRow ? ADV_IW : widths.reduce(0, +) + CGFloat(max(0, items.count - 1)) + 4
+        let tx = ownRow ? ADV_IX : ADV_IX + ADV_IW - total
+        let ty = ownRow ? hy + 20 : hy
+        if !ownRow { historyToggleWidth = max(28, tx - ADV_CX - 4) }
+        let trackHeight: CGFloat = ownRow ? 22 : 18
+        roundFill(rectTL(tx, ty, total, trackHeight), 9, gray(1, 0.07))
         var sx = tx + 2
         for (i, it) in items.enumerated() {
-            let r = rectTL(sx, hy + 2, widths[i], 14)
-            let on = it.0 == hp
+            let r = rectTL(sx, ty + 2, widths[i], trackHeight - 4)
+            let on = it.0 == selectedAccount?.historyKey
             if on { roundFill(r, 7, gray(1, 0.18)) }
-            textC(attr(it.1, 10.5, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: hy + 2, h: 14, align: 1)
-            hits.append(Hit(id: "hist:\(it.0)", rect: r.insetBy(dx: -2, dy: -4)))
+            textC(fitAttr(it.1, maxW: widths[i] - 6) { attr($0, 10.5, on ? .semibold : .medium, on ? textHi : textMid) }, x: r.midX, topY: ty + 2, h: trackHeight - 4, align: 1)
+            hits.append(Hit(id: "histaccount:" + it.0, rect: r, tooltip: it.1))
             sx += widths[i] + 1
         }
     }
+    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, historyToggleWidth,
+        historyViews.count >= 3 || renderedSyncWarning() != nil ? 26 : 35)))
     // Sync stalled / revoked: one orange line under the header, in both collapsed and expanded
     // states — the totals below silently miss the other computers otherwise. Tap → Settings.
     var warnH: CGFloat = 0
     if let w = renderedSyncWarning() {
         let a = fitAttr(w, maxW: ADV_IW) { attr($0, 10.5, .regular, ADV_WARN) }
-        textC(a, x: ADV_IX, topY: hy + 18 + 1, h: ADV_NOTICE - 2)
-        hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18, ADV_IW, ADV_NOTICE)))
+        textC(a, x: ADV_IX, topY: hy + 18 + selectorExtra + (historyViews.count >= 3 ? 4 : 0) + 1, h: ADV_NOTICE - 2)
+        hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18 + selectorExtra + (historyViews.count >= 3 ? 4 : 0), ADV_IW, ADV_NOTICE)))
         warnH = ADV_NOTICE
     }
     if expanded {
-        let ix = mergedUsageIndex()
-        let selectedCard = cards.first { $0.product == hp }
-        let d = selectedCard?.data ?? (hp == "claude" ? claude : codex)
-        let historyIndex = selectedCard?.account.map { accountUsageIndex($0, local: UsageLogs.shared.snapshot()) } ?? ix
-        let ap = advancedProduct(d, product: hp, index: historyIndex, acct: selectedCard?.account?.historyKey)
-        let by = hy + 18 + 4 + warnH                // body top
+        let ix = REMOTE_RENDER_ISOLATED ? UsageIndex() : mergedUsageIndex()
+        let d = selectedAccount?.data ?? (hp == "claude" ? claude : codex)
+        let historyIndex = selectedAccount.map { accountUsageIndex($0, local: renderedUsageIndex()) } ?? ix
+        let ap = advancedProduct(d, product: hp, index: historyIndex, acct: selectedAccount?.historyKey)
+        let by = hy + 18 + 4 + warnH + selectorExtra                // body top
         // -- 7-day stacked bars (x 26…216) --
         let cx0 = ADV_IX, cy0 = by
         textC(caps(tr("7 дней · $ по API", "7 days · $ at API"), 8.5, textLo), x: cx0, topY: cy0, h: 12)
@@ -5310,7 +5463,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             } else {
                 roundFill(rectTL(bx, gy + 38.5, 18, 1.5), 0.75, gray(1, 0.12))
             }
-            let dayDate = dayKeyFormatter.date(from: day.day) ?? Date()
+            let dayDate = dayKeyFormatter.date(from: day.day) ?? remoteRenderNow()
             let f = DateFormatter(); f.locale = Locale(identifier: appLang() == "ru" ? "ru_RU" : "en_US"); f.dateFormat = "EEE"
             let dn = f.string(from: dayDate).replacingOccurrences(of: ".", with: "")
             textB(attr(appLang() == "ru" ? dn.lowercased() : dn, 9, day.isToday ? .semibold : .regular, day.isToday ? ADV_ACCENT : textMid), x: bx + 9, baseY: gy + 50, align: 1)
@@ -5339,7 +5492,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let letters = appLang() == "ru" ? ["п", "в", "с", "ч", "п", "с", "в"] : ["M", "T", "W", "T", "F", "S", "S"]
         for (c, l) in letters.enumerated() { textB(attr(l, 7, .regular, textLo), x: kx + 9.5 * CGFloat(c) + 4, baseY: ky + 12 + 7, align: 1) }
         let levels: [Double] = hp == "claude" ? [10, 30, 60] : [5, 30, 100]
-        let calCal = Calendar.current
+        let calCal = remoteRenderCalendar()
         var row = 0, col = 0
         if let first = cal.first, let fd = dayKeyFormatter.date(from: first.day) {
             let wd = calCal.component(.weekday, from: fd); col = wd == 1 ? 6 : wd - 2
@@ -5351,7 +5504,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             if dd.usd <= 0 { color = gray(1, 0.06) }
             else { let a: CGFloat = dd.usd <= levels[0] ? 0.28 : dd.usd <= levels[1] ? 0.50 : dd.usd <= levels[2] ? 0.75 : 1.0; color = ADV_ACCENT.withAlphaComponent(a) }
             roundFill(rectTL(cellX, cellY, 7.5, 7.5), 2, color)
-            if dd.day == dayKey(Date()) { roundStroke(rectTL(cellX, cellY, 7.5, 7.5).insetBy(dx: 0.5, dy: 0.5), 2, gray(1, 0.7), 1) }
+            if dd.day == dayKey(remoteRenderNow()) { roundStroke(rectTL(cellX, cellY, 7.5, 7.5).insetBy(dx: 0.5, dy: 0.5), 2, gray(1, 0.7), 1) }
             if let dt = dayKeyFormatter.date(from: dd.day), (i == 0 || calCal.component(.day, from: dt) == 1), !labelledRows.contains(row) {
                 labelledRows.insert(row)
                 let mi = calCal.component(.month, from: dt) - 1
@@ -5380,34 +5533,40 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         }
         hline(ADV_IX, ADV_IX + ADV_IW, my + 4, gray(1, 0.06))
         let colX: [CGFloat] = [ADV_IX, ADV_IX + 120, ADV_IX + 203, ADV_IX + ADV_IW]
-        textC(caps(tr("по подписке", "on subscription"), 8.5, textLo), x: colX[1], topY: my + 10, h: 11)
+        textC(fitAttr(tr("по подписке", "on subscription"), maxW: 68) { caps($0, 8.5, textLo) }, x: colX[1], topY: my + 10, h: 11)
         textC(caps(tr("по API было бы", "at API price"), 8.5, textLo), x: colX[2], topY: my + 10, h: 11)
         textC(caps("×", 8.5, textLo), x: colX[3], topY: my + 10, h: 11, align: 2)
         var ry = my + 23
         var notes: [String] = []
-        for c in cards {
-            let m = c.account.map { moneySummary($0, local: UsageLogs.shared.snapshot(), now: Date()) }
-                ?? moneySummary(c.product, plan: c.data.plan, index: ix)
-            let nm = NSMutableAttributedString(attributedString: attr(c.product == "claude" ? "Claude" : "Codex", 10.5, .semibold, textHi))
-            nm.append(attr(" · " + (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + tr("/мес", "/mo"), 10.5, .regular, textMid))
-            textC(nm, x: colX[0], topY: ry, h: 13)
+        for account in historyViews {
+            let m = renderedMoneySummary(account, local: renderedUsageIndex(), now: remoteRenderNow())
+            let label = account.caption.isEmpty ? (account.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : account.caption
+            let price = attr(" · " + (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + tr("/мес", "/mo"), 10.5, .regular, textMid)
+            let pencilWidth: CGFloat = m.subEstimated ? 12 : 0
+            let labelWidth = max(20, 114 - width(price) - pencilWidth)
+            let title = fitAttr(label, maxW: labelWidth) { attr($0, 10.5, .semibold, textHi) }
+            textC(title, x: colX[0], topY: ry, h: 13)
+            textC(price, x: colX[0] + width(title), topY: ry, h: 13)
+            hits.append(Hit(id: "moneyaccount:" + account.historyKey,
+                rect: rectTL(colX[0], ry, 114, 13), tooltip: label + price.string))
             if m.subEstimated {
-                drawSF(ctx, "pencil", in: rectTL(colX[0] + width(nm) + 4, ry + 1.5, 10, 10), ADV_LINK)
-                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, 120, 15)))
+                let pencilX = colX[0] + width(title) + width(price) + 2
+                drawSF(ctx, "pencil", in: rectTL(pencilX, ry + 1.5, 10, 10), ADV_LINK)
+                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, 114, 15)))
             }
             textC(attr("≈ " + fmtUSD(m.subPerDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[1], topY: ry, h: 13)
             if m.usdApi > 0 {
                 textC(attr("≈ " + fmtUSD(m.perCalendarDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[2], topY: ry, h: 13)
                 textC(attr(fmtNum(m.ratio), 10.5, .regular, textHi), x: colX[3], topY: ry, h: 13, align: 2)
-                notes.append((c.product == "claude" ? "Claude" : "Codex") + " ≈ " + fmtUSD(m.perActiveDay))
+                notes.append((account.caption.isEmpty ? (account.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : account.caption) + " ≈ " + fmtUSD(m.perActiveDay))
             } else {
                 textC(attr(tr("пока нет", "none yet"), 10.5, .regular, textLo), x: colX[2], topY: ry, h: 13)
                 textC(attr("—", 10.5, .regular, textLo), x: colX[3], topY: ry, h: 13, align: 2)
             }
-            ry += 15
+            ry += 19
         }
         if !notes.isEmpty {
-            textC(attr(tr("в активный день по API: ", "on an active day at API price: ") + notes.joined(separator: " · "), 9.5, .regular, textLo), x: colX[0], topY: my + 55, h: 11)
+            textC(fitAttr(tr("в активный день по API: ", "on an active day at API price: ") + notes.joined(separator: " · "), maxW: ADV_IW) { attr($0, 9.5, .regular, textLo) }, x: colX[0], topY: ry + 3, h: 11)
         }
     }
     y += hh + 6
@@ -5439,6 +5598,10 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
     let textHi = gray(1, 0.95), textMid = gray(1, 0.5), textLo = gray(1, 0.34)
     let orange = NSColor(srgbRed: 1.0, green: 0.62, blue: 0.18, alpha: 1)
     let d = UserDefaults.standard
+    let settings = accountSettingsLayout()
+    let SET_TRAY_CAP = settings.trayCap, SET_TRAY_TOP = settings.trayTop, SET_TRAY_H = settings.trayHeight
+    let SET_SUB_CAP = settings.subCap, SET_SUB_TOP = settings.subTop, SET_SUB_H = settings.subHeight
+    let SET_SYNC_CAP = settings.syncCap, SET_SYNC_TOP = settings.syncTop
 
     func rectTL(_ x: CGFloat, _ topY: CGFloat, _ w: CGFloat, _ h: CGFloat) -> CGRect {
         CGRect(x: x, y: H - topY - h, width: w, height: h)
@@ -5623,14 +5786,46 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
     }
 
     // Subscription selection is available in both panel modes.
-    text(attr(tr("СОБИРАТЬ И ПОКАЗЫВАТЬ", "COLLECT AND SHOW"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_PRODUCTS_CAP)
+    text(attr(settings.model.pollingTitle, 9.5, .semibold, textLo), x: pad + 2, topY: SET_PRODUCTS_CAP)
     roundFill(rectTL(cardX, SET_PRODUCTS_TOP, cardW, SET_PRODUCTS_H), 12, gray(1, 0.04))
     roundStroke(rectTL(cardX, SET_PRODUCTS_TOP, cardW, SET_PRODUCTS_H), 12, gray(1, 0.06), 1)
     for (i, item) in [("claude", "Claude Code"), ("codex", "Codex")].enumerated() {
         let x = cardX + CGFloat(i) * cardW / 2
         text(attr(item.1, 12, .regular, textHi), x: x + 14, topY: SET_PRODUCTS_TOP + 11)
         drawToggle(rectTL(x + cardW / 2 - 46, SET_PRODUCTS_TOP + 10, 34, 16), productEnabled(item.0))
-        hits.append(Hit(id: "monitor:" + item.0, rect: rectTL(x, SET_PRODUCTS_TOP, cardW / 2, SET_PRODUCTS_H)))
+        let tooltip = tr("Выключено: не читаем вход и журналы ", "Off: this computer does not read sign-in or logs for ") + item.1
+            + tr(" на этом компьютере и не запрашиваем лимиты. Аккаунты с других компьютеров видны (блок «Аккаунты»).", " or request its limits. Accounts from other computers remain visible in Accounts.")
+        hits.append(Hit(id: "monitor:" + item.0, rect: rectTL(x, SET_PRODUCTS_TOP, cardW / 2, SET_PRODUCTS_H), tooltip: tooltip))
+    }
+
+    if settings.model.showsV10 {
+        let top = SET_PRODUCTS_TOP + SET_PRODUCTS_H
+        let label = fitAttr(settings.model.v10Text, maxW: cardW - 8) { attr($0, 10.5, .medium, ADV_LINK) }
+        text(label, x: cardX + 4, topY: top + 4)
+        hits.append(Hit(id: "accounts:github", rect: rectTL(cardX, top, cardW, 20), tooltip: settings.model.v10Text))
+    }
+    if settings.model.showsAccounts {
+        text(attr(tr("АККАУНТЫ", "ACCOUNTS"), 9.5, .semibold, textLo), x: pad + 2, topY: settings.accountsCap)
+        if settings.accountsHeight > 0 {
+            roundFill(rectTL(cardX, settings.accountsTop, cardW, settings.accountsHeight), 12, gray(1, 0.04))
+            roundStroke(rectTL(cardX, settings.accountsTop, cardW, settings.accountsHeight), 12, gray(1, 0.06), 1)
+        }
+        for (i, row) in settings.model.accounts.enumerated() {
+            let top = settings.accountsTop + CGFloat(i) * SET_ROW_H
+            let view = settings.views[i]
+            if let icon = loadCGImage(assetPath(view.product + "_128.png")) { ctx.draw(icon, in: rectTL(cardX + 15, top + 10, 16, 16)) }
+            text(fitAttr(row.title, maxW: 180) { attr($0, 12.5, .medium, row.visible ? textHi : textMid) }, x: cardX + 42, topY: top + 3)
+            text(fitAttr(row.subtitle, maxW: 226) { attr($0, 10, .regular, textLo) }, x: cardX + 42, topY: top + 21)
+            if row.editable {
+                let edit = rectTL(cardX + cardW - 76, top + 1, 24, 24)
+                drawSF(ctx, "pencil", in: edit.insetBy(dx: 6, dy: 6), textMid)
+                hits.append(Hit(id: "edit:" + row.historyKey, rect: edit, tooltip: row.title))
+            }
+            let toggle = rectTL(cardX + cardW - 48, top + 10, 34, 16)
+            drawToggle(toggle, row.visible)
+            hits.append(Hit(id: "accountvisible:" + row.historyKey, rect: toggle.insetBy(dx: -4, dy: -8), tooltip: row.title))
+            if i + 1 < settings.model.accounts.count { hdiv(cardX + 42, cardX + cardW, top + SET_ROW_H) }
+        }
     }
 
     // section 1 — which percentages go into the menu-bar strip
@@ -5642,7 +5837,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         // Both sides on one row, split by the same slash the strip itself draws, so the
         // control reads like its own result: «Fable / нед» → "100/86%" in the menu bar.
         func segGroup(_ x: CGFloat, _ w: CGFloat, _ slot: Int, _ options: [TrayMetric?]) {
-            let segH: CGFloat = 24, trackTop = SET_TRAY_TOP + (SET_TRAY_H - segH) / 2
+            let segH: CGFloat = 24, trackTop = SET_TRAY_TOP + (44 - segH) / 2
             roundFill(rectTL(x, trackTop, w, segH), 7, gray(1, 0.08))
             let n = CGFloat(options.count), segW = (w - 6 - (n - 1) * 2) / n
             let picked: TrayMetric? = slot < cur.count ? cur[slot] : nil
@@ -5657,22 +5852,36 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         }
         let lw: CGFloat = 124, rw: CGFloat = 152      // left side has 3 options, right also "—"
         segGroup(cardX + 14, lw, 0, [.session, .weekly, .model])
-        text(attr("/", 13, .regular, textMid), x: cardX + 14 + lw + 10, topY: SET_TRAY_TOP + (SET_TRAY_H - 13) / 2 - 1)
+        text(attr("/", 13, .regular, textMid), x: cardX + 14 + lw + 10, topY: SET_TRAY_TOP + (44 - 13) / 2 - 1)
         segGroup(cardX + 14 + lw + 20, rw, 1, [nil, .session, .weekly, .model])
     }
 
+    for (i, product) in settings.model.menuProducts.enumerated() {
+        let top = SET_TRAY_TOP + 44 + CGFloat(i) * SET_ROW_H
+        hdiv(cardX + 14, cardX + cardW, top)
+        text(attr(product == "claude" ? "Claude" : "Codex", 12.5, .regular, textHi), x: cardX + 14, topY: top + 10)
+        let visible = settings.views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+        let chosen = menuAccount(product, views: visible, selected: menuAccountSelection())
+        let title = chosen?.caption ?? tr("По умолчанию", "Default")
+        let capsule = rectTL(cardX + cardW - 214, top + 6, 200, 24)
+        roundFill(capsule, 7, gray(1, 0.08))
+        text(fitAttr(title, maxW: 170) { attr($0, 11, .medium, textHi) }, x: capsule.minX + 9, topY: top + 12)
+        drawSF(ctx, "chevron.down", in: CGRect(x: capsule.maxX - 17, y: capsule.midY - 4, width: 8, height: 8), textMid)
+        hits.append(Hit(id: "menuaccount:" + product, rect: capsule, tooltip: title))
+    }
+
     // section 1b — subscription prices (feed the Advanced view's money figures)
-    if advancedEnabled() {
+    if advancedEnabled(), SET_SUB_H > 0 {
         text(attr(tr("ПОДПИСКИ · ДЛЯ ОЦЕНКИ В ДЕНЬГАХ", "SUBSCRIPTIONS · FOR THE MONEY ESTIMATE"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SUB_CAP)
         roundFill(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.04))
         roundStroke(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.06), 1)
-        func subRow(_ i: Int, _ product: String, _ label: String, _ plan: String?, _ choices: [Double]) {
+        func subRow(_ i: Int, _ view: AccountView, _ choices: [Double]) {
             let rowTop = SET_SUB_TOP + CGFloat(i) * SET_ROW_H
-            let cur = subscriptionUSD(product, plan: plan)
-            text(attr(label, 13, .regular, textHi), x: cardX + 14, topY: rowTop + (SET_ROW_H - 13) / 2 - 1)
-            if cur.estimated {
-                text(attr(tr("оценка", "estimate"), 9.5, .regular, textLo), x: cardX + 14 + ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(13, .regular), cg(.white))))) + 6, topY: rowTop + (SET_ROW_H - 9.5) / 2)
-            }
+            let product = view.product, label = view.caption.isEmpty ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : view.caption
+            let stored = (d.object(forKey: "accountSubscriptionUSD") as? [String: Double])?[view.historyKey]
+            let inferred = subscriptionUSD(product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal)
+            let cur = stored.map { (usd: $0, estimated: false) } ?? inferred
+            text(fitAttr(label, maxW: 113) { attr($0, 11, .regular, textHi) }, x: cardX + 14, topY: rowTop + (SET_ROW_H - 13) / 2 - 1)
             let f = ctFont(11, .medium)
             let widths = choices.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr("$\(Int($0))", f, cg(.white))))) + 14 }
             var x = cardX + cardW - 14 - widths.reduce(0, +) - CGFloat(choices.count - 1) * 4
@@ -5683,13 +5892,16 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 roundFill(r, 6, on ? (cur.estimated ? gray(1, 0.12) : gray(1, 0.18)) : gray(1, 0.06))
                 if on, cur.estimated { roundStroke(r, 6, gray(1, 0.25), 1) }
                 text(attr("$\(Int(c))", 11, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: top + 5, align: 1)
-                hits.append(Hit(id: "sub:\(product):\(Int(c))", rect: r))
+                hits.append(Hit(id: "accountsub:\(view.historyKey):\(Int(c))", rect: r, tooltip: label + (cur.estimated ? tr(" · оценка", " · estimate") : "")))
                 x += widths[j] + 4
             }
         }
-        subRow(0, "claude", "Claude", nil, [20, 100, 200])
-        hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + SET_ROW_H)
-        subRow(1, "codex", "Codex", UserDefaults.standard.string(forKey: "codexPlan"), [8, 20, 100, 200])
+        let priced = settings.views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) }
+        for (i, view) in priced.enumerated() {
+            subRow(i, view, view.product == "claude" ? [20, 100, 200] : [8, 20, 100, 200])
+            if i + 1 < priced.count { hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + CGFloat(i + 1) * SET_ROW_H) }
+        }
+    }
 
         // section 1c — cross-machine sync through GitHub
         if syncBlockShown() {
@@ -5776,7 +5988,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 hdiv(cardX + 42, cardX + cardW, rt)
                 let isMac = m.os.lowercased().hasPrefix("mac")
                 drawSF(ctx, isMac ? "laptopcomputer" : "desktopcomputer", in: rectTL(cardX + 14, rt + (SET_SYNC_MROW_H - 16) / 2, 19, 16), textMid)
-                let stale = m.updated.map { Date().timeIntervalSince($0) > 86400 } ?? false
+                let stale = m.updated.map { remoteRenderNow().timeIntervalSince($0) > 86400 } ?? false
                 let when = m.isSelf ? tr("этот компьютер", "this computer")
                     : m.updated.map { tr("данные от ", "data from ") + fmtMoment($0).lowercased() } ?? tr("ещё не присылал", "no data yet")
                 let whenA = attr(when, 10.5, .regular, stale ? ADV_WARN : textMid)
@@ -5814,7 +6026,6 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 id: "sync:keychain-retry", primary: false)
         }
         }
-    }
 
     // sounds group — one summary row; the three cards below only when unfolded
     do {
@@ -6202,7 +6413,7 @@ private final class QuotaActionButton: NSButton {
     }
 }
 
-final class LimitsPanelView: NSView {
+final class LimitsPanelView: NSView, NSTextFieldDelegate {
     var claude = LimitData(); var codex = LimitData()
     var interval: TimeInterval = POLL_DEFAULT
     var autoIntervals: [String: TimeInterval] = [:]
@@ -6216,6 +6427,12 @@ final class LimitsPanelView: NSView {
     private var quotaButtons: [NSButton] = []
     var mainScroll: CGFloat = 0
     private var mainScroller: NSScroller?
+    private var captionEditor: NSTextField?
+    private var captionCounter: NSTextField?
+    private var captionReset: NSButton?
+    private var editingCaptionKey: String?
+    private var editingCaptionOriginal: String?
+    private var captionDraft = ""
     var onQuit: (() -> Void)?
     var onOpenURL: ((String) -> Void)?
     var onPreview: ((String) -> Void)?
@@ -6242,9 +6459,18 @@ final class LimitsPanelView: NSView {
     override var isFlipped: Bool { false }
 
     func setMode(_ m: PanelMode) {
+        finishCaptionEdit(.escape)
         mode = m
-        if m == .main { mainScroll = 0 }
+        mainScroll = 0
         resizeToContent()
+    }
+
+    private func showGitHubSettings() {
+        setMode(.settings)
+        let layout = accountSettingsLayout()
+        let excess = max(0, settingsTotalHeight(about) - bounds.height)
+        mainScroll = min(excess, max(0, layout.syncCap - 14))
+        needsDisplay = true
     }
 
     /// Resize the panel (anchored at its top edge) to fit the current mode/state.
@@ -6265,7 +6491,7 @@ final class LimitsPanelView: NSView {
             let screenMax = (window?.screen?.visibleFrame.height ?? 800) - 40
             targetH = min(screenMax, claudeFixHeight(expired: claude.auth == .expired))
         }
-        if mode == .main, let screen = window?.screen ?? NSScreen.main {
+        if mode == .main || mode == .settings, let screen = window?.screen ?? NSScreen.main {
             targetH = min(targetH, screen.visibleFrame.height - 24)
         }
         if let win = window {
@@ -6280,11 +6506,21 @@ final class LimitsPanelView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let previousFrame = REMOTE_ACCOUNT_FRAME
-        let frame = mode == .main ? captureAccountFrame(claude, codex, now: Date()) : nil
+        let frame = (mode == .main || mode == .settings) ? captureAccountFrame(claude, codex, now: Date()) : nil
         REMOTE_ACCOUNT_FRAME = frame
         defer { REMOTE_ACCOUNT_FRAME = previousFrame }
         if mode == .settings || mode == .sounds {
-            hits = drawSettings(ctx, size: bounds.size, about: about, soundsPage: mode == .sounds, copied: copiedCmd)
+            let contentHeight = mode == .settings ? settingsTotalHeight(about) : bounds.height
+            let excess = max(0, contentHeight - bounds.height)
+            mainScroll = min(excess, max(0, mainScroll))
+            let offset = bounds.height - contentHeight + mainScroll
+            ctx.saveGState(); ctx.clip(to: bounds); ctx.translateBy(x: 0, y: offset)
+            hits = drawSettings(ctx, size: CGSize(width: bounds.width, height: contentHeight), about: about,
+                                soundsPage: mode == .sounds, copied: copiedCmd)
+            ctx.restoreGState()
+            hits = hits.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: offset), tooltip: $0.tooltip) }
+            updateContentScroller(contentHeight)
+            updateCaptionEditorFrame()
         } else if mode == .whatsnew {
             hits = drawWhatsNew(ctx, size: bounds.size, notes: notes, loading: notesLoading,
                                 error: notesError, scroll: scroll, contentH: notesContentH,
@@ -6304,18 +6540,10 @@ final class LimitsPanelView: NSView {
                 : drawPanel(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
             ctx.restoreGState()
             hits = hits.map { Hit(id: $0.id, rect: $0.rect.offsetBy(dx: 0, dy: offset), tooltip: $0.tooltip) }
-            if excess > 0 {
-                let scroller = mainScroller ?? NSScroller(frame: .zero)
-                if mainScroller == nil {
-                    scroller.scrollerStyle = .overlay; scroller.target = self; scroller.action = #selector(mainScrolled(_:))
-                    addSubview(scroller); mainScroller = scroller
-                }
-                scroller.frame = NSRect(x: bounds.width - 12, y: 4, width: 12, height: bounds.height - 8)
-                scroller.knobProportion = bounds.height / contentHeight
-                scroller.doubleValue = Double(mainScroll / excess); scroller.isHidden = false
-            } else { mainScroller?.isHidden = true }
+            updateContentScroller(contentHeight)
         }
-        if mode != .main { mainScroller?.isHidden = true }
+        if mode != .main && mode != .settings { mainScroller?.isHidden = true }
+
         let actionHits = mode == .main ? hits.filter { isQuotaAction($0.id) || $0.id.hasPrefix("iv") } : []
         for button in quotaButtons where !actionHits.contains(where: { $0.id == button.identifier?.rawValue }) {
             button.removeFromSuperview()
@@ -6364,8 +6592,11 @@ final class LimitsPanelView: NSView {
                 let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
                 let element = NSAccessibilityElement()
                 element.setAccessibilityRole(.staticText); element.setAccessibilityFrame(screenRect)
-                let product = hit.id.hasSuffix("claude") ? "claude" : "codex"
-                let account = displayedCardViews(claude, codex).first { $0.product == product }
+                let parts = hit.id.split(separator: ":", maxSplits: 2).map(String.init)
+                let product = parts.count > 1 ? parts[1] : "claude"
+                let account = displayedCardViews(claude, codex).first {
+                    $0.product == product && (parts.count < 3 || $0.historyKey == parts[2])
+                }
                 element.setAccessibilityLabel(account?.caption ?? (product == "claude" ? "Claude Code" : "Codex"))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityValue(hit.tooltip ?? "")
@@ -6374,13 +6605,13 @@ final class LimitsPanelView: NSView {
             setAccessibilityChildren(accessibleChildren)
         } else { setAccessibilityChildren(nil) }
         removeAllToolTips()
-        for h in hits where h.tooltip != nil && (h.id.hasPrefix("quotafeedback:") || h.id.hasPrefix("open:") || h.id == "claudefix") {
+        for h in hits where h.tooltip != nil {
             let rect = h.rect.intersection(bounds)
             if !rect.isNull && !rect.isEmpty { addToolTip(rect, owner: self, userData: nil) }
         }
         // The same immutable views/clock were consumed by cards, footers and AX.
         // An ordinary show()/needsDisplay redraw therefore logs time-only state changes too.
-        if let frame = frame { onAccountsDisplayed?(frame.displayedViews, frame.now) }
+        if mode == .main, let frame = frame { onAccountsDisplayed?(frame.visibleViews, frame.now) }
     }
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
@@ -6393,7 +6624,7 @@ final class LimitsPanelView: NSView {
     @objc private func quotaButtonClicked(_ sender: NSButton) {
         guard let id = sender.identifier?.rawValue else { return }
         if id == "refresh" { onRefresh?() }
-        else if id.hasPrefix("syncsettings:") { setMode(.settings) }
+        else if id.hasPrefix("syncsettings:") { showGitHubSettings() }
         else if id == "allowquota:claude" { onClaudePermission?(true) }
         else if id == "cancelquota:claude" { onClaudePermission?(false) }
         else if id.hasPrefix("retryquota:") { onRefreshProduct?(String(id.dropFirst(11))) }
@@ -6419,13 +6650,28 @@ final class LimitsPanelView: NSView {
         alert.addButton(withTitle: tr("Понятно", "OK")); alert.runModal()
     }
 
+    private func scrollableContentHeight() -> CGFloat {
+        mode == .settings ? settingsTotalHeight(about) : mainPanelHeight(claude, codex)
+    }
+    private func updateContentScroller(_ contentHeight: CGFloat) {
+        let excess = max(0, contentHeight - bounds.height)
+        guard excess > 0 else { mainScroller?.isHidden = true; return }
+        let scroller = mainScroller ?? NSScroller(frame: .zero)
+        if mainScroller == nil {
+            scroller.scrollerStyle = .overlay; scroller.target = self; scroller.action = #selector(mainScrolled(_:))
+            addSubview(scroller); mainScroller = scroller
+        }
+        scroller.frame = NSRect(x: bounds.width - 12, y: 4, width: 12, height: bounds.height - 8)
+        scroller.knobProportion = bounds.height / contentHeight
+        scroller.doubleValue = Double(mainScroll / excess); scroller.isHidden = false
+    }
     @objc private func mainScrolled(_ sender: NSScroller) {
-        let excess = max(0, mainPanelHeight(claude, codex) - bounds.height)
+        let excess = max(0, scrollableContentHeight() - bounds.height)
         mainScroll = CGFloat(sender.doubleValue) * excess; needsDisplay = true
     }
     override func scrollWheel(with event: NSEvent) {
-        if mode == .main {
-            let excess = max(0, mainPanelHeight(claude, codex) - bounds.height)
+        if mode == .main || mode == .settings {
+            let excess = max(0, scrollableContentHeight() - bounds.height)
             mainScroll = min(excess, max(0, mainScroll - event.scrollingDeltaY)); needsDisplay = true
             return
         }
@@ -6433,6 +6679,99 @@ final class LimitsPanelView: NSView {
         let maxScroll = max(0, notesContentH - notesViewportH)
         scroll = min(maxScroll, max(0, scroll - event.scrollingDeltaY))
         needsDisplay = true
+    }
+
+    private func accountForSettings(_ key: String) -> AccountView? {
+        displayAccountViews(claude, codex, includeHidden: true).first { $0.historyKey == key }
+    }
+    private func updateCaptionEditorFrame() {
+        guard let key = editingCaptionKey, let editor = captionEditor,
+              let hit = hits.first(where: { $0.id == "edit:" + key }) else { return }
+        let rowTop = hit.rect.maxY + 1
+        editor.frame = CGRect(x: 56, y: rowTop - 22, width: 165, height: 21)
+        captionCounter?.frame = CGRect(x: 222, y: rowTop - 18, width: 42, height: 14)
+        captionReset?.frame = CGRect(x: 224, y: rowTop - 35, width: 60, height: 15)
+        let visible = editor.frame.intersects(bounds)
+        editor.isHidden = !visible; captionCounter?.isHidden = !visible; captionReset?.isHidden = !visible
+    }
+    private func beginCaptionEdit(_ key: String) {
+        finishCaptionEdit(.escape)
+        guard let view = accountForSettings(key), view.label != nil, !key.hasPrefix("u:") else { return }
+        editingCaptionKey = key
+        editingCaptionOriginal = localAccountCaptions()[view.label ?? key]
+        captionDraft = remoteCaptionInput(view.caption)
+        let editor = NSTextField(frame: .zero)
+        editor.font = NSFont.systemFont(ofSize: 12.5)
+        editor.stringValue = captionDraft; editor.delegate = self
+        editor.focusRingType = .default
+        editor.toolTip = tr("Подпись видна на всех ваших компьютерах", "The label is shown on all your computers")
+        editor.setAccessibilityLabel(tr("Подпись аккаунта", "Account label"))
+        let counter = NSTextField(labelWithString: "\(captionDraft.unicodeScalars.count)/32")
+        counter.font = NSFont.systemFont(ofSize: 10); counter.textColor = .secondaryLabelColor
+        let reset = NSButton(title: tr("Сбросить", "Reset"), target: self, action: #selector(resetCaption(_:)))
+        reset.isBordered = false; reset.font = NSFont.systemFont(ofSize: 10)
+        reset.contentTintColor = ADV_LINK
+        addSubview(editor); addSubview(counter); addSubview(reset)
+        captionEditor = editor; captionCounter = counter; captionReset = reset
+        updateCaptionEditorFrame(); window?.makeFirstResponder(editor)
+    }
+    func controlTextDidChange(_ notification: Notification) {
+        guard let editor = notification.object as? NSTextField, editor === captionEditor else { return }
+        let raw = editor.stringValue
+        let normalized = raw.precomposedStringWithCompatibilityMapping
+        if normalized.contains(where: { $0 == "@" || $0 == "/" || $0 == "\\" }) {
+            editor.stringValue = captionDraft
+        } else {
+            captionDraft = remoteCaptionInput(raw); editor.stringValue = captionDraft
+        }
+        captionCounter?.stringValue = "\(captionDraft.unicodeScalars.count)/32"
+    }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === captionEditor else { return false }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { finishCaptionEdit(.enter); return true }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { finishCaptionEdit(.escape); return true }
+        return false
+    }
+    @objc private func resetCaption(_ sender: NSButton) { finishCaptionEdit(.reset) }
+    private func finishCaptionEdit(_ command: RemoteCaptionCommand) {
+        guard let key = editingCaptionKey else { return }
+        let view = accountForSettings(key)
+        let result = remoteCaptionEdit(original: editingCaptionOriginal, draft: captionEditor?.stringValue ?? captionDraft, command: command)
+        if result.committed {
+            var captions = localAccountCaptions()
+            // Empty sentinel deliberately overrides a custom caption imported from gist.
+            captions[view?.label ?? key] = result.value ?? ""
+            UserDefaults.standard.set(captions, forKey: "localAccountCaptions")
+        }
+        editingCaptionKey = nil
+        captionEditor?.delegate = nil; captionEditor?.removeFromSuperview(); captionEditor = nil
+        captionCounter?.removeFromSuperview(); captionCounter = nil
+        captionReset?.removeFromSuperview(); captionReset = nil
+        if result.committed { onTrayChanged?(); resizeToContent() }
+        needsDisplay = true
+    }
+    private func chooseMenuAccount(_ product: String, at point: CGPoint) {
+        let views = displayAccountViews(claude, codex).filter { $0.product == product && !$0.historyKey.hasPrefix("u:") }
+        let stored = menuAccountSelection()[product]
+        let selected = stored.flatMap { label in views.contains(where: { $0.label == label }) ? label : nil }
+        let menu = NSMenu()
+        let fallback = NSMenuItem(title: tr("По умолчанию", "Default"), action: #selector(menuAccountPicked(_:)), keyEquivalent: "")
+        fallback.target = self; fallback.representedObject = [product, ""]
+        fallback.state = selected == nil ? .on : .off; menu.addItem(fallback)
+        for view in views {
+            guard let label = view.label else { continue }
+            let item = NSMenuItem(title: view.caption, action: #selector(menuAccountPicked(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = [product, label]
+            item.state = selected == label ? .on : .off; menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: point, in: self)
+    }
+    @objc private func menuAccountPicked(_ sender: NSMenuItem) {
+        guard let parts = sender.representedObject as? [String], parts.count == 2 else { return }
+        var selected = menuAccountSelection()
+        selected[parts[0]] = parts[1].isEmpty ? nil : parts[1]
+        UserDefaults.standard.set(selected, forKey: "menuAccount")
+        onTrayChanged?(); needsDisplay = true
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -6444,7 +6783,8 @@ final class LimitsPanelView: NSView {
             case "allowquota:claude": onClaudePermission?(true)
             case "cancelquota:claude": onClaudePermission?(false)
             case "quit": onQuit?()
-            case "settings", "syncsettings:claude", "syncsettings:codex": setMode(.settings)
+            case "settings": setMode(.settings)
+            case "syncsettings:claude", "syncsettings:codex": showGitHubSettings()
             case "back": setMode(.main)
             case "backsettings": setMode(.settings)
             case "whatsnew": onWhatsNew?()
@@ -6455,7 +6795,35 @@ final class LimitsPanelView: NSView {
             case "claudefix": setMode(.claudeFix)
             case "fixrefresh": onRefresh?(); setMode(.main)
             default:
-                if h.id.hasPrefix("retryquota:") {
+                if h.id.hasPrefix("syncsettings:") {
+                    showGitHubSettings()
+                } else if h.id.hasPrefix("edit:") {
+                    beginCaptionEdit(String(h.id.dropFirst(5)))
+                } else if h.id.hasPrefix("accountvisible:") {
+                    finishCaptionEdit(.escape)
+                    let key = String(h.id.dropFirst(15))
+                    guard let view = accountForSettings(key) else { return }
+                    let identity = view.label ?? key
+                    var hidden = hiddenAccounts()
+                    if hidden.contains(identity) { hidden.remove(identity) } else { hidden.insert(identity) }
+                    UserDefaults.standard.set(hidden.sorted(), forKey: "hiddenAccounts")
+                    onTrayChanged?(); resizeToContent()
+                } else if h.id.hasPrefix("menuaccount:") {
+                    chooseMenuAccount(String(h.id.dropFirst(12)), at: CGPoint(x: h.rect.minX, y: h.rect.minY))
+                } else if h.id == "accounts:github" {
+                    showGitHubSettings()
+                } else if h.id.hasPrefix("histaccount:") {
+                    UserDefaults.standard.set(String(h.id.dropFirst(12)), forKey: "advHistAccount")
+                    resizeToContent()
+                } else if h.id.hasPrefix("accountsub:") {
+                    let value = String(h.id.dropFirst(11))
+                    if let split = value.lastIndex(of: ":"), let price = Double(value[value.index(after: split)...]) {
+                        var overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
+                        overrides[String(value[..<split])] = price
+                        UserDefaults.standard.set(overrides, forKey: "accountSubscriptionUSD")
+                        needsDisplay = true
+                    }
+                } else if h.id.hasPrefix("retryquota:") {
                     onRefreshProduct?(String(h.id.dropFirst(11)))
                 } else if h.id.hasPrefix("restorequota:") {
                     restoreQuotaAccess(String(h.id.dropFirst(13)))
@@ -6589,7 +6957,7 @@ final class PanelController {
     }
 
     func show(below button: NSStatusBarButton) {
-        view.mode = .main   // always open on the main screen
+        view.setMode(.main)   // discard an unfinished settings edit when reopening
         view.mainScroll = 0
         let mainH = min(mainPanelHeight(view.claude, view.codex),
                         ((button.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 10000) - 24)
@@ -7222,10 +7590,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// (Re)build just the menu-bar image — used by render() and by the update badge refresh.
     func applyTrayImage(_ claude: LimitData, _ codex: LimitData) {
-        var products: [(LimitData, String)] = []
-        if productEnabled("claude"), claude.present { products.append((claude, "claude_128.png")) }
-        if productEnabled("codex"), codex.present { products.append((codex, "codex_128.png")) }
-        if let cgImg = renderStrip(products, dark: isTrayDark(), s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
+        let frame = captureAccountFrame(claude, codex, now: Date())
+        let previousFrame = REMOTE_ACCOUNT_FRAME
+        REMOTE_ACCOUNT_FRAME = frame
+        defer { REMOTE_ACCOUNT_FRAME = previousFrame }
+        let menu = remoteMenuPresentation(views: frame.visibleViews, selected: menuAccountSelection(),
+            language: appLang(), dark: isTrayDark(), now: frame.now, timeZone: .current, metrics: trayMetrics().map { $0.rawValue })
+        statusItem.button?.toolTip = menu.tooltip
+        if let cgImg = renderStrip([], dark: menu.dark, s: 2, badge: availableUpdate != nil), let btn = statusItem.button {
             let img = NSImage(cgImage: cgImg, size: NSSize(width: CGFloat(cgImg.width) / 2,
                                                            height: CGFloat(cgImg.height) / 2))
             img.isTemplate = false
@@ -7872,11 +8244,6 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     select(false, true)
     check(advancedHeight(c, x) < enabledHeight, "single-subscription panel shrinks")
     SYNC_PREVIEW = SyncUIState()
-    func save(_ context: CGContext, _ path: String) {
-        let dst = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL, "public.png" as CFString, 1, nil)!
-        CGImageDestinationAddImage(dst, context.makeImage()!, nil)
-        check(CGImageDestinationFinalize(dst), "preview " + path)
-    }
     // MANUAL-REFRESH freeze2: synthetic bitmap fixtures, no runtime refresh paths.
     // All inputs below are RAM-only, SYNC_PREVIEW is set and history remains collapsed.
     // Date() affects display text only: no clock value can reach network/credentials/log scans.
@@ -7931,12 +8298,31 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     select(false, true)   // the state the checks above left (single-subscription panel)
     check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-09)")
     check(runRemoteLimitsC3SelfTests() == 0, "C3 remote-limits model selftests (part A)")
+    check(runRemoteLimitsC3BSelfTests() == 0, "C3 remote-limits model selftests (part B)")
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,
     // launch callback, event loop, refresh or recovery action is invoked here.
     _ = NSApplication.shared
     _ = ctFont(11, .regular); _ = ctMono(11, .regular)
+    let previewDir: URL
+    do { previewDir = try c3PreviewDirectory() }
+    catch { check(false, "C3-10 preview directory: " + error.localizedDescription); exit(1) }
+    var previewFiles: [String] = []
+    func save(_ context: CGContext, _ path: String) {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        let target = previewDir.appendingPathComponent(name)
+        guard let image = context.makeImage(),
+              let destination = CGImageDestinationCreateWithURL(target as CFURL, "public.png" as CFString, 1, nil) else {
+            check(false, "preview allocation " + name); return
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        let saved = CGImageDestinationFinalize(destination)
+        check(saved, "preview " + target.path)
+        if saved { previewFiles.append(name) }
+    }
+    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 190,
+          "C3-10 190 C3-B preview scenes")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {
@@ -8138,7 +8524,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     manualCheck(before != nil && after != nil && before!.isEqual(after!),
                                 label + " draw preserves preference: " + key)
                 }
-                save(image, "/tmp/ccl-manual-refresh-\(fixture)-\(lang)-\(advanced ? "advanced" : "simple").png")
+                save(image, "ccl-manual-refresh-\(fixture)-\(lang)-\(advanced ? "advanced" : "simple").png")
                 manualImages += 1
             }
         }
@@ -8158,7 +8544,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             check(toggles.count == 2 && !toggles[0].rect.intersects(toggles[1].rect)
                   && hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= h },
                   "\(lang) advanced=\(advanced): both toggles and all controls fit")
-            save(ctx, "/tmp/ccl-subscriptions-settings-\(lang)-\(advanced).png")
+            save(ctx, "ccl-subscriptions-settings-\(lang)-\(advanced).png")
             for bothOff in [false, true] {
                 prefs["autoPoll"] = true
                 select(false, !bothOff)
@@ -8172,7 +8558,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                       "\(lang) advanced=\(advanced): all fixed intervals and Auto are clickable")
                 check(phits.contains { $0.id == "settings" } && !phits.contains { $0.id == "claudefix" || $0.id.contains("claude.ai") },
                       "\(lang) advanced=\(advanced) paused=\(bothOff): Settings reachable; no Claude links")
-                save(pc, "/tmp/ccl-subscriptions-panel-\(lang)-\(advanced)-paused-\(bothOff).png")
+                save(pc, "ccl-subscriptions-panel-\(lang)-\(advanced)-paused-\(bothOff).png")
             }
         }
     }
@@ -8340,7 +8726,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 check(autoHit.minX == 176 && autoHit.width == 40 && powerHit.minX == 320
                       && !autoHit.intersects(powerHit) && autoHit.minY >= 0 && autoHit.maxY <= height,
                       "\(lang) advanced=\(advanced) \(fixture): full-panel footer bounds and fallback")
-                save(image, "/tmp/ccl-auto-ui-\(fixture)-\(lang)-advanced-\(advanced).png")
+                save(image, "ccl-auto-ui-\(fixture)-\(lang)-advanced-\(advanced).png")
                 autoImages += 1
             }
             prefs["autoPoll"] = true; select(true, true)
@@ -8547,7 +8933,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     authCheck(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height },
                               label + " actual hit bounds")
                     // Keep full panels as PNG for QA; do not compare time-dependent card bitmaps.
-                    save(image, "/tmp/ccl-auth-hints-\(product)-\(fixture)-\(lang)-advanced-\(advanced)-both-\(both).png")
+                    save(image, "ccl-auth-hints-\(product)-\(fixture)-\(lang)-advanced-\(advanced)-both-\(both).png")
                     authImages += 1
                 }
             }
@@ -8607,11 +8993,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                           "GitHub \(lang) \(name) actual login affordance matches state")
                     check(settingsHits.contains { $0.id == "sync:logout" }, "GitHub \(lang) \(name) actual local cleanup control")
                     check(settingsHits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= sh }, "GitHub settings control bounds")
-                    save(settingsImage, "/tmp/ccl-github-auth-settings-\(name)-\(lang).png"); githubImages += 1
+                    save(settingsImage, "ccl-github-auth-settings-\(name)-\(lang).png"); githubImages += 1
                 }
                 check(beforePreferences.isEqual(to: defaults.dictionaryRepresentation())
                       && beforeIndex == (try! cachedIndexEncoder.encode(UsageLogs.shared.snapshot())), "GitHub actual draw leaves preferences and cached usage unchanged")
-                save(image, "/tmp/ccl-github-auth-main-\(name)-\(lang)-advanced-\(advanced).png"); githubImages += 1
+                save(image, "ccl-github-auth-main-\(name)-\(lang)-advanced-\(advanced).png"); githubImages += 1
             }
         }
     }
@@ -8622,6 +9008,12 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
           "Auto selection uses provider snapshots independently of the saved fixed interval")
+    do {
+        let count = try c3WritePreviewManifest(previewDir: previewDir, files: previewFiles)
+        check(c3VerifyPreviewManifest(previewDir: previewDir, files: previewFiles, check: check) == 0,
+              "C3-10 final preview manifest")
+        print("OK C3-10 \(count) previews → \(previewDir.path)")
+    } catch { check(false, "C3-10 manifest: " + error.localizedDescription) }
     print("Subscription selection and adaptive polling selftest passed")
     exit(0)
 }
