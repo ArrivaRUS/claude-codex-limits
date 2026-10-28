@@ -598,6 +598,89 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     }
 }
 
+
+// C3-27: the native Auto tooltip keeps its full accessible interval wording.
+// Both products intentionally share the legacy history key: participation and
+// display names are product-scoped and independent of account labels/visibility.
+private func c3bC327(_ expect: C3BExpect) {
+    var claude = c3bView(local: true), codex = c3bView(1, product: "codex", local: true)
+    claude.label = nil; codex.label = nil
+    claude.historyKey = "l:legacy"; codex.historyKey = "l:legacy"
+    let local = [claude, codex], both: Set<String> = ["claude", "codex"]
+    let intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400]
+    let foreign = c3bView(2, product: "claude")
+    for language in ["ru", "en"] {
+        let en = language == "en", autoTitle = en ? "Auto" : "Авто"
+        let first = en ? "15 minutes" : "15 минут", second = en ? "4 hours" : "4 часа"
+        let footer = remoteAutoFooter(views: local, enabled: both, intervals: intervals, language: language)
+        expect(footer.products == ["claude", "codex"] && !footer.noSubscriptions,
+               "C3-27 \(language): both enabled local legacy products participate in Auto")
+        let tooltip = remotePollTooltip(0, views: local, enabled: both, intervals: intervals, auto: true, language: language)
+        expect(tooltip == autoTitle + ": Claude Code → " + first + "; Codex → " + second,
+               "C3-27 \(language): native Auto tooltip preserves full titles for Claude 900 and Codex 14400")
+        expect(remotePollTooltip(900, views: local, enabled: both, intervals: intervals, auto: true, language: language)
+               == first + "\n" + autoTitle + ": Claude Code",
+               "C3-27 \(language): 15-minute segment names only its enabled Claude poll")
+        expect(remotePollTooltip(14400, views: local, enabled: both, intervals: intervals, auto: true, language: language)
+               == second + "\n" + autoTitle + ": Codex",
+               "C3-27 \(language): four-hour segment names only its enabled Codex poll")
+
+        let titles: [(TimeInterval, String)] = en
+            ? [(900, "15 minutes"), (1800, "30 minutes"), (3600, "1 hour"), (14400, "4 hours")]
+            : [(900, "15 минут"), (1800, "30 минут"), (3600, "1 час"), (14400, "4 часа")]
+        for (seconds, title) in titles {
+            let shared = ["claude": seconds, "codex": seconds]
+            expect(remotePollTooltip(0, views: local, enabled: both, intervals: shared, auto: true, language: language)
+                   == autoTitle + ": Claude Code → " + title + "; Codex → " + title,
+                   "C3-27 \(language)/\(Int(seconds)): equal effective intervals list both providers")
+            expect(remotePollTooltip(seconds, views: local, enabled: both, intervals: shared, auto: true, language: language)
+                   == title + "\n" + autoTitle + ": Claude Code; Codex",
+                   "C3-27 \(language)/\(Int(seconds)): shared interval segment lists both providers")
+            expect(remotePollTooltip(seconds, views: local, enabled: both, intervals: shared, auto: false, language: language) == title,
+                   "C3-27 \(language)/\(Int(seconds)): manual tooltip is the existing accessible interval title")
+        }
+        expect(remotePollTooltip(0, views: local, enabled: both, intervals: intervals, auto: false, language: language) == autoTitle,
+               "C3-27 \(language): manual Auto button has no effective-interval mappings")
+        for (product, name, seconds, title) in [("claude", "Claude Code", 900.0, first), ("codex", "Codex", 14400.0, second)] {
+            let enabled: Set<String> = [product]
+            expect(remoteAutoFooter(views: local, enabled: enabled, intervals: intervals, language: language).products == [product],
+                   "C3-27 \(language)/\(product): disabled local neighbour does not participate")
+            expect(remotePollTooltip(0, views: local, enabled: enabled, intervals: intervals, auto: true, language: language)
+                   == autoTitle + ": " + name + " → " + title,
+                   "C3-27 \(language)/\(product): single enabled provider keeps full Auto title")
+            expect(remotePollTooltip(seconds, views: local, enabled: enabled, intervals: intervals, auto: true, language: language)
+                   == title + "\n" + autoTitle + ": " + name,
+                   "C3-27 \(language)/\(product): single-provider interval tooltip excludes disabled neighbour")
+        }
+        let allFrame = RemoteAccountFrame(now: c3bNow(), sync: ReaderSyncState(phase: .off),
+            allViews: local, visibleViews: [codex], displayedViews: [codex])
+        expect(remotePollTooltip(0, views: allFrame.allViews, enabled: both, intervals: intervals, auto: true, language: language) == tooltip,
+               "C3-27 \(language): hidden local Claude continues participating through allViews")
+        expect(remotePollTooltip(0, views: local + [foreign], enabled: both, intervals: intervals, auto: true, language: language) == tooltip,
+               "C3-27 \(language): foreign same-product account never duplicates local Auto mapping")
+        expect(remotePollTooltip(0, views: [foreign, codex], enabled: both, intervals: intervals, auto: true, language: language)
+               == autoTitle + ": Codex → " + second,
+               "C3-27 \(language): remote Claude does not replace the missing local Claude poll")
+        let none = remoteAutoFooter(views: [foreign], enabled: both, intervals: intervals, language: language)
+        expect(none.noSubscriptions && none.products.isEmpty,
+               "C3-27 \(language): foreign-only account never participates in local Auto")
+        for seconds in [0.0, 900, 1800, 3600, 14400] {
+            for auto in [true, false] {
+                expect(remotePollTooltip(seconds, views: [], enabled: [], intervals: intervals, auto: auto, language: language)
+                       == (en ? "No subscriptions enabled" : "Нет включённых подписок"),
+                       "C3-27 \(language)/\(Int(seconds))/auto=\(auto): local-only Off retains existing native tooltip")
+            }
+            expect(remotePollTooltip(seconds, views: [foreign], enabled: both, intervals: intervals, auto: true, language: language) == none.tooltip,
+                   "C3-27 \(language)/\(Int(seconds)): foreign-only footer keeps V9 schedule explanation")
+        }
+        expect(remotePollTooltip(0, views: local, enabled: both, intervals: [:], auto: true, language: language) == autoTitle,
+               "C3-27 \(language): missing Auto interval snapshot never invents a default mapping")
+        expect(remotePollTooltip(0, views: local, enabled: both, intervals: ["claude": 2700, "codex": 900], auto: true, language: language)
+               == autoTitle + ": Codex → " + first,
+               "C3-27 \(language): unsupported interval is omitted without losing valid neighbour")
+    }
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -605,7 +688,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
         print("\(ok ? "OK" : "FAIL") \(message)")
     }
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
-    c3bReviewRegressions(expect)
+    c3bReviewRegressions(expect); c3bC327(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
     return failures
 }

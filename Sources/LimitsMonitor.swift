@@ -4084,20 +4084,13 @@ func pollSelected(_ sec: TimeInterval, manual: TimeInterval, autoIntervals: [Str
     }
 }
 func pollAccessibleTitle(_ sec: TimeInterval) -> String {
-    switch sec {
-    case 900: return tr("15 минут", "15 minutes")
-    case 1800: return tr("30 минут", "30 minutes")
-    case 3600: return tr("1 час", "1 hour")
-    case 14400: return tr("4 часа", "4 hours")
-    default: return tr("Авто", "Auto")
-    }
+    remotePollAccessibleTitle(sec, language: appLang())
 }
 func pollTooltip(_ sec: TimeInterval, autoIntervals: [String: TimeInterval], views: [AccountView]? = nil) -> String {
     if let views = views {
-        let model = remoteAutoFooter(views: views, enabled: Set(["claude", "codex"].filter { productEnabled($0) }), intervals: autoIntervals, language: appLang())
-        if model.noSubscriptions || (sec == 0 && autoPollEnabled()) { return model.tooltip }
-        let names = model.products.filter { autoIntervals[$0] == sec }.map { $0 == "claude" ? "Claude Code" : "Codex" }
-        return pollAccessibleTitle(sec) + (autoPollEnabled() && !names.isEmpty ? tr("\nАвто: ", "\nAuto: ") + names.joined(separator: "; ") : "")
+        return remotePollTooltip(sec, views: views,
+            enabled: Set(["claude", "codex"].filter { productEnabled($0) }),
+            intervals: autoIntervals, auto: autoPollEnabled(), language: appLang())
     }
     guard !monitoringPaused() else { return tr("Нет включённых подписок", "No subscriptions enabled") }
     let title = pollAccessibleTitle(sec)

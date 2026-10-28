@@ -321,6 +321,43 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
     return card
 }
 
+func remotePollAccessibleTitle(_ sec: TimeInterval, language: String) -> String {
+    let en = language == "en"
+    switch sec {
+    case 900: return en ? "15 minutes" : "15 минут"
+    case 1800: return en ? "30 minutes" : "30 минут"
+    case 3600: return en ? "1 hour" : "1 час"
+    case 14400: return en ? "4 hours" : "4 часа"
+    default: return en ? "Auto" : "Авто"
+    }
+}
+
+// Auto participation comes from C3-A; the native interval control retains its
+// existing accessible duration wording instead of the compact schedule copy.
+func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<String>,
+                       intervals: [String: TimeInterval], auto: Bool, language: String) -> String {
+    let model = remoteAutoFooter(views: views, enabled: enabled, intervals: intervals, language: language)
+    let en = language == "en"
+    if model.noSubscriptions {
+        // A local-only Off panel keeps the established explanation. With foreign
+        // accounts, explain that their schedules belong to the publishing machines.
+        if enabled.isEmpty && !views.contains(where: { !$0.isLocal }) {
+            return en ? "No subscriptions enabled" : "Нет включённых подписок"
+        }
+        return model.tooltip
+    }
+    let label = remotePollAccessibleTitle(sec, language: language)
+    guard auto else { return label }
+    let providers = model.products.compactMap { product -> String? in
+        guard let interval = intervals[product], [900.0, 1800, 3600, 14400].contains(interval),
+              sec == 0 || sec == interval else { return nil }
+        let name = product == "claude" ? "Claude Code" : "Codex"
+        return sec == 0 ? name + " → " + remotePollAccessibleTitle(interval, language: language) : name
+    }
+    guard !providers.isEmpty else { return label }
+    return label + (sec == 0 ? ": " : (en ? "\nAuto: " : "\nАвто: ")) + providers.joined(separator: "; ")
+}
+
 // Time-driven tray redraws do not depend on a local provider poll. Strict `>`
 // freshness boundaries get a millisecond so the redraw observes the new state.
 func remoteMenuRefreshDeadline(views: [AccountView], now: Date) -> Date? {
