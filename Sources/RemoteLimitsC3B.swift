@@ -76,10 +76,9 @@ func remoteAdvancedRowHeight(_ kind: AdvRowKind) -> Double {
 }
 func remoteAdvancedRowKind(_ view: AccountView, metric: String, now: Date) -> AdvRowKind {
     let d = view.data
-    if !view.isLocal {
-        if view.state == .signedOut { return .inactive }
-        if view.state != .fresh && view.state != .serviceWait { return .stale }
-    }
+    // Reader/source status lives in the header and footer. Within V4 the
+    // snapshot still owns its complete forecast row, regardless of that status.
+    if !view.isLocal && view.state == .signedOut { return .inactive }
     let used: Double?, reset: Date?, hours: Double
     switch metric {
     case "session": (used, reset, hours) = (d.session, d.sessionReset, 5)
@@ -300,16 +299,37 @@ func remotePresentationSourceLine(_ raw: AccountView, language: String, narrow: 
     return remoteCardSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone,
                                 compact: compact, machineLimit: machineLimit)
 }
-func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,
-                            now: Date, timeZone: TimeZone, manual: RemoteManualPhase = .idle) -> RemoteCardPresentation {
-    let view = remotePresentationView(raw, sync: sync, now: now)
-    // Provider cooldown is meaningful only where this machine has a login.
+func remotePresentationManualPhase(isLocal: Bool, manual: RemoteManualPhase,
+                                   readerManual: RemoteManualPhase?, now: Date) -> RemoteManualPhase {
+    guard !isLocal else { return manual }
     let phase: RemoteManualPhase
-    if case .pollAllowed = manual, !view.isLocal { phase = .idle } else { phase = manual }
+    if case .pollAllowed = manual { phase = readerManual ?? .idle }
+    else { phase = readerManual ?? manual }
+    if case .pollAllowed = phase { return .idle }
+    if case .checked(let at) = phase, !(0..<60).contains(now.timeIntervalSince(at)) { return .idle }
+    return phase
+}
+
+func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,
+                            now: Date, timeZone: TimeZone, manual: RemoteManualPhase = .idle,
+                            productAccountCount: Int = 1, readerManual: RemoteManualPhase? = nil) -> RemoteCardPresentation {
+    let view = remotePresentationView(raw, sync: sync, now: now)
+    // Provider cooldown belongs to the local card; the reader's result belongs
+    // to every foreign card and retains the same 60-second lifetime.
+    let phase = remotePresentationManualPhase(isLocal: view.isLocal, manual: manual,
+        readerManual: readerManual, now: now)
     var safeSync = sync
     safeSync.warning = sync.warning.map { remoteSnapshotText($0, limit: 256) }
     var card = remoteCardPresentation(view, sync: safeSync, language: language, narrow: narrow,
                                       now: now, timeZone: timeZone, manual: phase)
+    let defaultCaption = view.caption.isEmpty || view.caption == remoteDefaultCaption(view)
+    if productAccountCount >= 2 && view.isLocal && defaultCaption {
+        let machines = view.machines.prefix(2).joined(separator: ", ")
+            + (view.machines.count > 2 ? " +\(view.machines.count - 2)" : "")
+        card.simpleTitle = (view.product == "claude" ? "Claude" : "Codex")
+            + (machines.isEmpty ? "" : " · " + machines)
+        card.machineSuffix = machines.isEmpty ? "" : "· " + machines
+    }
     card.sourceLine = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
     if !view.isLocal && view.state == .signedOut {
         card.paceNotice = nil
@@ -319,6 +339,70 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
         }
     }
     return card
+}
+
+// The renderer passes measured widths including each pill's padding. Machines
+// receive the remaining width only after the complete product title and pills.
+struct RemoteAdvancedHeaderWidths {
+    var title: Double
+    var badge: Double
+    var plan: Double
+    var machines: Double
+}
+func remoteAdvancedHeaderWidths(availableWidth: Double, titleWidth: Double,
+                                 badgeWidth: Double, planWidth: Double, machineWidth: Double,
+                                 isCustomTitle: Bool, minimumTitleWidth: Double) -> RemoteAdvancedHeaderWidths {
+    let available = max(0, availableWidth), naturalTitle = max(0, titleWidth)
+    let badge = max(0, badgeWidth), plan = max(0, planWidth), machines = max(0, machineWidth)
+    let titleGap = badge > 0 || plan > 0 || machines > 0 ? 7.0 : 0
+    let badgeGap = badge > 0 && (plan > 0 || machines > 0) ? 5.0 : 0
+    let planGap = plan > 0 && machines > 0 ? 5.0 : 0
+    let fixed = badge + plan + titleGap + badgeGap + planGap
+    let titleBudget = max(0, available - fixed)
+    // Custom L can shrink, while a product name keeps its natural measured
+    // width. The normal 263pt row has room for both fixed pills and the product.
+    let title = isCustomTitle ? min(naturalTitle, max(minimumTitleWidth, titleBudget)) : naturalTitle
+    return RemoteAdvancedHeaderWidths(title: title, badge: badge, plan: plan,
+        machines: min(machines, max(0, available - fixed - title)))
+}
+
+// C3-A's formatter remains unchanged for its public contract. Actual C3-B scene
+// rendering uses the explicit scene timezone for every timestamp in a verdict.
+func remoteAdvancedVerdict(_ row: AdvRow, data: LimitData, now: Date, language: String,
+                            timeZone: TimeZone) -> String {
+    let en = language == "en"
+    func t(_ ru: String, _ english: String) -> String { en ? english : ru }
+    func moment(_ at: Date) -> String { remoteCardTimestamp(at, now: now, timeZone: timeZone) }
+    guard remotePaceTimeValid(data, now: now) else { return t("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
+    func percent(_ value: Double) -> String { String(Int(value.rounded())) + "%" }
+    if let at = data.asOf, now.timeIntervalSince(at) > snapshotHorizon(data) {
+        return row.limit?.pace?.projectedPct.map { t("Прогноз на снимке: ", "Snapshot forecast: ") + percent($0) }
+            ?? t("На снимке мало данных для темпа", "Not enough pace data in snapshot")
+    }
+    if row.kind == .stale {
+        let reset = row.limit?.pace.map { $0.reset <= now } == true
+        return data.asOf.map { t(reset ? "Окно сброшено · снимок " : "по данным на ", reset ? "Window reset · snapshot " : "as of ") + moment($0) }
+            ?? t("Нет свежих данных · темп не считаем", "No fresh data · pace paused")
+    }
+    guard let pace = row.limit?.pace else {
+        return row.limit?.used != nil ? t("Нет времени окна · темп не считаем", "Window timing unknown · pace paused")
+            : t("Окно не активно · откроется с первым запросом", "Window inactive · opens with the first request")
+    }
+    switch row.kind {
+    case .exhausted: return t("Лимит исчерпан · сброс в ", "Limit reached · resets at ") + moment(pace.reset)
+    case .tooEarly: return t("Мало данных для темпа · сброс в ", "Not enough data for pace · resets at ") + moment(pace.reset)
+    default: break
+    }
+    if let at = pace.runsOutAt {
+        let minutes = max(0, Int(pace.reset.timeIntervalSince(at) / 60))
+        let span = minutes >= 60 ? t("\(minutes / 60) ч", "\(minutes / 60) h") : t("\(minutes) мин", "\(minutes) min")
+        return t("Кончится в ", "Runs out at ") + moment(at) + t(", за ", ", ") + span + t(" до сброса", " before reset")
+    }
+    if let projected = pace.projectedPct {
+        return t(projected.rounded() >= 85 ? "Хватит впритык (прогноз " : "Хватит до сброса (прогноз ",
+                 projected.rounded() >= 85 ? "Barely lasts (forecast " : "Lasts until reset (forecast ") + percent(projected) + ")"
+    }
+    return t("Хватит до сброса", "Lasts until reset")
 }
 
 func remotePollAccessibleTitle(_ sec: TimeInterval, language: String) -> String {

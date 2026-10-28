@@ -154,7 +154,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         REMOTE_ACCOUNT_VIEWS_PREVIEW = views
     }
     func render(_ name: String, language: String, view: String, accounts: [AccountView], sync: ReaderSyncState,
-                now: Date = C3_PREVIEW_NOW, phase: RemoteManualPhase = .idle, settings: Bool = false,
+                now: Date = C3_PREVIEW_NOW, phase: RemoteManualPhase = .idle, readerManual: RemoteManualPhase? = nil, settings: Bool = false,
                 hidden: Set<String> = [], expanded: Bool = false) {
         let advanced = view == "advanced"
         let accounts = remoteSortedPresentationViews(views: accounts.map {
@@ -169,7 +169,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             }, "C3-10 reader state governs every foreign account " + name)
         }
         let frame = RemoteAccountFrame(now: now, sync: sync, allViews: accounts, visibleViews: visible, displayedViews: visible)
-        withRemoteRenderScene(frame: frame, timeZone: C3_PREVIEW_ZONE, manual: phase) {
+        withRemoteRenderScene(frame: frame, timeZone: C3_PREVIEW_ZONE, manual: phase, readerManual: readerManual) {
             let empty = LimitData(present: false)
             let height = settings ? settingsTotalHeight(AboutState()) : mainPanelHeight(empty, empty)
             guard height.isFinite, height > 0, let context = bitmapContext(Int(PANEL_W * 2), Int(ceil(height * 2))) else {
@@ -182,6 +182,12 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             else if advanced { hits = drawAdvanced(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             else { hits = drawPanel(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C3-10 actual draw hit bounds " + name)
+            if name.hasPrefix("c3-manual-pollAllowed-"), let foreign = visible.first(where: { !$0.isLocal }) {
+                let foreignCard = cardPresentation(foreign, narrow: view == "simple-narrow", now: now)
+                check(foreignCard.statusLine == (language == "ru" ? "GitHub проверен 15:45" : "GitHub checked 15:45"),
+                      "C3-10 provider cooldown and successful reader result coexist on separate cards " + name)
+            }
+
             if !settings && accounts.filter({ $0.product == "codex" && $0.state == .syncStalled }).count == 2 {
                 let actions = hits.filter { $0.id.hasPrefix("syncsettings:") }
                 check(actions.count == 2 && Set(actions.map { $0.id }).count == 2,
@@ -199,6 +205,16 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                     }
                 }
                 check(separateAccounts, "C3-10 actual history account selection hits do not overlap " + name)
+                if name.hasPrefix("c3-long-names-"), expanded {
+                    let caption = frame.allViews.first?.caption ?? ""
+                    check(caption.unicodeScalars.count == 32 && accounts.count == 1
+                          && accounts.first?.tooltip == caption,
+                          "C3-10 expanded long-caption history exposes the complete 32-scalar selector label " + name)
+                    let captionWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(caption, ctFont(10.5, .semibold), cg(.white))))
+                    check(accounts.first.map { $0.rect.width <= 308 && $0.rect.height > 0
+                          && captionWidth <= $0.rect.width - 10 } == true,
+                          "C3-10 complete long-caption selector text fits its measured native hit width " + name)
+                }
                 if expanded && visible.isEmpty && frame.allViews.contains(where: { $0.historyKey == "u:codex" }) {
                     check(!toggles.isEmpty && hits.contains { $0.id == "moneyaccount:codex|u:codex" }
                           && !hits.contains { $0.id.hasPrefix("quotafeedback:") },
@@ -276,13 +292,15 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         default: check(false, "C3-10 unknown manual golden phase"); continue
         }
         let now = c3PreviewDate("2026-10-12T15:45:59Z"), sync = ReaderSyncState(phase: .on)
+        let readerManual: RemoteManualPhase? = row.phase == "pollAllowed"
+            ? .checked(c3PreviewDate("2026-10-12T15:45:00Z")) : nil
         for view in ["simple-narrow", "simple-wide", "advanced"] {
             let presentation = remotePresentationCard(account, sync: sync, language: row.language, narrow: view == "simple-narrow",
-                now: now, timeZone: C3_PREVIEW_ZONE, manual: phase)
+                now: now, timeZone: C3_PREVIEW_ZONE, manual: phase, readerManual: readerManual)
             check(presentation.statusLine == row.text && presentation.tooltip.contains(row.text) && presentation.sourceLine.contains("15:43"),
                   "C3-10 manual scene agrees with C3-A golden " + row.phase + "/" + row.language + "/" + view)
             render("c3-manual-\(row.phase)-\(row.language)-\(view).png", language: row.language, view: view,
-                accounts: sceneAccounts(account, view: view), sync: sync, now: now, phase: phase)
+                accounts: sceneAccounts(account, view: view), sync: sync, now: now, phase: phase, readerManual: readerManual)
         }
     }
     var localCodex = c3PreviewView(product: "codex", identity: 2, machines: ["mac"])
@@ -413,7 +431,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             check(p.accessibilityLabel == account.caption && p.sourceLine.contains("15:43"),
                   "C3-10 long caption/source retains full AX label and source time")
             render("c3-long-names-\(language)-\(view).png", language: language, view: view,
-                accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on))
+                accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on), expanded: view == "advanced")
         }
         let hiddenClaude = c3PreviewView()
         let unassigned = AccountView(product: "codex", label: nil, historyKey: "u:codex", caption: "",

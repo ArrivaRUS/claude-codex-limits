@@ -4287,6 +4287,7 @@ let QUOTA_CARD_FOOTER_H: CGFloat = 32
 // Preview seams never initialize live sync or credentials.
 var REMOTE_ACCOUNT_VIEWS_PREVIEW: [AccountView]? = nil
 var REMOTE_MANUAL_PHASE: RemoteManualPhase = .idle
+private var REMOTE_READER_MANUAL_PHASE: RemoteManualPhase? = nil
 private var remoteManualRefresh: RemoteManualRefreshController?
 // Scoped to one NSView draw or an explicit isolated bitmap scene. Only the
 // live NSView draw emits events; every scene restores its caller with defer.
@@ -4302,17 +4303,19 @@ func remoteRenderCalendar() -> Calendar {
 }
 func remoteRenderTimeZone() -> TimeZone { REMOTE_RENDER_TIME_ZONE ?? .current }
 func withRemoteRenderScene<T>(frame: RemoteAccountFrame, timeZone: TimeZone,
-                              manual: RemoteManualPhase, body: () -> T) -> T {
+                              manual: RemoteManualPhase, readerManual: RemoteManualPhase? = nil, body: () -> T) -> T {
     let previousFrame = REMOTE_ACCOUNT_FRAME, previousZone = REMOTE_RENDER_TIME_ZONE
-    let previousManual = REMOTE_MANUAL_PHASE, previousIsolation = REMOTE_RENDER_ISOLATED
+    let previousManual = REMOTE_MANUAL_PHASE, previousReaderManual = REMOTE_READER_MANUAL_PHASE
+    let previousIsolation = REMOTE_RENDER_ISOLATED
     let previousDayCalendar = dayKeyFormatter.calendar, previousDayZone = dayKeyFormatter.timeZone
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
     dayKeyFormatter.calendar = calendar; dayKeyFormatter.timeZone = timeZone
     REMOTE_ACCOUNT_FRAME = frame; REMOTE_RENDER_TIME_ZONE = timeZone
-    REMOTE_MANUAL_PHASE = manual; REMOTE_RENDER_ISOLATED = true
+    REMOTE_MANUAL_PHASE = manual; REMOTE_READER_MANUAL_PHASE = readerManual; REMOTE_RENDER_ISOLATED = true
     defer {
         REMOTE_ACCOUNT_FRAME = previousFrame; REMOTE_RENDER_TIME_ZONE = previousZone
-        REMOTE_MANUAL_PHASE = previousManual; REMOTE_RENDER_ISOLATED = previousIsolation
+        REMOTE_MANUAL_PHASE = previousManual; REMOTE_READER_MANUAL_PHASE = previousReaderManual
+        REMOTE_RENDER_ISOLATED = previousIsolation
         dayKeyFormatter.calendar = previousDayCalendar; dayKeyFormatter.timeZone = previousDayZone
     }
     return body()
@@ -4425,7 +4428,8 @@ func simpleCardViews(_ claude: LimitData, _ codex: LimitData) -> [AccountView] {
         data: LimitData(present: false), isLocal: true, tier: nil, usageDays: [:], machines: [], state: .fresh)
     return missing == "claude" ? [placeholder, only] : [only, placeholder]
 }
-func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> RemoteCardPresentation {
+func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date(),
+                      productAccountCount: Int? = nil) -> RemoteCardPresentation {
     let at = REMOTE_ACCOUNT_FRAME?.now ?? now
     let sync: ReaderSyncState
     if let frame = REMOTE_ACCOUNT_FRAME { sync = frame.sync }
@@ -4434,8 +4438,14 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> 
         let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
         sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
     }
+    let readerPhase = REMOTE_RENDER_ISOLATED ? REMOTE_READER_MANUAL_PHASE : remoteManualRefresh?.phase(now: at)
+    let manualPhase = REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE : (readerPhase ?? REMOTE_MANUAL_PHASE)
+    let productCount = productAccountCount ?? (REMOTE_ACCOUNT_FRAME?.visibleViews ?? []).filter {
+        $0.product == view.product && !$0.historyKey.hasPrefix("u:")
+    }.count
     return remotePresentationCard(view, sync: sync, language: appLang(), narrow: narrow, now: at,
-                                  timeZone: remoteRenderTimeZone(), manual: REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE : (remoteManualRefresh?.phase(now: at) ?? REMOTE_MANUAL_PHASE))
+        timeZone: remoteRenderTimeZone(), manual: manualPhase, productAccountCount: max(1, productCount),
+        readerManual: readerPhase)
 }
 func remoteToneColor(_ tone: String) -> NSColor {
     tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
@@ -4511,11 +4521,11 @@ func quotaActionID(_ feedback: QuotaRefreshFeedback, product: String) -> String?
     }
 }
 func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, timeZone: TimeZone,
-                            availableWidth: Double, measure: (String) -> Double) -> String {
+                            narrow: Bool = true, availableWidth: Double, measure: (String) -> Double) -> String {
     let machine = view.data.source?.machineName ?? view.machines.first ?? "?"
     let limit: Int? = machine.count > 8 ? 8 : nil
     let full = remotePresentationSourceLine(view, language: language, narrow: false, now: now, timeZone: timeZone)
-    if measure(full) <= availableWidth {
+    if measure(full) <= availableWidth || !narrow {
         return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
             timeZone: timeZone, machineLimit: limit)
     }
@@ -4548,7 +4558,8 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
     var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
     if (data.source != nil || view?.isLocal == false), let view = view {
         sourceLine = remoteFittedSourceLine(view, language: appLang(), now: Date(timeIntervalSince1970: now),
-            timeZone: remoteRenderTimeZone(), availableWidth: Double(footer.width)) { value in
+            timeZone: remoteRenderTimeZone(), narrow: !advanced && card.width < 300,
+            availableWidth: Double(footer.width)) { value in
                 Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, .regular), cg(gray(1, 0.5))))))
             }
     }
@@ -4679,7 +4690,8 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     let cardViews = simpleCardViews(claude, codex)
     let layout = remotePanelLayout(views: cardViews, style: .simple, now: remoteRenderNow())
     let prods = cardViews.enumerated().map { i, view in
-        (view.data, view.data.present ? cardPresentation(view, narrow: layout.cards[i].width < 300).simpleTitle : view.caption,
+        (view.data, view.data.present ? cardPresentation(view, narrow: layout.cards[i].width < 300,
+            productAccountCount: cardViews.filter { $0.product == view.product }.count).simpleTitle : view.caption,
          view.product + "_128.png", remoteCardActionURL(product: view.product), view.product)
     }
 
@@ -5091,11 +5103,13 @@ private struct HistorySelectorLayout {
 private func historySelectorLayout(_ accounts: [AccountView]) -> HistorySelectorLayout {
     let titles = accounts.map { view in
         view.historyKey.hasPrefix("u:") ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled")
-            : cardPresentation(view, narrow: false).simpleTitle
+            : cardPresentation(view, narrow: false,
+                productAccountCount: accounts.filter { $0.product == view.product && !$0.historyKey.hasPrefix("u:") }.count).simpleTitle
     }
     guard advHistExpanded() else { return HistorySelectorLayout(titles: titles, rects: [], ownRow: false, extraHeight: 0) }
     let widths = titles.map { title in
-        min(ADV_IW - 4, ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10.5, .semibold), cg(gray(1, 0.95)))))) + 16)
+        let textWidth = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10.5, .semibold), cg(gray(1, 0.95))))))
+        return min(ADV_IW - 4, textWidth + 16)
     }
     let total = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) + 4
     let ownRow = accounts.count >= 3 || total > 150
@@ -5383,7 +5397,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             }
         }
         let verdict = remoteEmpty ? "" : rowData.source == nil ? advVerdict(row, asOf: rowData.asOf)
-            : advVerdict(row, data: rowData, now: REMOTE_ACCOUNT_FRAME?.now ?? Date(), language: appLang())
+            : remoteAdvancedVerdict(row, data: rowData, now: remoteRenderNow(), language: appLang(), timeZone: remoteRenderTimeZone())
         var va = attr(verdict, 12.5, verdictWeight, verdictColor)
         if width(va) > ADV_IW {                                   // spec §3.2 truncation ladder
             var s = verdict.replacingOccurrences(of: tr(" до сброса", " before reset"), with: "")
@@ -5430,7 +5444,9 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let card = rectTL(slot.minX, y, slot.width, ch)
         roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
         let canFix = c.account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: c.product, auth: c.data.auth)
-        let presentation = c.account.map { cardPresentation($0, narrow: false) }
+        let presentation = c.account.map { account in
+            cardPresentation(account, narrow: false, productAccountCount: cards.filter { $0.product == account.product }.count)
+        }
         let remote = c.account?.isLocal == false
         // header
         let y0 = y + 9
@@ -5441,16 +5457,28 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         else { planLabel = c.data.plan?.capitalized ?? "" }
         let planAttr = attr(planLabel, 9.5, .semibold, gray(1, 0.60), kern: 0.19)
         let planWidth = planLabel.isEmpty ? 0 : width(planAttr) + 14
-        let badgeWidth: CGFloat = warningBadge.isEmpty ? 0 : min(90, width(attr(warningBadge, 9.5, .semibold, textMid, kern: 0.19)) + 14)
-        let titleRoom = max(1, 263 - planWidth - badgeWidth - (planWidth > 0 ? 7 : 0) - (badgeWidth > 0 ? 5 : 0))
         let rawTitle = presentation?.advancedTitle ?? c.name
-        let titleWidth = min(titleRoom, max(width(attr(String(rawTitle.prefix(8)), 13, .semibold, textHi)), titleRoom - 48))
-        let name = fitAttr(rawTitle, maxW: titleWidth) { attr($0, 13, .semibold, textHi) }
+        let machineSuffix = presentation?.machineSuffix ?? ""
+        let titleWidth = width(attr(rawTitle, 13, .semibold, textHi))
+        let minimumTitleWidth = width(attr(String(rawTitle.prefix(8)), 13, .semibold, textHi))
+        let availableWidth = 312 - ADV_IX - 23
+        // A long status-machine badge yields after the suffix, before any part
+        // of the product name (or the custom caption's first eight characters).
+        let protectedTitle = rawTitle == c.name ? titleWidth : minimumTitleWidth
+        let badgeGaps: CGFloat = 7 + (planWidth > 0 ? 5 : 0) + (machineSuffix.isEmpty ? 0 : 5)
+        let badgeBudget = max(14, availableWidth - protectedTitle - planWidth - badgeGaps)
+        let badgeWidth = warningBadge.isEmpty ? 0
+            : min(badgeBudget, width(attr(warningBadge, 9.5, .semibold, textMid, kern: 0.19)) + 14)
+        let allocation = remoteAdvancedHeaderWidths(availableWidth: Double(availableWidth),
+            titleWidth: Double(titleWidth), badgeWidth: Double(badgeWidth),
+            planWidth: Double(planWidth), machineWidth: Double(width(attr(machineSuffix, 11, .regular, textMid))),
+            isCustomTitle: rawTitle != c.name, minimumTitleWidth: Double(minimumTitleWidth))
+        let name = fitAttr(rawTitle, maxW: CGFloat(allocation.title)) { attr($0, 13, .semibold, textHi) }
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
         if !warningBadge.isEmpty {
             let ink = remote ? remoteToneColor(presentation?.statusTone ?? "textMid") : ADV_WARN
-            let r = pill(fitAttr(warningBadge, maxW: max(1, badgeWidth - 14)) { attr($0, 9.5, .semibold, ink, kern: 0.19) },
+            let r = pill(fitAttr(warningBadge, maxW: max(1, CGFloat(allocation.badge) - 14)) { attr($0, 9.5, .semibold, ink, kern: 0.19) },
                 x: px, topY: y0 + 1, h: 16, padX: 7, fill: ink.withAlphaComponent(0.16), stroke: ink.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
@@ -5458,8 +5486,9 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             let r = pill(planAttr, x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
             px = r.maxX + 5
         }
-        if let suffix = presentation?.machineSuffix, !suffix.isEmpty, px < 308 {
-            textC(fitAttr(suffix, maxW: 312 - px) { attr($0, 11, .regular, textMid) }, x: px, topY: y0 + 1, h: 16)
+        if !machineSuffix.isEmpty, allocation.machines > 0 {
+            textC(fitAttr(machineSuffix, maxW: CGFloat(allocation.machines)) { attr($0, 11, .regular, textMid) },
+                  x: px, topY: y0 + 1, h: 16)
         }
         let arrow = rectTL(322, y0 + 3, 12, 12)
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)

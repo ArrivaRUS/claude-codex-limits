@@ -451,8 +451,8 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     }
     for state in [RemoteCardState.stale, .signInRequired, .offline, .syncStalled] {
         var view = c3bView(state: state)
-        expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .stale,
-               "C3-21/D4: foreign state \(state.rawValue) uses stale Advanced row even with fresh timestamp")
+        expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .full,
+               "C3-21/N3: foreign state \(state.rawValue) keeps full Advanced row while the snapshot is within V4")
         view.isLocal = true; view.data.source = nil
         expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .full,
                "C3-21/A1: remote fixture state \(state.rawValue) does not override healthy local row classification")
@@ -681,6 +681,188 @@ private func c3bC327(_ expect: C3BExpect) {
     }
 }
 
+// C3-28...33: visual round 2, owner decisions N1/N2/N3/16/Q5/Q6.
+// Measured widths are injected numbers; clocks and zones are explicit. Actual
+// CoreText glyph fitting stays in the 190 AppKit previews, including long L.
+private func c3bC328(_ expect: C3BExpect) {
+    let constrained = remoteAdvancedHeaderWidths(availableWidth: 263, titleWidth: 82,
+        badgeWidth: 95, planWidth: 59, machineWidth: 31, isCustomTitle: false, minimumTitleWidth: 64)
+    expect(constrained.title == 82 && constrained.badge == 95 && constrained.plan == 59,
+           "C3-28/N1: complete Claude Code title, warning badge and plan are reserved before machines")
+    expect(constrained.machines == 10 && constrained.title + constrained.badge + constrained.plan + constrained.machines + 17 == 263,
+           "C3-28/N1: machine suffix gives up width first and all measured gaps fit 263pt")
+    let ample = remoteAdvancedHeaderWidths(availableWidth: 300, titleWidth: 82,
+        badgeWidth: 95, planWidth: 59, machineWidth: 31, isCustomTitle: false, minimumTitleWidth: 64)
+    expect(ample.title == 82 && ample.machines == 31,
+           "C3-28/N1: available width is not wasted by a fixed machine reservation")
+    let custom = remoteAdvancedHeaderWidths(availableWidth: 263, titleWidth: 220,
+        badgeWidth: 95, planWidth: 59, machineWidth: 31, isCustomTitle: true, minimumTitleWidth: 64)
+    expect(custom.title >= 64 && custom.title < 220 && custom.machines == 0
+           && custom.badge == 95 && custom.plan == 59,
+           "C3-28/N1: custom account title can shrink to its eight-character minimum after dropping machines")
+}
+
+private func c3bC329(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let local = c3bView(product: "codex", local: true)
+    for language in ["ru", "en"] {
+        let single = remotePresentationCard(local, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone, productAccountCount: 1)
+        let multiple = remotePresentationCard(local, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone, productAccountCount: 2)
+        expect(single.simpleTitle == "Codex" && multiple.simpleTitle == "Codex · mac",
+               "C3-29/N2: machine-free local product title is restricted to its sole account")
+        expect(multiple.advancedTitle == "Codex" && multiple.machineSuffix == "· mac"
+               && local.data.source == nil && multiple.sourceLine == (language == "ru" ? "Данные 15:50" : "Data 15:50"),
+               "C3-29/N2: multi-account header uses machines while local footer remains this-machine Data time")
+        var other = c3bView(2, product: "codex")
+        other.machines = ["desktop"]; other.caption = "Codex Pro · desktop"
+        let remote = remotePresentationCard(other, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone, productAccountCount: 2)
+        expect([multiple.simpleTitle, remote.simpleTitle] == ["Codex · mac", "Codex · desktop"],
+               "C3-29/N2: card and history segment captions distinguish both Codex accounts")
+        var custom = local; custom.caption = "Work Codex"
+        let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone, productAccountCount: 2)
+        expect(named.simpleTitle == custom.caption && named.machineSuffix.isEmpty,
+               "C3-29/N2: explicit account caption remains intact instead of gaining duplicate machines")
+    }
+}
+
+private func c3bC330(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, moscow = TimeZone(secondsFromGMT: 3 * 3600)!
+    var healthy = c3bView(model: true)
+    healthy.data.weekly = 39
+    healthy.data.weeklyReset = healthy.data.asOf!.addingTimeInterval(84 * 3600)
+    let freshHeight = remotePanelLayout(views: [healthy], style: .advanced, now: now).cards.first?.height
+    expect(freshHeight == 258, "C3-30/N3: baseline full three-window Claude card retains existing 258pt model geometry")
+    for state in [RemoteCardState.signInRequired, .offline, .syncStalled, .serviceWait] {
+        var view = healthy; view.state = state
+        let kinds = remoteAdvancedMetrics(view).map { remoteAdvancedRowKind(view, metric: $0, now: now) }
+        expect(kinds.allSatisfy { $0 == .full } && kinds.allSatisfy { remoteAdvancedRowHeight($0) == 62 },
+               "C3-30/N3: in-horizon \(state.rawValue) keeps complete 62pt forecast and metadata rows")
+        expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height == freshHeight,
+               "C3-30/N3: in-horizon \(state.rawValue) card has exactly the fresh card height")
+        let pace = snapshotWindowPace(used: view.data.weekly, reset: view.data.weeklyReset,
+            windowH: 168, asOf: view.data.asOf, now: now)
+        let row = AdvRow(limit: PacedLimit(id: "weekly", name: "", pace: pace, color: 0, used: 39), kind: kinds.last!, credits: nil)
+        for language in ["ru", "en"] {
+            expect(remoteAdvancedVerdict(row, data: view.data, now: now, language: language, timeZone: zone)
+                   == (language == "ru" ? "Хватит до сброса (прогноз 78%)" : "Lasts until reset (forecast 78%)"),
+                   "C3-30/N3: \(language) \(state.rawValue) retains asOf forecast rather than an as-of-only line")
+        }
+        view.data.source?.freshUntil = now.addingTimeInterval(-1)
+        expect(remoteAdvancedMetrics(view).allSatisfy { remoteAdvancedRowKind(view, metric: $0, now: now) == .stale },
+               "C3-30/N3: \(state.rawValue) becomes stale only beyond the V4 horizon")
+    }
+    var noReader = healthy; noReader.state = .signedOut
+    expect(remoteAdvancedMetrics(noReader).allSatisfy { remoteAdvancedRowKind(noReader, metric: $0, now: now) == .inactive },
+           "C3-30/N3: reader state7 still has inactive windows rather than fabricated forecasts")
+    let pace = snapshotWindowPace(used: healthy.data.weekly, reset: healthy.data.weeklyReset,
+        windowH: 168, asOf: healthy.data.asOf, now: now)
+    let staleRow = AdvRow(limit: PacedLimit(id: "weekly", name: "", pace: pace, color: 0, used: 39), kind: .stale, credits: nil)
+    for language in ["ru", "en"] {
+        expect(remoteAdvancedVerdict(staleRow, data: healthy.data, now: now, language: language, timeZone: zone)
+               == (language == "ru" ? "по данным на 15:50" : "as of 15:50"),
+               "C3-30/N3: explicit UTC verdict observation time matches the footer instead of the host timezone")
+        expect(remoteAdvancedVerdict(staleRow, data: healthy.data, now: now, language: language, timeZone: moscow)
+               == (language == "ru" ? "по данным на 18:50" : "as of 18:50"),
+               "C3-30/N3: changing only injected timezone shifts verdict and footer together")
+        let resetRow = AdvRow(limit: staleRow.limit, kind: .exhausted, credits: nil)
+        let utcReset = remoteCardTimestamp(healthy.data.weeklyReset, now: now, timeZone: zone)
+        let shiftedReset = remoteCardTimestamp(healthy.data.weeklyReset, now: now, timeZone: moscow)
+        expect(remoteAdvancedVerdict(resetRow, data: healthy.data, now: now, language: language, timeZone: zone).hasSuffix(utcReset)
+               && remoteAdvancedVerdict(resetRow, data: healthy.data, now: now, language: language, timeZone: moscow).hasSuffix(shiftedReset)
+               && utcReset != shiftedReset,
+               "C3-30/N3: reset verdict timestamps use the same injected scene formatter as the footer")
+    }
+    var fast = healthy
+    fast.data.session = 80; fast.data.sessionReset = now.addingTimeInterval(3 * 3600)
+    let fastPace = snapshotWindowPace(used: fast.data.session, reset: fast.data.sessionReset,
+        windowH: 5, asOf: fast.data.asOf, now: now)
+    let fastRow = AdvRow(limit: PacedLimit(id: "session", name: "", pace: fastPace, color: 0, used: 80), kind: .full, credits: nil)
+    for language in ["ru", "en"] {
+        expect(fastPace?.runsOutAt != nil
+               && remoteAdvancedVerdict(fastRow, data: fast.data, now: now, language: language, timeZone: zone).contains("16:17")
+               && remoteAdvancedVerdict(fastRow, data: fast.data, now: now, language: language, timeZone: moscow).contains("19:17"),
+               "C3-30/N3: runs-out forecast uses the injected scene timezone, independently of the host")
+    }
+}
+
+private func c3bC331(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!
+    for language in ["ru", "en"] {
+        var view = c3bView()
+        let raw = language == "ru" ? "Рабочая подписка для больших задач" : "Work subscription for large tasks"
+        view.caption = String(raw.prefix(32))
+        let card = remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: language,
+            narrow: false, now: now, timeZone: zone)
+        expect(view.caption.unicodeScalars.count == 32 && card.simpleTitle == view.caption
+               && card.advancedTitle == view.caption && card.accessibilityLabel == view.caption,
+               "C3-31/16: 32-character custom caption is passed in full to the history segment and accessibility label")
+    }
+}
+
+private func c3bC332(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!
+    var view = c3bView(); view.data.source?.machineName = "build-machine"
+    for language in ["ru", "en"] {
+        let full = language == "ru" ? "Данные с build-machine от 15:50" : "Data from build-machine at 15:50"
+        let compact = language == "ru" ? "С build-machine от 15:50" : "From build-machine at 15:50"
+        let fullShortName = language == "ru" ? "Данные с build-ma… от 15:50" : "Data from build-ma… at 15:50"
+        let compactShortName = language == "ru" ? "С build-ma… от 15:50" : "From build-ma… at 15:50"
+        var narrowMeasures: [String] = []
+        let narrow = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone, narrow: true,
+            availableWidth: 130) { text in
+                narrowMeasures.append(text)
+                return text == full || text == compact ? 150 : 120
+            }
+        expect(narrow == compactShortName && narrowMeasures == [full, compact],
+               "C3-32/Q5: narrow card alone may shorten full source prefix before shortening the machine")
+        for width in [300.0, 308.0] {
+            var wideMeasures: [String] = []
+            let wide = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone, narrow: false,
+                availableWidth: width) { text in
+                    wideMeasures.append(text)
+                    return text == full ? 400 : 120
+                }
+            expect(wide == fullShortName && !wideMeasures.contains(compact),
+                   "C3-32/Q5: wide Simple/Advanced \(Int(width))pt keeps full prefix and shortens only machine")
+        }
+    }
+}
+
+private func c3bC333(_ expect: C3BExpect) {
+    let checkedAt = c3bNow().addingTimeInterval(-15 * 60), zone = TimeZone(secondsFromGMT: 0)!
+    var clock = checkedAt
+    var completion: ((Bool) -> Void)?
+    var reads = 0
+    let reader = RemoteManualRefreshController(clock: { clock }, read: { callback in reads += 1; completion = callback })
+    expect(reader.request() && reads == 1, "C3-33/Q6: injected manual click performs one reader request without a provider effect")
+    completion?(true)
+    let pollAllowed = RemoteManualPhase.pollAllowed(c3bNow().addingTimeInterval(-120)) // 15:58
+    var local = c3bView(local: true), foreign = c3bView(1, product: "codex")
+    local.data.asOf = checkedAt.addingTimeInterval(-120); foreign.data.asOf = local.data.asOf
+    foreign.data.source?.asOf = foreign.data.asOf
+    for age in [0.0, 59, 60] {
+        clock = checkedAt.addingTimeInterval(age)
+        let readerPhase = reader.phase(now: clock)
+        for language in ["ru", "en"] {
+            let localCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: language,
+                narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
+            let foreignCard = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on), language: language,
+                narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
+            expect(localCard.statusLine == (language == "ru" ? "Опрос можно с 15:58" : "Poll allowed at 15:58"),
+                   "C3-33/Q6: \(language) local provider cooldown remains independent at reader age \(Int(age))s")
+            expect(foreignCard.statusLine == (age < 60 ? (language == "ru" ? "GitHub проверен 15:45" : "GitHub checked 15:45") : ""),
+                   "C3-33/Q6: \(language) every foreign card shows successful read for exactly 60 seconds")
+        }
+    }
+    let orphan = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on), language: "en", narrow: true,
+        now: checkedAt, timeZone: zone, manual: pollAllowed)
+    expect(orphan.statusLine.isEmpty, "C3-33/Q6: provider cooldown without a reader result never fabricates GitHub checked")
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -689,6 +871,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
     }
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
     c3bReviewRegressions(expect); c3bC327(expect)
+    c3bC328(expect); c3bC329(expect); c3bC330(expect); c3bC331(expect); c3bC332(expect); c3bC333(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
     return failures
 }
