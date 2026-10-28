@@ -3,8 +3,9 @@ import Foundation
 // C3 part B: independent RED model tests, 2026-10-28.
 // Sources: plans C3, test-plan C3-06/08/09, UX §§6/7/9/10/11,
 // sync-protocol writer sanitization (T14), lessons 004/006/013/014.
-// Entry must run BEFORE NSApplication.shared. No AppKit, runtime globals,
-// defaults, filesystem, credentials, history singleton, refresh or network.
+// Entry must run BEFORE NSApplication.shared. No AppKit, filesystem,
+// credentials, history singleton, refresh or network. The D7 legacy notice
+// reads localization from the caller's pre-installed in-memory defaults.
 // Fixed clock/timezone/theme and all settings are explicit arguments.
 // RED means written before models; no Swift compilation/run claimed on Linux.
 // Geometry is top-left coordinates. Geometry/model checks do not accept C3-10:
@@ -105,20 +106,26 @@ private func c3bC306(_ expect: C3BExpect) {
     for product in ["claude", "codex"] {
         for style in [RemotePanelStyle.simple, .advanced] {
             for model in [false, true] {
-                let local = c3bView(product: product, local: true, model: model)
+                var local = c3bView(product: product, local: true, model: model)
+                local.data.auth = .loggedOut
                 var remote = c3bView(product: product, model: model)
                 remote.data.auth = .loggedOut // local auth must not suppress snapshot rows
                 let a = remotePanelLayout(views: [local], style: style, now: c3bNow())
                 let b = remotePanelLayout(views: [remote], style: style, now: c3bNow())
-                expect(a.cards.count == 1 && b.cards.count == 1 && a.cards.first?.height == b.cards.first?.height,
-                       "C3-06 \(product)/\(style)/model=\(model): local and remote loggedOut card heights equal")
+                expect(a.cards.count == 1 && b.cards.count == 1 && local.data.auth == .loggedOut && remote.data.auth == .loggedOut,
+                       "C3-06 \(product)/\(style)/model=\(model): both loggedOut fixtures retain a card")
+                if style == .advanced {
+                    expect(remoteAdvancedRowKind(local, metric: "weekly", now: c3bNow()) == .stale
+                           && remoteAdvancedRowKind(remote, metric: "weekly", now: c3bNow()) == .full,
+                           "C3-06 loggedOut: local sign-in problem pauses pace; remote last snapshot remains usable")
+                }
             }
         }
     }
     for count in 1...4 {
         let views = (0..<count).map { c3bView($0, product: $0 == 0 ? "claude" : "codex") }
         let collapsed = remotePanelLayout(views: views, style: .advanced, now: c3bNow())
-        expect(collapsed.moneyRows.isEmpty, "C3-06 Advanced \(count): collapsed history has no drawn money rows")
+        expect(collapsed.moneyRows.isEmpty && collapsed.historySelectorRect == nil, "C3-06 Advanced \(count): collapsed history has no money rows or selector")
         c3bValidRects(collapsed, expect, "Advanced collapsed \(count)")
         let layout = remotePanelLayout(views: views, style: .advanced, now: c3bNow(), historyHeight: 231)
         expect(layout.cards.count == count && layout.cards.allSatisfy { $0.minX == 15 && $0.width == 330 },
@@ -237,7 +244,7 @@ private func c3bC308(_ expect: C3BExpect) {
            "C3-08: hidden/disappeared selected account falls back to local")
     expect(c3bMenu([other], selected: ["codex": "missing"]).lines.first?.historyKey == other.historyKey,
            "C3-08: no local identity falls back to first visible account")
-    for state in [RemoteCardState.stale, .signInRequired, .offline, .syncStalled, .signedOut, .serviceWait, .fresh] {
+    for state in [RemoteCardState.stale, .signInRequired, .offline, .syncStalled, .serviceWait, .fresh] {
         for status in ["expired", "signed_out"] {
             var view = c3bView(state: state); view.data.source?.status = status; view.data.auth = .loggedOut
             let model = c3bMenu([view])
@@ -350,6 +357,247 @@ private func c3bC309(_ expect: C3BExpect) {
            "C3-09/T14: safe percent text is literal; at-sign is rejected even inside format marker")
 }
 
+// C3-B review regressions C3-15…26. Every input is synthetic and every clock
+// explicit. These contracts run before AppKit; no runtime callbacks are invoked.
+private func c3bReviewRegressions(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!
+    var historical = c3bView(local: true)
+    historical.data.asOf = now.addingTimeInterval(-5 * 3600)
+    historical.data.weekly = 41
+    historical.data.weeklyReset = historical.data.asOf!.addingTimeInterval(84 * 3600)
+    let historicalKind = remoteAdvancedRowKind(historical, metric: "weekly", now: now)
+    let historicalPace = snapshotWindowPace(used: 41, reset: historical.data.weeklyReset, windowH: 168, asOf: historical.data.asOf)
+    expect(metricIsStale(historical.data, metric: "weekly", now: now) && historicalKind == .full,
+           "C3-15/A1: local five-hour-old snapshot dims without losing full 62pt weekly row")
+    expect(remoteAdvancedRowHeight(historicalKind) == 62 && historicalPace?.projectedPct == 82,
+           "C3-15/A1: 41% at half-week projects 82% from asOf despite current age")
+    let historicalRow = AdvRow(limit: PacedLimit(id: "weekly", name: "", pace: historicalPace, color: 0, used: 41), kind: historicalKind, credits: nil)
+    expect(advVerdict(historicalRow, data: historical.data, now: now, language: "en") == "Snapshot forecast: 82%",
+           "C3-15/A1: historical local verdict retains snapshot forecast")
+
+    var legacyClaude = c3bView(local: true), legacyCodex = c3bView(1, product: "codex", local: true)
+    legacyClaude.label = nil; legacyCodex.label = nil
+    legacyClaude.historyKey = "l:legacy"; legacyCodex.historyKey = "l:legacy"
+    let claudeID = remoteAccountID(legacyClaude), codexID = remoteAccountID(legacyCodex)
+    var accountsByID: [String: AccountView] = [:]
+    accountsByID[claudeID] = legacyClaude; accountsByID[codexID] = legacyCodex
+    var pricesByID: [String: Double] = [:]
+    pricesByID[claudeID] = 200; pricesByID[codexID] = 20
+    expect(claudeID != codexID && accountsByID[codexID]?.product == "codex" && accountsByID[claudeID]?.product == "claude",
+           "C3-16/A2: product-scoped l:legacy IDs select independent cached local accounts")
+    expect(pricesByID[claudeID] == 200 && pricesByID[codexID] == 20,
+           "C3-16/A2: legacy products do not share subscription price overrides")
+    let legacyViews = [legacyClaude, legacyCodex]
+    expect(selectedHistoryAccount(views: legacyViews, selectedID: codexID, product: "claude")?.product == "codex",
+           "C3-16/A2: live history selection adapter resolves compound Codex legacy ID")
+    expect(selectedHistoryAccount(views: legacyViews, selectedID: "l:legacy", product: "codex")?.product == "codex",
+           "C3-16/A2: ambiguous persisted legacy selection falls back within selected product")
+    let claudePrice = accountSubscriptionPrice(legacyClaude, overrides: pricesByID, localFallback: (999, true))
+    let codexPrice = accountSubscriptionPrice(legacyCodex, overrides: pricesByID, localFallback: (999, true))
+    expect(claudePrice.usd == 200 && codexPrice.usd == 20 && !claudePrice.estimated && !codexPrice.estimated,
+           "C3-16/A2: live pricing adapter keeps compound overrides independent across products")
+
+    var remote = c3bView()
+    remote.data.source?.freshUntil = now.addingTimeInterval(60)
+    remote.data.sessionReset = now.addingTimeInterval(30)
+    expect(remoteMenuRefreshDeadline(views: [remote], now: now) == now.addingTimeInterval(30),
+           "C3-17/A3: tray refresh deadline chooses reset before source freshness boundary")
+    remote.data.sessionReset = now.addingTimeInterval(600)
+    expect(remoteMenuRefreshDeadline(views: [remote], now: now).map { abs($0.timeIntervalSince(now) - 60.001) < 0.00001 } == true,
+           "C3-17/A3: tray refresh deadline follows source horizon without a local poll")
+    expect(remoteMenuRefreshDeadline(views: [], now: now) == nil,
+           "C3-17/A3: no accounts require no freshness timer")
+    var noValues = c3bView(); noValues.data = LimitData(present: false)
+    expect(remoteMenuRefreshDeadline(views: [noValues], now: now) == nil,
+           "C3-17/A3: account without values or timestamps needs no freshness timer")
+    let exactBoundary = now.addingTimeInterval(60)
+    expect(!metricIsStale(remote.data, metric: "weekly", now: exactBoundary)
+           && metricIsStale(remote.data, metric: "weekly", now: exactBoundary.addingTimeInterval(0.001)),
+           "C3-17/A3: strict source horizon changes menu freshness immediately after its deadline")
+
+    let hostile = "A\u{1B}\u{202E}\u{200B}\u{2028}\u{2029}" + String(repeating: "Z", count: 500)
+    var unsafe = c3bView()
+    unsafe.caption = hostile; unsafe.machines = [hostile]
+    unsafe.data.plan = hostile; unsafe.tier = nil
+    unsafe.data.source?.machineName = hostile; unsafe.data.source?.statusMachineName = hostile
+    let menu = c3bMenu([unsafe]), settings = c3bSettings([unsafe])
+    let strings = [menu.tooltip, menu.lines.first?.caption ?? "", menu.lines.first?.sourceLine ?? "",
+                   settings.accounts.first?.title ?? "", settings.accounts.first?.subtitle ?? "", remoteDefaultCaption(unsafe)]
+    expect(strings.allSatisfy { value in !value.unicodeScalars.contains { scalar in
+        [.control, .format, .surrogate, .lineSeparator, .paragraphSeparator].contains(scalar.properties.generalCategory)
+    } }, "C3-18/D1: snapshot caption/machines/plan/source never leak controls or separators into presentation")
+    expect(strings.allSatisfy { $0.unicodeScalars.count < 400 }
+           && (menu.lines.first?.caption.unicodeScalars.count ?? 0) <= 128,
+           "C3-18/D1: snapshot strings are bounded in menu/settings/default captions")
+    let safe = remoteSanitizedView(unsafe)
+    expect(remoteSanitizedView(safe).caption == safe.caption && remoteSanitizedView(safe).machines == safe.machines,
+           "C3-18/D1: sanitizing presentation strings twice is stable")
+
+    var unknown = c3bView(8, product: "codex")
+    unknown.label = nil; unknown.historyKey = "u:codex"; unknown.data = LimitData(present: false)
+    let two = [c3bView(), c3bView(1, product: "codex")]
+    let base = remotePanelLayout(views: two, style: .advanced, now: now)
+    let withUnknown = remotePanelLayout(views: two + [unknown], style: .advanced, now: now)
+    expect(withUnknown.cards == base.cards && withUnknown.windowHeight == base.windowHeight && withUnknown.historySelectorRect == nil,
+           "C3-19/D2: unassigned group adds no quota card or collapsed history space")
+    let unknownOnly = remotePanelLayout(views: [unknown], style: .advanced, now: now, historyHeight: 231)
+    expect(unknownOnly.cards.isEmpty && unknownOnly.moneyRows.count == 1,
+           "C3-19/D2/V10: unassigned group retains required expanded history money row")
+    for count in [3, 4] {
+        let views = (0..<count).map { c3bView($0) }
+        let collapsed = remotePanelLayout(views: views, style: .advanced, now: now, historyHeight: 35)
+        expect(collapsed.historySelectorRect == nil && collapsed.moneyRows.isEmpty,
+               "C3-20/D3: collapsed history for \(count) accounts has no selector or money rows")
+    }
+    for state in [RemoteCardState.stale, .signInRequired, .offline, .syncStalled] {
+        var view = c3bView(state: state)
+        expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .stale,
+               "C3-21/D4: foreign state \(state.rawValue) uses stale Advanced row even with fresh timestamp")
+        view.isLocal = true; view.data.source = nil
+        expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .full,
+               "C3-21/A1: remote fixture state \(state.rawValue) does not override healthy local row classification")
+    }
+    expect(remoteAdvancedRowKind(c3bView(state: .serviceWait), metric: "weekly", now: now) == .full,
+           "C3-21/D4: fresh source service wait preserves full pace row")
+
+    var localScoped = c3bView(local: true, model: true)
+    expect(remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: healthy local scoped row reserves 15pt")
+    localScoped.data.auth = .loggedOut
+    expect(!remoteSimpleShowsScopedRow(localScoped, now: now)
+           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 184,
+           "C3-22/A5: local sign-in problem hides model row and removes its 15pt")
+    localScoped.data.auth = .ok; localScoped.data.asOf = now.addingTimeInterval(-5 * 3600)
+    expect(!remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: stale local card does not reserve hidden scoped row")
+    var remoteScoped = c3bView(model: true, state: .stale)
+    remoteScoped.data.source?.freshUntil = now.addingTimeInterval(-1)
+    expect(remoteSimpleShowsScopedRow(remoteScoped, now: now), "C3-22/V13: stale foreign model row remains visible and grey")
+
+    expect(remoteCaptionInput("A\u{2028}B\u{2029}C") == "ABC",
+           "C3-23/A6: line and paragraph separators are stripped from one-line caption input")
+    let edit = remoteCaptionEdit(original: "Old", draft: "A\u{2028}B\u{2029}C", command: .enter)
+    expect(edit.committed && edit.value == "ABC" && edit.count == 3,
+           "C3-23/A6: separator-free committed caption and counter agree")
+    var labelled = c3bView(2, product: "codex")
+    labelled.label = "label-identity"; labelled.historyKey = "different-history-key"
+    let hidden = c3bSettings([two[1], labelled], hidden: ["label-identity"])
+    expect(hidden.accounts.last?.visible == false && hidden.menuProducts.isEmpty,
+           "C3-24/D6: hiddenAccounts uses C2 label when label differs from historyKey")
+    expect(!remoteAccountIsHidden(labelled, hidden: ["different-history-key"])
+           && remoteAccountIsHidden(legacyClaude, hidden: ["l:legacy"]),
+           "C3-24/D6: historyKey fallback applies to legacy identity, not labelled account")
+    expect(remoteAccountIsHidden(legacyClaude, hidden: [claudeID])
+           && !remoteAccountIsHidden(legacyCodex, hidden: [claudeID]),
+           "C3-24/A2: hiding product-scoped legacy Claude leaves legacy Codex visible")
+    expect(remoteAccountIsHidden(unknown, hidden: ["codex|u:codex"])
+           && !remoteAccountIsHidden(unknown, hidden: ["claude|u:codex"]),
+           "C3-24/A2: unassigned group honors product-scoped hidden identity")
+    var noTime = c3bView(local: true); noTime.data.asOf = nil
+    expect(remoteAdvancedNoticeLines(noTime, now: now) == 1 && !limitSnapshotNotice(noTime.data, now: now).isEmpty,
+           "C3-25/D7: local nil asOf preserves existing paused notice, with no fabricated timestamp")
+
+    for phase in [SyncPhase.off, .revoked, .awaitingCode] {
+        for view in [c3bView(), c3bView(1, product: "codex")] {
+            let sync = ReaderSyncState(phase: phase)
+            let presented = remotePresentationView(view, sync: sync, now: now)
+            expect(presented.state == .signedOut && presented.data.session == nil && presented.data.weekly == nil && presented.data.scoped == nil,
+                   "C3-26/V4: reader \(phase) clears values on every foreign account")
+            expect(remoteAdvancedNoticeLines(presented, now: now) == 0,
+                   "C3-26/V3: foreign state7 has no invalid-time amber notice")
+            for language in ["ru", "en"] {
+                let p = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
+                expect(p.sourceLine == (language == "ru" ? "Нет данных с vps" : "No data from vps") && !p.showsValues,
+                       "C3-26/V1: state7 keeps no-data source line separate from GitHub action")
+                if phase == .revoked {
+                    expect(p.statusLine == (language == "ru" ? "Войдите заново ›" : "Sign in again ›"),
+                           "C3-26/V2: revoked narrow action uses approved complete short text")
+                }
+            }
+        }
+    }
+    let disconnected = ReaderSyncState(phase: .off)
+    let noNumbers = c3bMenu([c3bView(), c3bView(1, product: "codex")].map {
+        remotePresentationView($0, sync: disconnected, now: now)
+    })
+    expect(noNumbers.lines.count == 2 && noNumbers.lines.allSatisfy { $0.session == nil && $0.weekly == nil && $0.scoped == nil },
+           "C3-26/Q3: reader state7 menu retains product icons without cached numbers")
+    let connectedLocal = remotePresentationView(c3bView(local: true), sync: disconnected, now: now)
+    expect(connectedLocal.state == .fresh && connectedLocal.data.session == 20 && connectedLocal.data.weekly == 40,
+           "C3-26/V4: GitHub reader sign-out preserves this-machine signed-in values")
+    let warning = ReaderSyncState(phase: .on, warning: "Fixture warning")
+    expect([c3bView(), c3bView(1, product: "codex")].allSatisfy {
+        remotePresentationView($0, sync: warning, now: now).state == .syncStalled
+    }, "C3-26/V4: sync warning governs every foreign account, including fresh neighbouring fixtures")
+    let poll = RemoteManualPhase.pollAllowed(now.addingTimeInterval(900))
+    let foreignPoll = remotePresentationCard(c3bView(), sync: ReaderSyncState(phase: .on), language: "en", narrow: true, now: now, timeZone: zone, manual: poll)
+    expect(!foreignPoll.statusLine.contains("Poll allowed"), "C3-26/V8: provider pollAllowed status never appears on foreign account")
+    var local = c3bView(local: true)
+    let localSource = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: "ru", narrow: false, now: now, timeZone: zone)
+    expect(localSource.sourceLine == "Данные 15:50", "C3-26/V7: this-machine snapshot source omits remote machine phrase")
+    local.isLocal = false; local.data.source = c3bView().data.source
+    let short = remotePresentationSourceLine(local, language: "ru", narrow: true, now: now, timeZone: zone)
+    expect(short == "Данные с vps от 15:50", "C3-26/Q1: narrow today retains full form until measured width requires shortening")
+    local.data.source?.machineName = "build-machine-with-a-long-name"
+    let shortened = remotePresentationSourceLine(local, language: "ru", narrow: true, now: now, timeZone: zone, compact: true, machineLimit: 8)
+    expect(shortened == "С build-ma… от 15:50", "C3-26/V5/Q1: measured-overflow steps preserve time and shorten machine to eight characters plus ellipsis")
+    let fittedShort = remoteFittedSourceLine(c3bView(), language: "ru", now: now, timeZone: zone, availableWidth: 130,
+        measure: { $0 == "Данные с vps от 15:50" ? 129 : 200 })
+    expect(fittedShort == "Данные с vps от 15:50", "C3-26/Q1: measured full today form fits 130pt and remains full")
+    let fittedLong = remoteFittedSourceLine(local, language: "ru", now: now, timeZone: zone, availableWidth: 130,
+        measure: { $0.hasPrefix("Данные ") ? 150 : 120 })
+    expect(fittedLong == "С build-ma… от 15:50", "C3-26/Q1: measured long full form overflows 130pt and uses complete short form")
+    // Distinguish every step: measuring an already-shortened full form first
+    // would incorrectly keep "Данные с" because that form is only 120pt here.
+    var measuredView = local; measuredView.data.source?.machineName = "build-machine"
+    for compactWidth in [120.0, 150.0] {
+        var measurements: [String] = []
+        let fitted = remoteFittedSourceLine(measuredView, language: "ru", now: now, timeZone: zone, availableWidth: 130) { text in
+            measurements.append(text)
+            switch text {
+            case "Данные с build-machine от 15:50": return 150
+            case "С build-machine от 15:50": return compactWidth
+            case "Данные с build-ma… от 15:50", "С build-ma… от 15:50": return 120
+            default: return 1000
+            }
+        }
+        expect(measurements == ["Данные с build-machine от 15:50", "С build-machine от 15:50"]
+               && fitted == "С build-ma… от 15:50",
+               "C3-26/Q1: measure original full then original compact (\(compactWidth)pt) before returning eight-character machine")
+    }
+    var pro = c3bView(product: "codex"); pro.data.plan = "Pro"
+    let snapshotPrice = accountSubscriptionPrice(pro, overrides: [:], localFallback: (200, true))
+    expect(snapshotPrice.usd == 200 && !snapshotPrice.estimated,
+           "C3-26/V17/V23: known Pro snapshot keeps exact price without approximation across plan capitalization")
+    pro.data.plan = nil
+    expect(accountSubscriptionPrice(pro, overrides: [:], localFallback: (200, true)).estimated,
+           "C3-26/V17: missing snapshot plan retains estimated fallback")
+    for state in [RemoteCardState.signInRequired, .offline, .syncStalled] {
+        var view = c3bView(state: state)
+        expect(!metricIsStale(view.data, metric: "weekly", now: now),
+               "C3-26/V12: source state \(state.rawValue) alone does not dim in-horizon body")
+        view.data.source?.freshUntil = now.addingTimeInterval(-1)
+        expect(metricIsStale(view.data, metric: "weekly", now: now),
+               "C3-26/V12: source state \(state.rawValue) dims body after freshness horizon")
+    }
+    var desktop = c3bView(4); desktop.caption = "Claude Max 20x · desktop"
+    var vps = c3bView(3); vps.caption = "Claude Max 20x · vps"
+    let localCodex = c3bView(2, product: "codex", local: true)
+    let remoteCodex = c3bView(1, product: "codex")
+    expect(remoteMissingSetupProduct(visible: [localCodex], all: [localCodex], polling: ["claude": true, "codex": true]) == "claude",
+           "C3-26/A4: single local Codex restores enabled missing Claude setup slot")
+    expect(remoteMissingSetupProduct(visible: [localCodex], all: [localCodex], polling: ["claude": false, "codex": true]) == nil,
+           "C3-26/A4: disabled missing product receives no setup slot")
+    let localClaudeForSetup = c3bView(local: true)
+    expect(remoteMissingSetupProduct(visible: [localCodex], all: [localClaudeForSetup, localCodex], polling: ["claude": true, "codex": true]) == nil,
+           "C3-26/A4: hidden existing Claude stays hidden instead of reappearing as setup slot")
+    expect(remoteMissingSetupProduct(visible: [remoteCodex], all: [remoteCodex], polling: ["claude": true, "codex": true]) == nil,
+           "C3-26/A4: foreign-only scene creates no local missing-product placeholder")
+    for language in ["ru", "en"] {
+        let sorted = remoteSortedPresentationViews(views: [remoteCodex, vps, localCodex, desktop], language: language)
+        expect(sorted.map(remoteAccountID) == [desktop, vps, localCodex, remoteCodex].map(remoteAccountID),
+               "C3-26/V20: \(language) order is product, local sign-in, caption, identity")
+    }
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -357,6 +605,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
         print("\(ok ? "OK" : "FAIL") \(message)")
     }
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
+    c3bReviewRegressions(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
     return failures
 }

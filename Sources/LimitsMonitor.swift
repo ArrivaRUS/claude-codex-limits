@@ -3896,6 +3896,23 @@ func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
                                 + SET_SYNC_SIGNOUT_HINT_H
     }
 }
+private func disconnectedSyncNote(_ s: SyncUIState) -> String {
+    if s.phase == .off, let error = s.error { return error }
+    return s.phase == .revoked
+        ? tr("Расход других компьютеров не обновляется. Последние полученные данные остаются в истории.",
+             "Other computers' usage isn't updating. The last data received stays in the history.")
+        : tr("Столбики и деньги учтут компьютеры, вошедшие в тот же GitHub. Функция позволяет организовывать сводную статистику с нескольких компьютеров, на которых применяется один и тот же аккаунт.",
+             "Bars and money will include every computer signed in to the same GitHub. It combines statistics from several computers that use the same account.")
+}
+/// Live Settings measure disconnected content; the legacy sync-height contract
+/// remains available to the pre-existing C1 sync selftests.
+func remoteSyncCardHeight(_ s: SyncUIState = syncUIState()) -> CGFloat {
+    guard s.phase == .off || s.phase == .revoked else { return setSyncCardH(s) }
+    let noteH = measuredTextHeight(disconnectedSyncNote(s), width: PANEL_W - 60, size: 10.5) + 8
+    let errorH: CGFloat = s.phase == .revoked && s.lastError != nil ? SET_SYNC_STATUS_H : 0
+    return SET_ROW_H * 2 + noteH + errorH + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
+        + (s.canRetryKeychain ? SET_ROW_H : 0)
+}
 let SET_SYNC_STATUS_H: CGFloat = 20      // «Последняя отправка · чтение» (+ the last error) under the machines
 let SET_SYNC_CAP = SET_SUB_TOP + SET_SUB_H + SET_GAP
 let SET_SYNC_TOP = SET_SYNC_CAP + SET_CAP_H
@@ -3913,7 +3930,7 @@ private struct AccountSettingsLayout {
 private func accountSettingsLayout() -> AccountSettingsLayout {
     let snapshot = readerLocalSnapshot.snapshot()
     let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(snapshot.local.0, snapshot.local.1, now: remoteRenderNow())
-    let views = frame.allViews
+    let views = remoteSortedPresentationViews(views: frame.allViews.map { remotePresentationView($0, sync: frame.sync, now: frame.now) }, language: appLang())
     let model = remoteSettingsModel(views: views, hidden: hiddenAccounts(),
         polling: ["claude": productEnabled("claude"), "codex": productEnabled("codex")],
         sync: frame.sync, advanced: advancedEnabled(), language: appLang())
@@ -3924,10 +3941,10 @@ private func accountSettingsLayout() -> AccountSettingsLayout {
     let tc = top, tt = tc + SET_CAP_H, th = SET_TRAY_H + CGFloat(model.menuProducts.count) * SET_ROW_H
     top = tt + th + SET_GAP
     let sc = top, st = sc + SET_CAP_H
-    let sh = CGFloat(views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) }.count) * SET_ROW_H
+    let sh = CGFloat(views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }.count) * SET_ROW_H
     if advancedEnabled(), sh > 0 { top = st + sh + SET_GAP }
     let yc = top, yt = yc + SET_CAP_H
-    if model.showsGitHub { top = yt + setSyncCardH() + SET_GAP }
+    if model.showsGitHub { top = yt + remoteSyncCardHeight() + SET_GAP }
     return AccountSettingsLayout(model: model, views: views, accountsCap: ac, accountsTop: at, accountsHeight: ah,
         trayCap: tc, trayTop: tt, trayHeight: th, subCap: sc, subTop: st, subHeight: sh,
         syncCap: yc, syncTop: yt, soundsTop: top)
@@ -3968,7 +3985,7 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 }
 /// Height of the main panel for the given data — grows when a per-model limit is shown.
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
-    let views = displayedCardViews(claude, codex)
+    let views = simpleCardViews(claude, codex)
     if views.isEmpty { return PANEL_H }
     return CGFloat(remotePanelLayout(views: views, style: .simple, now: remoteRenderNow()).windowHeight)
 }
@@ -4314,11 +4331,26 @@ private func renderedHasHistory(_ view: AccountView?) -> Bool {
     guard !REMOTE_RENDER_ISOLATED, let view = view else { return false }
     return !UsageHistory.shared.samples(view.product, acct: view.historyKey, since: Date(timeIntervalSince1970: 0)).isEmpty
 }
+/// Explicit account prices use the same product-scoped identity as history selection.
+func accountSubscriptionPrice(_ view: AccountView, overrides: [String: Double], localFallback: (usd: Double, estimated: Bool)) -> (usd: Double, estimated: Bool) {
+    if let price = overrides[remoteAccountID(view)], price.isFinite, price >= 0 { return (price, false) }
+    let plan = view.data.plan?.lowercased() ?? ""
+    let known = ["free", "go", "plus", "pro", "max", "max_5x", "max_20x"].contains(plan)
+    return (localFallback.usd, known ? false : localFallback.estimated)
+}
+private func renderedSubscriptionPrice(_ view: AccountView) -> (usd: Double, estimated: Bool) {
+    let fallback = subscriptionUSD(view.product, plan: view.data.plan?.lowercased(), tier: view.tier, isLocal: view.isLocal)
+    var overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
+    if overrides[remoteAccountID(view)] == nil, let legacy = overrides[view.historyKey],
+       let frame = REMOTE_ACCOUNT_FRAME, frame.allViews.filter({ $0.historyKey == view.historyKey }).count == 1 {
+        overrides[remoteAccountID(view)] = legacy
+    }
+    return accountSubscriptionPrice(view, overrides: overrides, localFallback: fallback)
+}
 private func renderedMoneySummary(_ view: AccountView, local: UsageIndex, now: Date) -> MoneySummary {
-    let value = moneySummary(view, local: local, now: now)
-    guard let price = (UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double])?[view.historyKey] else { return value }
+    let value = moneySummary(view, local: local, now: now), price = renderedSubscriptionPrice(view)
     return MoneySummary(days: value.days, activeDays: value.activeDays, usdApi: value.usdApi,
-        perCalendarDay: value.perCalendarDay, perActiveDay: value.perActiveDay, subMonthly: price, subEstimated: false)
+        perCalendarDay: value.perCalendarDay, perActiveDay: value.perActiveDay, subMonthly: price.usd, subEstimated: price.estimated)
 }
 
 private func localAccountCaptions() -> [String: String] {
@@ -4327,7 +4359,7 @@ private func localAccountCaptions() -> [String: String] {
 private func applyingLocalCaptions(_ views: [AccountView]) -> [AccountView] {
     let captions = localAccountCaptions()
     return views.map { value in
-        var value = value
+        var value = remoteSanitizedView(value)
         if let text = captions[value.label ?? value.historyKey] {
             let clean = remoteCaptionInput(text)
             value.caption = clean.isEmpty ? remoteDefaultCaption(value) : clean
@@ -4336,7 +4368,8 @@ private func applyingLocalCaptions(_ views: [AccountView]) -> [AccountView] {
     }.sorted {
         if $0.product != $1.product { return $0.product == "claude" }
         if $0.isLocal != $1.isLocal { return $0.isLocal }
-        let order = $0.caption.localizedCaseInsensitiveCompare($1.caption)
+        let locale = Locale(identifier: appLang() == "en" ? "en_US" : "ru_RU")
+        let order = $0.caption.compare($1.caption, options: [.caseInsensitive], locale: locale)
         return order == .orderedSame ? ($0.label ?? $0.historyKey) < ($1.label ?? $1.historyKey) : order == .orderedAscending
     }
 }
@@ -4346,8 +4379,8 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
     let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now))
     let hidden = hiddenAccounts(), menu = menuAccountSelection()
     if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
-        let all = applyingLocalCaptions(all)
-        let visible = all.filter { !hidden.contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+        let all = applyingLocalCaptions(all).map { remotePresentationView($0, sync: sync, now: now) }
+        let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
         return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
     }
     let cache = isolated ? SyncRemoteCache() : GitHubSync.shared.remoteSnapshot()
@@ -4355,7 +4388,7 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
         localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids, remote: cache, hidden: hidden, menu: menu,
         sync: sync, now: now,
         localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"))
-    var all = applyingLocalCaptions(resolved.allViews)
+    var all = applyingLocalCaptions(resolved.allViews).map { remotePresentationView($0, sync: sync, now: now) }
     // Unlabelled usage has no quota card, but remains manageable in Settings/history.
     for product in ["claude", "codex"] {
         let days = cache.unattributedDays?[product] ?? (cache.accounts == nil ? cache.days[product] : nil) ?? [:]
@@ -4365,7 +4398,7 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
                 machines: cache.machines.map { $0.name }, state: .fresh))
         }
     }
-    let visible = all.filter { !hidden.contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+    let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
     return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
 }
 func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date(), includeHidden: Bool = false) -> [AccountView] {
@@ -4375,7 +4408,29 @@ func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Da
     return includeHidden ? frame.allViews : frame.visibleViews
 }
 func displayedCardViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date()) -> [AccountView] {
-    (REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)).visibleViews.filter { !$0.historyKey.hasPrefix("u:") }
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)
+    return remoteSortedPresentationViews(views: frame.visibleViews.map { remotePresentationView($0, sync: frame.sync, now: frame.now) }, language: appLang())
+        .filter { !$0.historyKey.hasPrefix("u:") }
+}
+func remoteMissingSetupProduct(visible: [AccountView], all: [AccountView], polling: [String: Bool]) -> String? {
+    guard visible.count == 1, let only = visible.first, only.isLocal, only.data.source == nil else { return nil }
+    let missing = only.product == "claude" ? "codex" : "claude"
+    guard polling[missing] == true,
+          !all.contains(where: { $0.product == missing && $0.data.present && !$0.historyKey.hasPrefix("u:") }) else { return nil }
+    return missing
+}
+/// Preserve the original two local slots, including the enabled product's setup card.
+/// Remote accounts have their own grid and never gain a speculative setup placeholder.
+func simpleCardViews(_ claude: LimitData, _ codex: LimitData) -> [AccountView] {
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: remoteRenderNow())
+    let views = displayedCardViews(claude, codex)
+    guard frame.sync.phase != .on,
+          let missing = remoteMissingSetupProduct(visible: views, all: frame.allViews,
+              polling: ["claude": productEnabled("claude"), "codex": productEnabled("codex")]),
+          let only = views.first else { return views }
+    let placeholder = AccountView(product: missing, label: nil, historyKey: "l:missing", caption: missing == "claude" ? "Claude Code" : "Codex",
+        data: LimitData(present: false), isLocal: true, tier: nil, usageDays: [:], machines: [], state: .fresh)
+    return missing == "claude" ? [placeholder, only] : [only, placeholder]
 }
 func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> RemoteCardPresentation {
     let at = REMOTE_ACCOUNT_FRAME?.now ?? now
@@ -4386,7 +4441,7 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date()) -> 
         let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
         sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
     }
-    return remoteCardPresentation(view, sync: sync, language: appLang(), narrow: narrow, now: at,
+    return remotePresentationCard(view, sync: sync, language: appLang(), narrow: narrow, now: at,
                                   timeZone: remoteRenderTimeZone(), manual: REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE : (remoteManualRefresh?.phase(now: at) ?? REMOTE_MANUAL_PHASE))
 }
 func remoteToneColor(_ tone: String) -> NSColor {
@@ -4462,6 +4517,24 @@ func quotaActionID(_ feedback: QuotaRefreshFeedback, product: String) -> String?
     case .none: return nil
     }
 }
+func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, timeZone: TimeZone,
+                            availableWidth: Double, measure: (String) -> Double) -> String {
+    let machine = view.data.source?.machineName ?? view.machines.first ?? "?"
+    let limit: Int? = machine.count > 8 ? 8 : nil
+    let full = remotePresentationSourceLine(view, language: language, narrow: false, now: now, timeZone: timeZone)
+    if measure(full) <= availableWidth {
+        return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+            timeZone: timeZone, machineLimit: limit)
+    }
+    let compact = remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+        timeZone: timeZone, compact: true)
+    if measure(compact) <= availableWidth {
+        return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+            timeZone: timeZone, compact: true, machineLimit: limit)
+    }
+    return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+        timeZone: timeZone, compact: true, machineLimit: 8)
+}
 /// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
 func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
                          view: AccountView? = nil) -> [Hit] {
@@ -4480,17 +4553,11 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
     }
     let model = view.map { cardPresentation($0, narrow: !advanced && card.width < 300, now: Date(timeIntervalSince1970: now)) }
     var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
-    if data.source != nil, let view = view {
-        func fits(_ text: String) -> Bool { lineWidth(CTLineCreateWithAttributedString(ctAttr(text, ctFont(10, .regular), cg(gray(1, 0.5))))) <= footer.width }
-        let at = Date(timeIntervalSince1970: now)
-        if !fits(sourceLine) {
-            sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
-                                             now: at, timeZone: remoteRenderTimeZone(), compact: true)
-        }
-        if !fits(sourceLine) {
-            sourceLine = remoteCardSourceLine(view, language: appLang(), narrow: !advanced && card.width < 300,
-                                             now: at, timeZone: remoteRenderTimeZone(), compact: true, machineLimit: 8)
-        }
+    if (data.source != nil || view?.isLocal == false), let view = view {
+        sourceLine = remoteFittedSourceLine(view, language: appLang(), now: Date(timeIntervalSince1970: now),
+            timeZone: remoteRenderTimeZone(), availableWidth: Double(footer.width)) { value in
+                Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, .regular), cg(gray(1, 0.5))))))
+            }
     }
     line(sourceLine, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
          color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
@@ -4616,10 +4683,10 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
 
     let pad: CGFloat = 16
 
-    let cardViews = displayedCardViews(claude, codex)
+    let cardViews = simpleCardViews(claude, codex)
     let layout = remotePanelLayout(views: cardViews, style: .simple, now: remoteRenderNow())
     let prods = cardViews.enumerated().map { i, view in
-        (view.data, cardPresentation(view, narrow: layout.cards[i].width < 300).simpleTitle,
+        (view.data, view.data.present ? cardPresentation(view, narrow: layout.cards[i].width < 300).simpleTitle : view.caption,
          view.product + "_128.png", remoteCardActionURL(product: view.product), view.product)
     }
 
@@ -4749,9 +4816,9 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             text(attr(label, 10, .semibold, color), x: pillR.minX + padL + icoW + midGap, topY: pillTop + (pillH - 10) / 2 - 0.5)
         }
         let scopedCol = metricIsStale(d, metric: "model", now: now) ? gray(1, 0.3) : (d.scoped.map { scopedColor($0.percent) } ?? SCOPED_COLOR)
-        if !stale, let rc = d.resetCredits, rc >= 1 {
+        if (!stale || remote), let rc = d.resetCredits, rc >= 1 {
             pill("arrow.clockwise", "\(rc)", amber)
-        } else if !stale, let s = d.scoped {
+        } else if (!stale || remote), let s = d.scoped {
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = cardsTop + 124, l2 = cardsTop + 139
@@ -4771,7 +4838,15 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             let lx = x + 16
             dot(lx, centerTopY: l1 + 5, sCol)
             text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
-            text(attr(limitResetText(d.sessionReset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l1, align: 2)
+            let sessionReset = limitResetText(d.sessionReset, now: now)
+            let sessionLabelW = lineWidth(CTLineCreateWithAttributedString(attr(tr("Сессия", "Session"), 10.5, .regular, textMid)))
+            let resetRoom = x + w - 14 - (lx + 11 + sessionLabelW + 4)
+            var resetText = attr(sessionReset, 10, .regular, textLo)
+            if remote, lineWidth(CTLineCreateWithAttributedString(resetText)) > resetRoom {
+                let fullWidth = lineWidth(CTLineCreateWithAttributedString(resetText))
+                resetText = attr(sessionReset, max(8, 10 * resetRoom / max(1, fullWidth)), .regular, textLo)
+            }
+            text(resetText, x: x + w - 14, topY: l1, align: 2)
             dot(lx, centerTopY: l2 + 5, wCol)
             text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
             text(attr(limitResetText(d.weeklyReset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
@@ -5003,14 +5078,59 @@ private func renderedSyncWarning() -> String? {
     return syncWarning()
 }
 
+private let remoteHistoryEmptyMessageRU = "Истории пока нет — копим с сегодняшнего дня. Столбики появятся завтра, календарь заполнится за неделю. Темп выше уже работает: ему история не нужна."
+private let remoteHistoryEmptyMessageEN = "No history yet — collecting from today. Bars appear tomorrow, the calendar fills over a week. Pace above already works: it needs no history."
+private func remoteHistoryEmptyMessage() -> String { tr(remoteHistoryEmptyMessageRU, remoteHistoryEmptyMessageEN) }
+private func measuredTextHeight(_ text: String, width: CGFloat, size: CGFloat) -> CGFloat {
+    let fs = CTFramesetterCreateWithAttributedString(ctAttr(text, ctFont(size, .regular), cg(gray(1, 0.5))))
+    return ceil(CTFramesetterSuggestFrameSizeWithConstraints(fs, CFRange(location: 0, length: 0), nil,
+        CGSize(width: width, height: .greatestFiniteMagnitude), nil).height)
+}
+private func historyEmptyHeight() -> CGFloat {
+    max(ADV_HIST_EMPTY_EXTRA, measuredTextHeight(remoteHistoryEmptyMessage(), width: ADV_IW - 16, size: 10.5) + 16)
+}
+private struct HistorySelectorLayout {
+    var titles: [String]
+    var rects: [CGRect]             // top-left coordinates, relative to the header
+    var ownRow: Bool
+    var extraHeight: CGFloat
+}
+private func historySelectorLayout(_ accounts: [AccountView]) -> HistorySelectorLayout {
+    let titles = accounts.map { view in
+        view.historyKey.hasPrefix("u:") ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled")
+            : cardPresentation(view, narrow: false).simpleTitle
+    }
+    guard advHistExpanded() else { return HistorySelectorLayout(titles: titles, rects: [], ownRow: false, extraHeight: 0) }
+    let widths = titles.map { title in
+        min(ADV_IW - 4, ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10.5, .semibold), cg(gray(1, 0.95)))))) + 16)
+    }
+    let total = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) + 4
+    let ownRow = accounts.count >= 3 || total > 150
+    if !ownRow {
+        var x = ADV_IW - total + 2
+        let rects = widths.map { width -> CGRect in
+            defer { x += width + 1 }
+            return CGRect(x: x, y: 2, width: width, height: 14)
+        }
+        return HistorySelectorLayout(titles: titles, rects: rects, ownRow: false, extraHeight: 0)
+    }
+    var x: CGFloat = 2, row = 0
+    var rects: [CGRect] = []
+    for width in widths {
+        if x > 2 && x + width > ADV_IW - 2 { row += 1; x = 2 }
+        rects.append(CGRect(x: x, y: 22 + CGFloat(row) * 22, width: width, height: 18))
+        x += width + 1
+    }
+    return HistorySelectorLayout(titles: titles, rects: rects, ownRow: true, extraHeight: CGFloat(row + 1) * 22)
+}
 func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
-    let warn: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0      // orange sync line under the header
-    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn + (historyAccounts(cards).count >= 3 ? 22 : 0) }
-    let items = historyAccounts(cards)
-    let selected = selectedHistoryAccount(items)
-    let noHistory = !renderedHasHistory(selected)
-    return ADV_HIST_EXPANDED + (noHistory ? ADV_HIST_EMPTY_EXTRA : 0) + warn
-        + (items.count >= 3 ? 22 : 0) + CGFloat(max(0, items.count - 2)) * 19
+    let warn: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0
+    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
+    let items = historyAccounts(cards), selector = historySelectorLayout(items)
+    let noHistory = !renderedHasHistory(selectedHistoryAccount(items))
+    // Account caption and monthly price occupy a full-width line; daily figures follow.
+    let moneyExtra = max(0, CGFloat(items.count) * 38 - 38)
+    return ADV_HIST_EXPANDED + (noHistory ? historyEmptyHeight() : 0) + warn + selector.extraHeight + moneyExtra
 }
 
 private func historyAccounts(_ cards: [AdvCard]) -> [AccountView] {
@@ -5018,32 +5138,37 @@ private func historyAccounts(_ cards: [AdvCard]) -> [AccountView] {
     let snapshot = readerLocalSnapshot.snapshot()
     let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(snapshot.local.0, snapshot.local.1, now: remoteRenderNow())
     let unassigned = frame.allViews.filter {
-        $0.historyKey.hasPrefix("u:") && !hiddenAccounts().contains($0.historyKey)
+        $0.historyKey.hasPrefix("u:") && !remoteAccountIsHidden($0, hidden: hiddenAccounts())
     }
-    return actual + unassigned
+    return remoteSortedPresentationViews(views: actual + unassigned, language: appLang())
+}
+func selectedHistoryAccount(views: [AccountView], selectedID: String?, product: String) -> AccountView? {
+    if let selected = selectedID {
+        if let view = views.first(where: { remoteAccountID($0) == selected }) { return view }
+        let legacy = views.filter { $0.historyKey == selected }
+        if legacy.count == 1 { return legacy[0] }
+    }
+    return views.first { $0.product == product } ?? views.first
 }
 private func selectedHistoryAccount(_ accounts: [AccountView]) -> AccountView? {
-    let selected = UserDefaults.standard.string(forKey: "advHistAccount")
-    if let selected = selected, let view = accounts.first(where: { $0.historyKey == selected }) { return view }
-    let product = advHistProduct(accounts.map { $0.product })
-    return accounts.first { $0.product == product } ?? accounts.first
+    selectedHistoryAccount(views: accounts, selectedID: UserDefaults.standard.string(forKey: "advHistAccount"),
+                           product: advHistProduct(accounts.map { $0.product }))
 }
 
-func showMissingProduct(_ cards: [AdvCard]) -> Bool {
-    cards.count == 1 && cards[0].account?.isLocal == true && cards[0].data.source == nil
-        && productEnabled(cards[0].product == "claude" ? "codex" : "claude")
+func showMissingProduct(_ cards: [AdvCard], allViews: [AccountView]? = nil) -> Bool {
+    let snapshot = readerLocalSnapshot.snapshot()
+    let all = allViews ?? REMOTE_ACCOUNT_FRAME?.allViews
+        ?? displayAccountViews(snapshot.local.0, snapshot.local.1, includeHidden: true)
+    return remoteMissingSetupProduct(visible: cards.compactMap { $0.account }, all: all,
+        polling: ["claude": productEnabled("claude"), "codex": productEnabled("codex")]) != nil
 }
 
 func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     let cards = advCards(claude, codex)
     if cards.isEmpty && historyAccounts(cards).isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
-    let accounts = historyAccounts(cards)
-    let selector: CGFloat = accounts.count >= 3 ? 22 : 0
-    let moneyExtra = advHistExpanded() ? CGFloat(max(0, accounts.count - 2)) * 19 : 0
-    let warning: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0
-    let baseHistory = advHistoryHeight(cards) - selector - moneyExtra - warning
-    let layout = remotePanelLayout(views: accounts, style: .advanced, now: remoteRenderNow(), historyHeight: Double(baseHistory))
-    return CGFloat(layout.windowHeight) + warning + (showMissingProduct(cards) ? 5 + ADV_PLACEHOLDER : 0)
+    let cardHeight = cards.reduce(CGFloat(0)) { $0 + $1.height + 5 }
+    return 58 + cardHeight + advHistoryHeight(cards) + 6 + 59
+        + (showMissingProduct(cards, allViews: displayAccountViews(claude, codex, includeHidden: true)) ? 5 + ADV_PLACEHOLDER : 0)
 }
 /// Credit line under the footer (author · version · GitHub), same as in the Simple view —
 /// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
@@ -5216,13 +5341,13 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     let cards = advCards(claude, codex)
     var y: CGFloat = 58
 
-    func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowData: LimitData) {
+    func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowData: LimitData, remoteBody: Bool = false, remoteEmpty: Bool = false) {
         if row.kind == .credits {
             let n = row.credits ?? 0
-            let on = n > 0
+            let on = n > 0 && !remoteEmpty
             dot(ADV_IX + 3, yr + 14.5, on ? ADV_ACCENT : gray(1, 0.22))
             textC(caps(tr("Сбросы в запасе", "Resets in reserve"), 9.5, on ? textMid : textLo), x: ADV_IX + 12, topY: yr + 6, h: 17)
-            let num = attr("\(n)", 11, .semibold, on ? ADV_ACCENT : textLo)
+            let num = attr(remoteEmpty ? "—" : "\(n)", 11, .semibold, on ? ADV_ACCENT : textLo)
             let pw = 6 + 11 + 4 + width(num) + 7
             let pr = rectTL(ADV_IX + ADV_IW - pw, yr + 6, pw, 17)
             roundFill(pr, 8.5, on ? ADV_ACCENT.withAlphaComponent(0.16) : gray(1, 0.09))
@@ -5234,8 +5359,8 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         guard let l = row.limit else { return }
         let pace = l.pace
         let live = row.kind == .full || row.kind == .exhausted || row.kind == .tooEarly || row.kind == .stale
-        let col = live ? advWindowColor(l.color, pace?.used) : gray(1, 0.22)
-        if dimmed { ctx.saveGState(); ctx.setAlpha(0.42) }
+        let col = dimmed && remoteBody ? gray(1, 0.3) : (live ? advWindowColor(l.color, pace?.used) : gray(1, 0.22))
+        if dimmed && !remoteBody { ctx.saveGState(); ctx.setAlpha(0.42) }
         // L1: dot · label · percent
         dot(ADV_IX + 3, yr + 11, live ? col : gray(1, 0.22))
         textC(caps(l.name, 9.5, row.kind == .inactive ? textLo : textMid), x: ADV_IX + 12, topY: yr + 4, h: 14)
@@ -5244,17 +5369,27 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         } else {
             textC(attr("—", 14, .semibold, textLo), x: ADV_IX + ADV_IW, topY: yr + 4, h: 14, align: 2)
         }
-        // L2: verdict
+        // L2: colour follows the snapshot horizon, independently of the row's
+        // compact state layout. A source/login warning does not dim fresh data.
+        let semanticKind: AdvRowKind
+        if remoteBody && row.kind == .stale && !dimmed, let pace = pace {
+            semanticKind = pace.used >= 100 ? .exhausted
+                : (pace.elapsedH < 10.0 / 60 || pace.used < 2 ? .tooEarly : .full)
+        } else { semanticKind = row.kind }
         let verdictColor: NSColor, verdictWeight: NSFont.Weight
-        switch row.kind {
-        case .full:
-            if let p = pace, p.runsOutAt != nil { verdictColor = ADV_CRIT; verdictWeight = .semibold }
-            else if let p = pace, let pr = p.projectedPct, pr.rounded() >= 85 { verdictColor = ADV_WARN; verdictWeight = .semibold }
-            else { verdictColor = textHi; verdictWeight = .semibold }
-        case .exhausted: verdictColor = ADV_CRIT; verdictWeight = .semibold
-        default: verdictColor = textMid; verdictWeight = .regular
+        if remoteBody && dimmed {
+            verdictColor = gray(1, 0.3); verdictWeight = .regular
+        } else {
+            switch semanticKind {
+            case .full:
+                if let p = pace, p.runsOutAt != nil { verdictColor = ADV_CRIT; verdictWeight = .semibold }
+                else if let p = pace, let pr = p.projectedPct, pr.rounded() >= 85 { verdictColor = ADV_WARN; verdictWeight = .semibold }
+                else { verdictColor = textHi; verdictWeight = .semibold }
+            case .exhausted: verdictColor = ADV_CRIT; verdictWeight = .semibold
+            default: verdictColor = textMid; verdictWeight = .regular
+            }
         }
-        let verdict = rowData.source == nil ? advVerdict(row, asOf: rowData.asOf)
+        let verdict = remoteEmpty ? "" : rowData.source == nil ? advVerdict(row, asOf: rowData.asOf)
             : advVerdict(row, data: rowData, now: REMOTE_ACCOUNT_FRAME?.now ?? Date(), language: appLang())
         var va = attr(verdict, 12.5, verdictWeight, verdictColor)
         if width(va) > ADV_IW {                                   // spec §3.2 truncation ladder
@@ -5291,7 +5426,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             m.append(attr(" · " + rate + " · " + tr("сброс ", "reset ") + advResetShort(p.reset, now: REMOTE_ACCOUNT_FRAME?.now ?? Date()), 10.5, .regular, textMid))
             textC(m, x: ADV_IX, topY: yr + 46, h: 12)
         }
-        if dimmed { ctx.restoreGState() }
+        if dimmed && !remoteBody { ctx.restoreGState() }
     }
 
     let cardLayout = remotePanelLayout(views: cards.compactMap { $0.account }, style: .advanced, now: remoteRenderNow())
@@ -5308,37 +5443,37 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let y0 = y + 9
         if let img = loadCGImage(assetPath(c.icon)) { ctx.draw(img, in: rectTL(ADV_IX, y0 + 1, 16, 16)) }
         let warningBadge = remote ? (presentation?.advancedBadge ?? "") : ((c.paused || limitPollFailed(c.data)) ? limitDataBadge(c.data) : "")
-        let planWidth = min(64, width(attr(presentation?.planBadge ?? c.data.plan ?? "", 9.5, .semibold, textMid)) + 14)
-        let badgeWidth: CGFloat = warningBadge.isEmpty ? 0 : min(85, width(attr(warningBadge, 9.5, .semibold, textMid)) + 14)
-        let suffixWidth = min(48, width(attr(presentation?.machineSuffix ?? "", 11, .regular, textMid)))
-        let titleWidth = max(95, 266 - planWidth - badgeWidth - suffixWidth)
-        let name = fitAttr(presentation?.advancedTitle ?? c.name, maxW: titleWidth) { attr($0, 13, .semibold, textHi) }
+        let planLabel: String
+        if let shown = presentation?.planBadge, !shown.isEmpty { planLabel = shown }
+        else { planLabel = c.data.plan?.capitalized ?? "" }
+        let planAttr = attr(planLabel, 9.5, .semibold, gray(1, 0.60), kern: 0.19)
+        let planWidth = planLabel.isEmpty ? 0 : width(planAttr) + 14
+        let badgeWidth: CGFloat = warningBadge.isEmpty ? 0 : min(90, width(attr(warningBadge, 9.5, .semibold, textMid, kern: 0.19)) + 14)
+        let titleRoom = max(1, 263 - planWidth - badgeWidth - (planWidth > 0 ? 7 : 0) - (badgeWidth > 0 ? 5 : 0))
+        let rawTitle = presentation?.advancedTitle ?? c.name
+        let titleWidth = min(titleRoom, max(width(attr(String(rawTitle.prefix(8)), 13, .semibold, textHi)), titleRoom - 48))
+        let name = fitAttr(rawTitle, maxW: titleWidth) { attr($0, 13, .semibold, textHi) }
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
         if !warningBadge.isEmpty {
             let ink = remote ? remoteToneColor(presentation?.statusTone ?? "textMid") : ADV_WARN
-            let r = pill(fitAttr(warningBadge, maxW: max(20, min(71, 312 - px - planWidth - 7))) { attr($0, 9.5, .semibold, ink, kern: 0.19) }, x: px, topY: y0 + 1, h: 16, padX: 7,
-                         fill: ink.withAlphaComponent(0.16), stroke: ink.withAlphaComponent(0.42))
+            let r = pill(fitAttr(warningBadge, maxW: max(1, badgeWidth - 14)) { attr($0, 9.5, .semibold, ink, kern: 0.19) },
+                x: px, topY: y0 + 1, h: 16, padX: 7, fill: ink.withAlphaComponent(0.16), stroke: ink.withAlphaComponent(0.42))
             px = r.maxX + 5
         }
-        let planLabel: String
-        if remote { planLabel = presentation?.planBadge ?? "" }
-        else if let plan = c.data.plan {
-            planLabel = c.product == "claude" ? (plan == "max" ? (UserDefaults.standard.string(forKey: "claudeTier")?.contains("20x") == true ? "Max 20x" : "Max") : plan.capitalized) : plan
-        } else { planLabel = "" }
         if !planLabel.isEmpty {
-            let r = pill(fitAttr(planLabel, maxW: max(12, 312 - px - 14)) { attr($0, 9.5, .semibold, gray(1, 0.60), kern: 0.19) }, x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
+            let r = pill(planAttr, x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
             px = r.maxX + 5
         }
-        if let suffix = presentation?.machineSuffix, !suffix.isEmpty {
-            textC(fitAttr(suffix, maxW: max(0, 312 - px)) { attr($0, 11, .regular, textMid) }, x: px, topY: y0 + 1, h: 16)
+        if let suffix = presentation?.machineSuffix, !suffix.isEmpty, px < 308 {
+            textC(fitAttr(suffix, maxW: 312 - px) { attr($0, 11, .regular, textMid) }, x: px, topY: y0 + 1, h: 16)
         }
         let arrow = rectTL(322, y0 + 3, 12, 12)
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(c.url)", rect: canFix || remote ? card : arrow.insetBy(dx: -8, dy: -8), tooltip: c.account?.caption))
         var ry = y + 29
         do {
-            let notice = limitSnapshotNotice(c.data, now: REMOTE_ACCOUNT_FRAME?.now ?? Date())
+            let notice = remote && c.account?.state == .signedOut ? "" : limitSnapshotNotice(c.data, now: REMOTE_ACCOUNT_FRAME?.now ?? Date())
             if !notice.isEmpty { textC(attr(notice, 10.5, .regular, ADV_WARN), x: ADV_IX, topY: ry, h: 14) }
             if canFix {
                 let code = ctAttr("claude → /login", ctMono(10, .regular), cg(gray(1, 0.8)))
@@ -5349,14 +5484,17 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             ry += c.noticeHeight
         }
         for (i, row) in c.rows.enumerated() {
-            drawRow(row, topY: ry, dimmed: (c.paused || row.kind == .stale) && row.kind != .credits, rowData: c.data)
+            let metric = row.limit?.id == "scoped" ? "model" : (row.limit?.id ?? "weekly")
+            let dim = remote ? metricIsStale(c.data, metric: metric, now: remoteRenderNow()) : (c.paused || row.kind == .stale)
+            drawRow(row, topY: ry, dimmed: dim && row.kind != .credits, rowData: c.data, remoteBody: remote,
+                    remoteEmpty: remote && c.account?.state == .signedOut)
             ry += row.height
             if i < c.rows.count - 1 { hline(ADV_IX, ADV_IX + ADV_IW, ry, gray(1, 0.06)); ry += 1 }
         }
         hits += drawQuotaCardFooter(ctx, card: card, data: c.data, product: c.product, advanced: true, view: c.account)
         y += ch + 5
     }
-    if showMissingProduct(cards) {
+    if showMissingProduct(cards, allViews: displayAccountViews(claude, codex, includeHidden: true)) {
         // the other product isn't set up — a dashed invitation instead of an empty card
         let r = rectTL(ADV_CX, y, ADV_CW, ADV_PLACEHOLDER)
         ctx.saveGState(); ctx.setLineDash(phase: 0, lengths: [4, 3])
@@ -5381,42 +5519,36 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     let hy = y + 8                                  // border 1 + padding 7
     drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
     let others = syncOtherMachines()
-    let histCap = tr("История и деньги", "History & money") + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
-    textC(fitAttr(histCap, maxW: historyViews.count >= 3 ? ADV_IW - 14 : 132) { caps($0, 9.5, textLo) }, x: ADV_IX + 14, topY: hy, h: 18)
-    var historyToggleWidth: CGFloat = 200
-    let selectorExtra: CGFloat = historyViews.count >= 3 ? 22 : 0
-    do {
-        let items = historyViews.map { view in
-            (view.historyKey, view.historyKey.hasPrefix("u:") ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : cardPresentation(view, narrow: false).simpleTitle)
-        }
-        let ownRow = items.count >= 3
-        let widths = ownRow ? Array(repeating: (ADV_IW - 4 - CGFloat(max(0, items.count - 1))) / CGFloat(max(1, items.count)), count: items.count)
-            : items.map { min(76, width(attr($0.1, 10.5, .semibold, textHi)) + 16) }
-        let total = ownRow ? ADV_IW : widths.reduce(0, +) + CGFloat(max(0, items.count - 1)) + 4
-        let tx = ownRow ? ADV_IX : ADV_IX + ADV_IW - total
-        let ty = ownRow ? hy + 20 : hy
-        if !ownRow { historyToggleWidth = max(28, tx - ADV_CX - 4) }
-        let trackHeight: CGFloat = ownRow ? 22 : 18
-        roundFill(rectTL(tx, ty, total, trackHeight), 9, gray(1, 0.07))
-        var sx = tx + 2
-        for (i, it) in items.enumerated() {
-            let r = rectTL(sx, ty + 2, widths[i], trackHeight - 4)
-            let on = it.0 == selectedAccount?.historyKey
-            if on { roundFill(r, 7, gray(1, 0.18)) }
-            textC(fitAttr(it.1, maxW: widths[i] - 6) { attr($0, 10.5, on ? .semibold : .medium, on ? textHi : textMid) }, x: r.midX, topY: ty + 2, h: trackHeight - 4, align: 1)
-            hits.append(Hit(id: "histaccount:" + it.0, rect: r, tooltip: it.1))
-            sx += widths[i] + 1
-        }
+    let selector = historySelectorLayout(historyViews)
+    let selectorExtra = selector.extraHeight
+    let baseHistCap = tr("История и деньги", "History & money")
+    let capRoom = selector.ownRow || selector.rects.isEmpty ? ADV_IW - 14 : (selector.rects.first?.minX ?? ADV_IW) - 18
+    let fullHistCap = baseHistCap + (others > 0 ? tr(" · \(others + 1) ПК", " · \(others + 1) PCs") : "")
+    let fullCap = caps(fullHistCap, 9.5, textLo)
+    let histCap = width(fullCap) <= capRoom ? fullCap : caps(baseHistCap, 9.5, textLo)
+    textC(histCap, x: ADV_IX + 14, topY: hy, h: 18)
+    for (i, slot) in selector.rects.enumerated() {
+        let account = historyViews[i], title = selector.titles[i]
+        let r = rectTL(ADV_IX + slot.minX, hy + slot.minY, slot.width, slot.height)
+        let on = selectedAccount.map { remoteAccountID($0) } == remoteAccountID(account)
+        roundFill(r, 7, gray(1, on ? 0.18 : 0.07))
+        // A single long custom caption can use a smaller face, never an ellipsis.
+        let naturalWidth = width(attr(title, 10.5, .semibold, textHi))
+        let size = min(10.5, 10.5 * max(1, slot.width - 10) / max(1, naturalWidth))
+        textC(attr(title, size, on ? .semibold : .medium, on ? textHi : textMid),
+              x: r.midX, topY: hy + slot.minY, h: slot.height, align: 1)
+        hits.append(Hit(id: "histaccount:" + remoteAccountID(account), rect: r, tooltip: title))
     }
-    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, historyToggleWidth,
-        historyViews.count >= 3 || renderedSyncWarning() != nil ? 26 : 35)))
+    let toggleWidth = selector.ownRow || selector.rects.isEmpty ? ADV_CW : max(28, (selector.rects.first?.minX ?? 200) - 4)
+    hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, toggleWidth,
+        selector.ownRow || renderedSyncWarning() != nil ? 26 : 35)))
     // Sync stalled / revoked: one orange line under the header, in both collapsed and expanded
     // states — the totals below silently miss the other computers otherwise. Tap → Settings.
     var warnH: CGFloat = 0
     if let w = renderedSyncWarning() {
         let a = fitAttr(w, maxW: ADV_IW) { attr($0, 10.5, .regular, ADV_WARN) }
-        textC(a, x: ADV_IX, topY: hy + 18 + selectorExtra + (historyViews.count >= 3 ? 4 : 0) + 1, h: ADV_NOTICE - 2)
-        hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18 + selectorExtra + (historyViews.count >= 3 ? 4 : 0), ADV_IW, ADV_NOTICE)))
+        textC(a, x: ADV_IX, topY: hy + 18 + selectorExtra + (selector.ownRow ? 4 : 0) + 1, h: ADV_NOTICE - 2)
+        hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18 + selectorExtra + (selector.ownRow ? 4 : 0), ADV_IW, ADV_NOTICE)))
         warnH = ADV_NOTICE
     }
     if expanded {
@@ -5518,10 +5650,10 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         var my = by + 82
         if ap.firstSample == nil {
             // first day: no sampled history yet — say so instead of showing empty charts as data
-            let bx = rectTL(ADV_IX, my + 2, ADV_IW, ADV_HIST_EMPTY_EXTRA - 6)
+            let noteHeight = historyEmptyHeight()
+            let bx = rectTL(ADV_IX, my + 2, ADV_IW, noteHeight - 6)
             roundFill(bx, 8, gray(1, 0.04))
-            let msg = tr("Истории пока нет — копим с сегодняшнего дня. Столбики появятся завтра, календарь заполнится за неделю. Темп выше уже работает: ему история не нужна.",
-                         "No history yet — collecting from today. Bars appear tomorrow, the calendar fills over a week. Pace above already works: it needs no history.")
+            let msg = remoteHistoryEmptyMessage()
             let para = NSMutableAttributedString(attributedString: attr(msg, 10.5, .regular, textMid))
             let ps = NSMutableParagraphStyle(); ps.lineSpacing = 1.5
             let fs = CTFramesetterCreateWithAttributedString(para)
@@ -5529,11 +5661,11 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             ctx.saveGState(); ctx.textMatrix = .identity
             CTFrameDraw(CTFramesetterCreateFrame(fs, CFRangeMake(0, 0), path, nil), ctx)
             ctx.restoreGState()
-            my += ADV_HIST_EMPTY_EXTRA
+            my += noteHeight
         }
         hline(ADV_IX, ADV_IX + ADV_IW, my + 4, gray(1, 0.06))
         let colX: [CGFloat] = [ADV_IX, ADV_IX + 120, ADV_IX + 203, ADV_IX + ADV_IW]
-        textC(fitAttr(tr("по подписке", "on subscription"), maxW: 68) { caps($0, 8.5, textLo) }, x: colX[1], topY: my + 10, h: 11)
+        textC(caps(tr("подписка", "subscription"), 8.5, textLo), x: colX[1], topY: my + 10, h: 11)
         textC(caps(tr("по API было бы", "at API price"), 8.5, textLo), x: colX[2], topY: my + 10, h: 11)
         textC(caps("×", 8.5, textLo), x: colX[3], topY: my + 10, h: 11, align: 2)
         var ry = my + 23
@@ -5543,27 +5675,29 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             let label = account.caption.isEmpty ? (account.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : account.caption
             let price = attr(" · " + (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + tr("/мес", "/mo"), 10.5, .regular, textMid)
             let pencilWidth: CGFloat = m.subEstimated ? 12 : 0
-            let labelWidth = max(20, 114 - width(price) - pencilWidth)
-            let title = fitAttr(label, maxW: labelWidth) { attr($0, 10.5, .semibold, textHi) }
+            let labelWidth = max(20, ADV_IW - width(price) - pencilWidth)
+            let natural = width(attr(label, 10.5, .semibold, textHi))
+            let labelSize = min(10.5, 10.5 * labelWidth / max(1, natural))
+            let title = attr(label, labelSize, .semibold, textHi)
             textC(title, x: colX[0], topY: ry, h: 13)
             textC(price, x: colX[0] + width(title), topY: ry, h: 13)
-            hits.append(Hit(id: "moneyaccount:" + account.historyKey,
-                rect: rectTL(colX[0], ry, 114, 13), tooltip: label + price.string))
+            hits.append(Hit(id: "moneyaccount:" + remoteAccountID(account),
+                rect: rectTL(colX[0], ry, ADV_IW, 13), tooltip: label + price.string))
             if m.subEstimated {
                 let pencilX = colX[0] + width(title) + width(price) + 2
                 drawSF(ctx, "pencil", in: rectTL(pencilX, ry + 1.5, 10, 10), ADV_LINK)
-                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, 114, 15)))
+                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, ADV_IW, 15)))
             }
-            textC(attr("≈ " + fmtUSD(m.subPerDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[1], topY: ry, h: 13)
+            textC(attr("≈ " + fmtUSD(m.subPerDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[1], topY: ry + 17, h: 13)
             if m.usdApi > 0 {
-                textC(attr("≈ " + fmtUSD(m.perCalendarDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[2], topY: ry, h: 13)
-                textC(attr(fmtNum(m.ratio), 10.5, .regular, textHi), x: colX[3], topY: ry, h: 13, align: 2)
+                textC(attr("≈ " + fmtUSD(m.perCalendarDay) + tr("/день", "/day"), 10.5, .regular, textHi), x: colX[2], topY: ry + 17, h: 13)
+                textC(attr(fmtNum(m.ratio), 10.5, .regular, textHi), x: colX[3], topY: ry + 17, h: 13, align: 2)
                 notes.append((account.caption.isEmpty ? (account.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : account.caption) + " ≈ " + fmtUSD(m.perActiveDay))
             } else {
-                textC(attr(tr("пока нет", "none yet"), 10.5, .regular, textLo), x: colX[2], topY: ry, h: 13)
-                textC(attr("—", 10.5, .regular, textLo), x: colX[3], topY: ry, h: 13, align: 2)
+                textC(attr(tr("пока нет", "none yet"), 10.5, .regular, textLo), x: colX[2], topY: ry + 17, h: 13)
+                textC(attr("—", 10.5, .regular, textLo), x: colX[3], topY: ry + 17, h: 13, align: 2)
             }
-            ry += 19
+            ry += 38
         }
         if !notes.isEmpty {
             textC(fitAttr(tr("в активный день по API: ", "on an active day at API price: ") + notes.joined(separator: " · "), maxW: ADV_IW) { attr($0, 9.5, .regular, textLo) }, x: colX[0], topY: ry + 3, h: 11)
@@ -5800,7 +5934,9 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
 
     if settings.model.showsV10 {
         let top = SET_PRODUCTS_TOP + SET_PRODUCTS_H
-        let label = fitAttr(settings.model.v10Text, maxW: cardW - 8) { attr($0, 10.5, .medium, ADV_LINK) }
+        let linkWidth = ceil(lineWidth(CTLineCreateWithAttributedString(attr(settings.model.v10Text, 10.5, .medium, ADV_LINK))))
+        let linkSize = min(10.5, 10.5 * (cardW - 8) / max(1, linkWidth))
+        let label = attr(settings.model.v10Text, linkSize, .medium, ADV_LINK)
         text(label, x: cardX + 4, topY: top + 4)
         hits.append(Hit(id: "accounts:github", rect: rectTL(cardX, top, cardW, 20), tooltip: settings.model.v10Text))
     }
@@ -5819,11 +5955,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             if row.editable {
                 let edit = rectTL(cardX + cardW - 76, top + 1, 24, 24)
                 drawSF(ctx, "pencil", in: edit.insetBy(dx: 6, dy: 6), textMid)
-                hits.append(Hit(id: "edit:" + row.historyKey, rect: edit, tooltip: row.title))
+                hits.append(Hit(id: "edit:" + remoteAccountID(view), rect: edit, tooltip: row.title))
             }
             let toggle = rectTL(cardX + cardW - 48, top + 10, 34, 16)
             drawToggle(toggle, row.visible)
-            hits.append(Hit(id: "accountvisible:" + row.historyKey, rect: toggle.insetBy(dx: -4, dy: -8), tooltip: row.title))
+            hits.append(Hit(id: "accountvisible:" + remoteAccountID(view), rect: toggle.insetBy(dx: -4, dy: -8), tooltip: row.title))
             if i + 1 < settings.model.accounts.count { hdiv(cardX + 42, cardX + cardW, top + SET_ROW_H) }
         }
     }
@@ -5860,7 +5996,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         let top = SET_TRAY_TOP + 44 + CGFloat(i) * SET_ROW_H
         hdiv(cardX + 14, cardX + cardW, top)
         text(attr(product == "claude" ? "Claude" : "Codex", 12.5, .regular, textHi), x: cardX + 14, topY: top + 10)
-        let visible = settings.views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) && !$0.historyKey.hasPrefix("u:") }
+        let visible = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }
         let chosen = menuAccount(product, views: visible, selected: menuAccountSelection())
         let title = chosen?.caption ?? tr("По умолчанию", "Default")
         let capsule = rectTL(cardX + cardW - 214, top + 6, 200, 24)
@@ -5878,9 +6014,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         func subRow(_ i: Int, _ view: AccountView, _ choices: [Double]) {
             let rowTop = SET_SUB_TOP + CGFloat(i) * SET_ROW_H
             let product = view.product, label = view.caption.isEmpty ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : view.caption
-            let stored = (d.object(forKey: "accountSubscriptionUSD") as? [String: Double])?[view.historyKey]
-            let inferred = subscriptionUSD(product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal)
-            let cur = stored.map { (usd: $0, estimated: false) } ?? inferred
+            let cur = renderedSubscriptionPrice(view)
             text(fitAttr(label, maxW: 113) { attr($0, 11, .regular, textHi) }, x: cardX + 14, topY: rowTop + (SET_ROW_H - 13) / 2 - 1)
             let f = ctFont(11, .medium)
             let widths = choices.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr("$\(Int($0))", f, cg(.white))))) + 14 }
@@ -5892,11 +6026,11 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 roundFill(r, 6, on ? (cur.estimated ? gray(1, 0.12) : gray(1, 0.18)) : gray(1, 0.06))
                 if on, cur.estimated { roundStroke(r, 6, gray(1, 0.25), 1) }
                 text(attr("$\(Int(c))", 11, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: top + 5, align: 1)
-                hits.append(Hit(id: "accountsub:\(view.historyKey):\(Int(c))", rect: r, tooltip: label + (cur.estimated ? tr(" · оценка", " · estimate") : "")))
+                hits.append(Hit(id: "accountsub:\(remoteAccountID(view)):\(Int(c))", rect: r, tooltip: label + (cur.estimated ? tr(" · оценка", " · estimate") : "")))
                 x += widths[j] + 4
             }
         }
-        let priced = settings.views.filter { !hiddenAccounts().contains($0.label ?? $0.historyKey) }
+        let priced = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }
         for (i, view) in priced.enumerated() {
             subRow(i, view, view.product == "claude" ? [20, 100, 200] : [8, 20, 100, 200])
             if i + 1 < priced.count { hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + CGFloat(i + 1) * SET_ROW_H) }
@@ -5905,7 +6039,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
 
         // section 1c — cross-machine sync through GitHub
         if syncBlockShown() {
-        let sy = syncUIState(), syTop = SET_SYNC_TOP, syH = setSyncCardH()
+        let sy = syncUIState(), syTop = SET_SYNC_TOP, syH = remoteSyncCardHeight()
         text(attr(tr("ДРУГИЕ КОМПЬЮТЕРЫ · ЧЕРЕЗ GITHUB", "OTHER COMPUTERS · VIA GITHUB"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SYNC_CAP)
         roundFill(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.04))
         roundStroke(rectTL(cardX, syTop, cardW, syH), 12, gray(1, 0.06), 1)
@@ -5935,33 +6069,28 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         case .off, .revoked:
             let revoked = sy.phase == .revoked
             drawSF(ctx, revoked ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath", in: rectTL(cardX + 15, syTop + (SET_ROW_H - 16) / 2, 16, 16), revoked ? ADV_WARN : textMid)
-            let loginW = button(revoked ? tr("Войти заново", "Sign in again") : tr("Войти через GitHub", "Sign in with GitHub"), right: cardX + cardW - 12, rowTop: syTop, id: "sync:login", primary: true)
-            var titleRight = cardX + cardW - 12 - loginW - 10
+            let title = revoked ? tr("Нужно проверить вход в GitHub", "GitHub sign-in needs attention") : tr("Сводить расход", "Combine usage")
+            text(attr(title, 13, .regular, textHi), x: cardX + 42, topY: rowMid)
+            let controlsTop = syTop + SET_ROW_H
+            let loginW = button(revoked ? tr("Войти заново", "Sign in again") : tr("Войти через GitHub", "Sign in with GitHub"),
+                right: cardX + cardW - 12, rowTop: controlsTop, id: "sync:login", primary: true)
             if sy.canSignOut {
-                let label = tr("Выйти", "Sign out")
-                link(label, right: titleRight, topY: rowMid + 1, id: "sync:logout")
-                titleRight -= ceil(lineWidth(CTLineCreateWithAttributedString(attr(label, 11, .medium, ADV_LINK)))) + 10
+                link(tr("Выйти", "Sign out"), right: cardX + cardW - 12 - loginW - 14,
+                     topY: controlsTop + (SET_ROW_H - 13) / 2, id: "sync:logout")
             }
-            text(fitAttr(revoked ? tr("Нужно проверить вход в GitHub", "GitHub sign-in needs attention") : tr("Сводить расход", "Combine usage"),
-                         maxW: titleRight - cardX - 42) { attr($0, 13, .regular, textHi) }, x: cardX + 42, topY: rowMid)
-            if let err = sy.error, !revoked {
-                note(err, syTop + SET_ROW_H - 2)
-            } else {
-            note(revoked
-                 ? tr("Расход других компьютеров не обновляется. Последние полученные данные остаются в истории.",
-                      "Other computers' usage isn't updating. The last data received stays in the history.")
-                 : tr("Столбики и деньги учтут компьютеры, вошедшие в тот же GitHub. Функция позволяет организовывать сводную статистику с нескольких компьютеров, на которых применяется один и тот же аккаунт.",
-                      "Bars and money will include every computer signed in to the same GitHub. It combines statistics from several computers that use the same account."),
-                 syTop + SET_ROW_H - 4)
-            }
+            let noteTop = controlsTop + SET_ROW_H
+            let noteH = measuredTextHeight(disconnectedSyncNote(sy), width: cardW - 28, size: 10.5) + 8
+            note(disconnectedSyncNote(sy), noteTop, height: noteH)
             if revoked, let err = sy.lastError {
                 let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
                 text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
-                     x: cardX + 14, topY: syTop + SET_ROW_H + SET_SYNC_NOTE_H)
+                     x: cardX + 14, topY: noteTop + noteH)
             }
             if sy.canSignOut {
-                note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
+                note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H,
+                     height: SET_SYNC_SIGNOUT_HINT_H)
             }
+
         case .awaitingCode:
             text(attr(tr("Введите код на github.com/login/device", "Enter the code at github.com/login/device"), 12, .regular, textHi), x: cardX + 14, topY: rowMid + 1)
             let codeTop = syTop + SET_ROW_H - 2
@@ -6682,7 +6811,10 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     }
 
     private func accountForSettings(_ key: String) -> AccountView? {
-        displayAccountViews(claude, codex, includeHidden: true).first { $0.historyKey == key }
+        let views = displayAccountViews(claude, codex, includeHidden: true)
+        if let view = views.first(where: { remoteAccountID($0) == key }) { return view }
+        let legacy = views.filter { $0.historyKey == key }
+        return legacy.count == 1 ? legacy[0] : nil
     }
     private func updateCaptionEditorFrame() {
         guard let key = editingCaptionKey, let editor = captionEditor,
@@ -6696,7 +6828,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     }
     private func beginCaptionEdit(_ key: String) {
         finishCaptionEdit(.escape)
-        guard let view = accountForSettings(key), view.label != nil, !key.hasPrefix("u:") else { return }
+        guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
         editingCaptionKey = key
         editingCaptionOriginal = localAccountCaptions()[view.label ?? key]
         captionDraft = remoteCaptionInput(view.caption)
@@ -6803,9 +6935,17 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                     finishCaptionEdit(.escape)
                     let key = String(h.id.dropFirst(15))
                     guard let view = accountForSettings(key) else { return }
-                    let identity = view.label ?? key
+                    let identity = view.label ?? remoteAccountID(view)
                     var hidden = hiddenAccounts()
-                    if hidden.contains(identity) { hidden.remove(identity) } else { hidden.insert(identity) }
+                    let wasHidden = remoteAccountIsHidden(view, hidden: hidden)
+                    if view.label == nil, hidden.remove(view.historyKey) != nil {
+                        // Split an old shared local-cache key before toggling one product.
+                        for account in displayAccountViews(claude, codex, includeHidden: true)
+                            where account.label == nil && account.historyKey == view.historyKey {
+                            hidden.insert(remoteAccountID(account))
+                        }
+                    }
+                    if wasHidden { hidden.remove(identity) } else { hidden.insert(identity) }
                     UserDefaults.standard.set(hidden.sorted(), forKey: "hiddenAccounts")
                     onTrayChanged?(); resizeToContent()
                 } else if h.id.hasPrefix("menuaccount:") {
@@ -7311,6 +7451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             GitHubSync.shared.recheckKeychainRetry()
             // Main and Settings heights both depend on sync state (orange line, status rows).
             guard let self = self, let v = self.panelCtrl?.view else { return }
+            if let last = self.last { self.applyTrayImage(last.0, last.1) }
             if v.mode == .settings || v.mode == .main { v.resizeToContent() } else { v.needsDisplay = true }
         }
         GitHubSync.shared.load()
@@ -7325,8 +7466,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startLogsTimer()
         startActivityTimer()
         let displayTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self = self, self.panelCtrl.isVisible else { return }
-            self.publishAutoIntervals()
+            guard let self = self else { return }
+            if let last = self.last { self.applyTrayImage(last.0, last.1) }
+            if self.panelCtrl.isVisible { self.publishAutoIntervals() }
         }
         RunLoop.main.add(displayTimer, forMode: .common); refreshDisplayTimer = displayTimer
         doRefresh(live: true, scheduled: true)
