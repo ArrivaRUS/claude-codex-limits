@@ -43,6 +43,10 @@ struct LimitData {
     var credentialIssue: QuotaCredentialIssue?
     var permissionRequestInFlight = false
     var auth: AuthState = .ok  // Confirmed provider auth/storage state, never inferred from snapshot age.
+    var localAccountId: String? = nil // local provenance only; never part of a wire snapshot
+    var expiredReason: String? = nil
+    var failureKind: String? = nil
+    var httpStatus: Int? = nil
     var source: RemoteSource? = nil
 }
 
@@ -52,6 +56,8 @@ func quotaFallback(_ result: LimitData, previous: LimitData) -> LimitData {
     var merged = previous
     merged.present = true; merged.apiFresh = false; merged.fromCache = true
     merged.error = result.error; merged.auth = result.auth; merged.serverRetryAt = result.serverRetryAt
+    merged.localAccountId = result.localAccountId ?? previous.localAccountId
+    merged.expiredReason = result.expiredReason; merged.failureKind = result.failureKind; merged.httpStatus = result.httpStatus
     merged.credentialIssue = result.credentialIssue
     merged.permissionRequestInFlight = result.permissionRequestInFlight
     merged.pollFailed = true
@@ -86,7 +92,7 @@ struct QuotaRefreshState {
         // Keep the old flight reserved until its worker finishes, even across re-enable.
     }
     func nextAttempt(schedule: Double) -> Double {
-        max(localUntil, serverUntil ?? schedule)
+        max(localUntil, max(schedule, serverUntil ?? 0))
     }
     mutating func admit(_ intent: QuotaRefreshIntent, now: Double, scheduledAt: Double) -> QuotaRefreshAdmission {
         guard enabled else { return .disabled }
@@ -98,6 +104,13 @@ struct QuotaRefreshState {
         flight = QuotaRefreshTicket(serial: serial, generation: generation)
         localUntil = now + 30
         return .start(serial)
+    }
+    /// Reserve a serialized read/coordination flight. Provider admission remains
+    /// the C4 controller's own 900s/server/remote decision after the fresh GET.
+    mutating func admitCoordination(now: Double) -> QuotaRefreshAdmission {
+        guard enabled else { return .disabled }; guard flight == nil else { return .inFlight }
+        serial &+= 1; flight = QuotaRefreshTicket(serial: serial, generation: generation)
+        localUntil = now + 30; return .start(serial)
     }
     // Returns false for obsolete selections; still retires precisely that worker's flight.
     mutating func complete(_ ticket: QuotaRefreshTicket, retryAfter: Double?) -> Bool {

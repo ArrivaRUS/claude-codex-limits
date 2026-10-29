@@ -850,9 +850,11 @@ final class RemoteManualRefreshController {
     }
 }
 
-func remoteManualProviderProducts(views: [AccountView], localIds: [String: String], enabled: Set<String>) -> Set<String> {
+func remoteManualProviderProducts(views: [AccountView], localIds: [String: String], enabled: Set<String>,
+                                  decisions: [String: [String: Any]] = [:]) -> Set<String> {
     Set(enabled.filter { product in
-        localIds[product] != nil || !views.contains { $0.product == product && !$0.isLocal }
+        guard decisions[product]?["action"] as? String != "skip" else { return false }
+        return localIds[product] != nil || !views.contains { $0.product == product && !$0.isLocal }
     })
 }
 

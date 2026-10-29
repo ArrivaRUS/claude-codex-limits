@@ -266,6 +266,7 @@ private final class ClaudeQuotaPendingCredential {
 }
 private let claudeQuotaPendingCredential = ClaudeQuotaPendingCredential()
 private func persistClaudeQuotaUpdate(_ update: ClaudeQuotaUpdate, io: ClaudeQuotaIO) -> SyncKeychainStatus {
+    guard ["guarded", "legacy"].contains(io.credentialWrite()) else { return .failure(65) }
     guard let envelope = try? JSONEncoder().encode(update), let input = String(data: envelope, encoding: .utf8) else { return .failure(65) }
     return io.keychain("update", input).status
 }
@@ -316,13 +317,15 @@ private func claudeQuotaPermissionRead(_ permit: QuotaKeychainReadPermit) -> (st
     return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
 }
 
-func quotaFailureData(_ response: SyncHTTPResult, tokenEndpoint: Bool = false) -> LimitData {
+func quotaFailureData(_ response: SyncHTTPResult, tokenEndpoint: Bool = false, now: Double = Date().timeIntervalSince1970) -> LimitData {
     let error = response.data.flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }?["error"] as? String
     let failure = QuotaHTTPFailure(status: response.status, headers: response.headers,
-                                  now: Date().timeIntervalSince1970, tokenEndpoint: tokenEndpoint, oauthError: error)
+                                  now: now, tokenEndpoint: tokenEndpoint, oauthError: error)
     var result = LimitData()
     result.error = response.status == 0 ? "network unavailable" : "HTTP \(response.status)"
     result.serverRetryAt = failure.retryAt
+    result.httpStatus = response.status
+    result.failureKind = response.status == 0 ? "network" : "http"
     result.auth = failure.authenticationRequired ? .expired : .ok
     return result
 }
@@ -332,6 +335,8 @@ struct ClaudeQuotaIO {
     var permissionRead: (_ permit: QuotaKeychainReadPermit) -> (status: SyncKeychainStatus, out: String)
     var http: (_ url: String, _ method: String, _ headers: [String: String], _ body: Data?, _ timeout: Double,
                _ noRedirects: Bool) -> SyncHTTPResult
+    var now: () -> Date = { Date() }
+    var credentialWrite: () -> String = { credentialWritePolicy() }
 
     static let live: ClaudeQuotaIO = ClaudeQuotaIO(keychain: { operation, input in
         if CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest") {
@@ -354,10 +359,11 @@ struct ClaudeQuotaIO {
 func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO = .live) -> LimitData {
     guard productEnabled("claude") else { return LimitData(present: false) }
     var d = LimitData()
-    let pending = claudeQuotaPendingCredential.snapshot()
+    let canWrite = ["guarded", "legacy"].contains(io.credentialWrite())
+    let pending = canWrite ? claudeQuotaPendingCredential.snapshot() : nil
     let resolution = quotaReconcilePendingCredential(pending,
         read: { readClaudeQuotaCredential(readPermit, io: io) },
-        quietUpdate: { persistClaudeQuotaUpdate($0, io: io) == .success },
+        quietUpdate: { canWrite && persistClaudeQuotaUpdate($0, io: io) == .success },
         cancelled: { readPermit?.isCancelled == true })
     if resolution.retirePending, let pending = pending { claudeQuotaPendingCredential.clear(pending) }
     let data: Data
@@ -378,17 +384,21 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO =
     if let tier = oauth["rateLimitTier"] as? String { UserDefaults.standard.set(tier, forKey: "claudeTier") }
     var at = oauth["accessToken"] as? String ?? ""
     let exp = (oauth["expiresAt"] as? Double) ?? 0
-    let nowMs = Date().timeIntervalSince1970 * 1000
+    let nowMs = io.now().timeIntervalSince1970 * 1000
 
     // A token that expires in under two minutes is treated as spent — a reading started now
     // could outlive it. `usable` is the honest question: is there still something to ask with
     // if the refresh doesn't work out?
     if at.isEmpty || exp - nowMs < 120_000 {
         let usable = !at.isEmpty && exp > nowMs
+        if !canWrite {
+            if usable { /* Use the still-valid CLI access without rotating it. */ }
+            else { d.auth = .expired; d.error = "cli_refresh_pending"; d.expiredReason = "cli_refresh_pending"; d.failureKind = "auth"; return d }
+        }
         let rt = (oauth["refreshToken"] as? String) ?? ""
         if rt.isEmpty {
             if !usable { d.auth = .expired; d.error = "no refresh token"; return d }
-        } else {
+        } else if canWrite {
             let fp = tokenFingerprint(rt)
             // A refresh token the server has already refused never recovers. Asking again every
             // five minutes is how a dead login earned a 429 after one night, so once refused we
@@ -410,7 +420,7 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO =
                     oauth["accessToken"] = newAt
                     if let newRt = tok["refresh_token"] as? String { oauth["refreshToken"] = newRt }
                     let ein = (tok["expires_in"] as? Double) ?? 28800
-                    oauth["expiresAt"] = (Date().timeIntervalSince1970 + ein) * 1000
+                    oauth["expiresAt"] = (io.now().timeIntervalSince1970 + ein) * 1000
                     creds["claudeAiOauth"] = oauth
                     guard let outData = try? JSONSerialization.data(withJSONObject: creds) else {
                         d.auth = .keychainError; d.error = "credential encoding failed"; d.credentialIssue = .writeUnavailable; return d
@@ -431,7 +441,7 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO =
                         UserDefaults.standard.set(fp, forKey: DEAD_REFRESH_KEY)
                     }
                     // A network/rate-limit failure is not proof that the login expired.
-                    return quotaFailureData(resp, tokenEndpoint: true)
+                    return quotaFailureData(resp, tokenEndpoint: true, now: io.now().timeIntervalSince1970)
                 }
             }
             // Nothing left to ask with. Say the login expired instead of quietly serving
@@ -450,7 +460,7 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO =
     guard resp.status == 200, let ud = resp.data,
           let j = (try? JSONSerialization.jsonObject(with: ud)) as? [String: Any]
     else {
-        return quotaFailureData(resp)
+        return quotaFailureData(resp, now: io.now().timeIntervalSince1970)
     }
 
     if let fh = j["five_hour"] as? [String: Any] {
@@ -498,7 +508,7 @@ func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO =
         }
     }
     guard d.session != nil || d.weekly != nil || d.scoped != nil else { d.error = "invalid usage response"; return d }
-    d.asOf = Date(); d.apiFresh = true
+    d.asOf = io.now(); d.apiFresh = true
     return d
 }
 
@@ -581,59 +591,93 @@ func jwtExp(_ jwt: String) -> Double? {
     return j["exp"] as? Double
 }
 
-/// Reads a valid Codex access token from ~/.codex/auth.json, refreshing it via
-/// the official OpenAI token endpoint (and persisting back) if it has expired.
-func codexAccessToken() -> (credential: (token: String, account: String)?, failure: LimitData?) {
-    guard let data = FileManager.default.contents(atPath: CODEX_AUTH_PATH),
-          var root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+/// CLI credential writes are opt-in. Invalid/unset values are read-only.
+func credentialWritePolicy(_ defaults: UserDefaults = .standard) -> String {
+    let value = defaults.string(forKey: "credentialWrite") ?? "never"
+    return ["guarded", "legacy"].contains(value) ? value : "never"
+}
+struct CodexCredentialIO {
+    var authPath: String
+    var now: () -> Date
+    var policy: () -> String
+    var http: (String, String, [String: String], Data?, Double, Bool) -> SyncHTTPResult
+    static var live: CodexCredentialIO {
+        precondition(!CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }), "selftest requires injected Codex IO")
+        return CodexCredentialIO(authPath: CODEX_AUTH_PATH, now: { Date() }, policy: { credentialWritePolicy() },
+            http: { requestHTTP($0, method: $1, headers: $2, body: $3, timeout: $4, noRedirects: $5) })
+    }
+}
+private func persistCodexTokens(_ replacement: [String: Any], expectedAccess: String, expectedRefresh: String,
+                                io: CodexCredentialIO) -> String? {
+    guard ["guarded", "legacy"].contains(io.policy()) else { return "credential policy" }
+    guard let bytes = FileManager.default.contents(atPath: io.authPath),
+          var root = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
           var tokens = root["tokens"] as? [String: Any],
-          let acc = tokens["account_id"] as? String,
+          tokens["access_token"] as? String == expectedAccess,
+          tokens["refresh_token"] as? String == expectedRefresh else { return "superseded" }
+    for key in ["access_token", "refresh_token", "id_token"] {
+        if let value = replacement[key] as? String { tokens[key] = value }
+    }
+    root["tokens"] = tokens; root["last_refresh"] = ISO8601DateFormatter().string(from: io.now())
+    guard let output = try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys]) else { return "credential encoding" }
+    var rejected: String?
+    let saved = c4AtomicWrite(output, path: io.authPath) {
+        guard ["guarded", "legacy"].contains(io.policy()) else { rejected = "credential policy"; return false }
+        guard let latest = FileManager.default.contents(atPath: io.authPath),
+              let object = (try? JSONSerialization.jsonObject(with: latest)) as? [String: Any],
+              let pair = object["tokens"] as? [String: Any],
+              pair["access_token"] as? String == expectedAccess, pair["refresh_token"] as? String == expectedRefresh,
+              latest == bytes else { rejected = "superseded"; return false }
+        return true
+    }
+    return saved ? nil : (rejected ?? "credential write failed")
+}
+func codexAccessToken(io supplied: CodexCredentialIO? = nil) -> (credential: (token: String, account: String)?, failure: LimitData?) {
+    let io = supplied ?? .live
+    guard let data = FileManager.default.contents(atPath: io.authPath), data.count <= 8 * 1024 * 1024,
+          let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let tokens = root["tokens"] as? [String: Any], let acc = tokens["account_id"] as? String,
           let at = tokens["access_token"] as? String else { return (nil, LimitData(error: "no CLI sign-in", auth: .loggedOut)) }
-
-    if let exp = jwtExp(at), exp > Date().timeIntervalSince1970 + 60 {
-        return ((at, acc), nil)                  // still valid
+    if let exp = jwtExp(at), exp > io.now().timeIntervalSince1970 { return ((at, acc), nil) }
+    guard ["guarded", "legacy"].contains(io.policy()) else {
+        var result = LimitData(error: "cli_refresh_pending", auth: .expired)
+        result.expiredReason = "cli_refresh_pending"; result.failureKind = "auth"; return (nil, result)
     }
-    guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else { return (nil, LimitData(error: "no refresh token", auth: .expired)) }
-    let body = try? JSONSerialization.data(withJSONObject: [
-        "client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt])
-    let resp = requestHTTP("https://auth.openai.com/oauth/token", method: "POST",
-                    headers: ["Content-Type": "application/json", "Accept": "application/json",
-                              "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal"],
-                    body: body, timeout: 15, noRedirects: true)
-    guard resp.status == 200, let rd = resp.data,
-          let tok = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-          let newAt = tok["access_token"] as? String, !newAt.isEmpty else { return (nil, quotaFailureData(resp, tokenEndpoint: true)) }
-    tokens["access_token"] = newAt
-    if let v = tok["id_token"] as? String { tokens["id_token"] = v }
-    if let v = tok["refresh_token"] as? String { tokens["refresh_token"] = v }
-    root["tokens"] = tokens
-    root["last_refresh"] = ISO8601DateFormatter().string(from: Date())
-    if let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted]) {
-        try? out.write(to: URL(fileURLWithPath: CODEX_AUTH_PATH))
+    guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else {
+        var result = LimitData(error: "no refresh token", auth: .expired); result.expiredReason = "signin_required"; return (nil, result)
     }
-    return ((newAt, acc), nil)
+    let body = try? JSONSerialization.data(withJSONObject: ["client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt])
+    let response = io.http("https://auth.openai.com/oauth/token", "POST",
+        ["Content-Type": "application/json", "Accept": "application/json", "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal"], body, 15, true)
+    guard response.status == 200, let bytes = response.data,
+          let replacement = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+          let newAccess = replacement["access_token"] as? String, !newAccess.isEmpty else {
+        return (nil, quotaFailureData(response, tokenEndpoint: true, now: io.now().timeIntervalSince1970))
+    }
+    if let failure = persistCodexTokens(replacement, expectedAccess: at, expectedRefresh: rt, io: io) {
+        var result = LimitData(error: failure); result.failureKind = "credentials"; return (nil, result)
+    }
+    return ((newAccess, acc), nil)
 }
 
-/// A failed HTTP response retains status/auth/retry metadata through every fallback.
-func codexUsageLive() -> LimitData {
-    let token = codexAccessToken()
+func codexUsageLive(io supplied: CodexCredentialIO? = nil) -> LimitData {
+    let io = supplied ?? .live
+    let token = codexAccessToken(io: io)
     guard let (at, acc) = token.credential else { return token.failure ?? LimitData(error: "credential unavailable") }
-    let resp = requestHTTP("https://chatgpt.com/backend-api/wham/usage", method: "GET",
-                    headers: ["Authorization": "Bearer \(at)", "chatgpt-account-id": acc,
-                              "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal",
-                              "originator": "codex_cli_rs", "Accept": "application/json"], body: nil, timeout: 15, noRedirects: true)
-    guard resp.status == 200, let rd = resp.data,
-          let obj = (try? JSONSerialization.jsonObject(with: rd)) as? [String: Any],
-          let rl = obj["rate_limit"] as? [String: Any] else { return quotaFailureData(resp) }
-    var d = LimitData(); d.present = true
-    if let p = rl["primary_window"] as? [String: Any] { codexApplyWindow(p, &d, positionalWeekly: false) }
-    if let s = rl["secondary_window"] as? [String: Any] { codexApplyWindow(s, &d, positionalWeekly: true) }
-    d.plan = obj["plan_type"] as? String
-    if let pl = d.plan { UserDefaults.standard.set(pl, forKey: "codexPlan") }
-    if let rc = (obj["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int { d.resetCredits = rc }
-    guard d.session != nil || d.weekly != nil else { d.error = "invalid usage response"; return d }
-    d.asOf = Date(); d.apiFresh = true
-    return d
+    let response = io.http("https://chatgpt.com/backend-api/wham/usage", "GET",
+        ["Authorization": "Bearer \(at)", "chatgpt-account-id": acc,
+         "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal", "originator": "codex_cli_rs", "Accept": "application/json"], nil, 15, true)
+    guard response.status == 200, let bytes = response.data,
+          let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
+          let limits = object["rate_limit"] as? [String: Any] else { return quotaFailureData(response, now: io.now().timeIntervalSince1970) }
+    var result = LimitData(); result.httpStatus = response.status
+    if let value = limits["primary_window"] as? [String: Any] { codexApplyWindow(value, &result, positionalWeekly: false) }
+    if let value = limits["secondary_window"] as? [String: Any] { codexApplyWindow(value, &result, positionalWeekly: true) }
+    result.plan = object["plan_type"] as? String
+    if supplied == nil, let plan = result.plan { UserDefaults.standard.set(plan, forKey: "codexPlan") }
+    result.resetCredits = (object["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int
+    guard result.session != nil || result.weekly != nil else { result.error = "invalid usage response"; result.failureKind = "invalid_response"; return result }
+    result.asOf = io.now(); result.apiFresh = true; result.localAccountId = acc.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(); return result
 }
 
 func loadCodexCache() -> LimitData? {
@@ -647,12 +691,17 @@ func loadCodexCache() -> LimitData? {
 /// otherwise uses the freshest of the local rollout files and the last cached reading.
 func fetchCodex(live: Bool) -> LimitData {
     guard productEnabled("codex") else { return LimitData(present: false) }
-    // A valid CLI login can exist without rollout logs. Always attempt live when asked.
-    let liveResult = live ? codexUsageLive() : nil
-    if let result = liveResult, result.apiFresh { return result }
+    if live {
+        let identity = readLocalAccountIds(products: ["codex"])["codex"]
+        let result = codexUsageLive()
+        if result.apiFresh { return result }
+        guard let identity = identity,
+              readLocalAccountIds(products: ["codex"])["codex"] == identity else { return result }
+        var fallback = quotaFallback(result, previous: c4StoredReading(c4ProductionStore.state(identity)))
+        fallback.localAccountId = identity; return fallback
+    }
     var best = codexFromRollout()
     if let cached = loadCodexCache() { best = quotaSelectSnapshot(best, previous: cached) }
-    if let failure = liveResult { return quotaFallback(failure, previous: best) }
     if let at = best.asOf, Date().timeIntervalSince(at) > 2 * 3600 { best.stale = true }
     return best
 }
@@ -858,6 +907,7 @@ struct DayModelUsage: Codable {
 struct FileMark: Codable { var size: Int; var lastId: String?; var model: String? }
 
 struct UsageIndex: Codable {
+    var accountByDay: [String: [String: String]]? = nil
     var activity: [String: [Double]]? = nil  // optional for compatibility with existing indexes
     var files: [String: FileMark] = [:]
     /// product → day → model → usage
@@ -923,6 +973,8 @@ final class UsageLogs {
     static func scan(_ ix: inout UsageIndex, home: String = HOME,
                      isEnabled: (String) -> Bool = { productEnabled($0) }) -> Bool {
         var changed = false
+        let originalCodexDays = Set(ix.days["codex"]?.keys.map { $0 } ?? [])
+        let identities = isEnabled("codex") ? readLocalAccountIds(products: ["codex"], paths: ["codex": home + "/.codex/auth.json"]) : [:]
         var seen: [String: Set<UInt64>] = ix.seen.mapValues { Set($0) }
         defer { ix.seen = seen.mapValues { Array($0) } }
         let fm = FileManager.default
@@ -952,6 +1004,11 @@ final class UsageLogs {
                 let path = xRoot + "/" + rel
                 if recent(path), scanFile(path, product: "codex", &ix, &seen) { changed = true }
             }
+        }
+        for day in ix.days["codex"]?.keys.map({ $0 }) ?? [] where ix.accountByDay?["codex"]?[day] == nil {
+            var attribution = ix.accountByDay ?? [:]
+            attribution["codex", default: [:]][day] = originalCodexDays.contains(day) ? "" : identities["codex"] ?? ""
+            ix.accountByDay = attribution; changed = true
         }
         return changed
     }
@@ -2161,17 +2218,26 @@ final class GitHubSync {
     private let suppliedMachineId: String?
     private let revokeRecheckDelay: TimeInterval
     private let clock: () -> Date
+    private let publisherSnapshot: (() -> C4PublisherSnapshot)?
+    private let pollLogPath: String?
+    private var validatingSession: (gistId: String, token: String, at: Date, cache: SyncRemoteCache, access: GitHubAuthAccess?, pass: UUID)?
+    private(set) var writeFailure: String?
+    private var sampledClock = false
+    private var observedPass: UUID?
     private var machineIdNeedsSave = false
 
     init(transport: @escaping SyncHTTP = syncHTTP,
          keychain: SyncKeychain = SecuritySyncKeychain(), defaults: UserDefaults = .standard,
          remotePath: String = SYNC_REMOTE_PATH, machineId: String? = nil, revokeRecheckDelay: TimeInterval = 4,
-         authOwner: GitHubAuthOwner? = nil, clock: @escaping () -> Date = { Date() }) {
+         authOwner: GitHubAuthOwner? = nil, clock: @escaping () -> Date = { Date() },
+         publisherSnapshot: (() -> C4PublisherSnapshot)? = nil, pollLogPath: String? = nil) {
         self.authOwner = authOwner
         self.transport = transport; self.keychain = keychain; self.defaults = defaults
         self.remotePath = remotePath; self.suppliedMachineId = machineId
         self.revokeRecheckDelay = revokeRecheckDelay
-        self.clock = clock
+        self.clock = clock; self.publisherSnapshot = publisherSnapshot; self.pollLogPath = pollLogPath
+        _ui.clockSkew = defaults.object(forKey: "clockSkew") as? Double
+        _ui.clockSkewAt = defaults.object(forKey: "clockSkewAt") as? Date
         _ui.login = defaults.string(forKey: "syncLogin")
         _ui.phase = defaults.bool(forKey: "syncRevoked") ? .revoked : (_ui.login == nil ? .off : .on)
         _ui.lastSync = defaults.object(forKey: "syncLastOkAt") as? Date
@@ -2210,7 +2276,7 @@ final class GitHubSync {
         return id
     }()
     lazy var machineName: String = machineTag(setting: defaults.string(forKey: "machineName") ?? "macbook",
-                                               hostname: ProcessInfo.processInfo.hostName)
+                                               hostname: "mac")
     var osName: String {
         let v = ProcessInfo.processInfo.operatingSystemVersion
         return "macOS \(v.majorVersion).\(v.minorVersion)"
@@ -2354,6 +2420,7 @@ final class GitHubSync {
         var data: Data? = nil
         if let b = body { data = try? JSONSerialization.data(withJSONObject: b); h["Content-Type"] = "application/json" }
         let r = transport(url, method, h, data, 20)
+        observeGitHubClock(r.headers)
         if r.err == syncBodyTooLarge || (r.data?.count ?? 0) > syncMaxGistBody {
             // PATCH needs only the confirmed status, never its potentially huge echo.
             if method == "PATCH", (200..<300).contains(r.status) { return (r.status, nil, r.headers, nil) }
@@ -2483,7 +2550,7 @@ final class GitHubSync {
         if authEpoch != nil {
             // An explicit account change cannot reuse another account's gist or totals,
             // including while a durably saved candidate waits for identity validation.
-            for key in ["syncLogin", "syncGistId", "syncPushHash", "syncDiscoveredAt", "syncPushedAt", "syncLastOkAt", "syncRevoked"] { defaults.removeObject(forKey: key) }
+            for key in ["syncLogin", "syncGistId", "syncPushHash", "syncMetaHash", "syncHeartbeatAt", "syncDiscoveredAt", "syncPushedAt", "syncLastOkAt", "syncRevoked"] { defaults.removeObject(forKey: key) }
             lock.lock(); _remote = SyncRemoteCache(); lock.unlock()
             try? FileManager.default.removeItem(atPath: remotePath)
             setUI { $0.login = nil; $0.machines = []; $0.lastSync = nil; $0.lastUploadAt = nil }
@@ -2592,7 +2659,7 @@ final class GitHubSync {
                 return
             }
             let d = self.defaults
-            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncPushedAt", "syncRevoked", "syncDiscoveredAt", "syncLastOkAt", "syncLastAttemptAt", "syncLastError", "syncLastErrorAt", "syncRejectedRaw"] { d.removeObject(forKey: k) }
+            for k in ["syncLogin", "syncGistId", "syncPushHash", "syncMetaHash", "syncHeartbeatAt", "syncPushedAt", "syncRevoked", "syncDiscoveredAt", "syncLastOkAt", "syncLastAttemptAt", "syncLastError", "syncLastErrorAt", "syncRejectedRaw"] { d.removeObject(forKey: k) }
             self.lock.lock(); self._remote = SyncRemoteCache(); self.lock.unlock()
             try? FileManager.default.removeItem(atPath: self.remotePath)
             self.setUI { $0 = SyncUIState() }
@@ -2778,57 +2845,143 @@ final class GitHubSync {
 
     // MARK: push + pull
 
-    func syncNow(force: Bool = false) { q.async { self.syncBody(force: force) } }
-
-    /// Manual reader path: shares serialization, auth fencing and backoff with sync.
-    /// It never scans local usage, creates a gist or publishes a machine file.
-    func readNow(completion: @escaping (Bool) -> Void) {
+    func syncNow(force: Bool = false, mode: SyncMode = .full, deferWrite: Bool = false, passId: UUID? = nil,
+                 completion: ((SyncOutcome) -> Void)? = nil) {
         q.async {
-            self.syncBody(force: false, allowRetry: false, readOnly: true) { success in
-                DispatchQueue.main.async { completion(success) }
+            self.syncBody(force: force, allowRetry: mode == .full && !deferWrite, mode: mode, deferWrite: deferWrite, passId: passId) { outcome in
+                if let completion = completion { DispatchQueue.main.async { completion(outcome) } }
             }
         }
     }
-    /// Offline test seam; injected dependencies only, with no concurrent q work.
-    func readSynchronously() -> Bool {
-        var success = false
-        syncBody(force: false, allowRetry: false, readOnly: true) { success = $0 }
-        return success
+    func readNow(completion: @escaping (Bool) -> Void) {
+        syncNow(mode: .readOnly) { outcome in
+            if case .success = outcome { completion(true) } else { completion(false) }
+        }
     }
-
-    /// Synchronous test seam; use injected dependencies and do not overlap with q work.
-    func syncSynchronously(force: Bool = false) { syncBody(force: force, allowRetry: false) }
-
+    func readSynchronously() -> Bool {
+        if case .success = syncSynchronously(mode: .readOnly) { return true }; return false
+    }
+    @discardableResult func syncSynchronously(force: Bool = false, mode: SyncMode = .full,
+                                               deferWrite: Bool = false, passId: UUID? = nil) -> SyncOutcome {
+        var outcome = SyncOutcome.failed
+        syncBody(force: force, allowRetry: false, mode: mode, deferWrite: deferWrite, passId: passId) { outcome = $0 }
+        return outcome
+    }
+    private func publisherInput() -> C4PublisherSnapshot {
+        if let snapshot = publisherSnapshot { return snapshot() }
+        if CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
+            // Existing C1 fixtures may publish UsageLogs' explicit in-memory preview,
+            // but never inspect CLI identities or account-bound files.
+            return C4PublisherSnapshot(days: snapshotJSON().days, accountByDay: [:], localId: nil,
+                codex: LimitData(present: false), poll: AutoPollState())
+        }
+        let ids = readLocalAccountIds(products: ["codex"]), index = UsageLogs.shared.snapshot()
+        let state = ids["codex"].map { c4ProductionStore.state($0) } ?? C4TickState()
+        return C4PublisherSnapshot(days: snapshotJSON().days, accountByDay: index.accountByDay ?? [:],
+            localId: ids["codex"], codex: c4StoredReading(state), poll: state.poll,
+            attemptKind: state.attemptKind, automatic: autoPollEnabled())
+    }
     private func snapshotJSON() -> (days: [String: Any], hash: String) {
-        let ix = UsageLogs.shared.snapshot()
-        let cutoff = dayKey(Date().addingTimeInterval(-SYNC_KEEP_DAYS * 86400))
+        let index = UsageLogs.shared.snapshot()
+        let cutoff = dayKey(clock().addingTimeInterval(-SYNC_KEEP_DAYS * 86400))
         var days: [String: Any] = [:]
-        for (p, byDay) in ix.days where productEnabled(p, defaults: defaults) {
+        for (product, byDay) in index.days where productEnabled(product, defaults: defaults) {
             var pd: [String: Any] = [:]
             for (day, byModel) in byDay where day >= cutoff {
                 var md: [String: Any] = [:]
-                for (m, u) in byModel {
-                    md[m] = ["input": u.input, "output": u.output, "cacheRead": u.cacheRead,
-                             "cacheWrite5m": u.cacheWrite5m, "cacheWrite1h": u.cacheWrite1h, "turns": u.turns]
+                for (model, usage) in byModel {
+                    md[model] = ["input": usage.input, "output": usage.output, "cacheRead": usage.cacheRead,
+                        "cacheWrite5m": usage.cacheWrite5m, "cacheWrite1h": usage.cacheWrite1h, "turns": usage.turns]
                 }
                 pd[day] = md
             }
-            days[p] = pd
+            days[product] = pd
         }
-        let data = (try? JSONSerialization.data(withJSONObject: days, options: [.sortedKeys])) ?? Data()
-        return (days, String(fnv64(String(decoding: data, as: UTF8.self)), radix: 16))
+        let file: [String: Any] = ["days": days]
+        return (days, c4Fingerprints(file).push)
     }
     private func machineFile(_ days: [String: Any]) -> String {
-        let iso = ISO8601DateFormatter()
-        let obj: [String: Any] = [
-            "schema": 1,
-            "machine": ["id": machineId, "name": machineName, "os": osName, "app": "macos " + APP_VERSION],
-            "updated": iso.string(from: Date()),
-            "tz": TimeZone.current.identifier,
-            "days": days,
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])) ?? Data()
-        return String(decoding: data, as: UTF8.self)
+        var input = publisherInput(); input.days = days
+        let object = machineObject(input, gistId: defaults.string(forKey: "syncGistId"))
+        let bytes = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+        return String(decoding: bytes, as: UTF8.self)
+    }
+    private func machineObject(_ input: C4PublisherSnapshot, gistId: String?) -> [String: Any] {
+        c4MachineFile(days: input.days, accountByDay: input.accountByDay, localId: input.localId, codex: input.codex,
+            poll: input.poll, gistId: gistId, machineId: machineId, machineName: machineName, osName: osName,
+            now: clock(), attemptKind: input.attemptKind, automatic: input.automatic)
+    }
+    private func publisherEvent(_ event: [String: Any]) {
+        if let path = pollLogPath { _ = appendPollLog([event], path: path) }
+        else if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) { _ = appendPollLog([event]) }
+    }
+    private func observeGitHubClock(_ headers: [String: String]) {
+        guard !sampledClock, let raw = headers.first(where: { $0.key.lowercased() == "date" })?.value else { return }
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0); formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let server = formatter.date(from: raw) else { return }
+        sampledClock = true
+        let now = clock(), skew = server.timeIntervalSince(now)
+        defaults.set(skew, forKey: "clockSkew"); defaults.set(now, forKey: "clockSkewAt")
+        setUI { $0.clockSkew = skew; $0.clockSkewAt = now }
+        if abs(skew) > 60 { publisherEvent(["ev": "clock_skew", "ts": now.timeIntervalSince1970, "seconds": skew]) }
+    }
+    private func writePublisher(passId: UUID? = nil) -> SyncOutcome {
+        writeFailure = nil
+        guard let session = validatingSession, defaults.string(forKey: "syncGistId") == session.gistId,
+              ui.phase == .on, clock().timeIntervalSince(session.at) >= 0,
+              clock().timeIntervalSince(session.at) <= 120 else { writeFailure = "stale"; return .failed }
+        if let passId = passId, passId != session.pass { writeFailure = "busy"; return .failed }
+        let object = machineObject(publisherInput(), gistId: session.gistId), hashes = c4Fingerprints(object)
+        let now = clock(), pushed = defaults.object(forKey: "syncPushedAt") as? Date ?? .distantPast
+        let heartbeat = defaults.object(forKey: "syncHeartbeatAt") as? Date ?? .distantPast
+        let due = defaults.string(forKey: "syncMetaHash") != hashes.meta
+            || (defaults.string(forKey: "syncPushHash") != hashes.push && now.timeIntervalSince(pushed) >= 570)
+            || now.timeIntervalSince(heartbeat) >= 600
+        guard due else { return .success(session.cache) }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), bytes.count <= syncMaxMachineBody else { return .failed }
+        let body: [String: Any] = ["files": ["machine-\(machineId).json": ["content": String(decoding: bytes, as: UTF8.self)]]]
+        guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return .failed }
+        let headers = ["Authorization": "Bearer \(session.token)", "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "ClaudeCodexLimits"]
+        var response: SyncHTTPResult = (0, nil, "stale identity", [:])
+        var dispatched = false
+        let request = {
+            let age = self.clock().timeIntervalSince(session.at)
+            guard age >= 0 && age <= 120, self.defaults.string(forKey: "syncGistId") == session.gistId,
+                  self.validatingSession?.pass == session.pass else { self.writeFailure = "stale"; return }
+            dispatched = true
+            response = self.transport("https://api.github.com/gists/\(session.gistId)", "PATCH", headers, payload, 20)
+        }
+        // A write-only continuation may never rotate/revalidate auth behind its
+        // caller's back. Fence the exact GET issuance through dispatch of PATCH.
+        if let owner = authOwner {
+            guard let access = session.access, owner.withCurrentAccess(access, request) else { validatingSession = nil; return .failed }
+        } else {
+            guard case .token(let current) = keychain.read(), current == session.token else { validatingSession = nil; return .failed }
+            request()
+        }
+        guard dispatched else { return .failed }
+        observeGitHubClock(response.headers)
+        if response.status == 404 {
+            for key in ["syncGistId", "syncPushHash", "syncMetaHash", "syncHeartbeatAt", "syncDiscoveredAt"] { defaults.removeObject(forKey: key) }
+            validatingSession = nil
+        }
+        applyBackoff(response.status, headers: response.headers)
+        guard (200..<300).contains(response.status) else {
+            recordError("PATCH /gists/{id}: " + GitHubSync.statusText(response.status, headers: response.headers))
+            writeFailure = "http"; publisherEvent(["ev": "publish", "ts": now.timeIntervalSince1970, "result": "failed"]); return .failed
+        }
+        if let owner = authOwner {
+            guard let access = session.access, owner.withCurrentAccess(access, {}) else { validatingSession = nil; return .failed }
+        } else {
+            guard case .token(let current) = keychain.read(), current == session.token else { validatingSession = nil; return .failed }
+        }
+        defaults.set(hashes.push, forKey: "syncPushHash"); defaults.set(hashes.meta, forKey: "syncMetaHash")
+        defaults.set(now, forKey: "syncPushedAt"); defaults.set(now, forKey: "syncHeartbeatAt")
+        setUI { $0.lastUploadAt = now }
+        publisherEvent(["ev": "publish", "ts": now.timeIntervalSince1970, "result": "ok"])
+        return .success(session.cache)
     }
 
     /// Oldest gist holding the manifest, or nil. Errors are recorded here; `failed` = stop the cycle.
@@ -2851,10 +3004,14 @@ final class GitHubSync {
         return (best?.id, false)
     }
 
-    private func syncBody(force: Bool, allowRetry: Bool = true, readOnly: Bool = false,
-                          completion: ((Bool) -> Void)? = nil) {
-        var readSucceeded = false
-        defer { completion?(readSucceeded) }
+    private func syncBody(force: Bool, allowRetry: Bool = true, mode: SyncMode = .full, deferWrite: Bool = false, passId: UUID? = nil,
+                          completion: ((SyncOutcome) -> Void)? = nil) {
+        var outcome = SyncOutcome.failed
+        defer { completion?(outcome) }
+        if mode == .writeOnly { outcome = writePublisher(passId: passId); return }
+        let readOnly = mode == .readOnly, pass = passId ?? UUID()
+        if observedPass != pass { sampledClock = false; observedPass = pass }; validatingSession = nil
+
         let ownedToken: String?
         if let owner = authOwner {
             ownedToken = projectAuth(owner.ensureAccess(reason: "sync"))
@@ -2869,7 +3026,7 @@ final class GitHubSync {
         transientFailure = false
         defer {
             if allowRetry && transientFailure {
-                let retry = DispatchWorkItem { [weak self] in self?.syncBody(force: force, allowRetry: false) }
+                let retry = DispatchWorkItem { [weak self] in self?.syncBody(force: force, allowRetry: false, mode: mode, deferWrite: deferWrite) }
                 retryWork = retry
                 q.asyncAfter(deadline: .now() + 60, execute: retry)
             }
@@ -2882,7 +3039,8 @@ final class GitHubSync {
             if case .missing = credential, d.string(forKey: "syncLogin") != nil { setUI { $0.phase = .revoked } }
             recordError(syncKeychainReadError(credential)); return
         }
-        let snap = readOnly ? (days: [String: Any](), hash: "") : snapshotJSON()
+        let input = readOnly ? nil : publisherInput()
+        let snap = (days: input?.days ?? [:], hash: "")
         let myFile = "machine-\(machineId).json"
         if !readOnly && machineIdNeedsSave {
             do {
@@ -2906,12 +3064,12 @@ final class GitHubSync {
                 if let id = f.id, id != cur {
                     gistId = id
                     d.set(id, forKey: "syncGistId")
-                    d.removeObject(forKey: "syncPushHash")
+                    for key in ["syncPushHash", "syncMetaHash", "syncHeartbeatAt"] { d.removeObject(forKey: key) }
                 }
             }
         }
         if gistId == nil {
-            d.removeObject(forKey: "syncPushHash")
+            for key in ["syncPushHash", "syncMetaHash", "syncHeartbeatAt"] { d.removeObject(forKey: key) }
             let f = findGist(token)
             if f.failed { return }
             if let id = f.id { gistId = id }
@@ -2932,7 +3090,7 @@ final class GitHubSync {
                 if again.failed { return }
                 if let a = again.id, a != id {
                     gistId = a
-                    d.removeObject(forKey: "syncPushHash")
+                    for key in ["syncPushHash", "syncMetaHash", "syncHeartbeatAt"] { d.removeObject(forKey: key) }
                 }
             }
             d.set(clock(), forKey: "syncDiscoveredAt")
@@ -2940,9 +3098,10 @@ final class GitHubSync {
         }
         guard let gid = gistId else { return }
 
+        let validatedAt = clock()
         let g = gh("/gists/\(gid)", token: token)
         if g.status == 404 {
-            for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
+            for key in ["syncGistId", "syncPushHash", "syncMetaHash", "syncHeartbeatAt", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
         }
         if g.err == syncBodyTooLarge {
             recordError(tr("Слишком большой ответ синхронизации (предел 16 МиБ)", "Sync response too large (16 MiB limit)")); return
@@ -2950,21 +3109,12 @@ final class GitHubSync {
         if handle(g.status, headers: g.headers, request: "GET /gists/{id}", token: token) { return }
         guard let gist = g.json as? [String: Any], syncIsPrivate(gist["public"]) else {
             // Rediscover on the next cycle; never write into a public/unknown-visibility gist.
-            for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
+            for key in ["syncGistId", "syncPushHash", "syncMetaHash", "syncHeartbeatAt", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
             recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response"))
             return
         }
         guard let files = gist["files"] as? [String: Any] else {
             recordError(tr("Некорректный ответ GET /gists/{id}", "Invalid GET /gists/{id} response")); return
-        }
-
-        if !readOnly && (force || d.string(forKey: "syncPushHash") != snap.hash) {
-            let p = gh("/gists/\(gid)", "PATCH", token: token, body: ["files": [myFile: ["content": machineFile(snap.days)]]])
-            if p.status == 404 {
-                for key in ["syncGistId", "syncPushHash", "syncDiscoveredAt"] { d.removeObject(forKey: key) }
-            }
-            if handle(p.status, headers: p.headers, request: "PATCH /gists/{id}", token: token) { return }
-            d.set(snap.hash, forKey: "syncPushHash"); d.set(clock(), forKey: "syncPushedAt")
         }
 
         var contents: [String: String] = [:]
@@ -3069,7 +3219,9 @@ final class GitHubSync {
         // The auth owner's publication fence has been released. A reader callback may
         // inspect UI/auth state without recursively acquiring that fence.
         onRead?(cache, readAt)
-        readSucceeded = readWarning == nil
+        guard readWarning == nil else { return }
+        validatingSession = (gid, token, validatedAt, cache, capturedAccess, pass)
+        outcome = (!readOnly && !deferWrite) ? writePublisher(passId: pass) : .success(cache)
 
     }
 
@@ -3181,6 +3333,17 @@ final class ReaderLocalSnapshot {
     }
 }
 private let readerLocalSnapshot = ReaderLocalSnapshot()
+private enum C4ProductionStorage {
+    static let store = C4PublisherStore(path: DATA_DIR + "/publisher-state.json")
+}
+private var c4ProductionStore: C4PublisherStore {
+    precondition(!CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }), "selftest must inject C4 storage")
+    return C4ProductionStorage.store
+}
+private let c4PollQueue = DispatchQueue(label: "ccl.codex-publisher", qos: .utility)
+private var c4CodexManualPhase: RemoteManualPhase? // main-thread presentation only
+private var c4CodexManualStartedAt: Date?
+
 
 /// Decode only the requested identity string. Other JSON values are skipped in place,
 /// with bounded recursion; CLI projects, tokens and unrelated account fields are not retained.
@@ -3277,12 +3440,12 @@ private struct LocalIdentityJSON {
     }
 }
 
-private func readLocalAccountIds(products: Set<String> = ["claude", "codex"]) -> [String: String] {
+func readLocalAccountIds(products: Set<String> = ["claude", "codex"], paths: [String: String]? = nil) -> [String: String] {
     // Selftests and previews never inspect the user's login files.
-    guard !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) else { return [:] }
+    guard paths != nil || !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) else { return [:] }
     var ids: [String: String] = [:]
-    for (product, file, path) in [("claude", HOME + "/.claude.json", ["oauthAccount", "accountUuid"]),
-                                  ("codex", HOME + "/.codex/auth.json", ["tokens", "account_id"])] where products.contains(product) && productEnabled(product) {
+    for (product, file, path) in [("claude", paths?["claude"] ?? HOME + "/.claude.json", ["oauthAccount", "accountUuid"]),
+                                  ("codex", paths?["codex"] ?? CODEX_AUTH_PATH, ["tokens", "account_id"])] where products.contains(product) && (paths == nil ? productEnabled(product) : paths?[product] != nil) {
         guard let handle = FileHandle(forReadingAtPath: file) else { continue }
         let data = try? handle.read(upToCount: 8 * 1024 * 1024 + 1)
         try? handle.close()
@@ -3824,6 +3987,13 @@ struct SyncUIState {
     var lastError: String? = nil           // syncLastError — cleared by a good cycle
     var lastErrorAt: Date? = nil
     var keychainRetryAvailable = false
+    var clockSkew: Double? = nil
+    var clockSkewAt: Date? = nil
+    func clockSkewWarning(language: String) -> String? {
+        guard let skew = clockSkew, abs(skew) > 120 else { return nil }
+        return language == "en" ? "Computer and GitHub clocks differ; check time synchronization."
+            : "Системные часы и GitHub расходятся; проверьте синхронизацию времени."
+    }
     var canRetryKeychain: Bool { keychainRetryAvailable || ["locked", "timeout", "unreachable"].contains(authReason ?? "") }
     var canSignOut: Bool {
         phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
@@ -3835,6 +4005,7 @@ let SYNC_STALE_AFTER: TimeInterval = 30 * 60
 /// The orange line for the main screen, or nil when sync is fine / off. Revoked always shows:
 /// the totals silently lose the other computers otherwise.
 func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String? {
+    if let clock = s.clockSkewWarning(language: appLang()) { return clock }
     if let reason = s.authReason { return githubAuthMessage(reason, language: appLang()) }
     switch s.phase {
     case .revoked:
@@ -4439,7 +4610,8 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date(),
         sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
     }
     let readerPhase = REMOTE_RENDER_ISOLATED ? REMOTE_READER_MANUAL_PHASE : remoteManualRefresh?.phase(now: at)
-    let manualPhase = REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE : (readerPhase ?? REMOTE_MANUAL_PHASE)
+    let manualPhase = REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE
+        : (view.product == "codex" && view.isLocal ? (c4ManualPhase(c4CodexManualPhase, startedAt: c4CodexManualStartedAt, now: at) ?? readerPhase ?? REMOTE_MANUAL_PHASE) : (readerPhase ?? REMOTE_MANUAL_PHASE))
     let productCount = productAccountCount ?? (REMOTE_ACCOUNT_FRAME?.visibleViews ?? []).filter {
         $0.product == view.product && !$0.historyKey.hasPrefix("u:")
     }.count
@@ -7361,6 +7533,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var fetchingLimits: Bool { quotaStates.values.contains { $0.flight != nil } }
     var refreshDisplayTimer: Timer?
     var autoStates = loadAutoPollStates()
+    private var c4NextCoordinationRead: Double = 0
+    private var c4LastManualRead: Double?
+    private var c4MirroredLocalId = UserDefaults.standard.string(forKey: "c4AutoPollAccountId")
+    private var c4ActiveController: C4TickController? // accessed only on c4PollQueue
     var activityTimer: Timer?
     var availableUpdate: (version: String, url: String)?   // set by auto/manual checks
     var updateTimer: Timer?
@@ -7540,14 +7716,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if product == "claude" { claudeReadPermit?.cancel() }
                 state.setEnabled(enabled)
                 // Re-enable must not wait for a schedule belonging to an invalidated selection.
-                autoStates[product]?.lastAttempt = 0
+                if product != "codex" { autoStates[product]?.lastAttempt = 0 }
             }
             quotaStates[product] = state
         }
     }
     func scheduledAt(_ product: String) -> Double {
         let state = autoStates[product] ?? AutoPollState()
-        return state.lastAttempt == 0 ? 0 : state.lastAttempt + (autoPollEnabled() ? state.interval : interval)
+        let own = state.lastAttempt == 0 ? 0 : state.lastAttempt + (autoPollEnabled() ? state.interval : interval)
+        return product == "codex" ? max(own, c4NextCoordinationRead) : own
     }
     func startTimer() {
         timer?.invalidate()
@@ -7639,11 +7816,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let views = displayedCardViews(local.0, local.1, now: Date(timeIntervalSince1970: now))
             manualProducts = remoteManualProviderProducts(views: views, localIds: readerLocalSnapshot.snapshot().ids,
                 enabled: Set(["claude", "codex"].filter { productEnabled($0) }))
-            if only == nil || views.contains(where: { $0.product == only && !$0.isLocal }) {
+            if !(manualProducts.contains("codex") && (only == nil || only == "codex")) && (only == nil || views.contains(where: { $0.product == only && !$0.isLocal })) {
                 remoteManualRefresh?.request()
             }
         }
         for product in ["claude", "codex"] where (only == nil || only == product) && (scheduled || manualProducts.contains(product)) {
+            if product == "codex" {
+                startCodexPublisher(live: live, scheduled: scheduled, now: now)
+                continue
+            }
             var refresh = quotaState(product)
             let admission = refresh.admit(scheduled ? .scheduled : .manual, now: now, scheduledAt: scheduledAt(product))
             quotaStates[product] = refresh
@@ -7695,18 +7876,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !scheduled { panelCtrl.view.needsDisplay = true }
     }
 
+    private func startCodexPublisher(live: Bool, scheduled: Bool, now: Double) {
+        guard live, productEnabled("codex") else { return }
+        if !scheduled, let previous = c4LastManualRead, now - previous < 30 {
+            c4CodexManualPhase = .cooldown(Int(ceil(30 - (now - previous)))); return
+        }
+        var refresh = quotaState("codex")
+        let currentId = scheduled ? readLocalAccountIds(products: ["codex"])["codex"] : nil
+        let switched = currentId.map { c4MirroredLocalId != nil && c4MirroredLocalId != $0 } ?? false
+        if scheduled && (now < c4NextCoordinationRead || (!switched && now < scheduledAt("codex"))) { return }
+        let admission = refresh.admitCoordination(now: now)
+        quotaStates["codex"] = refresh
+        guard case .start = admission, let ticket = refresh.flight else { return }
+        if !scheduled { c4LastManualRead = now; c4CodexManualStartedAt = Date(timeIntervalSince1970: now); c4CodexManualPhase = .reading }
+        // A B2 skip leaves the attempt untouched. A separate reader cadence stops
+        // an already-due Auto state from rescheduling a GET every 50 milliseconds.
+        c4NextCoordinationRead = now + 600
+        let fixedInterval = interval, automatic = autoPollEnabled()
+        let mirror = autoStates["codex"] ?? AutoPollState(), mirrorId = c4MirroredLocalId
+        c4PollQueue.async { [weak self] in
+            guard let self = self else { return }
+            let ids = readLocalAccountIds(products: ["codex"])
+            guard let localId = ids["codex"] else {
+                _ = appendPollLog([["ev": "poll_skipped", "ts": Date().timeIntervalSince1970, "product": "codex", "reason": "no_login"]])
+                DispatchQueue.main.async {
+                    var state = self.quotaState("codex"); _ = state.complete(ticket, retryAfter: nil); self.quotaStates["codex"] = state
+                    if !scheduled { c4CodexManualPhase = .idle; remoteManualRefresh?.request() }
+                    self.saveAutoStates()
+                }
+                return
+            }
+            let initial = mirrorId == nil || mirrorId == localId ? mirror : AutoPollState()
+            var state = c4ProductionStore.state(localId, initial: initial)
+            if automatic && mirrorId == localId { state.poll.interval = mirror.interval }
+            if !automatic { state.poll.interval = normalizedPollInterval(fixedInterval) }
+            let passId = UUID()
+            let dependencies = C4TickDependencies(clock: { Date() }, read: { callback in
+                GitHubSync.shared.syncNow(mode: .full, deferWrite: true, passId: passId) { outcome in
+                    c4PollQueue.async { callback(outcome) }
+                }
+            }, writeOnly: { callback in
+                GitHubSync.shared.syncNow(mode: .writeOnly, passId: passId) { outcome in
+                    c4PollQueue.async { callback(outcome) }
+                }
+            }, save: { [weak self] value in
+                guard let self = self, c4ProductionStore.save(value, id: localId) else { return false }
+                DispatchQueue.main.sync {
+                    self.autoStates["codex"] = value.poll
+                    self.c4MirroredLocalId = localId; UserDefaults.standard.set(localId, forKey: "c4AutoPollAccountId")
+                    var refresh = self.quotaState("codex"); refresh.serverUntil = value.poll.serverRetryAt; self.quotaStates["codex"] = refresh
+                    self.saveAutoStates()
+                }
+                return true
+            }, fetch: { fetchCodex(live: true) }, emit: { event in
+                _ = appendPollLog([event])
+            }, armTimeout: { seconds, action in
+                c4PollQueue.asyncAfter(deadline: .now() + seconds, execute: action)
+            }, apply: { [weak self] result in
+                guard let self = self else { return }
+                DispatchQueue.main.sync {
+                    guard productEnabled("codex"), self.quotaState("codex").flight == ticket,
+                          self.quotaState("codex").generation == ticket.generation else { return }
+                    let previous = self.last ?? (LimitData(present: false), LimitData(present: false))
+                    if result.apiFresh { c4CodexManualPhase = nil }
+                    let selected = self.cacheQuotaCompletion("codex", response: result, previous: previous.1,
+                        previousId: readerLocalSnapshot.snapshot().ids["codex"], readingId: localId)
+                    self.render(previous.0, selected.data, sampleProducts: ["codex"], readingIds: selected.id.map { ["codex": $0] } ?? [:])
+                }
+            }, retryableWriteFailure: { ["stale", "busy"].contains(GitHubSync.shared.writeFailure ?? "") },
+               currentLocalId: { productEnabled("codex") ? readLocalAccountIds(products: ["codex"])["codex"] : nil },
+               onDecision: { [weak self] decision, allowedAt in
+                guard !scheduled, let self = self else { return }
+                DispatchQueue.main.async {
+                    let current = self.last ?? (LimitData(present: false), LimitData(present: false))
+                    let views = displayedCardViews(current.0, current.1, now: Date())
+                    let products = remoteManualProviderProducts(views: views, localIds: ["codex": localId], enabled: ["codex"], decisions: ["codex": decision])
+                    c4CodexManualPhase = products.contains("codex") ? .checked(Date()) : allowedAt.map(RemoteManualPhase.pollAllowed) ?? .idle
+                    self.panelCtrl.view.needsDisplay = true
+                }
+            }, fixedInterval: automatic ? nil : fixedInterval, canPollWithoutRead: {
+                guard GitHubSync.shared.ui.phase == .on,
+                      let gist = UserDefaults.standard.string(forKey: "syncGistId") else { return false }
+                return accountLabel(product: "codex", localId: localId, gistId: gist) != nil
+            })
+            let controller = C4TickController(state: state, myId: GitHubSync.shared.machineId, localId: localId, dependencies: dependencies)
+            self.c4ActiveController = controller
+            controller.tick(manual: !scheduled) { [weak self, weak controller] in
+                guard let self = self else { return }
+                let poll = controller?.state.poll
+                self.c4ActiveController = nil
+                DispatchQueue.main.async {
+                    var refresh = self.quotaState("codex")
+                    _ = refresh.complete(ticket, retryAfter: poll?.serverRetryAt); self.quotaStates["codex"] = refresh
+                    self.c4NextCoordinationRead = Date().timeIntervalSince1970 + 600
+                    if !scheduled, case .reading? = c4CodexManualPhase { c4CodexManualPhase = .failed }
+                    self.saveAutoStates()
+                    if let last = self.last { self.render(last.0, last.1) }
+                }
+            }
+        }
+    }
+
     private func cacheQuotaCompletion(_ product: String, response: LimitData, previous: LimitData,
                                       previousId: String?, readingId: String?) -> (data: LimitData, id: String?) {
+        if product == "codex" {
+            return c4CacheQuotaCompletion(product: product, response: response, previous: previous,
+                previousId: previousId, readingId: readingId, path: CACHE_PATH)
+        }
         var cache: [String: Any] = [:]
-        if let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
+        if let data = FileManager.default.contents(atPath: CACHE_PATH),
            let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { cache = object }
         let selected = readerQuotaCompletion(response, previous: previous, previousId: previousId, readingId: readingId,
-                                              cached: (cache[product] as? [String: Any]).map(dict2ld))
+            cached: (cache[product] as? [String: Any]).map(dict2ld))
         if selected.data.apiFresh {
-            cache[product] = ld2dict(selected.data)
-            if let data = try? JSONSerialization.data(withJSONObject: cache) {
-                try? data.write(to: URL(fileURLWithPath: CACHE_PATH), options: .atomic)
-            }
+            var entry = ld2dict(selected.data); entry["accountId"] = selected.id; cache[product] = entry
+            if let data = try? JSONSerialization.data(withJSONObject: cache) { _ = c4AtomicWrite(data, path: CACHE_PATH) }
         }
         return selected
     }

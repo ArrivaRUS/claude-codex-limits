@@ -443,17 +443,17 @@ C3-04, цикл правок №1: фикстура прогноза имеет 
 
 | ID | Вход | Ожидание | Ловушка |
 |---|---|---|---|
-| C4-01 | локальный Codex-вход (синтетический `auth.json` во временном каталоге) | `machineFile` содержит блок Codex с меткой; `cache.json[p].accountId` = `localId` | — |
-| C4-02 | due Codex, метку публикует и VPS | порядок: `syncNow(.full)` → `decide` по кэшу **из исхода** → `begin`+`saveAutoStates` → PATCH (`.writeOnly`, `attemptAt` в теле) **до** вызова `fetchCodex` → PATCH результата | записывающий транспорт + счётчик `fetchCodex` с `seq` |
-| C4-03 | PATCH попытки упал; `.failed` чтения; нет completion 60 с | `fetchCodex` не вызван, `lastAttempt` восстановлен, `publish_failed`; `.failed`/таймаут → своё расписание (B1); каждый ранний `return` в `syncBody` даёт `.failed` (перебор инжектированных отказов) | — |
-| C4-04 | `decide-vectors.json` | те же решения, что A3-01 (паритет) | golden |
-| C4-05 | VPS опубликовал `retryUntil` +1 ч для общей метки | мак не опрашивает до срока, в т. ч. ручным (RL-9) | — |
-| C4-06 | ручное «Обновить»: Claude без входа; Codex со входом, VPS опросил 5 мин назад; чужая `attemptAt` свежая / `asOf` старый / `status: error`; ≥ 900/960 с без `retryUntil` | только чтение gist (защита 30 с), «Опрос можно с HH:MM» (UX §4 (а)); 0 запросов до 900/960 с; в последнем случае ровно 1 запрос | транспорт-ловушка |
-| C4-07 | Т11: `credentialWrite = never` | `codexAccessToken()` → `expired/cli_refresh_pending`, 0 POST, `auth.json` sha/mtime тот же; `persistClaudeQuotaUpdate` не вызван (ловушка helper); `legacy` — запись атомарна и только при совпадении пары, фикстура «CLI успел переписать» → `superseded`, файл CLI цел | запись helper, `snap` файла |
-| C4-08 | `.writeOnly` при валидирующем чтении > 120 с назад | отказ без PATCH | — |
-| C4-09 | файл мака + `poll-log.jsonl` | сканер A1-10 чист; журнал 0600 | сентинели |
-| C4-10 | Т35 регресс: 302 на чужой хост для usage/oauth | не следуем (`noRedirects`), `error/http` | — |
-| C4-11 | `Date` со сдвигом ±120 с | `clockSkew` сохранён, подсказка «часы расходятся…» | — |
+| C4-01 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C401` · локальный Codex-вход (синтетический `auth.json` во временном каталоге) | `machineFile` содержит блок Codex с меткой; `cache.json[p].accountId` = `localId` | — |
+| C4-02 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C402` · due Codex, метку публикует и VPS | порядок: `syncNow(.full)` → `decide` по кэшу **из исхода** → `begin`+`saveAutoStates` → PATCH (`.writeOnly`, `attemptAt` в теле) **до** вызова `fetchCodex` → PATCH результата | записывающий транспорт + счётчик `fetchCodex` с `seq` |
+| C4-03 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C403` · PATCH попытки упал; `.failed` чтения; нет completion 60 с | `fetchCodex` не вызван, `lastAttempt` восстановлен, `publish_failed`; `.failed`/таймаут → своё расписание (B1); каждый ранний `return` в `syncBody` даёт `.failed` (перебор инжектированных отказов) | — |
+| C4-04 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C404` · `decide-vectors.json` | те же решения, что A3-01 (паритет) | golden |
+| C4-05 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C405` · VPS опубликовал `retryUntil` +1 ч для общей метки | мак не опрашивает до срока, в т. ч. ручным (RL-9) | — |
+| C4-06 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C406` · ручное «Обновить»: Claude без входа; Codex со входом, VPS опросил 5 мин назад; чужая `attemptAt` свежая / `asOf` старый / `status: error`; ≥ 900/960 с без `retryUntil` | только чтение gist (защита 30 с), «Опрос можно с HH:MM» (UX §4 (а)); 0 запросов до 900/960 с; в последнем случае ровно 1 запрос | транспорт-ловушка |
+| C4-07 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C407` · Т11: `credentialWrite = never` | `codexAccessToken()` → `expired/cli_refresh_pending`, 0 POST, `auth.json` sha/mtime тот же; `persistClaudeQuotaUpdate` не вызван (ловушка helper); `legacy` — запись атомарна и только при совпадении пары, фикстура «CLI успел переписать» → `superseded`, файл CLI цел | запись helper, `snap` файла |
+| C4-08 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C408` · `.writeOnly` при валидирующем чтении > 120 с назад | отказ без PATCH | — |
+| C4-09 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C409` · файл мака + `poll-log.jsonl` | сканер A1-10 чист; журнал 0600 | сентинели |
+| C4-10 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C410` · Т35 регресс: 302 на чужой хост для usage/oauth | не следуем (`noRedirects`), `error/http` | — |
+| C4-11 | RED, `Sources/RemoteLimitsC4SelfTests.swift:c4C411` · `Date` со сдвигом ±120 с | `clockSkew` сохранён, подсказка «часы расходятся…» | — |
 
 ### C5 — подписи и список N1 (Should)
 
