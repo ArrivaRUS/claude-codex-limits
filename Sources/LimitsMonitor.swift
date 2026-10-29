@@ -268,7 +268,12 @@ private let claudeQuotaPendingCredential = ClaudeQuotaPendingCredential()
 private func persistClaudeQuotaUpdate(_ update: ClaudeQuotaUpdate, io: ClaudeQuotaIO) -> SyncKeychainStatus {
     guard ["guarded", "legacy"].contains(io.credentialWrite()) else { return .failure(65) }
     guard let envelope = try? JSONEncoder().encode(update), let input = String(data: envelope, encoding: .utf8) else { return .failure(65) }
-    return io.keychain("update", input).status
+    let status = io.keychain("update", input).status
+    if status == .success {
+        io.emit(["ev": "token_refresh", "ts": io.now().timeIntervalSince1970,
+                 "product": "claude", "credentialWrite": 1, "policy": "guarded"])
+    }
+    return status
 }
 private func readClaudeQuotaCredential(_ permit: QuotaKeychainReadPermit?, io: ClaudeQuotaIO) -> QuotaCredentialRead {
     let result = permit.map { io.permissionRead($0) } ?? io.keychain("read", nil)
@@ -337,6 +342,7 @@ struct ClaudeQuotaIO {
                _ noRedirects: Bool) -> SyncHTTPResult
     var now: () -> Date = { Date() }
     var credentialWrite: () -> String = { credentialWritePolicy() }
+    var emit: ([String: Any]) -> Void = { _ in }
 
     static let live: ClaudeQuotaIO = ClaudeQuotaIO(keychain: { operation, input in
         if CommandLine.arguments.contains("--sync-selftest") || CommandLine.arguments.contains("--subscriptions-selftest") {
@@ -353,7 +359,7 @@ struct ClaudeQuotaIO {
             preconditionFailure("selftest cannot request Claude provider endpoints")
         }
         return requestHTTP(url, method: method, headers: headers, body: body, timeout: timeout, noRedirects: noRedirects)
-    })
+    }, emit: { _ = appendPollLog([$0]) })
 }
 
 func fetchClaude(readPermit: QuotaKeychainReadPermit? = nil, io: ClaudeQuotaIO = .live) -> LimitData {
@@ -601,10 +607,12 @@ struct CodexCredentialIO {
     var now: () -> Date
     var policy: () -> String
     var http: (String, String, [String: String], Data?, Double, Bool) -> SyncHTTPResult
+    var emit: ([String: Any]) -> Void = { _ in }
     static var live: CodexCredentialIO {
         precondition(!CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }), "selftest requires injected Codex IO")
         return CodexCredentialIO(authPath: CODEX_AUTH_PATH, now: { Date() }, policy: { credentialWritePolicy() },
-            http: { requestHTTP($0, method: $1, headers: $2, body: $3, timeout: $4, noRedirects: $5) })
+            http: { requestHTTP($0, method: $1, headers: $2, body: $3, timeout: $4, noRedirects: $5) },
+            emit: { _ = appendPollLog([$0]) })
     }
 }
 private func persistCodexTokens(_ replacement: [String: Any], expectedAccess: String, expectedRefresh: String,
@@ -630,6 +638,11 @@ private func persistCodexTokens(_ replacement: [String: Any], expectedAccess: St
               latest == bytes else { rejected = "superseded"; return false }
         return true
     }
+    if saved {
+        // legacy is the guarded opt-in alias in the shared O1 vocabulary.
+        io.emit(["ev": "token_refresh", "ts": io.now().timeIntervalSince1970,
+                 "product": "codex", "credentialWrite": 1, "policy": "guarded"])
+    }
     return saved ? nil : (rejected ?? "credential write failed")
 }
 func codexAccessToken(io supplied: CodexCredentialIO? = nil) -> (credential: (token: String, account: String)?, failure: LimitData?) {
@@ -638,13 +651,15 @@ func codexAccessToken(io supplied: CodexCredentialIO? = nil) -> (credential: (to
           let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let tokens = root["tokens"] as? [String: Any], let acc = tokens["account_id"] as? String,
           let at = tokens["access_token"] as? String else { return (nil, LimitData(error: "no CLI sign-in", auth: .loggedOut)) }
+    let identity = acc.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    func owned(_ result: LimitData) -> LimitData { var value = result; value.localAccountId = identity; return value }
     if let exp = jwtExp(at), exp > io.now().timeIntervalSince1970 { return ((at, acc), nil) }
     guard ["guarded", "legacy"].contains(io.policy()) else {
         var result = LimitData(error: "cli_refresh_pending", auth: .expired)
-        result.expiredReason = "cli_refresh_pending"; result.failureKind = "auth"; return (nil, result)
+        result.expiredReason = "cli_refresh_pending"; result.failureKind = "auth"; return (nil, owned(result))
     }
     guard let rt = tokens["refresh_token"] as? String, !rt.isEmpty else {
-        var result = LimitData(error: "no refresh token", auth: .expired); result.expiredReason = "signin_required"; return (nil, result)
+        var result = LimitData(error: "no refresh token", auth: .expired); result.expiredReason = "signin_required"; return (nil, owned(result))
     }
     let body = try? JSONSerialization.data(withJSONObject: ["client_id": CODEX_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": rt])
     let response = io.http("https://auth.openai.com/oauth/token", "POST",
@@ -652,10 +667,10 @@ func codexAccessToken(io supplied: CodexCredentialIO? = nil) -> (credential: (to
     guard response.status == 200, let bytes = response.data,
           let replacement = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
           let newAccess = replacement["access_token"] as? String, !newAccess.isEmpty else {
-        return (nil, quotaFailureData(response, tokenEndpoint: true, now: io.now().timeIntervalSince1970))
+        return (nil, owned(quotaFailureData(response, tokenEndpoint: true, now: io.now().timeIntervalSince1970)))
     }
     if let failure = persistCodexTokens(replacement, expectedAccess: at, expectedRefresh: rt, io: io) {
-        var result = LimitData(error: failure); result.failureKind = "credentials"; return (nil, result)
+        var result = LimitData(error: failure); result.failureKind = "credentials"; return (nil, owned(result))
     }
     return ((newAccess, acc), nil)
 }
@@ -664,17 +679,20 @@ func codexUsageLive(io supplied: CodexCredentialIO? = nil) -> LimitData {
     let io = supplied ?? .live
     let token = codexAccessToken(io: io)
     guard let (at, acc) = token.credential else { return token.failure ?? LimitData(error: "credential unavailable") }
+    let identity = acc.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let response = io.http("https://chatgpt.com/backend-api/wham/usage", "GET",
         ["Authorization": "Bearer \(at)", "chatgpt-account-id": acc,
          "User-Agent": "codex_cli_rs/0.20.0 (Mac OS 26.0.0; arm64) Apple_Terminal", "originator": "codex_cli_rs", "Accept": "application/json"], nil, 15, true)
     guard response.status == 200, let bytes = response.data,
           let object = (try? JSONSerialization.jsonObject(with: bytes)) as? [String: Any],
-          let limits = object["rate_limit"] as? [String: Any] else { return quotaFailureData(response, now: io.now().timeIntervalSince1970) }
-    var result = LimitData(); result.httpStatus = response.status
+          let limits = object["rate_limit"] as? [String: Any] else {
+        var failure = quotaFailureData(response, now: io.now().timeIntervalSince1970)
+        failure.localAccountId = identity; return failure
+    }
+    var result = LimitData(); result.httpStatus = response.status; result.localAccountId = identity
     if let value = limits["primary_window"] as? [String: Any] { codexApplyWindow(value, &result, positionalWeekly: false) }
     if let value = limits["secondary_window"] as? [String: Any] { codexApplyWindow(value, &result, positionalWeekly: true) }
     result.plan = object["plan_type"] as? String
-    if supplied == nil, let plan = result.plan { UserDefaults.standard.set(plan, forKey: "codexPlan") }
     result.resetCredits = (object["rate_limit_reset_credits"] as? [String: Any])?["available_count"] as? Int
     guard result.session != nil || result.weekly != nil else { result.error = "invalid usage response"; result.failureKind = "invalid_response"; return result }
     result.asOf = io.now(); result.apiFresh = true; result.localAccountId = acc.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(); return result
@@ -695,10 +713,9 @@ func fetchCodex(live: Bool) -> LimitData {
         let identity = readLocalAccountIds(products: ["codex"])["codex"]
         let result = codexUsageLive()
         if result.apiFresh { return result }
-        guard let identity = identity,
+        guard let identity = identity, result.localAccountId == identity,
               readLocalAccountIds(products: ["codex"])["codex"] == identity else { return result }
-        var fallback = quotaFallback(result, previous: c4StoredReading(c4ProductionStore.state(identity)))
-        fallback.localAccountId = identity; return fallback
+        return quotaFallback(result, previous: c4StoredReading(c4ProductionStore.state(identity)))
     }
     var best = codexFromRollout()
     if let cached = loadCodexCache() { best = quotaSelectSnapshot(best, previous: cached) }
@@ -2855,11 +2872,11 @@ final class GitHubSync {
     }
     func readNow(completion: @escaping (Bool) -> Void) {
         syncNow(mode: .readOnly) { outcome in
-            if case .success = outcome { completion(true) } else { completion(false) }
+            completion(outcome.readable)
         }
     }
     func readSynchronously() -> Bool {
-        if case .success = syncSynchronously(mode: .readOnly) { return true }; return false
+        syncSynchronously(mode: .readOnly).readable
     }
     @discardableResult func syncSynchronously(force: Bool = false, mode: SyncMode = .full,
                                                deferWrite: Bool = false, passId: UUID? = nil) -> SyncOutcome {
@@ -3136,7 +3153,7 @@ final class GitHubSync {
             var countedRawBytes = false
             if (f["truncated"] as? Bool) == true || (content == nil && f["raw_url"] != nil) {
                 guard let raw = f["raw_url"] as? String else {
-                    recordError(tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url")); return
+                    readWarning = tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url"); continue
                 }
                 let key = SHA256.hash(data: Data(raw.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
                 if rejected[key] != nil {
@@ -3164,9 +3181,12 @@ final class GitHubSync {
                 if r.err == "Raw read deadline exceeded" || (readFailed && clock() >= readDeadline) {
                     readWarning = tr("Истёк срок чтения файлов синхронизации (60 с)", "Sync file read deadline exceeded (60 s)"); break
                 }
-                if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) { return }
+                if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) {
+                    readWarning = ui.lastError ?? tr("Некорректный ответ чтения файла синхронизации", "Invalid sync file response")
+                    continue
+                }
                 guard r.status == 200 else {
-                    recordError(tr("Некорректный ответ чтения файла синхронизации", "Invalid sync file response")); return
+                    readWarning = tr("Некорректный ответ чтения файла синхронизации", "Invalid sync file response"); continue
                 }
                 let data = r.data ?? Data()
                 total += data.count
@@ -3219,9 +3239,14 @@ final class GitHubSync {
         // The auth owner's publication fence has been released. A reader callback may
         // inspect UI/auth state without recursively acquiring that fence.
         onRead?(cache, readAt)
-        guard readWarning == nil else { return }
+        guard readWarning == nil || !contents.isEmpty else { return }
         validatingSession = (gid, token, validatedAt, cache, capturedAccess, pass)
-        outcome = (!readOnly && !deferWrite) ? writePublisher(passId: pass) : .success(cache)
+        if !readOnly && !deferWrite {
+            outcome = writePublisher(passId: pass)
+            if outcome.readable && readWarning != nil { outcome = .partial(cache) }
+        } else {
+            outcome = readWarning == nil ? .success(cache) : .partial(cache)
+        }
 
     }
 
@@ -7724,7 +7749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func scheduledAt(_ product: String) -> Double {
         let state = autoStates[product] ?? AutoPollState()
         let own = state.lastAttempt == 0 ? 0 : state.lastAttempt + (autoPollEnabled() ? state.interval : interval)
-        return product == "codex" ? max(own, c4NextCoordinationRead) : own
+        return product == "codex" && GitHubSync.shared.ui.phase == .on ? max(own, c4NextCoordinationRead) : own
     }
     func startTimer() {
         timer?.invalidate()
@@ -7816,6 +7841,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let views = displayedCardViews(local.0, local.1, now: Date(timeIntervalSince1970: now))
             manualProducts = remoteManualProviderProducts(views: views, localIds: readerLocalSnapshot.snapshot().ids,
                 enabled: Set(["claude", "codex"].filter { productEnabled($0) }))
+            if GitHubSync.shared.ui.phase != .on && productEnabled("codex") {
+                // Cached foreign cards cannot hide a still-local CLI login while GitHub is off.
+                manualProducts.insert("codex")
+            }
             if !(manualProducts.contains("codex") && (only == nil || only == "codex")) && (only == nil || views.contains(where: { $0.product == only && !$0.isLocal })) {
                 remoteManualRefresh?.request()
             }
@@ -7878,20 +7907,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startCodexPublisher(live: Bool, scheduled: Bool, now: Double) {
         guard live, productEnabled("codex") else { return }
-        if !scheduled, let previous = c4LastManualRead, now - previous < 30 {
+        let coordinating = GitHubSync.shared.ui.phase == .on
+        if coordinating && !scheduled, let previous = c4LastManualRead, now - previous < 30 {
             c4CodexManualPhase = .cooldown(Int(ceil(30 - (now - previous)))); return
         }
         var refresh = quotaState("codex")
         let currentId = scheduled ? readLocalAccountIds(products: ["codex"])["codex"] : nil
         let switched = currentId.map { c4MirroredLocalId != nil && c4MirroredLocalId != $0 } ?? false
-        if scheduled && (now < c4NextCoordinationRead || (!switched && now < scheduledAt("codex"))) { return }
+        if scheduled && ((coordinating && now < c4NextCoordinationRead) || (!switched && now < scheduledAt("codex"))) { return }
         let admission = refresh.admitCoordination(now: now)
         quotaStates["codex"] = refresh
         guard case .start = admission, let ticket = refresh.flight else { return }
         if !scheduled { c4LastManualRead = now; c4CodexManualStartedAt = Date(timeIntervalSince1970: now); c4CodexManualPhase = .reading }
         // A B2 skip leaves the attempt untouched. A separate reader cadence stops
         // an already-due Auto state from rescheduling a GET every 50 milliseconds.
-        c4NextCoordinationRead = now + 600
+        c4NextCoordinationRead = coordinating ? now + 600 : 0
         let fixedInterval = interval, automatic = autoPollEnabled()
         let mirror = autoStates["codex"] ?? AutoPollState(), mirrorId = c4MirroredLocalId
         c4PollQueue.async { [weak self] in
@@ -7938,7 +7968,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     guard productEnabled("codex"), self.quotaState("codex").flight == ticket,
                           self.quotaState("codex").generation == ticket.generation else { return }
                     let previous = self.last ?? (LimitData(present: false), LimitData(present: false))
-                    if result.apiFresh { c4CodexManualPhase = nil }
+                    if result.apiFresh {
+                        c4CodexManualPhase = nil
+                        if let plan = result.plan { UserDefaults.standard.set(plan, forKey: "codexPlan") }
+                    }
                     let selected = self.cacheQuotaCompletion("codex", response: result, previous: previous.1,
                         previousId: readerLocalSnapshot.snapshot().ids["codex"], readingId: localId)
                     self.render(previous.0, selected.data, sampleProducts: ["codex"], readingIds: selected.id.map { ["codex": $0] } ?? [:])
@@ -7954,11 +7987,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     c4CodexManualPhase = products.contains("codex") ? .checked(Date()) : allowedAt.map(RemoteManualPhase.pollAllowed) ?? .idle
                     self.panelCtrl.view.needsDisplay = true
                 }
-            }, fixedInterval: automatic ? nil : fixedInterval, canPollWithoutRead: {
-                guard GitHubSync.shared.ui.phase == .on,
-                      let gist = UserDefaults.standard.string(forKey: "syncGistId") else { return false }
-                return accountLabel(product: "codex", localId: localId, gistId: gist) != nil
-            })
+            }, fixedInterval: automatic ? nil : fixedInterval,
+               syncPhase: { GitHubSync.shared.ui.phase })
             let controller = C4TickController(state: state, myId: GitHubSync.shared.machineId, localId: localId, dependencies: dependencies)
             self.c4ActiveController = controller
             controller.tick(manual: !scheduled) { [weak self, weak controller] in
@@ -7968,7 +7998,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async {
                     var refresh = self.quotaState("codex")
                     _ = refresh.complete(ticket, retryAfter: poll?.serverRetryAt); self.quotaStates["codex"] = refresh
-                    self.c4NextCoordinationRead = Date().timeIntervalSince1970 + 600
+                    self.c4NextCoordinationRead = GitHubSync.shared.ui.phase == .on ? Date().timeIntervalSince1970 + 600 : 0
                     if !scheduled, case .reading? = c4CodexManualPhase { c4CodexManualPhase = .failed }
                     self.saveAutoStates()
                     if let last = self.last { self.render(last.0, last.1) }

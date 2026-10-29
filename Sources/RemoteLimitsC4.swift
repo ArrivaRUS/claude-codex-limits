@@ -246,7 +246,10 @@ func c4ManualPhase(_ phase: RemoteManualPhase?, startedAt: Date?, now: Date) -> 
 }
 
 enum SyncMode { case full, readOnly, writeOnly }
-enum SyncOutcome { case success(SyncRemoteCache), failed }
+enum SyncOutcome {
+    case success(SyncRemoteCache), partial(SyncRemoteCache), failed
+    var readable: Bool { if case .failed = self { return false }; return true }
+}
 
 struct C4TickState: Codable {
     var poll: AutoPollState = AutoPollState()
@@ -275,6 +278,7 @@ struct C4TickDependencies {
     var onDecision: ([String: Any], Date?) -> Void = { _, _ in }
     var fixedInterval: Double? = nil
     var canPollWithoutRead: () -> Bool = { true }
+    var syncPhase: () -> SyncPhase = { .on }
 }
 
 /// All methods and dependency callbacks use one caller-owned executor. Tests execute
@@ -286,6 +290,7 @@ final class C4TickController {
     private var flight: UUID?
     private var phase: UUID?
     private var manualReadAt: Date?
+    private var originalPoll: AutoPollState?
     var remoteRetry: [String: Double]? { state.remoteRetry }
     var tieWait: [Any]? { if let m = state.tieMachine, let t = state.tieNextAt { return [m, t] }; return nil }
     var publishFailures: Int { state.publishFailures }
@@ -323,6 +328,10 @@ final class C4TickController {
             state.poll.lastAttempt = now
             guard io.save(state) else { skip("state_unsaved"); finish(id, completion); return }
         }
+        originalPoll = state.poll
+        if io.syncPhase() != .on {
+            localPoll(id, manual: manual, coordinated: false, completion: completion); return
+        }
         if manual, let readAt = manualReadAt, io.clock().timeIntervalSince(readAt) < 30 {
             skip("not_due"); finish(id, completion); return
         }
@@ -330,10 +339,6 @@ final class C4TickController {
         let interval = manual && !state.poll.failed ? 900 : state.poll.interval
         let due = (state.poll.lastAttempt == 0 || now - state.poll.lastAttempt >= interval) && now >= (state.poll.serverRetryAt ?? 0)
         let previousFailures = state.publishFailures
-        if due {
-            state.publishFailures = min(3, max(0, state.publishFailures) + 1)
-            guard io.save(state) else { state.publishFailures = previousFailures; skip("state_unsaved"); finish(id, completion); return }
-        }
         let interruptedDay = (previousFailures >= 1 || state.pendingAttempt) && state.poll.lastAttempt > 0
             && now - state.poll.lastAttempt >= max(state.poll.interval, 86400)
         if due && io.canPollWithoutRead() && (previousFailures >= 3 || (previousFailures + 1 >= 3 && state.pendingAttempt) || interruptedDay) {
@@ -350,18 +355,24 @@ final class C4TickController {
                                completion: @escaping () -> Void) {
         phaseCall(io.read) { [weak self] outcome in
             guard let self = self, self.flight == id else { return }
+            guard self.io.syncPhase() == .on else {
+                self.localPoll(id, manual: manual, coordinated: false, completion: completion); return
+            }
             let cache: SyncRemoteCache
             switch outcome {
-            case .success(let value): cache = value
+            case .success(let value), .partial(let value): cache = value
             case .failed:
-                self.failedPublication(id, manual: manual, due: due, previousFailures: previousFailures,
-                                       reopened: true, announced: false, completion: completion); return
+                // GET failure has no announcement and consumes no PATCH failure budget.
+                self.localPoll(id, manual: manual, coordinated: true, eligible: due, completion: completion); return
             }
             let now = self.io.clock().timeIntervalSince1970
             let remote = c4CoordinationRemote(cache, localId: self.localId)
             let decision: [String: Any] = due ? self.decide(now: now, manual: manual, remote: remote) : ["action": "skip", "reason": "not_due"]
             let next = self.nextAt(now: now, manual: manual, remote: remote)
             self.io.onDecision(decision, Date(timeIntervalSince1970: next))
+            guard self.io.syncPhase() == .on else {
+                self.localPoll(id, manual: manual, coordinated: false, completion: completion); return
+            }
             if !due || decision["action"] as? String != "poll" {
                 self.state.publishFailures = previousFailures
                 guard self.io.save(self.state) else { self.skip("state_unsaved"); self.finish(id, completion); return }
@@ -383,10 +394,22 @@ final class C4TickController {
                 // Linux applies the same escape only AFTER this GET's decision.
                 self.poll(id, manual: manual, publishResult: true, completion: completion); return
             }
+            guard self.io.syncPhase() == .on else {
+                self.state.poll.lastAttempt = previous; self.state.pendingAttempt = false
+                self.localPoll(id, manual: manual, coordinated: false, completion: completion); return
+            }
+            // Journal only an announcement attempt, before its blocking PATCH.
+            self.state.publishFailures = min(3, max(0, previousFailures) + 1)
+            guard self.io.save(self.state) else { self.skip("state_unsaved"); self.finish(id, completion); return }
             self.phaseCall(self.io.writeOnly) { [weak self] write in
                 guard let self = self, self.flight == id else { return }
+                guard self.io.syncPhase() == .on else {
+                    self.state.poll.lastAttempt = previous; self.state.pendingAttempt = false
+                    self.state.publishFailures = previousFailures
+                    self.localPoll(id, manual: manual, coordinated: false, completion: completion); return
+                }
                 switch write {
-                case .success:
+                case .success, .partial:
                     self.state.publishFailures = 0
                     guard self.io.save(self.state) else { self.skip("state_unsaved"); self.finish(id, completion); return }
                     self.poll(id, manual: manual, publishResult: true, completion: completion)
@@ -441,11 +464,13 @@ final class C4TickController {
         } else { skip("publish_failed"); finish(id, completion) }
     }
     private func recoverPublication(_ id: UUID, completion: @escaping () -> Void) {
+        guard io.syncPhase() == .on else { finish(id, completion); return }
         // Exhausted failure series moves this request ahead of a potentially
         // hanging GET, but still attempts one read/result publication afterward.
         phaseCall(io.read) { [weak self] outcome in
             guard let self = self, self.flight == id else { return }
-            guard case .success = outcome else { self.skip("publish_failed"); self.finish(id, completion); return }
+            guard self.io.syncPhase() == .on else { self.finish(id, completion); return }
+            guard outcome.readable else { self.finish(id, completion); return }
             self.phaseCall(self.io.writeOnly) { [weak self] write in
                 guard let self = self, self.flight == id else { return }
                 if case .success = write {
@@ -457,10 +482,35 @@ final class C4TickController {
         }
     }
 
+    /// GET outage retains already accepted B2 retry; standalone macOS uses only its own B1.
+    private func localPoll(_ id: UUID, manual: Bool, coordinated: Bool, eligible: Bool = true,
+                           completion: @escaping () -> Void) {
+        let now = io.clock().timeIntervalSince1970
+        let interval = manual && !state.poll.failed ? 900 : state.poll.interval
+        let ownNext = max(state.poll.lastAttempt == 0 ? now : state.poll.lastAttempt + interval, state.poll.serverRetryAt ?? 0)
+        let ownEligible = eligible && now >= ownNext
+        let decision = coordinated && ownEligible ? decide(now: now, manual: manual, remote: []) : [:]
+        if !ownEligible || (coordinated && decision["action"] as? String != "poll") {
+            guard io.save(state) else { skip("state_unsaved"); finish(id, completion); return }
+            let reason = now < (state.poll.serverRetryAt ?? 0) ? "retry_after"
+                : !eligible || now < ownNext ? "not_due" : decision["reason"] as? String ?? "not_due"
+            skip(reason); finish(id, completion); return
+        }
+        state.pendingAttempt = true; state.attemptKind = manual ? "manual" : "auto"
+        poll(id, manual: manual, publishResult: false, completion: completion)
+    }
+    private func rejectIdentity(_ id: UUID, completion: () -> Void) {
+        // Persist the rollback marker before restoring; restart cannot retain B's attempt under A.
+        state.rollbackLastAttempt = originalPoll?.lastAttempt ?? state.poll.lastAttempt
+        guard io.save(state) else { skip("state_unsaved"); finish(id, completion); return }
+        if let previous = originalPoll { state.poll = previous }
+        state.rollbackLastAttempt = nil; state.pendingAttempt = false
+        if !io.save(state) { skip("state_unsaved") }
+        event("identity_changed", ["product": "codex"]); finish(id, completion)
+    }
     private func poll(_ id: UUID, manual: Bool, publishResult: Bool, recoverRead: Bool = false, completion: @escaping () -> Void) {
         if let identity = io.currentLocalId, identity() != localId {
-            state.pendingAttempt = false; state.status = "error"; _ = io.save(state)
-            event("identity_changed", ["product": "codex"]); finish(id, completion); return
+            rejectIdentity(id, completion: completion); return
         }
         // Record the actual provider start, too: a slow announcement must not
         // shorten the restart floor relative to the HTTP request.
@@ -468,9 +518,9 @@ final class C4TickController {
         guard io.save(state) else { skip("state_unsaved"); finish(id, completion); return }
         event("poll_attempt", ["product": "codex", "kind": manual ? "manual" : "auto", "attemptAt": state.poll.lastAttempt])
         let result = io.fetch()
-        if let identity = io.currentLocalId, identity() != localId {
-            state.pendingAttempt = false; state.status = "error"; _ = io.save(state)
-            event("identity_changed", ["product": "codex"]); finish(id, completion); return
+        guard result.localAccountId == localId,
+              io.currentLocalId.map({ $0() == localId }) ?? true else {
+            rejectIdentity(id, completion: completion); return
         }
         let now = io.clock().timeIntervalSince1970
         state.poll.observe(result, now: now); state.poll.serverRetryAt = result.serverRetryAt
@@ -485,6 +535,7 @@ final class C4TickController {
         guard io.save(state) else { skip("state_unsaved"); finish(id, completion); return }
         io.apply(result)
         event("poll_result", ["product": "codex", "httpStatus": result.httpStatus as Any? ?? NSNull(), "result": fresh ? "ok" : "failed"])
+        guard io.syncPhase() == .on else { finish(id, completion); return }
         guard publishResult else {
             if recoverRead { recoverPublication(id, completion: completion) } else { finish(id, completion) }
             return
@@ -528,13 +579,12 @@ func c4CacheQuotaCompletion(product: String, response: LimitData, previous: Limi
     let old = cache[product] as? [String: Any]
     let samePrevious = readingId != nil && previousId == readingId
     let sameCache = readingId != nil && old?["accountId"] as? String == readingId
-    let ownedResponse = response.apiFresh || (readingId != nil && response.localAccountId == readingId)
-    var accepted = ownedResponse ? response : LimitData(error: response.error, auth: response.auth)
-    accepted.serverRetryAt = response.serverRetryAt; accepted.expiredReason = response.expiredReason
+    let ownedResponse = readingId != nil && response.localAccountId == readingId
+    var accepted = ownedResponse ? response : LimitData(error: "identity_changed")
     if samePrevious { accepted = quotaSelectSnapshot(accepted, previous: previous) }
     if sameCache, let old = old { accepted = quotaSelectSnapshot(accepted, previous: dict2ld(old)) }
     let selected: (data: LimitData, id: String?) = (accepted, quotaHasReadings(accepted) ? readingId : nil)
-    if response.apiFresh, let id = readingId, selected.id == id {
+    if ownedResponse && response.apiFresh, let id = readingId, selected.id == id {
         var entry = ld2dict(selected.data); entry["accountId"] = id; cache[product] = entry
         if let data = try? JSONSerialization.data(withJSONObject: cache) { _ = c4AtomicWrite(data, path: path) }
     }

@@ -13,6 +13,7 @@ private typealias C4Expect = (Bool, String) -> Void
 private let C4_NOW = Date(timeIntervalSince1970: 1_791_800_000)
 private let C4_GIST = "fixturegist0000000000000000000001"
 private let C4_ID = "c0dex000-1111-4222-8333-444455556666"
+private let C4_OTHER_ID = "cccccccc-1111-4222-8333-444455556666"
 private let C4_MACHINE = "selftest-c4-mac"
 private let C4_VPS = "selftest-c4-vps"
 private let C4_API = "https://api.github.com"
@@ -28,7 +29,7 @@ private func c4Reply(_ status: Int, _ object: Any? = nil, headers: [String: Stri
 private func c4ISO(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
 private func c4Fresh(_ date: Date = C4_NOW) -> LimitData {
     var data = LimitData(); data.session = 42.5; data.weekly = 61; data.plan = "pro"
-    data.resetCredits = 2; data.asOf = date; data.apiFresh = true
+    data.resetCredits = 2; data.asOf = date; data.apiFresh = true; data.localAccountId = C4_ID
     data.sessionReset = date.addingTimeInterval(3600); data.weeklyReset = date.addingTimeInterval(86400)
     return data
 }
@@ -57,6 +58,14 @@ private func c4Auth(_ path: String, access: String, refresh: String = "synthetic
     c4Write(["tokens": ["access_token": access, "refresh_token": refresh, "account_id": id],
              "untouched": ["keep": "CLI-owned"]], path)
 }
+
+// Test-only factory: default events are swallowed, never sent to the real poll log.
+private func c4CredentialIO(authPath: String, now: @escaping () -> Date, policy: @escaping () -> String,
+                          http: @escaping (String, String, [String: String], Data?, Double, Bool) -> SyncHTTPResult,
+                          emit: @escaping ([String: Any]) -> Void = { _ in }) -> CodexCredentialIO {
+    CodexCredentialIO(authPath: authPath, now: now, policy: policy, http: http, emit: emit)
+}
+
 private func c4JWT(expiry: TimeInterval) -> String {
     let payload = c4JSON(["exp": expiry]).base64EncodedString().replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -135,10 +144,14 @@ private final class C4Harness {
     var saved = C4TickState(poll: AutoPollState())
     var codex = c4Fresh(C4_NOW.addingTimeInterval(-10000))
     var remote = c4Remote()
+    var extraFiles: [String: Any] = [:]
+    var providerResult: LimitData? = nil
+    var syncPhase: SyncPhase = .on
+    var readOutcomes: [SyncOutcome] = []
     var events: [[String: Any]] = []
     var timers: [() -> Void] = []
     var timerDurations: [TimeInterval] = []
-    var patchSavedAttempts: [Double] = [], providerSavedAttempts: [Double] = []
+    var patchSavedAttempts: [Double] = [], providerSavedAttempts: [Double] = [], providerPersistedAttempts: [Double] = []
     var decisions: [([String: Any], Date?)] = []
     var dropRead = false, failRead = false, failSave = false, failPatch = false
     var canPollWithoutRead = true
@@ -151,6 +164,7 @@ private final class C4Harness {
     var remoteHeartbeat: Date? = nil
     var usageInput = 1
     var mutateAtPatch: (() -> Void)? = nil, mutateAtProvider: (() -> Void)? = nil
+    var mutateAfterRead: (() -> Void)? = nil
     lazy var http = SelfTestHTTP { [unowned self] call in
         if call.url == C4_API + "/gists/" + C4_GIST, call.method == "GET" {
             self.ledger.add("GET")
@@ -169,7 +183,9 @@ private final class C4Harness {
                 "updated": c4ISO(self.now), "lastSeenAt": c4ISO(self.now), "days": [:], "accounts": [record], "unattributedDays": [:]]
             if self.omitHeartbeat { machine.removeValue(forKey: "lastSeenAt") }
             else if let heartbeat = self.remoteHeartbeat { machine["lastSeenAt"] = c4ISO(heartbeat) }
-            return c4Reply(200, c4Gist(["machine-\(self.peerId).json": ["content": String(decoding: c4JSON(machine), as: UTF8.self)]]))
+            var files = self.extraFiles
+            files["machine-\(self.peerId).json"] = ["content": String(decoding: c4JSON(machine), as: UTF8.self)]
+            return c4Reply(200, c4Gist(files))
         }
         if call.url == C4_API + "/gists/" + C4_GIST, call.method == "PATCH" {
             let body = c4Object(call.body)
@@ -182,7 +198,10 @@ private final class C4Harness {
             return c4Reply(status, [:])
         }
         if call.url == "https://chatgpt.com/backend-api/wham/usage" {
-            self.providerCalls += 1; self.providerSavedAttempts.append(self.saved.poll.lastAttempt); self.ledger.add("fetchCodex"); self.mutateAtProvider?()
+            self.providerCalls += 1; self.providerSavedAttempts.append(self.saved.poll.lastAttempt)
+            let persisted = FileManager.default.contents(atPath: self.root + "/tick-state.json").flatMap { try? JSONDecoder().decode(C4TickState.self, from: $0) }
+            self.providerPersistedAttempts.append(persisted?.poll.lastAttempt ?? -1)
+            self.ledger.add("fetchCodex"); self.mutateAtProvider?()
             return c4Reply(200, ["rate_limit": ["primary_window": ["used_percent": 42.5, "limit_window_seconds": 18000,
                 "reset_at": Int(self.now.timeIntervalSince1970 + 3600)]], "plan_type": "pro"])
         }
@@ -198,7 +217,8 @@ private final class C4Harness {
     lazy var controller = C4TickController(state: saved, myId: C4_MACHINE, localId: localId,
         dependencies: C4TickDependencies(clock: { [unowned self] in self.now }, read: { [unowned self] completion in
             if self.dropRead { self.ledger.add("READ_NO_COMPLETION"); return }
-            completion(self.sync.syncSynchronously(mode: .full, deferWrite: true))
+            let outcome = self.sync.syncSynchronously(mode: .full, deferWrite: true)
+            self.readOutcomes.append(outcome); self.mutateAfterRead?(); completion(outcome)
         }, writeOnly: { [unowned self] completion in
             completion(self.sync.syncSynchronously(mode: .writeOnly))
         }, save: { [unowned self] state in
@@ -210,7 +230,7 @@ private final class C4Harness {
             do { try data.write(to: URL(fileURLWithPath: self.root + "/tick-state.json"), options: .atomic); return true } catch { return false }
         }, fetch: { [unowned self] in
             _ = self.http.transport("https://chatgpt.com/backend-api/wham/usage", "GET", [:], nil, 15)
-            return c4Fresh(self.now)
+            return self.providerResult ?? c4Fresh(self.now)
         }, emit: { [unowned self] event in
             self.events.append(event); _ = appendPollLog([event], path: self.root + "/poll-log.jsonl")
         }, armTimeout: { [unowned self] delay, action in self.timerDurations.append(delay); self.timers.append(action) },
@@ -218,7 +238,8 @@ private final class C4Harness {
         retryableWriteFailure: { [unowned self] in self.retryable },
         currentLocalId: { [unowned self] in self.localId },
         onDecision: { [unowned self] decision, nextAt in self.decisions.append((decision, nextAt)) },
-        canPollWithoutRead: { [unowned self] in self.canPollWithoutRead }))
+        canPollWithoutRead: { [unowned self] in self.canPollWithoutRead },
+        syncPhase: { [unowned self] in self.syncPhase }))
     var days: [String: Any] {
         ["codex": ["2026-10-12": ["gpt-6-astra": ["input": usageInput, "output": 2, "cacheRead": 3, "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1]]]]
     }
@@ -283,20 +304,29 @@ private func c4C401(_ root: String, _ expect: C4Expect) {
 
 private func c4C402(_ root: String, _ expect: C4Expect) {
     let h = C4Harness(root + "/c402"), auth = C4FileStamp(root + "/c402/auth.json")
+    h.mutateAtPatch = {
+        if h.patches.count == 1 { h.now = h.now.addingTimeInterval(37) }
+    }
     h.tick()
+    let started = C4_NOW.addingTimeInterval(37)
     let io = h.ledger.names.filter { ["GET", "PATCH", "fetchCodex"].contains($0) }
     expect(io == ["GET", "PATCH", "fetchCodex", "PATCH"], "C4-02 one GET → PATCH attempt → provider → PATCH result")
     let firstPatchIndex = h.ledger.names.firstIndex(of: "PATCH") ?? -1
     let firstSaveIndex = h.ledger.names.firstIndex(of: "save") ?? Int.max
     expect(firstSaveIndex < firstPatchIndex, "C4-02 attempt saved durably before announcement")
-    expect(h.patchSavedAttempts.first == C4_NOW.timeIntervalSince1970 && h.providerSavedAttempts == [C4_NOW.timeIntervalSince1970],
-           "C4-02 actual reserved timestamp durable at PATCH1 and provider entry")
+    expect(h.patchSavedAttempts.first == C4_NOW.timeIntervalSince1970 && h.providerSavedAttempts == [started.timeIntervalSince1970],
+           "C4-02 slow PATCH preserves reserved time and durably renews actual provider start")
+    expect(h.providerPersistedAttempts == [started.timeIntervalSince1970],
+           "C4-02 provider-entry restart sees actual start already written to disk")
     let records = h.patches.first?["accounts"] as? [[String: Any]]
     expect(records?.first?["attemptAt"] as? String == c4ISO(C4_NOW), "C4-02 PATCH1 contains reserved attemptAt")
     let final = (h.patches.last?["accounts"] as? [[String: Any]])?.first
-    expect(final?["asOf"] as? String == c4ISO(C4_NOW) && final?["status"] as? String == "ok", "C4-02 PATCH2 contains provider result")
+    expect(final?["asOf"] as? String == c4ISO(started) && final?["status"] as? String == "ok", "C4-02 PATCH2 contains provider result")
     expect(h.providerCalls == 1 && h.applied == 1 && h.completionCalls == 1, "C4-02 one provider/apply/completion")
     expect(h.authStamp == auth && h.keychain.writes == 0 && h.keychain.deletes == 0, "C4-02 credentials untouched")
+    let restored = (FileManager.default.contents(atPath: h.root + "/tick-state.json")).flatMap { try? JSONDecoder().decode(C4TickState.self, from: $0) }
+    expect(restored?.poll.lastAttempt == started.timeIntervalSince1970,
+           "C4-02 restart restores actual start after 37s announcement delay")
 }
 
 private func c4C403(_ root: String, _ expect: C4Expect) {
@@ -310,11 +340,18 @@ private func c4C403(_ root: String, _ expect: C4Expect) {
             expect(h.timerDurations.first == 60, "C4-03 timeout is exactly60 injected seconds")
             h.timers.forEach { $0() }; h.timers.forEach { $0() }
         }
-        expect(h.providerCalls == 0 && !h.ledger.names.contains("fetchCodex"), "C4-03 \(failure): zero provider transport")
-        expect(h.controller.state.poll.lastAttempt == oldAttempt, "C4-03 \(failure): reservation rolled back")
+        let localFallback = failure == "read" || failure == "timeout"
+        expect(h.providerCalls == (localFallback ? 1 : 0), "C4-03 \(failure): GET failure uses immediate B1; PATCH/save failure skips")
+        expect(h.ledger.names.contains("fetchCodex") == localFallback, "C4-03 \(failure): provider ledger agrees with B1 outcome")
+        expect(h.controller.state.poll.lastAttempt == (localFallback ? h.now.timeIntervalSince1970 : oldAttempt), "C4-03 \(failure): only an actual provider start advances attempt")
         expect(h.authStamp == auth && h.cacheStamp == cache, "C4-03 \(failure): auth/cache sha+mtime+inode unchanged")
         expect(h.completionCalls == 1, "C4-03 \(failure): completion exactly once")
-        if failure != "save" { expect(h.skipped("publish_failed"), "C4-03 \(failure): O1 publish_failed reason") }
+        if failure == "patch" { expect(h.skipped("publish_failed"), "C4-03 PATCH failure uses O1 publish_failed reason") }
+        if localFallback {
+            expect(!h.skipped("publish_failed") && h.events.contains { $0["ev"] as? String == "poll_attempt" },
+                   "C4-03 \(failure): Linux outage journal has poll_attempt, not PATCH failure")
+            expect(h.controller.publishFailures == 0, "C4-03 \(failure): failed GET does not consume PATCH1 failure series")
+        }
         if failure == "read" || failure == "timeout" {
             expect(h.patches.isEmpty, "C4-03 \(failure): no PATCH without valid GET")
         }
@@ -393,7 +430,7 @@ private func c4C407(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect
         let path = root + "/c407-" + (policy.isEmpty ? "unset" : policy) + "/auth.json"
         c4Auth(path, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 - 1))
         let before = C4FileStamp(path), ledger = C4Ledger()
-        let io = CodexCredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
             ledger.add("HTTP"); return c4Reply(599)
         })
         let token = codexAccessToken(io: io)
@@ -407,7 +444,7 @@ private func c4C407(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect
         c4Auth(path, access: oldAccess)
         let before = C4FileStamp(path), newAccess = c4JWT(expiry: C4_NOW.timeIntervalSince1970 + 3600)
         var calls = 0, noRedirectFlags: [Bool] = []
-        let io = CodexCredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { url, method, _, _, _, noRedirects in
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { url, method, _, _, _, noRedirects in
             calls += 1; noRedirectFlags.append(noRedirects)
             expect(url == "https://auth.openai.com/oauth/token" && method == "POST", "C4-07 \(policy): official OAuth endpoint")
             return c4Reply(200, ["access_token": newAccess, "refresh_token": "replacement-refresh"])
@@ -422,7 +459,7 @@ private func c4C407(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect
         // A concurrent CLI rotation between POST and write must win, byte-for-byte.
         c4Auth(path, access: oldAccess)
         var cliStamp: C4FileStamp?
-        let racing = CodexCredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
+        let racing = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
             c4Auth(path, access: "CLI-new-access", refresh: "CLI-new-refresh")
             cliStamp = C4FileStamp(path)
             return c4Reply(200, ["access_token": newAccess, "refresh_token": "our-late-refresh"])
@@ -435,7 +472,7 @@ private func c4C407(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect
         c4Auth(path, access: oldAccess)
         let beforeSwitch = C4FileStamp(path)
         var activePolicy = policy
-        let switching = CodexCredentialIO(authPath: path, now: { C4_NOW }, policy: { activePolicy }, http: { _, _, _, _, _, _ in
+        let switching = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { activePolicy }, http: { _, _, _, _, _, _ in
             activePolicy = "never"; return c4Reply(200, ["access_token": newAccess, "refresh_token": "late-refresh"])
         })
         let switched = codexAccessToken(io: switching)
@@ -450,7 +487,7 @@ private func c4C407(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect
         return (.success, credential)
     }, permissionRead: { _ in (.failure(37), "") }, http: { _, method, _, _, _, _ in
         if method == "POST" { posts += 1 }; return c4Reply(599)
-    }, now: { C4_NOW })
+    }, now: { C4_NOW }, emit: { _ in })
     _ = fetchClaude(io: claudeIO)
     expect(helperWrites == 0 && posts == 0, "C4-07 never: Claude persist/helper and OAuth are not called")
     defaults.removeObject(forKey: "credentialWrite"); defaults.set(false, forKey: "monitor_claude")
@@ -538,7 +575,7 @@ private func c4C409(_ root: String, _ expect: C4Expect) {
     let readFailure = C4Harness(root + "/c409-read-failure"); readFailure.failRead = true; readFailure.tick()
     expect(readFailure.patches.isEmpty && readFailure.journalEvents.filter { $0["ev"] as? String == "publish" }.isEmpty,
            "C4-09 failed GET produces no fictitious PATCH publication event")
-    expect(readFailure.skipped("publish_failed"), "C4-09 failed GET retains publish_failed skip reason")
+    expect(readFailure.providerCalls == 1 && !readFailure.skipped("publish_failed"), "C4-09 failed GET uses B1 poll events without PATCH failure reason")
 }
 
 private func c4C410(_ root: String, _ expect: @escaping C4Expect) {
@@ -546,7 +583,7 @@ private func c4C410(_ root: String, _ expect: @escaping C4Expect) {
         let path = root + "/c410-" + endpoint + "/auth.json"
         c4Auth(path, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 + (endpoint == "usage" ? 3600 : -1)))
         let before = C4FileStamp(path), ledger = C4Ledger()
-        let io = CodexCredentialIO(authPath: path, now: { C4_NOW }, policy: { "legacy" }, http: { url, method, _, _, _, noRedirects in
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { "legacy" }, http: { url, method, _, _, _, noRedirects in
             ledger.add(method + " " + url)
             if !noRedirects { ledger.add("REDIRECT https://foreign.fixture.invalid") }
             expect(noRedirects, "C4-10 \(endpoint): noRedirects true")
@@ -626,6 +663,8 @@ func runRemoteLimitsC4SelfTests(defaults: MemorySelfTestDefaults, root: String) 
     c4Fingerprints(testRoot, expect); c4PersistedRetry(testRoot, expect); c4ExhaustedPublicationBudget(testRoot, expect)
     c4NonDueTie(testRoot, expect); c4IntervalParsing(expect); c4CoordinationHeartbeat(testRoot, expect)
     c4NoLabelFallback(testRoot, expect); c4CoordinationSchedule(expect); c4ManualPhaseExpiry(expect)
+    c4C412(testRoot, expect); c4C413(testRoot, expect); c4C414(testRoot, expect)
+    c4C415(testRoot, defaults, expect); c4C416(testRoot, expect)
     print(failures == 0 ? "OK C4 remote-limits: all \(checks) checks passed" : "FAIL C4 remote-limits: \(failures) of \(checks) checks failed")
     return failures
 }
@@ -659,8 +698,9 @@ private func c4ReadFailures(_ root: String, _ expect: C4Expect) {
     let read = C4Harness(root + "/c403-read-series"); read.failRead = true
     for i in 1...3 {
         read.tick()
-        expect(read.providerCalls == (i == 3 ? 1 : 0), "C4-03 failed GET series tick\(i): bounded B1 fallback")
-        read.now = read.now.addingTimeInterval(600)
+        expect(read.providerCalls == i, "C4-03 failed GET due tick\(i): immediate B1 every own interval")
+        expect(read.controller.publishFailures == 0, "C4-03 failed GET tick\(i): PATCH series unchanged")
+        read.now = read.now.addingTimeInterval(900)
     }
 }
 
@@ -727,6 +767,7 @@ private func c4ExhaustedPublicationBudget(_ root: String, _ expect: C4Expect) {
         expect(provider < read, "C4-03 \(label): provider precedes read without completion")
         h.timers.forEach { $0() }
         expect(h.providerCalls == 1 && h.completionCalls == 1, "C4-03 \(label): read timeout after B1 fallback cannot duplicate provider")
+        expect(!h.skipped("publish_failed"), "C4-03 \(label): recovery GET timeout is not a PATCH1 failure")
     }
 }
 
@@ -771,22 +812,18 @@ private func c4CoordinationHeartbeat(_ root: String, _ expect: C4Expect) {
     }
 }
 
-// A bounded outage fallback needs a previously known gist and a valid local label.
+// R6: a missing cached gist cannot block macOS's own local schedule.
 private func c4NoLabelFallback(_ root: String, _ expect: C4Expect) {
     let h = C4Harness(root + "/c403-no-label-fallback")
     h.failRead = true; h.canPollWithoutRead = false
-    let auth = h.authStamp, cache = h.cacheStamp, lastAttempt = h.saved.poll.lastAttempt
-    for tick in 1...3 {
-        h.tick()
-        expect(h.providerCalls == 0 && !h.ledger.names.contains("fetchCodex"),
-               "C4-03 no cached gist/label tick\(tick): publication failure budget cannot authorize provider")
-        expect(h.controller.state.poll.lastAttempt == lastAttempt && h.authStamp == auth && h.cacheStamp == cache,
-               "C4-03 no cached gist/label tick\(tick): attempt and files unchanged")
-        h.now = h.now.addingTimeInterval(600)
-    }
-    expect(h.skipped("no_label") || h.skipped("no_github"), "C4-03 no cached gist/label: explicit no_label/no_github skip")
-    expect(h.patches.isEmpty && h.journalEvents.filter { $0["ev"] as? String == "publish" }.isEmpty,
-           "C4-03 no cached gist/label: zero PATCH/publication events")
+    let auth = h.authStamp, cache = h.cacheStamp
+    h.tick()
+    expect(h.providerCalls == 1 && h.controller.state.poll.lastAttempt == C4_NOW.timeIntervalSince1970,
+           "C4-03 no cached gist: failed GET still polls own Codex on B1")
+    expect(h.authStamp == auth && h.cacheStamp == cache && h.patches.isEmpty,
+           "C4-03 no cached gist: no credential/cache mutation or publication")
+    expect(h.controller.publishFailures == 0 && !h.skipped("publish_failed"),
+           "C4-03 no cached gist: failed read is not a failed announcement")
 }
 
 // A remembered provider deadline may extend, but never replace, the next B2 read tick.
@@ -831,4 +868,217 @@ private func c4ManualPhaseExpiry(_ expect: C4Expect) {
     if case .idle? = c4ManualPhase(.idle, startedAt: nil, now: C4_NOW) {
         expect(true, "C4-06 idle phase preserved")
     } else { expect(false, "C4-06 idle phase preserved") }
+}
+
+// R1 / T29: a stable current identity cannot make a result from other credentials mine.
+private func c4C412(_ root: String, _ expect: @escaping C4Expect) {
+    for kind in ["success", "429", "missing-success-id"] {
+        let h = C4Harness(root + "/c412-" + kind)
+        let oldAttempt = h.saved.poll.lastAttempt, oldInterval = h.saved.poll.interval
+        let oldSnapshot = c4JSON(ld2dict(h.codex))
+        h.saved.snapshot = oldSnapshot; h.saved.status = "ok"
+        var result = kind == "429" ? LimitData(error: "HTTP 429") : c4Fresh()
+        result.localAccountId = kind == "missing-success-id" ? nil : C4_OTHER_ID
+        if kind == "429" { result.httpStatus = 429; result.failureKind = "http"; result.serverRetryAt = C4_NOW.timeIntervalSince1970 + 3600 }
+        h.providerResult = result
+        let auth = h.authStamp, cache = h.cacheStamp
+        h.tick()
+        expect(h.localId == C4_ID && h.providerCalls == 1, "C4-12 \(kind): current input remains A while result carries B/unknown")
+        expect(h.applied == 0 && h.controller.state.snapshot == oldSnapshot,
+               "C4-12 \(kind): foreign result cannot replace A's snapshot/apply")
+        expect(h.controller.state.poll.serverRetryAt == nil && h.controller.state.poll.interval == oldInterval,
+               "C4-12 \(kind): foreign retry/backoff cannot contaminate A")
+        expect(h.controller.state.poll.lastAttempt == oldAttempt && !h.controller.state.pendingAttempt,
+               "C4-12 \(kind): superseded reservation rolls back")
+        expect(h.events.contains { $0["ev"] as? String == "identity_changed" }, "C4-12 \(kind): existing O1 identity_changed event")
+        expect(h.patches.count == 1 && h.authStamp == auth && h.cacheStamp == cache,
+               "C4-12 \(kind): no result PATCH or file mutation after foreign result")
+        let path = h.root + "/fenced-cache.json"
+        _ = c4CacheQuotaCompletion(product: "codex", response: h.codex, previous: LimitData(present: false),
+            previousId: nil, readingId: C4_ID, path: path)
+        let before = C4FileStamp(path)
+        let selected = c4CacheQuotaCompletion(product: "codex", response: result, previous: h.codex,
+            previousId: C4_ID, readingId: C4_ID, path: path)
+        expect(C4FileStamp(path) == before && !selected.data.apiFresh && selected.data.serverRetryAt == nil,
+               "C4-12 \(kind): production cache helper also rejects foreign fresh/retry fields")
+    }
+    // The account attached to every HTTP failure comes from the credentials used,
+    // even if another actor changes auth.json back to A during the request.
+    for status in [200, 401, 429, 302] {
+        let path = root + "/c412-http-\(status)/auth.json"
+        c4Auth(path, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 + 3600), id: C4_OTHER_ID)
+        var calls = 0
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { "never" }, http: { _, _, headers, _, _, noRedirects in
+            calls += 1
+            expect(headers["chatgpt-account-id"] == C4_OTHER_ID && noRedirects,
+                   "C4-12 HTTP\(status): request uses B credentials and no redirects")
+            c4Auth(path, access: "CLI-restored-A", id: C4_ID)
+            if status == 200 { return c4Reply(200, ["rate_limit": ["primary_window": ["used_percent": 42.5, "limit_window_seconds": 18000, "reset_at": 1791803600]]]) }
+            return c4Reply(status, nil, headers: ["Retry-After": "3600", "Location": "https://foreign.fixture.invalid/"])
+        })
+        let result = codexUsageLive(io: io)
+        expect(calls == 1 && result.localAccountId == C4_OTHER_ID,
+               "C4-12 HTTP\(status): response identity remains credential B after CLI returns to A")
+    }
+    let tokenPath = root + "/c412-oauth-failure/auth.json"
+    c4Auth(tokenPath, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 - 1), id: C4_OTHER_ID)
+    let tokenIO = c4CredentialIO(authPath: tokenPath, now: { C4_NOW }, policy: { "guarded" }, http: { _, _, _, _, _, _ in c4Reply(429, nil, headers: ["Retry-After": "3600"]) })
+    let failedToken = codexAccessToken(io: tokenIO)
+    expect(failedToken.failure?.localAccountId == C4_OTHER_ID && failedToken.failure?.serverRetryAt == C4_NOW.timeIntervalSince1970 + 3600,
+           "C4-12 OAuth failure retains credential account for retry fencing")
+}
+
+// R2: one refused file cannot erase successfully read coordination records.
+private func c4C413(_ root: String, _ expect: C4Expect) {
+    let h = C4Harness(root + "/c413-partial")
+    h.remote = c4Remote(retry: C4_NOW.addingTimeInterval(3600), status: "rate_limited")
+    h.extraFiles = ["machine-z-refused.json": ["truncated": true, "raw_url": "https://foreign.fixture.invalid/fixture.json"]]
+    let auth = h.authStamp, cache = h.cacheStamp
+    for tick in 1...3 {
+        h.tick()
+        if let result = h.readOutcomes.last, case .partial(let merged) = result {
+            expect(merged.accounts?.contains { $0.machineId == C4_VPS } == true, "C4-13 tick\(tick): partial outcome includes valid VPS account")
+        } else { expect(false, "C4-13 tick\(tick): refused raw produces partial outcome") }
+        expect(h.providerCalls == 0 && h.patches.isEmpty, "C4-13 tick\(tick): partial VPS retry suppresses provider and PATCH")
+        expect(h.controller.remoteRetry?["until"] == C4_NOW.timeIntervalSince1970 + 3600 && h.controller.state.poll.serverRetryAt == nil,
+               "C4-13 tick\(tick): partial read preserves separate foreign retry")
+        expect(h.controller.publishFailures == 0 && h.sync.ui.lastError != nil,
+               "C4-13 tick\(tick): visible partial warning is not a PATCH failure")
+        expect(h.authStamp == auth && h.cacheStamp == cache && !h.http.calls.contains { $0.url.contains("foreign.fixture.invalid") },
+               "C4-13 tick\(tick): refused raw never requested; credential/cache stamps stable")
+        h.now = h.now.addingTimeInterval(600)
+    }
+}
+
+// R3: sync availability chooses transport, never disables the local provider budget.
+private func c4C414(_ root: String, _ expect: C4Expect) {
+    let phases: [(String, SyncPhase)] = [("off", .off), ("revoked", .revoked), ("awaitingCode", .awaitingCode)]
+    for (name, phase) in phases {
+        for manual in [false, true] {
+            let h = C4Harness(root + "/c414-\(name)-\(manual)")
+            h.syncPhase = phase
+            h.saved.remoteRetry = ["until": C4_NOW.timeIntervalSince1970 + 3600, "firstSeenAt": C4_NOW.timeIntervalSince1970]
+            let auth = h.authStamp, cache = h.cacheStamp
+            h.tick(manual: manual)
+            expect(h.providerCalls == 1 && h.applied == 1, "C4-14 \(name)/\(manual): local Codex keeps B1 polling")
+            expect(h.ledger.count("GET") == 0 && h.patches.isEmpty && h.decisions.isEmpty,
+                   "C4-14 \(name)/\(manual): no GitHub/coordinator/publication")
+            expect(h.authStamp == auth && h.cacheStamp == cache, "C4-14 \(name)/\(manual): synthetic auth/cache unchanged")
+        }
+    }
+    for age in [899.0, 900] {
+        let h = C4Harness(root + "/c414-local-floor-\(Int(age))")
+        h.syncPhase = .off; h.saved.poll.lastAttempt = C4_NOW.timeIntervalSince1970 - age
+        h.tick(manual: true)
+        expect(h.providerCalls == (age < 900 ? 0 : 1) && h.ledger.count("GET") == 0,
+               "C4-14 local manual age\(Int(age)): own900s floor survives without sync")
+    }
+    let own = C4Harness(root + "/c414-own-retry"); own.syncPhase = .off; own.saved.poll.serverRetryAt = C4_NOW.timeIntervalSince1970 + 3600
+    own.tick(manual: true)
+    expect(own.providerCalls == 0 && own.ledger.count("GET") == 0, "C4-14 local manual still respects own Retry-After")
+    let on = C4Harness(root + "/c414-on")
+    on.remote = c4Remote(retry: C4_NOW.addingTimeInterval(3600), status: "rate_limited"); on.tick()
+    expect(on.providerCalls == 0 && on.ledger.count("GET") == 1 && on.controller.remoteRetry != nil,
+           "C4-14 on: existing shared B2 still applies")
+    for point in ["read", "attempt", "provider"] {
+        let h = C4Harness(root + "/c414-transition-" + point)
+        if point == "read" { h.mutateAfterRead = { h.syncPhase = .off } }
+        if point == "attempt" { h.mutateAtPatch = { h.syncPhase = .off } }
+        if point == "provider" { h.mutateAtProvider = { h.syncPhase = .off } }
+        h.tick()
+        expect(h.providerCalls == 1 && h.applied == 1 && h.completionCalls == 1,
+               "C4-14 on→off at \(point): no lost or duplicated local provider")
+        expect(h.patches.count == (point == "read" ? 0 : 1),
+               "C4-14 on→off at \(point): no publication after sync disabled")
+    }
+}
+
+// R4: log credential writes only after an actual guarded/legacy write succeeds.
+private func c4C415(_ root: String, _ defaults: MemorySelfTestDefaults, _ expect: @escaping C4Expect) {
+    let path = root + "/c415/auth.json", log = root + "/c415/poll-log.jsonl"
+    var events: [[String: Any]] = []
+    let emit: ([String: Any]) -> Void = { event in events.append(event); _ = appendPollLog([event], path: log) }
+    for policy in ["guarded", "legacy", "never"] {
+        c4Auth(path, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 - 1))
+        let previous = events.count
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
+            c4Reply(200, ["access_token": c4JWT(expiry: C4_NOW.timeIntervalSince1970 + 3600), "refresh_token": "fixture-renewed"])
+        }, emit: emit)
+        _ = codexAccessToken(io: io)
+        expect(events.count - previous == (policy == "never" ? 0 : 1), "C4-15 Codex \(policy): token_refresh iff credentials written")
+    }
+    for failure in ["superseded", "policy-changed"] {
+        c4Auth(path, access: c4JWT(expiry: C4_NOW.timeIntervalSince1970 - 1))
+        let previous = events.count
+        var policy = "guarded", cliStamp: C4FileStamp?
+        let io = c4CredentialIO(authPath: path, now: { C4_NOW }, policy: { policy }, http: { _, _, _, _, _, _ in
+            if failure == "superseded" { c4Auth(path, access: "CLI-new-access", refresh: "CLI-new-refresh"); cliStamp = C4FileStamp(path) }
+            else { policy = "never" }
+            return c4Reply(200, ["access_token": c4JWT(expiry: C4_NOW.timeIntervalSince1970 + 3600), "refresh_token": "fixture-renewed"])
+        }, emit: emit)
+        let token = codexAccessToken(io: io)
+        expect(token.credential == nil && events.count == previous,
+               "C4-15 Codex \(failure): rejected credential write emits no token_refresh")
+        if let stamp = cliStamp { expect(C4FileStamp(path) == stamp, "C4-15 superseded CLI write stays intact") }
+    }
+    defaults.set(true, forKey: "monitor_claude")
+    for policy in ["guarded", "legacy", "never"] {
+        var current = String(decoding: c4JSON(["claudeAiOauth": ["accessToken": "fixture-old-access", "refreshToken": "fixture-old-refresh", "expiresAt": Int((C4_NOW.timeIntervalSince1970 - 3600) * 1000)]]), as: UTF8.self)
+        let previous = events.count
+        let io = ClaudeQuotaIO(keychain: { operation, input in
+            if operation == "update", let input = input, let bytes = input.data(using: .utf8), let update = try? JSONDecoder().decode(ClaudeQuotaUpdate.self, from: bytes) {
+                current = String(decoding: update.replacement, as: UTF8.self)
+            }
+            return (.success, current)
+        }, permissionRead: { _ in (.failure(37), "") }, http: { url, _, _, _, _, _ in
+            if url.hasSuffix("/oauth/token") { return c4Reply(200, ["access_token": "fixture-new-access", "refresh_token": "fixture-new-refresh", "expires_in": 3600]) }
+            return c4Reply(200, ["five_hour": ["utilization": 12]])
+        }, now: { C4_NOW }, credentialWrite: { policy }, emit: emit)
+        _ = fetchClaude(io: io)
+        expect(events.count - previous == (policy == "never" ? 0 : 1), "C4-15 Claude \(policy): token_refresh iff helper write succeeds")
+    }
+    defaults.set(false, forKey: "monitor_claude")
+    for event in events {
+        expect(event["ev"] as? String == "token_refresh" && event["credentialWrite"] as? Int == 1 && event["ts"] as? Double == C4_NOW.timeIntervalSince1970,
+               "C4-15 O1 event name, credentialWrite=1 and injected timestamp")
+        expect(["codex", "claude"].contains(event["product"] as? String ?? "") && event["policy"] as? String == "guarded",
+               "C4-15 Linux O1 policy enum: legacy is the guarded opt-in alias")
+    }
+    let bytes = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+    expect(!bytes.contains("fixture-old") && !bytes.contains("fixture-new") && !bytes.contains(C4_ID), "C4-15 private event contains no token/account values")
+}
+
+// R6: a read failure cannot consume the PATCH1 failure budget or skip an eligible own tick.
+private func c4C416(_ root: String, _ expect: C4Expect) {
+    for kind in ["GET", "timeout"] {
+        let h = C4Harness(root + "/c416-" + kind)
+        h.failRead = kind == "GET"; h.dropRead = kind == "timeout"
+        h.saved.publishFailures = 1
+        h.tick()
+        if kind == "timeout" { h.now = h.now.addingTimeInterval(60); h.timers.forEach { $0() } }
+        expect(h.providerCalls == 1 && h.patches.isEmpty && h.applied == 1,
+               "C4-16 \(kind): first failed read immediately uses B1 with no announcement")
+        expect(h.controller.publishFailures == 1 && !h.skipped("publish_failed"),
+               "C4-16 \(kind): existing PATCH1 failure count preserved; no false publish_failed")
+        expect(h.events.contains { $0["ev"] as? String == "poll_attempt" } && h.events.contains { $0["ev"] as? String == "poll_result" },
+               "C4-16 \(kind): Linux O1 successful outage poll has attempt/result")
+    }
+    let retry = C4Harness(root + "/c416-retry"); retry.failRead = true; retry.saved.poll.serverRetryAt = C4_NOW.timeIntervalSince1970 + 3600
+    retry.tick()
+    expect(retry.providerCalls == 0 && retry.skipped("retry_after") && retry.patches.isEmpty,
+           "C4-16 failed GET respects own retry and uses Linux retry_after reason")
+    let remembered = C4Harness(root + "/c416-remembered-retry"); remembered.failRead = true
+    remembered.saved.remoteRetry = ["until": C4_NOW.timeIntervalSince1970 + 3600, "firstSeenAt": C4_NOW.timeIntervalSince1970 - 600]
+    remembered.tick()
+    expect(remembered.providerCalls == 0 && remembered.skipped("retry_after") && remembered.patches.isEmpty,
+           "C4-16 failed GET still honours previously accepted foreign retry")
+    expect(remembered.controller.remoteRetry?["firstSeenAt"] == C4_NOW.timeIntervalSince1970 - 600 && remembered.controller.state.poll.serverRetryAt == nil,
+           "C4-16 failed GET keeps remembered foreign retry separate and does not rearm its cap")
+    let notDue = C4Harness(root + "/c416-not-due"); notDue.failRead = true; notDue.saved.poll.lastAttempt = C4_NOW.timeIntervalSince1970 - 899
+    notDue.saved.tieMachine = C4_VPS; notDue.saved.tieNextAt = C4_NOW.timeIntervalSince1970 + 1
+    notDue.tick(manual: true)
+    expect(notDue.providerCalls == 0 && notDue.skipped("not_due") && notDue.patches.isEmpty,
+           "C4-16 failed GET before own floor uses Linux not_due reason")
+    expect(notDue.controller.state.tieMachine == C4_VPS && notDue.controller.state.tieNextAt == C4_NOW.timeIntervalSince1970 + 1,
+           "C4-16 non-due failed GET cannot clear or consume remembered tie")
 }
