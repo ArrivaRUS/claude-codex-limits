@@ -145,6 +145,8 @@ private final class C4Harness {
     var codex = c4Fresh(C4_NOW.addingTimeInterval(-10000))
     var remote = c4Remote()
     var extraFiles: [String: Any] = [:]
+    var rawReplies: [String: SyncHTTPResult] = [:]
+    var includePeerFile = true
     var providerResult: LimitData? = nil
     var syncPhase: SyncPhase = .on
     var readOutcomes: [SyncOutcome] = []
@@ -184,8 +186,12 @@ private final class C4Harness {
             if self.omitHeartbeat { machine.removeValue(forKey: "lastSeenAt") }
             else if let heartbeat = self.remoteHeartbeat { machine["lastSeenAt"] = c4ISO(heartbeat) }
             var files = self.extraFiles
-            files["machine-\(self.peerId).json"] = ["content": String(decoding: c4JSON(machine), as: UTF8.self)]
+            if self.includePeerFile { files["machine-\(self.peerId).json"] = ["content": String(decoding: c4JSON(machine), as: UTF8.self)] }
             return c4Reply(200, c4Gist(files))
+        }
+        if let reply = self.rawReplies[call.url] {
+            self.ledger.add("GET raw_url")
+            return reply
         }
         if call.url == C4_API + "/gists/" + C4_GIST, call.method == "PATCH" {
             let body = c4Object(call.body)
@@ -948,6 +954,78 @@ private func c4C413(_ root: String, _ expect: C4Expect) {
                "C4-13 tick\(tick): refused raw never requested; credential/cache stamps stable")
         h.now = h.now.addingTimeInterval(600)
     }
+
+    // Counter-control for M5: transport failure is not a file-level refusal.
+    // Valid inline VPS data is deliberately read first, but must not replace the
+    // last durable or visible cache if an allowed raw request fails afterward.
+    for failure in ["http500", "network0", "http200-error"] {
+        let f = C4Harness(root + "/c413-transport-" + failure)
+        f.remote = c4Remote(retry: C4_NOW.addingTimeInterval(3600), status: "rate_limited")
+        let raw = "https://gist.githubusercontent.com/fixture/c4/raw/machine-z-failed.json"
+        f.extraFiles = ["machine-z-failed.json": ["truncated": true, "raw_url": raw]]
+        switch failure {
+        case "http500": f.rawReplies[raw] = c4Reply(500)
+        case "http200-error": f.rawReplies[raw] = (200, Data("{}".utf8), "fixture transport failure", [:])
+        default: f.rawReplies[raw] = (0, nil, "fixture transport failure", [:])
+        }
+        let oldOK = C4_NOW.addingTimeInterval(-7200)
+        var prior = c4Remote(now: oldOK)
+        prior.machines = [SyncCachedMachine(id: "old-cache-peer", name: "old", os: "fixture", updated: oldOK)]
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let oldBytes = try? encoder.encode(prior) else { expect(false, "C4-13 seed prior cache encodes"); continue }
+        let path = f.root + "/sync-remote.json"
+        do { try oldBytes.write(to: URL(fileURLWithPath: path), options: .atomic) }
+        catch { expect(false, "C4-13 seed prior cache writes"); continue }
+        f.defaults.set(oldOK, forKey: "syncLastOkAt")
+        f.sync.setRemoteForPreview(prior)
+        let diskBefore = C4FileStamp(path)
+        let memoryBefore = try? encoder.encode(f.sync.remoteSnapshot())
+        let authBefore = f.authStamp, cacheBefore = f.cacheStamp
+        let result = f.sync.syncSynchronously(mode: .full, deferWrite: true)
+        if case .failed = result { expect(true, "C4-13 \(failure): ordinary raw transport failure aborts the read") }
+        else { expect(false, "C4-13 \(failure): ordinary raw transport failure must not become partial") }
+        expect(C4FileStamp(path) == diskBefore && memoryBefore != nil && (try? encoder.encode(f.sync.remoteSnapshot())) == memoryBefore,
+               "C4-13 \(failure): failed raw leaves durable and in-memory cache exactly unchanged")
+        expect(f.defaults.object(forKey: "syncLastOkAt") as? Date == oldOK && f.sync.ui.lastSync == oldOK,
+               "C4-13 \(failure): failed raw does not advance last-success time")
+        expect(f.sync.ui.lastError?.contains("GET raw_url") == true,
+               "C4-13 \(failure): visible error preserves GET raw_url origin")
+        expect(f.http.calls.count == 2 && f.http.calls.allSatisfy { $0.method == "GET" && ($0.url == C4_API + "/gists/" + C4_GIST || $0.url == raw) },
+               "C4-13 \(failure): one gist GET and one scripted raw GET, no /user or PATCH")
+        expect(f.providerCalls == 0 && f.patches.isEmpty && f.keychain.writes == 0 && f.keychain.deletes == 0 && f.authStamp == authBefore && f.cacheStamp == cacheBefore,
+               "C4-13 \(failure): no provider or credential/cache side effects")
+        if let rawCall = f.http.calls.first(where: { $0.url == raw }) {
+            expect(!rawCall.headers.keys.contains { ["authorization", "cookie", "proxy-authorization"].contains($0.lowercased()) },
+                   "C4-13 \(failure): allowed raw transport carries no authentication")
+        }
+    }
+
+    // A successful raw HTTP response with unreadable content is file-local,
+    // including when no other peer file survives: the committed empty read is partial.
+    let unreadable = C4Harness(root + "/c413-unreadable-only")
+    let raw = "https://gist.githubusercontent.com/fixture/c4/raw/machine-unreadable.json"
+    unreadable.includePeerFile = false
+    unreadable.extraFiles = ["machine-unreadable.json": ["truncated": true, "raw_url": raw]]
+    unreadable.rawReplies[raw] = (200, Data([0xff]), nil, [:])
+    let oldOK = C4_NOW.addingTimeInterval(-7200)
+    var prior = SyncRemoteCache()
+    prior.machines = [SyncCachedMachine(id: "old-peer", name: "old", os: "fixture", updated: oldOK)]
+    let path = unreadable.root + "/sync-remote.json"
+    guard let bytes = try? JSONEncoder().encode(prior) else { expect(false, "C4-13 unreadable-only seed encodes"); return }
+    do { try bytes.write(to: URL(fileURLWithPath: path), options: .atomic) }
+    catch { expect(false, "C4-13 unreadable-only seed writes"); return }
+    unreadable.defaults.set(oldOK, forKey: "syncLastOkAt"); unreadable.sync.setRemoteForPreview(prior)
+    let before = C4FileStamp(path)
+    let result = unreadable.sync.syncSynchronously(mode: .full, deferWrite: true)
+    if case .partial(let cache) = result {
+        expect(cache.machines.isEmpty, "C4-13 unreadable-only successful HTTP yields an empty partial read")
+    } else { expect(false, "C4-13 unreadable-only must not report failed after cache publication") }
+    expect(C4FileStamp(path) != before && unreadable.sync.remoteSnapshot().machines.isEmpty,
+           "C4-13 unreadable-only partial commits matching disk and memory caches")
+    expect(unreadable.defaults.object(forKey: "syncLastOkAt") as? Date == C4_NOW && unreadable.sync.ui.lastSync == C4_NOW && unreadable.sync.ui.lastError != nil,
+           "C4-13 unreadable-only partial advances success time and keeps the visible warning")
+    expect(unreadable.providerCalls == 0 && unreadable.patches.isEmpty && unreadable.http.calls.count == 2,
+           "C4-13 unreadable-only read contacts only the scripted gist/raw transport")
 }
 
 // R3: sync availability chooses transport, never disables the local provider budget.

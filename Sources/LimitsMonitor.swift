@@ -3153,7 +3153,7 @@ final class GitHubSync {
             var countedRawBytes = false
             if (f["truncated"] as? Bool) == true || (content == nil && f["raw_url"] != nil) {
                 guard let raw = f["raw_url"] as? String else {
-                    readWarning = tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url"); continue
+                    recordError(tr("Нет raw_url у усечённого файла", "Truncated file has no raw_url")); return
                 }
                 let key = SHA256.hash(data: Data(raw.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
                 if rejected[key] != nil {
@@ -3181,12 +3181,14 @@ final class GitHubSync {
                 if r.err == "Raw read deadline exceeded" || (readFailed && clock() >= readDeadline) {
                     readWarning = tr("Истёк срок чтения файлов синхронизации (60 с)", "Sync file read deadline exceeded (60 s)"); break
                 }
-                if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) {
-                    readWarning = ui.lastError ?? tr("Некорректный ответ чтения файла синхронизации", "Invalid sync file response")
-                    continue
+                // HTTP/network failures invalidate the whole read. File-level refusal,
+                // limits and the shared deadline have already been handled above.
+                if handle(r.status, headers: r.headers, request: "GET raw_url", token: nil) { return }
+                if r.err != nil {
+                    _ = handle(0, request: "GET raw_url", token: nil); return
                 }
                 guard r.status == 200 else {
-                    readWarning = tr("Некорректный ответ чтения файла синхронизации", "Invalid sync file response"); continue
+                    recordError(tr("GET raw_url: некорректный ответ чтения файла синхронизации", "GET raw_url: invalid sync file response")); return
                 }
                 let data = r.data ?? Data()
                 total += data.count
@@ -3239,7 +3241,6 @@ final class GitHubSync {
         // The auth owner's publication fence has been released. A reader callback may
         // inspect UI/auth state without recursively acquiring that fence.
         onRead?(cache, readAt)
-        guard readWarning == nil || !contents.isEmpty else { return }
         validatingSession = (gid, token, validatedAt, cache, capturedAccess, pass)
         if !readOnly && !deferWrite {
             outcome = writePublisher(passId: pass)
