@@ -20,7 +20,7 @@ trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
 CODESIGN_LOG="$BUILD_SOURCE_DIR/codesign.err"
 cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
 # Match Info.plist's macOS 13.0 minimum for the current build architecture.
-/usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/QuotaRefresh.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" "$DIR/Sources/RemoteLimitsSelfTests.swift" "$DIR/Sources/RemoteLimitsC2SelfTests.swift" "$DIR/Sources/RemoteLimitsC3SelfTests.swift" "$DIR/Sources/RemoteLimitsC3BSelfTests.swift" "$DIR/Sources/RemoteLimitsC3BPreviews.swift" "$DIR/Sources/RemoteLimitsC3B.swift" "$DIR/Sources/RemoteLimits.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
+/usr/bin/swiftc -target "$(uname -m)-apple-macosx13.0" -O "$BUILD_SOURCE_DIR/main.swift" "$DIR/Sources/QuotaRefresh.swift" "$DIR/Sources/GitHubAuth.swift" "$DIR/Sources/GitHubAuthSelfTests.swift" "$DIR/Sources/RemoteLimitsSelfTests.swift" "$DIR/Sources/RemoteLimitsC4SelfTests.swift" "$DIR/Sources/RemoteLimitsC4.swift" "$DIR/Sources/RemoteLimitsC2SelfTests.swift" "$DIR/Sources/RemoteLimitsC3SelfTests.swift" "$DIR/Sources/RemoteLimitsC3BSelfTests.swift" "$DIR/Sources/RemoteLimitsC3BPreviews.swift" "$DIR/Sources/RemoteLimitsC3B.swift" "$DIR/Sources/RemoteLimits.swift" -o "$APP/Contents/MacOS/$EXE_NAME"
 cp -R "$DIR/Resources/"* "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
