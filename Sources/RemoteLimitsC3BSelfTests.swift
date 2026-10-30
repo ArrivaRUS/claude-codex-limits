@@ -45,6 +45,23 @@ import Foundation
 // Unsafe nonempty draft is rejection, NOT empty/reset: original is retained,
 // committed=false. A sanitizer's empty result must not erase an existing label.
 
+// C4 UI debt RED contracts (2026-10-30), layered over the C3-A legacy model:
+// RemoteCardPresentation adds simpleMachines: String. C3-B simpleTitle contains
+// only the short product/custom L; Advanced title/suffix remain unchanged.
+// func remoteFittedSimpleMachines(_ text: String, availableWidth: Double,
+//   measureCondensed: (String) -> Double) -> String
+// struct RemoteSettingsErrorPresentation {
+//   var text: String; var lines: [String]; var height: Double; var accessibilityValue: String
+// }
+// func remoteSettingsErrorPresentation(_ text: String, availableWidth: Double,
+//   lineHeight: Double = 14, measureWidth: (String) -> Double) -> RemoteSettingsErrorPresentation
+// Wrapping preserves full text/AX, displays at most three measured lines, and
+// reports 14pt per visible line (empty text = 0). Runtime grows its existing
+// short-error block by height - 14, preserving its existing padding.
+// func remoteAdvancedHeaderRightBoundary(cardMaxX: Double) -> Double
+// Right inset 28pt: Advanced card x15/w330 ends at345, header text ends317.
+// These tests do not define production stand-ins and are RED before helpers exist.
+
 private typealias C3BExpect = (Bool, String) -> Void
 
 private func c3bNow() -> Date { Date(timeIntervalSince1970: 1_791_820_800) } // 2026-10-12 16:00 UTC
@@ -86,14 +103,14 @@ private func c3bC306(_ expect: C3BExpect) {
     // Literal UX vectors, including a model row ONLY in the last visible card.
     // This catches sizing that still consults only the first two/product cards.
     let vectors: [(Int, Bool, Double, Double, [CGRect])] = [
-        (1, false, 184, 318, [CGRect(x: 16, y: 58, width: 328, height: 184)]),
-        (2, false, 184, 318, [CGRect(x: 16, y: 58, width: 158, height: 184), CGRect(x: 186, y: 58, width: 158, height: 184)]),
-        (3, false, 184, 514, [CGRect(x: 16, y: 58, width: 158, height: 184), CGRect(x: 186, y: 58, width: 158, height: 184), CGRect(x: 16, y: 254, width: 328, height: 184)]),
-        (4, false, 184, 514, [CGRect(x: 16, y: 58, width: 158, height: 184), CGRect(x: 186, y: 58, width: 158, height: 184), CGRect(x: 16, y: 254, width: 158, height: 184), CGRect(x: 186, y: 254, width: 158, height: 184)]),
-        (1, true, 199, 333, [CGRect(x: 16, y: 58, width: 328, height: 199)]),
-        (2, true, 199, 333, [CGRect(x: 16, y: 58, width: 158, height: 199), CGRect(x: 186, y: 58, width: 158, height: 199)]),
-        (3, true, 199, 544, [CGRect(x: 16, y: 58, width: 158, height: 199), CGRect(x: 186, y: 58, width: 158, height: 199), CGRect(x: 16, y: 269, width: 328, height: 199)]),
-        (4, true, 199, 544, [CGRect(x: 16, y: 58, width: 158, height: 199), CGRect(x: 186, y: 58, width: 158, height: 199), CGRect(x: 16, y: 269, width: 158, height: 199), CGRect(x: 186, y: 269, width: 158, height: 199)])
+        (1, false, 197, 331, [CGRect(x: 16, y: 58, width: 328, height: 197)]),
+        (2, false, 197, 331, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197)]),
+        (3, false, 197, 540, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197), CGRect(x: 16, y: 267, width: 328, height: 197)]),
+        (4, false, 197, 540, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197), CGRect(x: 16, y: 267, width: 158, height: 197), CGRect(x: 186, y: 267, width: 158, height: 197)]),
+        (1, true, 212, 346, [CGRect(x: 16, y: 58, width: 328, height: 212)]),
+        (2, true, 212, 346, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212)]),
+        (3, true, 212, 570, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212), CGRect(x: 16, y: 282, width: 328, height: 212)]),
+        (4, true, 212, 570, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212), CGRect(x: 16, y: 282, width: 158, height: 212), CGRect(x: 186, y: 282, width: 158, height: 212)])
     ]
     for (count, model, height, window, rects) in vectors {
         let views = (0..<count).map { c3bView($0, product: $0 == 0 ? "claude" : "codex", model: model && $0 == count - 1) }
@@ -464,7 +481,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: healthy local scoped row reserves 15pt")
     localScoped.data.auth = .loggedOut
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now)
-           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 184,
+           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 197,
            "C3-22/A5: local sign-in problem hides model row and removes its 15pt")
     localScoped.data.auth = .ok; localScoped.data.asOf = now.addingTimeInterval(-5 * 3600)
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: stale local card does not reserve hidden scoped row")
@@ -710,8 +727,9 @@ private func c3bC329(_ expect: C3BExpect) {
             now: now, timeZone: zone, productAccountCount: 1)
         let multiple = remotePresentationCard(local, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
-        expect(single.simpleTitle == "Codex" && multiple.simpleTitle == "Codex · mac",
-               "C3-29/N2: machine-free local product title is restricted to its sole account")
+        expect(single.simpleTitle == "Codex" && single.simpleMachines.isEmpty
+               && multiple.simpleTitle == "Codex" && multiple.simpleMachines == "mac",
+               "C3-29/N2: sole local account keeps an empty reserved machine line; multiple accounts use the second line")
         expect(multiple.advancedTitle == "Codex" && multiple.machineSuffix == "· mac"
                && local.data.source == nil && multiple.sourceLine == (language == "ru" ? "Данные 15:50" : "Data 15:50"),
                "C3-29/N2: multi-account header uses machines while local footer remains this-machine Data time")
@@ -719,8 +737,9 @@ private func c3bC329(_ expect: C3BExpect) {
         other.machines = ["desktop"]; other.caption = "Codex Pro · desktop"
         let remote = remotePresentationCard(other, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
-        expect([multiple.simpleTitle, remote.simpleTitle] == ["Codex · mac", "Codex · desktop"],
-               "C3-29/N2: card and history segment captions distinguish both Codex accounts")
+        expect([multiple.simpleTitle, remote.simpleTitle] == ["Codex", "Codex"]
+               && [multiple.simpleMachines, remote.simpleMachines] == ["mac", "desktop"],
+               "C3-29/N2: second header lines distinguish both Codex accounts")
         var custom = local; custom.caption = "Work Codex"
         let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
@@ -863,6 +882,189 @@ private func c3bC333(_ expect: C3BExpect) {
     expect(orphan.statusLine.isEmpty, "C3-33/Q6: provider cooldown without a reader result never fabricates GitHub checked")
 }
 
+// C3-34...38 were written before the C4 UI implementation. Fixed in-memory
+// fixtures only; actual condensed glyphs, tooltip hits, AX and wrapping in the
+// native renderer still require the new AppKit PNG scenes and macOS selftest.
+private func c3bC334(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!
+    for product in ["claude", "codex"] {
+        let local = c3bView(product: product, local: true)
+        let solo = remotePresentationCard(local, sync: ReaderSyncState(phase: .off), language: "ru",
+            narrow: false, now: now, timeZone: zone)
+        let layout = remotePanelLayout(views: [local], style: .simple, now: now)
+        expect(solo.simpleTitle == (product == "claude" ? "Claude" : "Codex")
+               && solo.simpleMachines.isEmpty && layout.cards.first?.height == 197 && layout.windowHeight == 331,
+               "C3-34/D2: sole local \(product) without sync reserves the empty 13pt second header line")
+        let pair = remotePanelLayout(views: [local, c3bView(1, product: product)], style: .simple, now: now)
+        expect(pair.cards.map { $0.height } == [197, 197] && pair.windowHeight == 331,
+               "C3-34/D2: local and remote cards have equal heights in a mixed row")
+    }
+    let empty = remotePanelLayout(views: [], style: .simple, now: now)
+    expect(empty.cards.isEmpty && empty.windowHeight == 286,
+           "C3-34/D2: empty Simple panel does not reserve a nonexistent header")
+    let local = c3bView(local: true)
+    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == 195,
+           "C3-34/D2: 13pt Simple header does not enlarge Advanced cards")
+}
+
+private func c3bC335(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let localID = "c3350000-1111-4222-8333-444455556666"
+    guard let key = accountLabelKey(gistId: "c335-synthetic-gist"),
+          let label = accountLabel(product: "codex", localId: localID, labelKey: key) else {
+        expect(false, "C3-35/D2: synthetic resolver identity is valid"); return
+    }
+    var cache = SyncRemoteCache(); cache.labelKey = key
+    cache.accounts = ["zulu", "alpha", "beta"].enumerated().map { index, name in
+        var account = RemoteAccount(product: "codex", label: label, status: "ok")
+        account.plan = "pro"; account.asOf = now.addingTimeInterval(-600)
+        account.machineId = "c335-\(index)"; account.machineName = name; account.machineLastSeenAt = now
+        account.windows = RemoteWindows(weekly: RemoteWindow(pct: 40, resetAt: now.addingTimeInterval(86400)))
+        account.schedule = RemoteSchedule(mode: "auto", interval: 3600)
+        return account
+    }
+    let frame = remoteAccountFrame(local: (LimitData(present: false), c3bView(product: "codex", local: true).data),
+        localIds: ["codex": localID], remote: cache, hidden: [], menu: [:], sync: sync, now: now,
+        localMachineName: "macbook")
+    guard let merged = frame.allViews.first(where: { $0.product == "codex" }) else {
+        expect(false, "C3-35/D2: resolver returns merged local Codex fixture"); return
+    }
+    expect(frame.allViews.count == 1 && merged.machines == ["macbook", "alpha", "beta", "zulu"],
+           "C3-35/D2: merged account orders this computer first, remaining names alphabetically")
+    for language in ["ru", "en"] {
+        let header = remotePresentationCard(merged, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone)
+        expect(header.simpleTitle == "Codex" && header.simpleMachines == "macbook, alpha +2",
+               "C3-35/D2: short product first; at most two machine names and +N on second line")
+        expect(header.accessibilityLabel == merged.caption && !header.accessibilityLabel.contains("…"),
+               "C3-35/D2: full default caption remains available for header tooltip and card AX")
+        var custom = merged; custom.caption = language == "ru" ? "Рабочая подписка для больших задач" : "Work subscription for large tasks"
+        custom.caption = String(custom.caption.prefix(32))
+        let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
+            now: now, timeZone: zone)
+        expect(named.simpleTitle == custom.caption && named.simpleMachines == header.simpleMachines
+               && named.accessibilityLabel == custom.caption && named.advancedTitle == custom.caption && named.machineSuffix.isEmpty,
+               "C3-35/D2: complete custom L and machines stay on separate Simple lines; Advanced keeps its custom-title contract")
+    }
+    var measured: [String] = []
+    let text = "macbook, vps"
+    let fitted = remoteFittedSimpleMachines(text, availableWidth: 80) { candidate in
+        measured.append(candidate); return candidate == text ? 80 : 100
+    }
+    expect(fitted == text && measured == [text],
+           "C3-35/D2: exact fit in condensed preserves both machine names without premature ellipsis")
+    let clipped = remoteFittedSimpleMachines(text, availableWidth: 50) { Double($0.count) * 5 }
+    expect(clipped.hasSuffix("…") && !clipped.contains("\n") && Double(clipped.count) * 5 <= 50
+           && text.hasPrefix(String(clipped.dropLast())),
+           "C3-35/D2: measured condensed overflow shortens only the tail of the machine line")
+    expect(remoteFittedSimpleMachines("", availableWidth: 80, measureCondensed: { _ in 0 }).isEmpty,
+           "C3-35/D2: blank reserved machine line stays blank")
+}
+
+private func c3bC336(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!
+    let seen = now.addingTimeInterval(-25 * 3600) // 11.10 15:00, unlike today's fixture
+    for language in ["ru", "en"] {
+        for state in [RemoteCardState.offline, .syncStalled] {
+            var view = c3bView(state: state)
+            view.data.asOf = seen; view.data.source?.asOf = seen; view.data.source?.lastSeenAt = seen
+            let warning = language == "ru" ? "Синхронизация стоит с 11.10 15:00: тестовая ошибка" : "Sync stalled since 11.10 15:00: synthetic error"
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let narrow = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
+            let wide = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: now, timeZone: zone)
+            expect(narrow.sourceLine == (language == "ru" ? "С vps от 11.10" : "From vps at 11.10"),
+                   "C3-36/D1: narrow \(state.rawValue) source keeps other-day date without HH:mm")
+            expect(wide.sourceLine == (language == "ru" ? "Данные с vps от 11.10 15:00" : "Data from vps at 11.10 15:00"),
+                   "C3-36/D1: wide Simple and Advanced source retain full date and time")
+            if state == .offline {
+                expect(narrow.statusLine == (language == "ru" ? "vps не на связи с 11.10 ›" : "vps offline since 11.10 ›"),
+                       "C3-36/D1: narrow offline status preserves its chevron after the date")
+                expect(wide.statusLine.contains("11.10 15:00"),
+                       "C3-36/D1: wide Simple and Advanced offline status retain date and time")
+            } else {
+                expect(narrow.statusLine == (language == "ru" ? "Синхронизация стоит ›" : "Sync stalled ›")
+                       && narrow.action == "syncsettings" && narrow.tooltip.contains(warning),
+                       "C3-36/D1: state6 retains full sync warning and recovery action")
+            }
+            expect(narrow.tooltip.contains("11.10 15:00") && narrow.accessibilityValue == narrow.tooltip,
+                   "C3-36/D1: compact date never replaces full other-day timestamp in tooltip/AX")
+            for measuredWidth in [0.0, 400.0] {
+                let fitted = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone,
+                    narrow: true, availableWidth: 130, measure: { _ in measuredWidth })
+                expect(fitted == narrow.sourceLine,
+                       "C3-36/D1: actual fitted narrow source uses date-only policy regardless of width branch")
+            }
+            let advanced = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone,
+                narrow: false, availableWidth: 308, measure: { _ in 100 })
+            expect(advanced == wide.sourceLine, "C3-36/D1: fitted Advanced source retains HH:mm")
+        }
+        let today = c3bView(state: .offline)
+        let card = remotePresentationCard(today, sync: ReaderSyncState(phase: .on), language: language,
+            narrow: true, now: now, timeZone: zone)
+        expect(card.sourceLine == (language == "ru" ? "Данные с vps от 15:50" : "Data from vps at 15:50")
+               && card.statusLine == (language == "ru" ? "vps не на связи с 16:00" : "vps offline since 16:00"),
+               "C3-36/D1: today's compact source/status copy stays unchanged")
+    }
+    var independent = c3bView(state: .offline)
+    independent.data.asOf = seen.addingTimeInterval(-86400)
+    independent.data.source?.asOf = independent.data.asOf; independent.data.source?.lastSeenAt = seen
+    let distinct = remotePresentationCard(independent, sync: ReaderSyncState(phase: .on), language: "en",
+        narrow: true, now: now, timeZone: zone)
+    expect(distinct.sourceLine == "From vps at 10.10" && distinct.statusLine == "vps offline since 11.10 ›"
+           && distinct.tooltip.contains("10.10 15:00") && distinct.tooltip.contains("11.10 15:00"),
+           "C3-36/D1: observation date and last-seen date remain independent in compact and full copy")
+    // Same instant is yesterday in UTC, today in UTC+3: use the scene calendar.
+    let midnight = now.addingTimeInterval(-15.5 * 3600), late = midnight.addingTimeInterval(-90 * 60)
+    var boundary = c3bView(state: .offline)
+    boundary.data.asOf = late; boundary.data.source?.asOf = late; boundary.data.source?.lastSeenAt = late
+    let shifted = remotePresentationCard(boundary, sync: ReaderSyncState(phase: .on), language: "en", narrow: true,
+        now: midnight, timeZone: TimeZone(secondsFromGMT: 3 * 3600)!)
+    expect(shifted.sourceLine == "Data from vps at 02:00" && shifted.statusLine == "vps offline since 02:00",
+           "C3-36/D1: 'today' follows injected timezone rather than UTC/host day")
+}
+
+private func c3bC337(_ expect: C3BExpect) {
+    for text in ["Error alpha beta gamma delta", "Ошибка альфа бета гамма дельта"] {
+        for (width, count) in [(300.0, 1), (90.0, 2), (60.0, 3)] {
+            let model = remoteSettingsErrorPresentation(text, availableWidth: width, lineHeight: 14,
+                measureWidth: { Double($0.count) * 5 })
+            expect(model.text == text && model.accessibilityValue == text && model.lines.joined(separator: " ") == text,
+                   "C3-37/D3: wrapping preserves the complete model text and AX in either language")
+            expect(model.lines.count == count && model.height == Double(count) * 14
+                   && model.lines.allSatisfy { Double($0.count) * 5 <= width },
+                   "C3-37/D3: measured \(count)-line error grows by exactly \(count - 1) lines without overflow")
+        }
+    }
+    let long = "Ошибка 20:38: Не удалось восстановить результат предыдущего запроса. " + String(repeating: "Проверьте подключение к GitHub. ", count: 12)
+    let capped = remoteSettingsErrorPresentation(long, availableWidth: 300, lineHeight: 14,
+        measureWidth: { Double($0.count) * 5 })
+    expect(long.count > 256 && capped.text == long && capped.accessibilityValue == long,
+           "C3-37/D3: long real-world error remains complete beyond the card-warning 256-character limit")
+    expect(capped.lines.count == 3 && capped.height == 42
+           && capped.lines.allSatisfy { Double($0.count) * 5 <= 300 },
+           "C3-37/D3: visible long error is capped at three wrapped lines, extra block height 28pt")
+    let token = String(repeating: "X", count: 70)
+    let broken = remoteSettingsErrorPresentation(token, availableWidth: 60, lineHeight: 14,
+        measureWidth: { Double($0.count) * 5 })
+    expect(broken.text == token && broken.accessibilityValue == token && broken.lines.count == 3
+           && broken.lines.allSatisfy { Double($0.count) * 5 <= 60 },
+           "C3-37/D3: an unbroken error token cannot overflow the three-line block")
+    let empty = remoteSettingsErrorPresentation("", availableWidth: 300, lineHeight: 14, measureWidth: { _ in 0 })
+    expect(empty.text.isEmpty && empty.accessibilityValue.isEmpty && empty.lines.isEmpty && empty.height == 0,
+           "C3-37/D3: absent error reserves no wrapped error height")
+}
+
+private func c3bC338(_ expect: C3BExpect) {
+    let right = remoteAdvancedHeaderRightBoundary(cardMaxX: 345)
+    expect(right == 317 && remoteAdvancedHeaderRightBoundary(cardMaxX: 355) == 327,
+           "C3-38: Advanced header boundary is 317pt in the real 330pt card, with a 28pt inset")
+    let widths = remoteAdvancedHeaderWidths(availableWidth: right - 49, titleWidth: 82,
+        badgeWidth: 79, planWidth: 59, machineWidth: 31, isCustomTitle: false, minimumTitleWidth: 64)
+    expect(widths.title == 82 && widths.badge == 79 && widths.plan == 59 && widths.machines == 31,
+           "C3-38: corrected 268pt header budget fits complete product, status, plan and vps suffix")
+    expect(APP_VERSION == "3.3.0", "C3-38: C-slice application version is 3.3.0")
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -872,6 +1074,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
     c3bReviewRegressions(expect); c3bC327(expect)
     c3bC328(expect); c3bC329(expect); c3bC330(expect); c3bC331(expect); c3bC332(expect); c3bC333(expect)
+    c3bC334(expect); c3bC335(expect); c3bC336(expect); c3bC337(expect); c3bC338(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
     return failures
 }

@@ -2,6 +2,8 @@ import Foundation
 
 // C3-B value models. No preferences, singleton history, AppKit, or runtime effects.
 enum RemotePanelStyle { case simple, advanced }
+// A reserved second header line keeps every Simple card at the same height.
+let REMOTE_SIMPLE_HEADER_EXTRA = 13.0
 struct RemotePanelLayout {
     var cards: [CGRect]
     var intervalRect: CGRect
@@ -21,8 +23,8 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
                 historySelectorRect: nil, moneyRows: [])
         }
         let extra = visible.contains { remoteSimpleShowsScopedRow($0, now: now) } ? 15.0 : 0
-        let cardH = 184 + extra, rows = max(1, (visible.count + 1) / 2)
-        let height = 318 + extra + Double(rows - 1) * (cardH + 12)
+        let cardH = 184 + REMOTE_SIMPLE_HEADER_EXTRA + extra, rows = max(1, (visible.count + 1) / 2)
+        let height = 318 + REMOTE_SIMPLE_HEADER_EXTRA + extra + Double(rows - 1) * (cardH + 12)
         let cards = visible.indices.map { i -> CGRect in
             let wide = visible.count == 1 || (visible.count % 2 == 1 && i == visible.count - 1)
             return CGRect(x: wide || i % 2 == 0 ? 16 : 186,
@@ -297,7 +299,7 @@ func remotePresentationSourceLine(_ raw: AccountView, language: String, narrow: 
         return (en ? "Data " : "Данные ") + remoteCardTimestamp(view.data.asOf, now: now, timeZone: timeZone)
     }
     return remoteCardSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone,
-                                compact: compact, machineLimit: machineLimit)
+                                compact: compact, machineLimit: machineLimit, compactOtherDay: narrow)
 }
 func remotePresentationManualPhase(isLocal: Bool, manual: RemoteManualPhase,
                                    readerManual: RemoteManualPhase?, now: Date) -> RemoteManualPhase {
@@ -330,6 +332,13 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
             + (machines.isEmpty ? "" : " · " + machines)
         card.machineSuffix = machines.isEmpty ? "" : "· " + machines
     }
+    // The account resolver already orders this computer first, then peers.
+    // Keep the legacy C3-A presentation and Advanced header contracts intact.
+    card.simpleTitle = defaultCaption ? (view.product == "claude" ? "Claude" : "Codex") : view.caption
+    let plainLocal = view.isLocal && view.data.source == nil && view.machines.count <= 1
+        && productAccountCount < 2 && sync.phase != .on
+    card.simpleMachines = plainLocal ? "" : view.machines.prefix(2).joined(separator: ", ")
+        + (view.machines.count > 2 ? " +\(view.machines.count - 2)" : "")
     card.sourceLine = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
     if !view.isLocal && view.state == .signedOut {
         card.paceNotice = nil
@@ -340,6 +349,57 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
     }
     return card
 }
+
+// Only the condensed measurement decides whether a machine line needs ellipsis.
+func remoteFittedSimpleMachines(_ text: String, availableWidth: Double,
+                                measureCondensed: (String) -> Double) -> String {
+    guard !text.isEmpty else { return "" }
+    let width = max(0, availableWidth)
+    if measureCondensed(text) <= width { return text }
+    guard measureCondensed("…") <= width else { return "" }
+    var tail = text
+    while !tail.isEmpty {
+        tail.removeLast()
+        let candidate = tail.trimmingCharacters(in: .whitespaces) + "…"
+        if measureCondensed(candidate) <= width { return candidate }
+    }
+    return "…"
+}
+
+struct RemoteSettingsErrorPresentation {
+    var text: String
+    var lines: [String]
+    var height: Double
+    var accessibilityValue: String
+}
+func remoteSettingsErrorPresentation(_ text: String, availableWidth: Double, lineHeight: Double = 14,
+                                     measureWidth: (String) -> Double) -> RemoteSettingsErrorPresentation {
+    let width = max(0, availableWidth)
+    var lines: [String] = [], line = ""
+    // Word wrapping also splits a single oversized token, so service messages
+    // and identifiers cannot cross the right edge of the settings card.
+    for word in text.split(whereSeparator: { $0.isWhitespace }).map(String.init) {
+        let candidate = line.isEmpty ? word : line + " " + word
+        if measureWidth(candidate) <= width { line = candidate; continue }
+        if !line.isEmpty { lines.append(line); line = "" }
+        for character in word {
+            let next = line + String(character)
+            if !line.isEmpty && measureWidth(next) > width { lines.append(line); line = "" }
+            if measureWidth(String(character)) <= width { line.append(character) }
+        }
+    }
+    if !line.isEmpty { lines.append(line) }
+    if lines.count > 3 {
+        lines = Array(lines.prefix(3))
+        var last = lines[2]
+        while !last.isEmpty && measureWidth(last + "…") > width { last.removeLast() }
+        lines[2] = measureWidth("…") <= width ? last.trimmingCharacters(in: .whitespaces) + "…" : last
+    }
+    return RemoteSettingsErrorPresentation(text: text, lines: lines,
+        height: Double(lines.count) * max(0, lineHeight), accessibilityValue: text)
+}
+
+func remoteAdvancedHeaderRightBoundary(cardMaxX: Double) -> Double { cardMaxX - 28 }
 
 // The renderer passes measured widths including each pill's padding. Machines
 // receive the remaining width only after the complete product title and pills.

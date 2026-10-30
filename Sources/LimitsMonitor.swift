@@ -3949,7 +3949,7 @@ func isQuotaAction(_ id: String) -> Bool {
 /// Inline actions precede their enclosing card; passive feedback never consumes a click.
 func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
     hits.first { isQuotaAction($0.id) && $0.rect.contains(point) }
-        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("moneyaccount:") && $0.rect.contains(point) }
+        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("moneyaccount:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
 }
 
 let PANEL_W: CGFloat = 360
@@ -4081,15 +4081,26 @@ func syncSignOutHint(_ lang: String = appLang()) -> String {
         ? "Signs out only this computer. Revoke app access:\ngithub.com/settings/applications"
         : "Выход только на этом компьютере. Отзыв доступа:\ngithub.com/settings/applications"
 }
+func remoteSyncErrorPresentation(_ s: SyncUIState, width: CGFloat = PANEL_W - 60) -> RemoteSettingsErrorPresentation {
+    let full = s.lastError.map { error in
+        tr("Ошибка ", "Error ") + (s.lastErrorAt.map { fmtMoment($0) + ": " } ?? "") + error
+    } ?? ""
+    return remoteSettingsErrorPresentation(full, availableWidth: Double(width)) { value in
+        Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10.5, .regular), cg(gray(1, 0.5))))))
+    }
+}
+private func remoteSyncErrorExtraHeight(_ s: SyncUIState) -> CGFloat {
+    max(0, CGFloat(remoteSyncErrorPresentation(s).height) - 14)
+}
 func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
     let retryH: CGFloat = s.canRetryKeychain ? SET_ROW_H : 0
     switch s.phase {
     case .off:          return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
-    case .revoked:      return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H : 0)
+    case .revoked:      return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0)
                                 + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
     case .awaitingCode:  return retryH + SET_ROW_H + 44 + 26
     case .on:            return retryH + SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
-                                + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 : 0)
+                                + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 + remoteSyncErrorExtraHeight(s) : 0)
                                 + SET_SYNC_SIGNOUT_HINT_H
     }
 }
@@ -4106,7 +4117,7 @@ private func disconnectedSyncNote(_ s: SyncUIState) -> String {
 func remoteSyncCardHeight(_ s: SyncUIState = syncUIState()) -> CGFloat {
     guard s.phase == .off || s.phase == .revoked else { return setSyncCardH(s) }
     let noteH = measuredTextHeight(disconnectedSyncNote(s), width: PANEL_W - 60, size: 10.5) + 8
-    let errorH: CGFloat = s.phase == .revoked && s.lastError != nil ? SET_SYNC_STATUS_H : 0
+    let errorH: CGFloat = s.phase == .revoked && s.lastError != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0
     return SET_ROW_H * 2 + noteH + errorH + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
         + (s.canRetryKeychain ? SET_ROW_H : 0)
 }
@@ -4187,7 +4198,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     return CGFloat(remotePanelLayout(views: views, style: .simple, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.2.7"
+let APP_VERSION = "3.3.0"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -4722,18 +4733,18 @@ func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, ti
                             narrow: Bool = true, availableWidth: Double, measure: (String) -> Double) -> String {
     let machine = view.data.source?.machineName ?? view.machines.first ?? "?"
     let limit: Int? = machine.count > 8 ? 8 : nil
-    let full = remotePresentationSourceLine(view, language: language, narrow: false, now: now, timeZone: timeZone)
+    let full = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
     if measure(full) <= availableWidth || !narrow {
-        return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+        return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
             timeZone: timeZone, machineLimit: limit)
     }
-    let compact = remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+    let compact = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
         timeZone: timeZone, compact: true)
     if measure(compact) <= availableWidth {
-        return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+        return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
             timeZone: timeZone, compact: true, machineLimit: limit)
     }
-    return remotePresentationSourceLine(view, language: language, narrow: false, now: now,
+    return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
         timeZone: timeZone, compact: true, machineLimit: 8)
 }
 /// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
@@ -4920,6 +4931,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             d.sessionReset = nil; d.weeklyReset = nil
         }
         let x = slot.minX, w = slot.width, cardsTop = slot.minY, cardH = slot.height
+        let bodyTop = cardsTop + CGFloat(REMOTE_SIMPLE_HEADER_EXTRA)
         let r = rectTL(x, cardsTop, w, cardH)
         let remote = view?.isLocal == false
         let now = remoteRenderNow()
@@ -4933,8 +4945,8 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
                 ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)); ctx.restoreGState()
             }
             text(attr(name, 12.5, .semibold, textMid), x: x + 39, topY: cardsTop + 15)
-            text(attr(tr("Не настроен", "Not set up"), 12, .regular, textMid), x: x + w / 2, topY: cardsTop + 77, align: 1)
-            text(attr(tr("Настройки ›", "Settings ›"), 11, .medium, ADV_LINK), x: x + w / 2, topY: cardsTop + 109, align: 1)
+            text(attr(tr("Не настроен", "Not set up"), 12, .regular, textMid), x: x + w / 2, topY: bodyTop + 77, align: 1)
+            text(attr(tr("Настройки ›", "Settings ›"), 11, .medium, ADV_LINK), x: x + w / 2, topY: bodyTop + 109, align: 1)
             hits.append(Hit(id: "settings", rect: r))
             return
         }
@@ -4945,6 +4957,17 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         hits.append(Hit(id: canFix ? "claudefix" : "open:\(url)", rect: r, tooltip: view?.caption))
         if let img = loadCGImage(assetPath(icon)) { ctx.draw(img, in: rectTL(x + 14, cardsTop + 13, 18, 18)) }
         text(fitAttr(name, maxW: w - 64) { attr($0, 12.5, .semibold, gray(1, 0.9)) }, x: x + 39, topY: cardsTop + 15)
+        if let view = view {
+            let header = cardPresentation(view, narrow: w < 300,
+                productAccountCount: cardViews.filter { $0.product == view.product }.count)
+            func machinesAttr(_ value: String) -> NSAttributedString {
+                ctAttr(value, NSFont.systemFont(ofSize: 10.5, weight: .regular, width: .condensed) as CTFont, cg(textMid))
+            }
+            let machines = remoteFittedSimpleMachines(header.simpleMachines, availableWidth: Double(w - 64)) {
+                Double(lineWidth(CTLineCreateWithAttributedString(machinesAttr($0))))
+            }
+            text(machinesAttr(machines), x: x + 39, topY: cardsTop + 15 + CGFloat(REMOTE_SIMPLE_HEADER_EXTRA))
+        }
 
         hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product, view: view)
         let amber = NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
@@ -4953,13 +4976,13 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         // a "How to fix?" affordance. The whole card is already the tap target.
         func problemBody(_ title: String, _ subtitle: String?, showFix: Bool) {
             let cxp = x + w / 2
-            drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(cxp - 11, cardsTop + 46, 22, 22), amber)
-            text(attr(title, 12.5, .semibold, gray(1, 0.92)), x: cxp, topY: cardsTop + 78, align: 1)
-            if let s = subtitle { text(attr(s, 9.5, .regular, textLo), x: cxp, topY: cardsTop + 97, align: 1) }
+            drawSF(ctx, "exclamationmark.triangle.fill", in: rectTL(cxp - 11, bodyTop + 46, 22, 22), amber)
+            text(attr(title, 12.5, .semibold, gray(1, 0.92)), x: cxp, topY: bodyTop + 78, align: 1)
+            if let s = subtitle { text(attr(s, 9.5, .regular, textLo), x: cxp, topY: bodyTop + 97, align: 1) }
             if showFix && quotaFeedback(d).action == .none {
                 let label = tr("Как починить?", "How to fix?")
                 let lw = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(label, ctFont(11, .semibold), cg(amber)))))
-                let pw = lw + 26, ph: CGFloat = 24, pTop = cardsTop + 116
+                let pw = lw + 26, ph: CGFloat = 24, pTop = bodyTop + 116
                 let pr = rectTL(cxp - pw / 2, pTop, pw, ph)
                 roundFill(pr, ph / 2, amber.withAlphaComponent(0.16))
                 roundStroke(pr, ph / 2, amber.withAlphaComponent(0.5), 1)
@@ -4986,7 +5009,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         if d.auth == .ok {
             drawSF(ctx, "arrow.up.forward", in: rectTL(x + w - 21, cardsTop + 11, 11, 11), gray(1, 0.22), weight: .semibold)
         }
-        let cx = x + w / 2, cyTop = cardsTop + 84
+        let cx = x + w / 2, cyTop = bodyTop + 84
         // A frozen snapshot shouldn't masquerade as live: grey the ring + numbers and, below,
         // swap the reset times (which would otherwise show an impossible past moment) for a note.
         let stale = isStale(d, now)
@@ -5024,7 +5047,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         } else if (!stale || remote), let s = d.scoped {
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
-        let l1 = cardsTop + 124, l2 = cardsTop + 139
+        let l1 = bodyTop + 124, l2 = bodyTop + 139
         if !remote && (canFix || stale || limitPollFailed(d)) {
             // Keep the last good read distinct from the CLI's sign-in state.
             let copy = limitSimpleStaleCopy(d, product: product)
@@ -5659,7 +5682,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let machineSuffix = presentation?.machineSuffix ?? ""
         let titleWidth = width(attr(rawTitle, 13, .semibold, textHi))
         let minimumTitleWidth = width(attr(String(rawTitle.prefix(8)), 13, .semibold, textHi))
-        let availableWidth = 312 - ADV_IX - 23
+        let availableWidth = CGFloat(remoteAdvancedHeaderRightBoundary(cardMaxX: Double(slot.maxX))) - ADV_IX - 23
         // A long status-machine badge yields after the suffix, before any part
         // of the product name (or the custom caption's first eight characters).
         let protectedTitle = rawTitle == c.name ? titleWidth : minimumTitleWidth
@@ -6284,6 +6307,16 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let fr = CTFramesetterCreateFrame(fs, CFRange(location: 0, length: 0), CGPath(rect: r, transform: nil), nil)
             ctx.textMatrix = .identity; CTFrameDraw(fr, ctx)
         }
+        func errorNote(_ top: CGFloat) {
+            let model = remoteSyncErrorPresentation(sy, width: cardW - 28)
+            for (index, value) in model.lines.enumerated() {
+                text(attr(value, 10.5, .regular, ADV_WARN), x: cardX + 14, topY: top + CGFloat(index) * 14)
+            }
+            if !model.text.isEmpty {
+                hits.append(Hit(id: "syncerror:github", rect: rectTL(cardX + 14, top, cardW - 28, CGFloat(model.height)),
+                    tooltip: model.accessibilityValue))
+            }
+        }
         let rowMid = syTop + (SET_ROW_H - 13) / 2 - 1
         switch sy.phase {
         case .off, .revoked:
@@ -6301,11 +6334,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let noteTop = controlsTop + SET_ROW_H
             let noteH = measuredTextHeight(disconnectedSyncNote(sy), width: cardW - 28, size: 10.5) + 8
             note(disconnectedSyncNote(sy), noteTop, height: noteH)
-            if revoked, let err = sy.lastError {
-                let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
-                text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
-                     x: cardX + 14, topY: noteTop + noteH)
-            }
+            if revoked && sy.lastError != nil { errorNote(noteTop + noteH) }
             if sy.canSignOut {
                 note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H,
                      height: SET_SYNC_SIGNOUT_HINT_H)
@@ -6362,11 +6391,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let upl = sy.lastUploadAt.map { fmtMoment($0) } ?? "—", rd = sy.lastSync.map { fmtMoment($0) } ?? "—"
             text(fitAttr(tr("Последняя отправка: \(upl) · чтение: \(rd)", "Last upload: \(upl) · read: \(rd)"), maxW: cardW - 28) { attr($0, 10.5, .regular, textMid) },
                  x: cardX + 14, topY: st + (SET_SYNC_STATUS_H - 10.5) / 2)
-            if let err = sy.lastError {
-                let at = sy.lastErrorAt.map { fmtMoment($0) + ": " } ?? ""
-                text(fitAttr(tr("Ошибка ", "Error ") + at + err, maxW: cardW - 28) { attr($0, 10.5, .regular, ADV_WARN) },
-                     x: cardX + 14, topY: st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2)
-            }
+            if sy.lastError != nil { errorNote(st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2) }
             note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
         }
         if sy.canRetryKeychain {
@@ -6949,6 +6974,19 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                 element.setAccessibilityLabel(account?.caption ?? (product == "claude" ? "Claude Code" : "Codex"))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityValue(hit.tooltip ?? "")
+                accessibleChildren.append(element)
+            }
+            setAccessibilityChildren(accessibleChildren)
+        } else if mode == .settings {
+            var accessibleChildren: [Any] = subviews.filter { !$0.isHidden }
+            for hit in hits where hit.id.hasPrefix("syncerror:") {
+                let visible = hit.rect.intersection(bounds)
+                guard !visible.isNull && !visible.isEmpty else { continue }
+                let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
+                let element = NSAccessibilityElement()
+                element.setAccessibilityRole(.staticText); element.setAccessibilityFrame(screenRect)
+                element.setAccessibilityLabel(tr("Ошибка GitHub", "GitHub error"))
+                element.setAccessibilityParent(self); element.setAccessibilityValue(hit.tooltip ?? "")
                 accessibleChildren.append(element)
             }
             setAccessibilityChildren(accessibleChildren)
@@ -8800,8 +8838,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(saved, "preview " + target.path)
         if saved { previewFiles.append(name) }
     }
-    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 190,
-          "C3-10 190 C3-B preview scenes")
+    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 196,
+          "C3-10 196 C3-B preview scenes")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {
@@ -8943,9 +8981,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         top += card.height + 5
                     }
                 } else {
-                    let body = 152 + scopedRowExtra(cl, cx)
-                    manualCheck(height == 286 + scopedRowExtra(cl, cx) + (presentProducts.isEmpty ? 0 : 32),
-                                label + " Simple baseline plus at most 32pt")
+                    let headerExtra = simpleCardViews(cl, cx).isEmpty ? CGFloat(0) : CGFloat(REMOTE_SIMPLE_HEADER_EXTRA)
+                    let body = 152 + scopedRowExtra(cl, cx) + headerExtra
+                    manualCheck(height == 286 + scopedRowExtra(cl, cx) + headerExtra + (presentProducts.isEmpty ? 0 : 32),
+                                label + " Simple baseline plus 32pt footer and reserved second header line")
                     let simpleProducts = presentProducts.isEmpty ? [] : [("claude", cl), ("codex", cx)].filter { productEnabled($0.0) }
                     for (index, item) in simpleProducts.enumerated() {
                         // Original 360pt panel: 16pt margins, 12pt gap, two 158pt cards.
@@ -8957,7 +8996,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                             ? "claudefix" : item.0 == "claude" ? "open:https://claude.ai/settings/usage"
                             : "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
                         manualCheck(hits.filter { $0.id == cardHitID && $0.rect != gear.rect }.map { $0.rect } == [expectedCard],
-                                    label + " Simple whole-card or missing setup hit exactly matches original card bounds")
+                                    label + " Simple whole-card or missing setup hit includes the reserved header line")
                     }
                 }
                 let footerHits = hits.filter { $0.id.hasPrefix("quotafeedback:") }

@@ -155,12 +155,13 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
     }
     func render(_ name: String, language: String, view: String, accounts: [AccountView], sync: ReaderSyncState,
                 now: Date = C3_PREVIEW_NOW, phase: RemoteManualPhase = .idle, readerManual: RemoteManualPhase? = nil, settings: Bool = false,
-                hidden: Set<String> = [], expanded: Bool = false) {
+                hidden: Set<String> = [], expanded: Bool = false, settingsState: SyncUIState? = nil) {
         let advanced = view == "advanced"
         let accounts = remoteSortedPresentationViews(views: accounts.map {
             remotePresentationView($0, sync: sync, now: now)
         }, language: language)
         configure(language, advanced: advanced, views: accounts, sync: sync, hidden: hidden, expanded: expanded)
+        if let settingsState = settingsState { SYNC_PREVIEW = settingsState }
         let visible = accounts.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
         if sync.phase != .on || sync.warning != nil {
             check(accounts.filter { !$0.isLocal && !$0.historyKey.hasPrefix("u:") }.allSatisfy {
@@ -182,6 +183,19 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             else if advanced { hits = drawAdvanced(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             else { hits = drawPanel(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C3-10 actual draw hit bounds " + name)
+            if settings, let state = settingsState {
+                let error = remoteSyncErrorPresentation(state)
+                var short = state; short.lastError = language == "ru" ? "Тест" : "Test"
+                let shortError = remoteSyncErrorPresentation(short)
+                let errorHits = hits.filter { $0.id == "syncerror:github" }
+                check(error.lines.count == 3 && error.text == error.accessibilityValue
+                      && error.text.contains(state.lastError ?? "") && shortError.lines.count == 1,
+                      "C3-10 long GitHub error wraps to three lines with complete model/AX text " + name)
+                check(remoteSyncCardHeight(state) - remoteSyncCardHeight(short) == 28
+                      && errorHits.count == 1 && errorHits.first?.tooltip == error.accessibilityValue
+                      && errorHits.first?.rect.height == CGFloat(error.height),
+                      "C3-10 actual GitHub block grows28pt and exposes complete passive error hit " + name)
+            }
             if name.hasPrefix("c3-manual-pollAllowed-"), let foreign = visible.first(where: { !$0.isLocal }) {
                 let foreignCard = cardPresentation(foreign, narrow: view == "simple-narrow", now: now)
                 check(foreignCard.statusLine == (language == "ru" ? "GitHub проверен 15:45" : "GitHub checked 15:45"),
@@ -194,6 +208,37 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                       "C3-10 two Codex sync actions have distinct native button identities " + name)
             }
             if advanced && !settings {
+                func textWidth(_ value: String, _ size: CGFloat, _ weight: NSFont.Weight, kern: CGFloat = 0) -> Double {
+                    let a = NSMutableAttributedString(attributedString: ctAttr(value, ctFont(size, weight), cg(.white)))
+                    if kern != 0 { a.addAttribute(NSAttributedString.Key(kCTKernAttributeName as String), value: kern,
+                        range: NSRange(location: 0, length: a.length)) }
+                    return Double(ceil(lineWidth(CTLineCreateWithAttributedString(a))))
+                }
+                for account in visible {
+                    let p = cardPresentation(account, narrow: false)
+                    let productName = account.product == "claude" ? "Claude Code" : "Codex"
+                    let title = textWidth(p.advancedTitle, 13, .semibold)
+                    let minimumTitle = textWidth(String(p.advancedTitle.prefix(8)), 13, .semibold)
+                    let plan = p.planBadge.isEmpty ? 0 : textWidth(p.planBadge, 9.5, .semibold, kern: 0.19) + 14
+                    let suffix = textWidth(p.machineSuffix, 11, .regular)
+                    let warning = account.isLocal ? "" : p.advancedBadge
+                    let available = remoteAdvancedHeaderRightBoundary(cardMaxX: 345) - Double(ADV_IX) - 23
+                    let protectedTitle = p.advancedTitle == productName ? title : minimumTitle
+                    let badgeGaps = 7.0 + (plan > 0 ? 5.0 : 0) + (p.machineSuffix.isEmpty ? 0 : 5.0)
+                    let badge = warning.isEmpty ? 0 : min(max(14, available - protectedTitle - plan - badgeGaps),
+                        textWidth(warning, 9.5, .semibold, kern: 0.19) + 14)
+                    let allocation = remoteAdvancedHeaderWidths(availableWidth: available, titleWidth: title,
+                        badgeWidth: badge, planWidth: plan, machineWidth: suffix,
+                        isCustomTitle: p.advancedTitle != productName, minimumTitleWidth: minimumTitle)
+                    let gaps = (badge > 0 || plan > 0 || suffix > 0 ? 7.0 : 0)
+                        + (badge > 0 && (plan > 0 || suffix > 0) ? 5.0 : 0) + (plan > 0 && suffix > 0 ? 5.0 : 0)
+                    check(allocation.title + allocation.badge + allocation.plan + allocation.machines + gaps <= available,
+                          "C3-10 measured Advanced header stays before317pt, clear of arrow " + name)
+                    if language == "en", (name == "c3-3a-en-advanced.png" || name == "c3-3b-en-advanced.png") {
+                        check(p.machineSuffix == "· vps" && allocation.machines >= suffix,
+                              "C3-10 EN3a/3b retain complete vps suffix at317pt " + name)
+                    }
+                }
                 let toggles = hits.filter { $0.id == "hist:toggle" }
                 let accounts = hits.filter { $0.id.hasPrefix("histaccount:") }
                 check(toggles.allSatisfy { toggle in accounts.allSatisfy { !toggle.rect.intersects($0.rect) } },
@@ -418,6 +463,48 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             }
         }
     }
+    // D1 live-run regression: a different calendar day must leave room for the
+    // complete date and offline chevron in the158pt Simple card.
+    let datedNow = c3PreviewDate("2026-10-29T16:00:00Z")
+    let datedSeen = c3PreviewDate("2026-10-28T19:30:00Z")
+    for state in [RemoteCardState.offline, .syncStalled] {
+        for language in ["ru", "en"] {
+            var account = c3PreviewView(state: state)
+            account.data.asOf = datedSeen; account.data.source?.asOf = datedSeen
+            account.data.source?.attemptAt = datedSeen; account.data.source?.lastSeenAt = datedSeen
+            account.data.source?.nextAt = datedSeen.addingTimeInterval(3600)
+            account.data.source?.freshUntil = datedSeen.addingTimeInterval(4800)
+            account.data.sessionReset = c3PreviewDate("2026-10-29T18:00:00Z")
+            account.data.weeklyReset = c3PreviewDate("2026-11-01T07:00:00Z")
+            account.data.scoped?.reset = c3PreviewDate("2026-11-02T07:00:00Z")
+            let warning = language == "ru" ? "Синхронизация стоит с 28.10 19:30: нет связи с GitHub."
+                : "Sync stalled since 28.10 19:30: GitHub is unreachable."
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let p = remotePresentationCard(account, sync: sync, language: language, narrow: true,
+                now: datedNow, timeZone: C3_PREVIEW_ZONE)
+            check(p.sourceLine == (language == "ru" ? "С vps от 28.10" : "From vps at 28.10")
+                  && p.tooltip.contains("28.10 19:30") && p.accessibilityValue == p.tooltip,
+                  "C3-10 dated narrow source is compact and full timestamp remains in tooltip/AX")
+            if state == .offline {
+                check(p.statusLine == (language == "ru" ? "vps не на связи с 28.10 ›" : "vps offline since 28.10 ›"),
+                      "C3-10 dated offline action retains complete date and chevron")
+            }
+            render("c3-date-\(state.rawValue)-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
+                accounts: sceneAccounts(account, view: "simple-narrow"), sync: sync, now: datedNow)
+        }
+    }
+    // D3 uses only the isolated SyncUIState preview; no live sync is constructed.
+    for language in ["ru", "en"] {
+        let error = language == "ru"
+            ? "Не удалось восстановить результат предыдущего запроса к GitHub. Проверьте подключение к сети и повторите вход в настройках синхронизации. Последние полученные данные сохранены на этом компьютере."
+            : "Could not recover the result of the previous GitHub request. Check your network connection and sign in again in sync settings. The last received data remains saved on this computer."
+        let state = SyncUIState(phase: .on, login: "fixture-account",
+            machines: [SyncMachine(name: "mac", os: "macOS", updated: C3_PREVIEW_NOW, isSelf: true),
+                       SyncMachine(name: "vps", os: "Linux", updated: C3_PREVIEW_NOW, isSelf: false)],
+            lastSync: C3_PREVIEW_NOW, lastError: error, lastErrorAt: c3PreviewDate("2026-10-12T15:38:00Z"))
+        render("c3-settings-long-error-\(language)-simple.png", language: language, view: "simple",
+            accounts: [c3PreviewView(), localCodex], sync: ReaderSyncState(phase: .on), settings: true, settingsState: state)
+    }
     // §11.13: 32-scalar custom title and a long source name share the real card
     // layout. Only the source name may shorten; the HH:mm source time must survive.
     for language in ["ru", "en"] {
@@ -448,7 +535,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 accounts: accounts, sync: ReaderSyncState(phase: .on), settings: true, hidden: hidden)
         }
     }
-    check(written == 190, "C3-10 190 actual AppKit matrix PNGs saved")
+    check(written == 196, "C3-10 196 actual AppKit matrix PNGs saved")
     return written
 }
 
@@ -492,13 +579,15 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         }
     }
     for language in languages {
+        for state in [5, 6] { expected.insert("c3-date-\(state)-\(language)-simple-narrow.png") }
+        expected.insert("c3-settings-long-error-\(language)-simple.png")
         for view in views { expected.insert("c3-long-names-\(language)-\(view).png") }
         for view in ["simple", "advanced"] { expected.insert("c3-settings-accounts-\(language)-\(view).png") }
         expected.insert("c3-history-only-unassigned-\(language)-advanced.png")
         for view in ["simple", "advanced"] { expected.insert("c3-actions-two-codex-\(language)-\(view).png") }
     }
     let registered = Set(files)
-    expect(expected.count == 190, "matrix has 190 specified scenes")
+    expect(expected.count == 196, "matrix has 196 specified scenes")
     expect(expected.isSubset(of: registered), "complete V5/manual/layout/history/data/tray/settings matrix")
     expect(files.count == registered.count, "registered filenames are unique")
     expect(files.allSatisfy { !$0.isEmpty && URL(fileURLWithPath: $0).lastPathComponent == $0 && $0.hasSuffix(".png") },

@@ -866,6 +866,7 @@ struct RemoteCardPresentation {
     var paceNotice: String?
     var sessionResetText: String
     var sessionDimmed: Bool, showsValues: Bool
+    var simpleMachines: String = ""
 }
 struct RemoteAutoFooter {
     var products: [String]
@@ -919,12 +920,12 @@ func remotePaceTimeValid(_ d: LimitData, now: Date) -> Bool {
     guard let at = d.asOf, at.timeIntervalSince1970.isFinite else { return false }
     return at <= now.addingTimeInterval(d.source == nil ? 0 : 300)
 }
-func remoteCardTimestamp(_ date: Date?, now: Date, timeZone: TimeZone) -> String {
+func remoteCardTimestamp(_ date: Date?, now: Date, timeZone: TimeZone, compactOtherDay: Bool = false) -> String {
     guard let date = date, date.timeIntervalSince1970.isFinite,
           (0..<253402300800).contains(date.timeIntervalSince1970) else { return "—" }
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
     let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = timeZone
-    f.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "HH:mm" : "dd.MM HH:mm"
+    f.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "HH:mm" : (compactOtherDay ? "dd.MM" : "dd.MM HH:mm")
     return f.string(from: date)
 }
 private func remoteDisplayText(_ text: String, limit: Int) -> String {
@@ -963,15 +964,18 @@ func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteM
         return source?.retryUntil.map { t("Пауза сервиса до ", "Service wait until ") + time($0) }
             ?? t("Пауза сервиса", "Service wait")
     case .offline:
+        let compact = remoteCardTimestamp(source?.lastSeenAt, now: now, timeZone: timeZone, compactOtherDay: !wide)
+        let otherDay = compact != time(source?.lastSeenAt)
         return wide ? t("Машина \(machine) не на связи с \(time(source?.lastSeenAt))", "\(machine) has been offline since \(time(source?.lastSeenAt))")
-            : t("\(machine) не на связи с \(time(source?.lastSeenAt))", "\(machine) offline since \(time(source?.lastSeenAt))")
+            : t("\(machine) не на связи с \(compact)", "\(machine) offline since \(compact)") + (otherDay ? " ›" : "")
     case .syncStalled: return t("Синхронизация стоит ›", "Sync stalled ›")
     case .signedOut: return t("Войдите в GitHub ›", "Sign in to GitHub ›")
     }
 }
 
 func remoteCardSourceLine(_ view: AccountView, language: String, narrow: Bool, now: Date,
-                          timeZone: TimeZone, compact: Bool = false, machineLimit: Int? = nil) -> String {
+                          timeZone: TimeZone, compact: Bool = false, machineLimit: Int? = nil,
+                          compactOtherDay: Bool = false) -> String {
     guard view.state != .signedOut else { return "" }
     let en = language == "en"
     var machine = remoteDisplayText(view.data.source?.machineName ?? view.machines.first ?? "?", limit: 16)
@@ -980,7 +984,7 @@ func remoteCardSourceLine(_ view: AccountView, language: String, narrow: Bool, n
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
     let short = compact || (narrow && !calendar.isDate(at, inSameDayAs: now))
     return (short ? (en ? "From " : "С ") : (en ? "Data from " : "Данные с ")) + machine
-        + (en ? " at " : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone)
+        + (en ? " at " : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone, compactOtherDay: narrow && compactOtherDay)
 }
 
 func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,
