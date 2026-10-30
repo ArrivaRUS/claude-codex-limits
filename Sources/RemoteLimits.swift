@@ -936,7 +936,7 @@ private func remoteStatusMachine(_ view: AccountView) -> String {
     remoteDisplayText(view.data.source?.statusMachineName ?? view.data.source?.machineName ?? view.machines.first ?? "?", limit: 16)
 }
 func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteManualPhase,
-                     lang: String, wide: Bool, now: Date, timeZone: TimeZone) -> String {
+                     lang: String, wide: Bool, now: Date, timeZone: TimeZone, machineLimit: Int? = nil) -> String {
     let en = lang == "en", source = view.data.source
     func t(_ ru: String, _ english: String) -> String { en ? english : ru }
     func time(_ date: Date?) -> String { remoteCardTimestamp(date, now: now, timeZone: timeZone) }
@@ -949,7 +949,11 @@ func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteM
     case .pollAllowed(let at): return t("Опрос можно с ", "Poll allowed at ") + time(at)
     case .idle: break
     }
-    let machine = remoteStatusMachine(view), product = view.product == "claude" ? "Claude Code" : "Codex"
+    var machine = remoteStatusMachine(view)
+    if let limit = machineLimit, machine.count > max(0, limit) {
+        machine = String(machine.prefix(max(0, limit))) + "…"
+    }
+    let product = view.product == "claude" ? "Claude Code" : "Codex"
     switch state {
     case .fresh: return ""
     case .stale: return t("Данные устарели", "Data is stale")

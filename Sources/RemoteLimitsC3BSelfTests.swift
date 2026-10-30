@@ -60,6 +60,16 @@ import Foundation
 // short-error block by height - 14, preserving its existing padding.
 // func remoteAdvancedHeaderRightBoundary(cardMaxX: Double) -> Double
 // Right inset 28pt: Advanced card x15/w330 ends at345, header text ends317.
+// Review repairs R1/R2, RED before implementation:
+// func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String
+// Actual historySelectorLayout.titles and segment tooltips share this helper;
+// default short product + machines, custom L unchanged, u: localized.
+// func remoteFittedStatusLine(_ view: AccountView, presentation: RemoteCardPresentation,
+//   language: String, narrow: Bool = true, now: Date, timeZone: TimeZone,
+//   availableWidth: Double, measure: (String) -> Double) -> String
+// Preserve presented manual/sync state. Narrow offline fitting shortens only the
+// machine first (8 + ellipsis, then fewer characters if needed), preserving its
+// date/time and chevron; final tail fallback is allowed only if that cannot fit.
 // These tests do not define production stand-ins and are RED before helpers exist.
 
 private typealias C3BExpect = (Bool, String) -> Void
@@ -576,9 +586,9 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
             default: return 1000
             }
         }
-        expect(measurements == ["Данные с build-machine от 15:50", "С build-machine от 15:50"]
-               && fitted == "С build-ma… от 15:50",
-               "C3-26/Q1: measure original full then original compact (\(compactWidth)pt) before returning eight-character machine")
+        expect(Array(measurements.prefix(2)) == ["Данные с build-machine от 15:50", "С build-machine от 15:50"]
+               && measurements.contains("С build-ma… от 15:50") && fitted == "С build-ma… от 15:50",
+               "C3-26/Q1: original full and compact precede measured machine fitting (\(compactWidth)pt)")
     }
     var pro = c3bView(product: "codex"); pro.data.plan = "Pro"
     let snapshotPrice = accountSubscriptionPrice(pro, overrides: [:], localFallback: (200, true))
@@ -723,7 +733,7 @@ private func c3bC329(_ expect: C3BExpect) {
     let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
     let local = c3bView(product: "codex", local: true)
     for language in ["ru", "en"] {
-        let single = remotePresentationCard(local, sync: sync, language: language, narrow: true,
+        let single = remotePresentationCard(local, sync: ReaderSyncState(phase: .off), language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 1)
         let multiple = remotePresentationCard(local, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
@@ -733,18 +743,25 @@ private func c3bC329(_ expect: C3BExpect) {
         expect(multiple.advancedTitle == "Codex" && multiple.machineSuffix == "· mac"
                && local.data.source == nil && multiple.sourceLine == (language == "ru" ? "Данные 15:50" : "Data 15:50"),
                "C3-29/N2: multi-account header uses machines while local footer remains this-machine Data time")
-        var other = c3bView(2, product: "codex")
-        other.machines = ["desktop"]; other.caption = "Codex Pro · desktop"
+        let other = c3bView(2, product: "codex")
         let remote = remotePresentationCard(other, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
         expect([multiple.simpleTitle, remote.simpleTitle] == ["Codex", "Codex"]
-               && [multiple.simpleMachines, remote.simpleMachines] == ["mac", "desktop"],
+               && [multiple.simpleMachines, remote.simpleMachines] == ["mac", "vps"],
                "C3-29/N2: second header lines distinguish both Codex accounts")
+        let selectorTitles = [local, other].map { remoteHistorySelectorTitle($0, language: language) }
+        expect(selectorTitles == ["Codex · mac", "Codex · vps"] && Set(selectorTitles).count == 2,
+               "C3-29/R1: actual history selector titles and their tooltip strings distinguish both Codex accounts")
         var custom = local; custom.caption = "Work Codex"
         let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
-        expect(named.simpleTitle == custom.caption && named.machineSuffix.isEmpty,
-               "C3-29/N2: explicit account caption remains intact instead of gaining duplicate machines")
+        expect(named.simpleTitle == custom.caption && named.machineSuffix.isEmpty
+               && remoteHistorySelectorTitle(custom, language: language) == custom.caption,
+               "C3-29/R1: explicit account caption remains intact in Simple and history selector without duplicate machines")
+        var unlabelled = other; unlabelled.historyKey = "u:codex"; unlabelled.label = nil
+        expect(remoteHistorySelectorTitle(unlabelled, language: language)
+               == (language == "ru" ? "Codex · не указан" : "Codex · unlabelled"),
+               "C3-29/R1: unlabelled history segment keeps its localized distinct title")
     }
 }
 
@@ -836,8 +853,9 @@ private func c3bC332(_ expect: C3BExpect) {
                 narrowMeasures.append(text)
                 return text == full || text == compact ? 150 : 120
             }
-        expect(narrow == compactShortName && narrowMeasures == [full, compact],
-               "C3-32/Q5: narrow card alone may shorten full source prefix before shortening the machine")
+        expect(narrow == compactShortName && Array(narrowMeasures.prefix(2)) == [full, compact]
+               && narrowMeasures.contains(compactShortName),
+               "C3-32/Q5: narrow card shortens source prefix before returning a measured shortened machine")
         for width in [300.0, 308.0] {
             var wideMeasures: [String] = []
             let wide = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone, narrow: false,
@@ -988,11 +1006,11 @@ private func c3bC336(_ expect: C3BExpect) {
             }
             expect(narrow.tooltip.contains("11.10 15:00") && narrow.accessibilityValue == narrow.tooltip,
                    "C3-36/D1: compact date never replaces full other-day timestamp in tooltip/AX")
-            for measuredWidth in [0.0, 400.0] {
+            for measuredWidth in [0.0, 120.0] {
                 let fitted = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone,
                     narrow: true, availableWidth: 130, measure: { _ in measuredWidth })
                 expect(fitted == narrow.sourceLine,
-                       "C3-36/D1: actual fitted narrow source uses date-only policy regardless of width branch")
+                       "C3-36/D1: actual fitted narrow source preserves date-only policy when the complete short source fits")
             }
             let advanced = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone,
                 narrow: false, availableWidth: 308, measure: { _ in 100 })
@@ -1065,6 +1083,72 @@ private func c3bC338(_ expect: C3BExpect) {
     expect(APP_VERSION == "3.3.0", "C3-38: C-slice application version is 3.3.0")
 }
 
+// R2: real CoreText widths are covered by c3-...-longname-... PNG scenes. This
+// injected metric makes each w wider than the ordinary text, so eight w glyphs
+// can still exceed 130pt and the machine must yield further before the date.
+private func c3bC339(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, machine = String(repeating: "w", count: 16)
+    let seen = now.addingTimeInterval(-25 * 3600)
+    func measure(_ text: String) -> Double { text.reduce(0.0) { $0 + ($1 == "w" ? 8 : 4) } }
+    for language in ["ru", "en"] {
+        for state in [RemoteCardState.offline, .syncStalled] {
+            var view = c3bView(state: state)
+            view.machines = [machine]; view.data.source?.machineName = machine
+            view.data.source?.statusMachineName = machine
+            view.data.asOf = seen; view.data.source?.asOf = seen; view.data.source?.lastSeenAt = seen
+            let warning = language == "ru" ? "Синхронизация стоит с 11.10 15:00" : "Sync stalled since 11.10 15:00"
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let card = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
+            let status = remoteFittedStatusLine(view, presentation: card, language: language, narrow: true,
+                now: now, timeZone: zone, availableWidth: 130, measure: measure)
+            let source = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone, narrow: true,
+                availableWidth: 130, measure: measure)
+            expect(source.hasSuffix("11.10") && source.contains("…") && !source.contains(machine) && measure(source) <= 130,
+                   "C3-39/R2: \(language) state\(state.rawValue) source shortens machine before the complete date")
+            if state == .offline {
+                expect(status.hasSuffix("11.10 ›") && status.contains("…") && !status.contains(machine)
+                       && status.hasPrefix("w") && measure(status) <= 130,
+                       "C3-39/R2: \(language) offline status preserves complete date and chevron after measured machine fitting")
+                let tail = language == "ru" ? " не на связи с 11.10 ›" : " offline since 11.10 ›"
+                expect(measure(String(repeating: "w", count: 8) + "…" + tail) > 130
+                       && !status.hasPrefix(String(repeating: "w", count: 8)),
+                       "C3-39/R2: eight wide machine glyphs still overflow; the machine yields further before any date character")
+                let wideCard = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: now, timeZone: zone)
+                expect(remoteFittedStatusLine(view, presentation: wideCard, language: language, narrow: false,
+                    now: now, timeZone: zone, availableWidth: 300, measure: measure) == wideCard.statusLine
+                       && wideCard.statusLine.contains(machine) && wideCard.statusLine.contains("11.10 15:00"),
+                       "C3-39/R2: wide Simple and Advanced status retain the previous full timestamp and machine")
+                var today = view
+                today.data.asOf = now.addingTimeInterval(-600); today.data.source?.asOf = today.data.asOf
+                today.data.source?.lastSeenAt = today.data.asOf
+                let todayCard = remotePresentationCard(today, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
+                let todayStatus = remoteFittedStatusLine(today, presentation: todayCard, language: language, narrow: true,
+                    now: now, timeZone: zone, availableWidth: 130, measure: measure)
+                let todaySource = remoteFittedSourceLine(today, language: language, now: now, timeZone: zone, narrow: true,
+                    availableWidth: 130, measure: measure)
+                expect(todayStatus.hasSuffix("15:50") && todaySource.hasSuffix("15:50")
+                       && todayStatus.contains("…") && todaySource.contains("…")
+                       && measure(todayStatus) <= 130 && measure(todaySource) <= 130,
+                       "C3-39/R2: today's HH:mm also survives measured machine fitting in status and source")
+                let reading = remotePresentationCard(view, sync: sync, language: language, narrow: true,
+                    now: now, timeZone: zone, manual: .reading)
+                expect(remoteFittedStatusLine(view, presentation: reading, language: language, narrow: true,
+                    now: now, timeZone: zone, availableWidth: 130, measure: measure) == reading.statusLine,
+                       "C3-39/R2: machine fitting never replaces an active reader phase with the offline status")
+                let fallback = remoteFittedStatusLine(view, presentation: card, language: language, narrow: true,
+                    now: now, timeZone: zone, availableWidth: 12, measure: measure)
+                expect(measure(fallback) <= 12 && fallback.hasSuffix("…"),
+                       "C3-39/R2: only an impossible timestamp budget permits the final whole-line tail fallback")
+            } else {
+                expect(status == card.statusLine && status.hasSuffix("›") && measure(status) <= 130,
+                       "C3-39/R2: sync-stalled recovery copy retains its chevron and does not acquire the source machine")
+            }
+            expect(card.tooltip.contains(machine) && card.tooltip.contains("11.10 15:00") && card.accessibilityValue == card.tooltip,
+                   "C3-39/R2: fitting leaves the complete source name and timestamp in tooltip/AX")
+        }
+    }
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -1074,7 +1158,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
     c3bReviewRegressions(expect); c3bC327(expect)
     c3bC328(expect); c3bC329(expect); c3bC330(expect); c3bC331(expect); c3bC332(expect); c3bC333(expect)
-    c3bC334(expect); c3bC335(expect); c3bC336(expect); c3bC337(expect); c3bC338(expect)
+    c3bC334(expect); c3bC335(expect); c3bC336(expect); c3bC337(expect); c3bC338(expect); c3bC339(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
     return failures
 }

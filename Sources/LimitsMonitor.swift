@@ -4734,18 +4734,24 @@ func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, ti
     let machine = view.data.source?.machineName ?? view.machines.first ?? "?"
     let limit: Int? = machine.count > 8 ? 8 : nil
     let full = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
-    if measure(full) <= availableWidth || !narrow {
+    let width = max(0, availableWidth)
+    if !narrow {
         return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
             timeZone: timeZone, machineLimit: limit)
     }
+    if measure(full) <= width { return full }
     let compact = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
         timeZone: timeZone, compact: true)
-    if measure(compact) <= availableWidth {
-        return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
-            timeZone: timeZone, compact: true, machineLimit: limit)
+    let compactFits = measure(compact) <= width
+    if compactFits && limit == nil { return compact }
+    var shortest = compact
+    for machineLimit in stride(from: 8, through: 0, by: -1) {
+        let candidate = remotePresentationSourceLine(view, language: language, narrow: true, now: now,
+            timeZone: timeZone, compact: true, machineLimit: machineLimit)
+        shortest = candidate
+        if measure(candidate) <= width { return candidate }
     }
-    return remotePresentationSourceLine(view, language: language, narrow: narrow, now: now,
-        timeZone: timeZone, compact: true, machineLimit: 8)
+    return remoteFittedLineEnd(shortest, availableWidth: width, measure: measure)
 }
 /// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
 func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
@@ -4782,8 +4788,15 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
     if let view = view, let model = model, !view.isLocal || (view.data.source != nil && !model.statusLine.isEmpty) {
         if !model.statusLine.isEmpty {
             let rect = CGRect(x: footer.minX - 4, y: footer.minY, width: footer.width + 8, height: 24)
-            line(model.statusLine, rect: CGRect(x: footer.minX, y: footer.minY + 2, width: footer.width, height: 14),
-                 weight: model.action == nil ? .regular : .medium, color: remoteToneColor(model.statusTone))
+            let weight: NSFont.Weight = model.action == nil ? .regular : .medium
+            let narrow = !advanced && card.width < 300
+            let statusLine = remoteFittedStatusLine(view, presentation: model, language: appLang(), narrow: narrow,
+                now: Date(timeIntervalSince1970: now), timeZone: remoteRenderTimeZone(),
+                availableWidth: Double(footer.width)) { value in
+                    Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, weight), cg(.white)))))
+                }
+            line(statusLine, rect: CGRect(x: footer.minX, y: footer.minY + 2, width: footer.width, height: 14),
+                 weight: weight, color: remoteToneColor(model.statusTone), truncate: !narrow)
             if let action = model.action {
                 let identity = duplicate > 1 ? ":" + view.historyKey : ""
                 hits.append(Hit(id: action + ":" + product + identity, rect: rect, tooltip: tooltip))
@@ -5322,11 +5335,7 @@ private struct HistorySelectorLayout {
     var extraHeight: CGFloat
 }
 private func historySelectorLayout(_ accounts: [AccountView]) -> HistorySelectorLayout {
-    let titles = accounts.map { view in
-        view.historyKey.hasPrefix("u:") ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled")
-            : cardPresentation(view, narrow: false,
-                productAccountCount: accounts.filter { $0.product == view.product && !$0.historyKey.hasPrefix("u:") }.count).simpleTitle
-    }
+    let titles = accounts.map { remoteHistorySelectorTitle($0, language: appLang()) }
     guard advHistExpanded() else { return HistorySelectorLayout(titles: titles, rects: [], ownRow: false, extraHeight: 0) }
     let widths = titles.map { title in
         let textWidth = ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10.5, .semibold), cg(gray(1, 0.95))))))
@@ -8838,8 +8847,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(saved, "preview " + target.path)
         if saved { previewFiles.append(name) }
     }
-    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 196,
-          "C3-10 196 C3-B preview scenes")
+    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 198,
+          "C3-10 198 C3-B preview scenes")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {

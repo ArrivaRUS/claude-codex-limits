@@ -193,6 +193,19 @@ func remoteDefaultCaption(_ rawView: AccountView) -> String {
     return machines.isEmpty ? head : head + " · " + machines
 }
 
+// History keeps the single-line account identity from before Simple's D2 split.
+// The same title is drawn in its segment and exposed as the segment tooltip.
+func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String {
+    let view = remoteSanitizedView(raw), product = view.product == "claude" ? "Claude" : "Codex"
+    if view.historyKey.hasPrefix("u:") {
+        return product + (language == "en" ? " · unlabelled" : " · не указан")
+    }
+    if !view.caption.isEmpty && view.caption != remoteDefaultCaption(view) { return view.caption }
+    let machines = view.machines.prefix(2).joined(separator: ", ")
+        + (view.machines.count > 2 ? " +\(view.machines.count - 2)" : "")
+    return product + (machines.isEmpty ? "" : " · " + machines)
+}
+
 enum RemoteCaptionCommand { case enter, escape, reset }
 struct RemoteCaptionEdit { var text: String; var count: Int; var value: String?; var committed: Bool }
 func remoteCaptionInput(_ raw: String) -> String {
@@ -348,6 +361,44 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
         }
     }
     return card
+}
+
+// Last-resort end truncation is a model decision, after a source machine has
+// surrendered its width. The renderer draws this measured result unchanged.
+func remoteFittedLineEnd(_ text: String, availableWidth: Double, measure: (String) -> Double) -> String {
+    let width = max(0, availableWidth)
+    if measure(text) <= width { return text }
+    guard measure("…") <= width else { return "" }
+    var tail = text
+    while !tail.isEmpty {
+        tail.removeLast()
+        let candidate = tail.trimmingCharacters(in: .whitespaces) + "…"
+        if measure(candidate) <= width { return candidate }
+    }
+    return "…"
+}
+
+func remoteFittedStatusLine(_ raw: AccountView, presentation: RemoteCardPresentation, language: String,
+                            narrow: Bool = true, now: Date, timeZone: TimeZone,
+                            availableWidth: Double, measure: (String) -> Double) -> String {
+    let line = presentation.statusLine, width = max(0, availableWidth)
+    guard narrow && !line.isEmpty else { return line }
+    if measure(line) <= width { return line }
+    let view = remoteSanitizedView(raw)
+    let offline = remoteCardLine2(view, state: .offline, phase: .idle, lang: language, wide: false,
+        now: now, timeZone: timeZone)
+    // A reader phase or a projected sync-stalled state must retain its own copy.
+    if view.state == .offline && line == offline {
+        var shortest = line
+        for limit in stride(from: 8, through: 0, by: -1) {
+            let candidate = remoteCardLine2(view, state: .offline, phase: .idle, lang: language, wide: false,
+                now: now, timeZone: timeZone, machineLimit: limit)
+            shortest = candidate
+            if measure(candidate) <= width { return candidate }
+        }
+        return remoteFittedLineEnd(shortest, availableWidth: width, measure: measure)
+    }
+    return remoteFittedLineEnd(line, availableWidth: width, measure: measure)
 }
 
 // Only the condensed measurement decides whether a machine line needs ellipsis.

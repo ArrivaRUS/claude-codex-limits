@@ -183,6 +183,26 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             else if advanced { hits = drawAdvanced(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             else { hits = drawPanel(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C3-10 actual draw hit bounds " + name)
+            if name.hasPrefix("c3-date-5-longname-"), let account = visible.first(where: { $0.state == .offline }) {
+                let p = cardPresentation(account, narrow: true, now: now)
+                func measure(_ value: String) -> Double {
+                    Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, .regular), cg(.white)))))
+                }
+                let status = remoteFittedStatusLine(account, presentation: p, language: language, narrow: true,
+                    now: now, timeZone: C3_PREVIEW_ZONE, availableWidth: 130, measure: measure)
+                let source = remoteFittedSourceLine(account, language: language, now: now, timeZone: C3_PREVIEW_ZONE,
+                    narrow: true, availableWidth: 130, measure: measure)
+                let machine = String(repeating: "w", count: 16)
+                check(measure(p.statusLine) > 130 && measure(status) <= 130
+                      && status.hasSuffix("28.10 ›") && status.hasPrefix("w")
+                      && status.contains("…") && !status.contains(machine),
+                      "C3-10 measured long machine yields before the complete offline date and chevron " + name)
+                check(measure(source) <= 130 && source.hasSuffix("28.10")
+                      && source.contains("…") && !source.contains(machine)
+                      && p.tooltip.contains(machine) && p.tooltip.contains("28.10 19:30")
+                      && p.accessibilityValue == p.tooltip,
+                      "C3-10 fitted source preserves date and complete long machine/time remain in tooltip/AX " + name)
+            }
             if settings, let state = settingsState {
                 let error = remoteSyncErrorPresentation(state)
                 var short = state; short.lastError = language == "ru" ? "Тест" : "Test"
@@ -250,6 +270,16 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                     }
                 }
                 check(separateAccounts, "C3-10 actual history account selection hits do not overlap " + name)
+                if name.hasPrefix("c3-history-two-codex-"), expanded {
+                    let expected = ["Codex · mac", "Codex · vps"]
+                    let titles = frame.allViews.map { remoteHistorySelectorTitle($0, language: language) }
+                    check(titles == expected && accounts.compactMap { $0.tooltip } == expected
+                          && Set(accounts.compactMap { $0.tooltip }).count == 2,
+                          "C3-10 actual history selector text and tooltip distinguish both Codex accounts " + name)
+                    check(accounts.count == expected.count && zip(expected, accounts).allSatisfy { pair in
+                        textWidth(pair.0, 10.5, .semibold) <= Double(pair.1.rect.width - 10)
+                    }, "C3-10 complete Codex machine titles fit their rendered history segments " + name)
+                }
                 if name.hasPrefix("c3-long-names-"), expanded {
                     let caption = frame.allViews.first?.caption ?? ""
                     check(caption.unicodeScalars.count == 32 && accounts.count == 1
@@ -262,8 +292,10 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 }
                 if expanded && visible.isEmpty && frame.allViews.contains(where: { $0.historyKey == "u:codex" }) {
                     check(!toggles.isEmpty && hits.contains { $0.id == "moneyaccount:codex|u:codex" }
-                          && !hits.contains { $0.id.hasPrefix("quotafeedback:") },
-                          "C3-10 unlabelled-only group renders history/money without quota cards " + name)
+                          && !hits.contains { $0.id.hasPrefix("quotafeedback:") }
+                          && accounts.count == 1
+                          && accounts.first?.tooltip == (language == "ru" ? "Codex · не указан" : "Codex · unlabelled"),
+                          "C3-10 unlabelled-only group renders its distinct localized history title/money without quota cards " + name)
                 }
             }
             save(context.makeImage(), name)
@@ -491,6 +523,15 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             }
             render("c3-date-\(state.rawValue)-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
                 accounts: sceneAccounts(account, view: "simple-narrow"), sync: sync, now: datedNow)
+            if state == .offline {
+                var longName = account
+                let machine = String(repeating: "w", count: 16)
+                longName.machines = [machine]; longName.data.source?.machineName = machine
+                longName.data.source?.statusMachineName = machine
+                longName.caption = remoteDefaultCaption(longName)
+                render("c3-date-5-longname-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
+                    accounts: sceneAccounts(longName, view: "simple-narrow"), sync: sync, now: datedNow)
+            }
         }
     }
     // D3 uses only the isolated SyncUIState preview; no live sync is constructed.
@@ -535,7 +576,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 accounts: accounts, sync: ReaderSyncState(phase: .on), settings: true, hidden: hidden)
         }
     }
-    check(written == 196, "C3-10 196 actual AppKit matrix PNGs saved")
+    check(written == 198, "C3-10 198 actual AppKit matrix PNGs saved")
     return written
 }
 
@@ -580,6 +621,7 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
     }
     for language in languages {
         for state in [5, 6] { expected.insert("c3-date-\(state)-\(language)-simple-narrow.png") }
+        expected.insert("c3-date-5-longname-\(language)-simple-narrow.png")
         expected.insert("c3-settings-long-error-\(language)-simple.png")
         for view in views { expected.insert("c3-long-names-\(language)-\(view).png") }
         for view in ["simple", "advanced"] { expected.insert("c3-settings-accounts-\(language)-\(view).png") }
@@ -587,7 +629,7 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         for view in ["simple", "advanced"] { expected.insert("c3-actions-two-codex-\(language)-\(view).png") }
     }
     let registered = Set(files)
-    expect(expected.count == 196, "matrix has 196 specified scenes")
+    expect(expected.count == 198, "matrix has 198 specified scenes")
     expect(expected.isSubset(of: registered), "complete V5/manual/layout/history/data/tray/settings matrix")
     expect(files.count == registered.count, "registered filenames are unique")
     expect(files.allSatisfy { !$0.isEmpty && URL(fileURLWithPath: $0).lastPathComponent == $0 && $0.hasSuffix(".png") },
