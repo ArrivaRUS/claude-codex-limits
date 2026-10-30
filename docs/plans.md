@@ -161,7 +161,7 @@ T1: П2-в (ключ истории по идентичности); журнал
 Валидация: `"$APP" --subscriptions-selftest` (C3-01…C3-11, PNG детерминированные, `now` фиксирован), Т13, Т16; состояние на PNG = `reader_card_state` в журнале; визуальная сверка Юрки.
 T1: П4-а (мак), П5-а.
 
-## C4 — macOS: издатель мака и B2 `[ ]`
+## C4 — macOS: издатель мака и B2 `[~]` (2026-10-30: код и селфтесты приняты — мак `f93f9c3`: C4 730/730, C1 72/72, C3-34…39 OK, 198 PNG; decisions 2026-10-30; остаток — живая проверка gist и файла входа Codex после установки 3.3.0)
 
 Зависит от: C3; A5 (VPS публикует — иначе B2 на маке нечем проверить вживую). Файлы: `Sources/LimitsMonitor.swift` (`GitHubSync.syncNow(force:mode:completion:)`, `SyncOutcome`, `.writeOnly`, `machineFile` += блок Codex, `cacheQuotaCompletion` с `accountId`, `doRefresh` с продолжением из completion, `clockSkew`), `Sources/QuotaRefresh.swift`, `codexAccessToken()` (политика), `~/.claude-limits-monitor/poll-log.jsonl`.
 Задачи: ключ defaults `credentialWrite` — `never` по умолчанию, guard до POST и в функции записи, в `legacy` запись атомарна с перечитыванием/сравнением пары, `persistClaudeQuotaUpdate` при `never` не вызывается (П3-а, П3-д); чужой дедлайн отдельно от `serverRetryAt` с потолком 24 ч от `firstSeenAt` (П7); PATCH попытки до `fetchCodex`, упавший PATCH → запроса нет; `.failed` чтения / нет completion за 60 с → своё расписание (B1).
