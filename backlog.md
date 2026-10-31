@@ -1,5 +1,7 @@
 # Бэклог
 
+- C5 поверх `1109396`: исправлен hang C5-12 (queued mouseUp), AppKit watchdog30с и line-buffer stdout/stderr. Остаток — повтор полного WindowServer-прогона с журналом; RED до Mac.
+
 - C5 поверх `d8a7e21`: принятые F1/F2/F3/F5/F7/F8 fix4 реализованы; native key/mouse dispatch, activation/focus return/draft protection в C5-12 RED до Mac. Остаток — WindowServer-прогон и живая подпись/сброс между машинами.
 
 - В работе, C5 / macOS 3.3.1: подписи аккаунтов между машинами; долги C4 D4-а/б, D5, D6. Тесты C5-01…06 и Mac/native проверка — [план](docs/plans.md#c5--подписи-и-список-аккаунтов-should--), [тест-план](docs/test-plan-remote-limits.md). Стабильная подпись/ACL Связки ключей остаются в C6.

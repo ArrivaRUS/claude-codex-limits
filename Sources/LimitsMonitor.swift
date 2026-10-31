@@ -11,6 +11,50 @@ import Darwin
 import Security
 import CryptoKit
 
+// Configure before any selftest output (including early helper/auth suites).
+if CommandLine.arguments.contains(where: { $0.hasSuffix("-selftest") }) {
+    setvbuf(stdout, nil, _IOLBF, 0)
+    setvbuf(stderr, nil, _IOLBF, 0)
+}
+
+// Never depend on the main run loop: AppKit control/menu tracking can block it.
+final class AppKitSelfTestWatchdog {
+    static let shared = AppKitSelfTestWatchdog()
+    private let lock = NSLock()
+    private var phase: String? = nil
+    private var deadline: UInt64 = 0
+    private let timer: DispatchSourceTimer
+    private init() {
+        timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "ccl.selftest.watchdog", qos: .userInitiated))
+        timer.schedule(deadline: .now() + .milliseconds(250), repeating: .milliseconds(250))
+        timer.setEventHandler { [weak self] in self?.tick() }
+        timer.resume()
+    }
+    func begin(_ name: String) {
+        lock.lock()
+        phase = name
+        deadline = DispatchTime.now().uptimeNanoseconds + 30_000_000_000
+        lock.unlock()
+        print("BEGIN \(name) (watchdog 30s)")
+    }
+    func stop() {
+        lock.lock(); phase = nil; lock.unlock()
+        timer.cancel()
+    }
+    private func tick() {
+        lock.lock()
+        let expired = phase != nil && DispatchTime.now().uptimeNanoseconds >= deadline
+        let name = phase
+        if expired { phase = nil }
+        lock.unlock()
+        guard expired, let name = name else { return }
+        fputs("FAIL \(name) watchdog timeout\n", stderr)
+        fflush(stdout); fflush(stderr)
+        // A main-thread modal loop cannot run cleanup; do not wait for it at exit.
+        _exit(124)
+    }
+}
+
 // Reserved helper modes fail closed BEFORE selftests and ordinary globals, even
 // for malformed/mixed flags. No helper failure can fall through into app startup.
 if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--claude-quota-keychain-") }) {
@@ -7693,6 +7737,8 @@ final class PanelController {
 // C5-12: real WindowServer/field-editor checks, intentionally after AppKit.
 // MemorySelfTestDefaults and a synthetic frame keep this off credentials/network.
 func runCaptionEditorAppKitSelfTests() -> Int {
+    let watchdog = AppKitSelfTestWatchdog.shared
+    watchdog.begin("C5-12 setup/presentation policy")
     var failures = 0, checks = 0
     func check(_ ok: Bool, _ message: String) {
         checks += 1
@@ -7725,6 +7771,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
     let controller = PanelController()
     controller.panel.isReleasedWhenClosed = false
     defer {
+        watchdog.begin("C5-12 cleanup")
         controller.hide()
         let end = Date().addingTimeInterval(1)
         while NSApp.isActive && Date() < end {
@@ -7749,6 +7796,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
     }
     func sendKey(_ characters: String, code: UInt16, ignoring: String? = nil,
                  modifiers: NSEvent.ModifierFlags = [], phase: String) {
+        watchdog.begin("C5-12 key: " + phase)
         check(NSApp.isActive, "C5-12 key event starts in active app (\(phase), actual=\(NSApp.isActive))")
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
@@ -7760,14 +7808,31 @@ func runCaptionEditorAppKitSelfTests() -> Int {
             NSApp.sendEvent(event)
         }
     }
+    var clickNumber = 0
     func sendClick(_ point: CGPoint, in target: NSWindow, phase: String) {
+        watchdog.begin("C5-12 click: " + phase)
         let before = controller.localPointerEventCount
+        clickNumber += 1
+        let number = clickNumber, timestamp = ProcessInfo.processInfo.systemUptime
         guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point,
-            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.windowNumber,
-            context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+            modifierFlags: [], timestamp: timestamp, windowNumber: target.windowNumber,
+            context: nil, eventNumber: number, clickCount: 1, pressure: 1),
+              let release = NSEvent.mouseEvent(with: .leftMouseUp, location: point,
+            modifierFlags: [], timestamp: timestamp + 0.01, windowNumber: target.windowNumber,
+            context: nil, eventNumber: number, clickCount: 1, pressure: 0) else {
             check(false, "C5-12 native mouse event allocation (\(phase))"); return
         }
+        // Queue the release FIRST: sendEvent(down) can synchronously enter
+        // NSControlTrackMouse and cannot return to send a later mouseUp itself.
+        NSApp.postEvent(release, atStart: false)
         NSApp.sendEvent(event)
+        // Custom hits/monitors may finish without tracking. Dispatch any queued
+        // release now, so it cannot terminate a subsequent control's tracking.
+        while let queued = NSApp.nextEvent(matching: .leftMouseUp, until: Date.distantPast,
+                                           inMode: .default, dequeue: true) {
+            NSApp.sendEvent(queued)
+            if queued.windowNumber == target.windowNumber && queued.eventNumber == number { break }
+        }
         check(controller.localPointerEventCount > before,
               "C5-12 NSApp.sendEvent traverses installed local monitor (\(phase), before=\(before), after=\(controller.localPointerEventCount))")
     }
@@ -7794,6 +7859,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         check(view.hits.contains { $0.id == "edit:" + key }, "C5-12 actual Settings pencil exists")
         var previousApplication: NSRunningApplication?
         func waitForExit(_ phase: String) {
+            watchdog.begin("C5-12 exit: " + phase)
             waitFor { !panel.isKeyWindow && !NSApp.isActive }
             check(!NSApp.isActive, "C5-12 app deactivated after edit (\(phase), actual=\(NSApp.isActive))")
             if let previous = previousApplication, !previous.isTerminated {
@@ -7804,6 +7870,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
             print("C5-12 key-ordering fallbacks after \(phase): \(panel.keyboardFocusOrderingFallbacks)")
         }
         func start(_ phase: String) -> (NSTextField, NSTextView)? {
+            watchdog.begin("C5-12 begin edit: " + phase)
             view.finishCaptionEdit(.escape)
             waitFor { !panel.isKeyWindow }
             NSApp.deactivate()
@@ -7859,6 +7926,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
                   && localAccountCaptions()[label]?.text == "Team", "C5-12 Enter saves and releases key focus")
         }
         if let _ = start("Reset") {
+            watchdog.begin("C5-12 Reset action")
             view.captionReset?.performClick(nil)
             waitForExit("Reset")
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
@@ -9354,6 +9422,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,
     // launch callback, event loop, refresh or recovery action is invoked here.
+    let watchdog = AppKitSelfTestWatchdog.shared
+    watchdog.begin("AppKit initialization / C3-10 preview directory")
     _ = NSApplication.shared
     _ = ctFont(11, .regular); _ = ctMono(11, .regular)
     let previewDir: URL
@@ -9374,6 +9444,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     }
     check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 209,
           "C3-10 209 C3-B preview scenes")
+    watchdog.begin("Manual refresh UI setup")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {
@@ -9382,6 +9453,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                             "local-30s-one-claude", "server-wait-auth", "restore-one-codex",
                             "allow-keychain-one-claude", "cancel-keychain-one-claude", "write-denied-one-claude",
                             "idle-two", "missing-one", "missing-both", "off"] {
+                watchdog.begin("Manual refresh UI \(fixture) \(lang) advanced=\(advanced)")
                 prefs["lang"] = lang; prefs["advanced"] = advanced
                 prefs["advHistExpanded"] = false
                 prefs["interval"] = 1800
@@ -9593,6 +9665,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     for lang in ["ru", "en"] {
         prefs["lang"] = lang
         for advanced in [false, true] {
+            watchdog.begin("Subscription Settings \(lang) advanced=\(advanced)")
             prefs["advanced"] = advanced; select(false, true)
             let h = settingsTotalHeight(AboutState())
             let ctx = bitmapContext(Int(PANEL_W * 2), Int(h * 2))!; ctx.scaleBy(x: 2, y: 2)
@@ -9603,6 +9676,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                   "\(lang) advanced=\(advanced): both toggles and all controls fit")
             save(ctx, "ccl-subscriptions-settings-\(lang)-\(advanced).png")
             for bothOff in [false, true] {
+                watchdog.begin("Subscription panel \(lang) advanced=\(advanced) paused=\(bothOff)")
                 prefs["autoPoll"] = true
                 select(false, !bothOff)
                 let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
@@ -9621,6 +9695,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     }
     // AppDelegate init reads only synthetic volatile interval/state. Never launch it,
     // call saveAutoStates (persistent defaults), scanActivity (real logs), or start timers.
+    watchdog.begin("Auto restored AppDelegate/panel state")
     var startupClaude = AutoPollState(), startupCodex = AutoPollState()
     let runtimeNow = Date().timeIntervalSince1970
     startupClaude.interval = 14400; startupClaude.lastAttempt = runtimeNow - 400
@@ -9663,6 +9738,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(delegate.panelCtrl.view.autoIntervals == ["claude": 1800, "codex": 900],
           "observed backoff publishes its own interval while Codex stays unchanged")
     let fixtureUpdated = Date(timeIntervalSince1970: 100000)
+    watchdog.begin("Auto footer/model checks")
     var autoImages = 0
     for lang in ["ru", "en"] {
         prefs["lang"] = lang; select(true, true)
@@ -9680,6 +9756,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(!delegate.autoSummary().contains("Claude Code:"), "\(lang) tooltip filters disabled subscription")
         select(true, true)
         for advanced in [false, true] {
+            watchdog.begin("Auto footer/tooltip \(lang) advanced=\(advanced)")
             func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400], manual: TimeInterval = 3600) -> (Data, [Hit]) {
                 let preferencesBefore = defaults.dictionaryRepresentation() as NSDictionary
                 let ctx = bitmapContext(360, 40)!
@@ -9738,6 +9815,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 ("long", 1800, 900, true, true, true, [0, 900, 1800])
             ]
             for (fixture, ci, xi, claudeOn, codexOn, autoOn, expectedSelected) in autoFixtures {
+                watchdog.begin("Auto UI \(fixture) \(lang) advanced=\(advanced)")
                 prefs["advanced"] = advanced; prefs["autoPoll"] = autoOn; select(claudeOn, codexOn)
                 let manual: TimeInterval = !autoOn && !expectedSelected.isEmpty ? expectedSelected[0] : 3600
                 let snapshot = ["claude": ci, "codex": xi]
@@ -9794,6 +9872,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(autoImages == 88, "88 RU/EN Simple/Advanced Auto, Fixed and Off actual bitmap fixtures")
     // Auth-copy regressions (tester): synthetic LimitData and pure bitmap draw only.
     // Never call AppDelegate refresh/scan/timers or infer I/O safety from not-due.
+    watchdog.begin("Auth hints setup / recovery guards")
     let authNow = Date()
     var authChecks = 0, authImages = 0
     func authCheck(_ ok: Bool, _ message: String) {
@@ -9875,6 +9954,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                 ("codex", "weekly-only"), ("codex", "historical"),
                                 ("codex", "session-reset"), ("codex", "poll-failed")]
                 for (product, fixture) in fixtures {
+                    watchdog.begin("Auth hints \(product) \(fixture) \(lang) advanced=\(advanced) both=\(both)")
                     let combined = fixture.hasPrefix("both-")
                     if combined && !both { continue }
                     prefs["advanced"] = advanced; prefs["autoPoll"] = false
@@ -10007,6 +10087,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     // Actual Settings/main auth draw matrix. History remains collapsed because
     // expanded draw uses the production shared sync; the explicit merge regression
     // above covers synthetic history through its injected GitHubSync instance.
+    watchdog.begin("GitHub Settings/main setup")
     var githubImages = 0
     let cachedIndexEncoder = JSONEncoder(); cachedIndexEncoder.outputFormatting = [.sortedKeys]
     for lang in ["ru", "en"] {
@@ -10033,6 +10114,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             SYNC_PREVIEW = state
             check(syncWarning(state) == expectedCopy, "GitHub \(lang) \(name) exact truthful localized notice")
             for advanced in [false, true] {
+                watchdog.begin("GitHub \(name) \(lang) advanced=\(advanced)")
                 prefs["advanced"] = advanced; select(true, true)
                 let beforePreferences = defaults.dictionaryRepresentation() as NSDictionary
                 let beforeIndex = try! cachedIndexEncoder.encode(UsageLogs.shared.snapshot())
@@ -10066,16 +10148,19 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     delegate.panelCtrl.panel.close()
     let captionFocusFailures = runCaptionEditorAppKitSelfTests()
     check(captionFocusFailures == 0, "C5-12 native focus suite (\(captionFocusFailures) failures; all independent checks completed)")
+    watchdog.begin("AppKit final cleanup / Auto selection")
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
           "Auto selection uses provider snapshots independently of the saved fixed interval")
     do {
+        watchdog.begin("C3-10 write/verify final preview manifest")
         let count = try c3WritePreviewManifest(previewDir: previewDir, files: previewFiles)
         check(c3VerifyPreviewManifest(previewDir: previewDir, files: previewFiles, check: check) == 0,
               "C3-10 final preview manifest")
         print("OK C3-10 \(count) previews → \(previewDir.path)")
     } catch { check(false, "C3-10 manifest: " + error.localizedDescription) }
     print("Subscription selection and adaptive polling selftest passed")
+    watchdog.stop()
     exit(0)
 }
 

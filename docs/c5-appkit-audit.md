@@ -1,5 +1,36 @@
 # C5: статическая сверка AppKit-проверок после `6597268`
 
+## Зависание `1109396`: полный перечень синтетических событий
+
+WindowServer sample владельца подтвердил ожидание mouseUp внутри NSControlTrackMouse:
+sendClick отправлял только down. Теперь release с теми же window/location/eventNumber
+стоит в очереди до sendEvent(down); если вложенного трекинга не было, оставшийся up
+доставляется через nextEvent/sendEvent до следующего клика. Local-monitor proof сохранён.
+
+| Место в `LimitsMonitor.swift:runCaptionEditorAppKitSelfTests` | Статус |
+|---|---|
+| sendClick → counter | NSControl: парный up заранее, трекинг может завершиться |
+| sendClick → error line | NSControl: тот же парный путь |
+| sendClick → same pencil | custom hit: парный путь, оставшийся up доставлен сразу |
+| sendClick → outside field (4,4) | пустой край панели, без контролов/меню; парный путь |
+| sendClick → status anchor (.zero) | пустое тестовое borderless-окно, парный путь |
+| sendClick → outside own window (.zero) | то же пустое окно, local monitor скрывает панель; парный путь |
+| sendKey → X / @ / Escape / Return | keyDown+keyUp через NSApp.sendEvent; поле/команда завершения, без tracking/menu/modal path |
+| Reset.performClick(nil) | синхронный action, событий мыши/цикла trackMouse не создаёт |
+
+Поиск во всех Sources и *SelfTests.swift иных фабрик/отправителей синтетических
+событий не выявил. Production NSAlert.runModal (recovery), NSMenu.popUp
+(account chooser и status context menu) существуют, но ни одна фаза C5-12 и
+остальные AppKit-наборы их не вызывают. Bitmap/hit-test/AX сцены события не шлют.
+
+Отдельный AppKitSelfTestWatchdog: собственная Dispatch-очередь, NSLock и монотонный
+дедлайн30с; BEGIN перед initialization, C3 сценами/треем, Manual, Settings, Auto,
+Auth, GitHub, каждым native start/key/click/exit/Reset/cleanup и финальным manifest.
+Timeout пишет `FAIL <phase> watchdog timeout`, flush stdout/stderr, _exit(124).
+Дедлайн не обслуживается главным run loop. Построчная буферизация выставляется
+до первого вывода любого selftest. Геометрия/число сцен/ожидания не изменены.
+Баланс Swift и wiring проверены статически; native исполнение остаётся RED до Mac.
+
 2026-10-31. Работа одним агентом по прямому запросу владельца, без собственного
 ревью, Git-мутаций и запуска Python. Это статическая сверка тестов, не результат
 исполнения AppKit на Linux.

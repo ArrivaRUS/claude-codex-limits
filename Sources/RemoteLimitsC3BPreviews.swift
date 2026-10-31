@@ -94,6 +94,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
     guard CommandLine.arguments.contains("--subscriptions-selftest"), UserDefaults.standard is MemorySelfTestDefaults else {
         check(false, "C3-10 requires isolated subscription selftest defaults"); return 0
     }
+    let watchdog = AppKitSelfTestWatchdog.shared
+    watchdog.begin("C3-10 preview fixture setup")
     guard let fixtures = remoteLimitsFixturesDir() else {
         check(false, "C3-10 explicit C3 golden fixture directory missing"); return 0
     }
@@ -156,6 +158,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
     func render(_ name: String, language: String, view: String, accounts: [AccountView], sync: ReaderSyncState,
                 now: Date = C3_PREVIEW_NOW, phase: RemoteManualPhase = .idle, readerManual: RemoteManualPhase? = nil, settings: Bool = false,
                 hidden: Set<String> = [], expanded: Bool = false, settingsState: SyncUIState? = nil) {
+        watchdog.begin("C3-10 scene " + name)
         let advanced = view == "advanced"
         let accounts = remoteSortedPresentationViews(views: accounts.map {
             remotePresentationView($0, sync: sync, now: now)
@@ -383,6 +386,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                     let trayAccount = remotePresentationView(account, sync: sync, now: C3_PREVIEW_NOW)
                     let frame = RemoteAccountFrame(now: C3_PREVIEW_NOW, sync: sync, allViews: [trayAccount], visibleViews: [trayAccount], displayedViews: [trayAccount])
                     for dark in [true, false] {
+                        watchdog.begin("C3-10 tray \(name) \(language) dark=\(dark)")
                         withRemoteRenderScene(frame: frame, timeZone: C3_PREVIEW_ZONE, manual: .idle) {
                             let model = remoteMenuPresentation(views: [trayAccount], selected: [:], language: language,
                                 dark: dark, now: C3_PREVIEW_NOW, timeZone: C3_PREVIEW_ZONE)
