@@ -116,6 +116,29 @@ func remoteVisibleSourceLine(_ card: RemoteCardPresentation, advanced: Bool) -> 
 enum RemotePanelStyle { case simple, advanced }
 // A reserved second header line keeps every Simple card at the same height.
 let REMOTE_SIMPLE_HEADER_EXTRA = 13.0
+struct RemoteSimplePanelHeights {
+    var rows: Int
+    var scopedExtra: Double
+    var headerExtra: Double
+    var footerHeight: Double
+    var baseCardHeight: Double { 152 }
+    var baseWindowHeight: Double { 286 }
+    var rowGap: Double { 12 }
+    var cardHeight: Double { baseCardHeight + scopedExtra + headerExtra + footerHeight }
+    // The first row's reserved header/footer remain explicit; following rows
+    // contribute their whole card, including those same components.
+    var windowBaselineHeight: Double {
+        baseWindowHeight + scopedExtra + Double(max(0, rows - 1)) * (cardHeight + rowGap)
+    }
+    var windowHeight: Double { windowBaselineHeight + headerExtra + footerHeight }
+}
+func remoteSimplePanelHeights(views: [AccountView], now: Date) -> RemoteSimplePanelHeights {
+    let visible = views.filter { !$0.historyKey.hasPrefix("u:") }
+    return RemoteSimplePanelHeights(rows: (visible.count + 1) / 2,
+        scopedExtra: visible.contains { remoteSimpleShowsScopedRow($0, now: now) } ? 15 : 0,
+        headerExtra: visible.isEmpty ? 0 : REMOTE_SIMPLE_HEADER_EXTRA,
+        footerHeight: visible.isEmpty ? 0 : remoteQuotaFooterHeight(advanced: false))
+}
 struct RemotePanelLayout {
     var cards: [CGRect]
     var intervalRect: CGRect
@@ -129,19 +152,17 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
                        historyHeight: Double = 35) -> RemotePanelLayout {
     let visible = views.filter { !$0.historyKey.hasPrefix("u:") }
     if style == .simple {
+        let heights = remoteSimplePanelHeights(views: visible, now: now)
         if visible.isEmpty {
             return RemotePanelLayout(cards: [], intervalRect: CGRect(x: 16, y: 224, width: 328, height: 24),
-                authorRect: CGRect(x: 16, y: 265, width: 328, height: 16), windowHeight: 286,
+                authorRect: CGRect(x: 16, y: 265, width: 328, height: 16), windowHeight: heights.windowHeight,
                 historySelectorRect: nil, moneyRows: [])
         }
-        let extra = visible.contains { remoteSimpleShowsScopedRow($0, now: now) } ? 15.0 : 0
-        let removedSourceRow = remoteQuotaFooterHeight(advanced: true) - remoteQuotaFooterHeight(advanced: false)
-        let cardH = 184 + REMOTE_SIMPLE_HEADER_EXTRA + extra - removedSourceRow, rows = max(1, (visible.count + 1) / 2)
-        let height = 318 + REMOTE_SIMPLE_HEADER_EXTRA + extra - removedSourceRow + Double(rows - 1) * (cardH + 12)
+        let cardH = heights.cardHeight, height = heights.windowHeight
         let cards = visible.indices.map { i -> CGRect in
             let wide = visible.count == 1 || (visible.count % 2 == 1 && i == visible.count - 1)
             return CGRect(x: wide || i % 2 == 0 ? 16 : 186,
-                          y: 58 + Double(i / 2) * (cardH + 12), width: wide ? 328 : 158, height: cardH)
+                          y: 58 + Double(i / 2) * (cardH + heights.rowGap), width: wide ? 328 : 158, height: cardH)
         }
         return RemotePanelLayout(cards: cards, intervalRect: CGRect(x: 16, y: height - 62, width: 328, height: 24),
             authorRect: CGRect(x: 16, y: height - 21, width: 328, height: 16), windowHeight: height,

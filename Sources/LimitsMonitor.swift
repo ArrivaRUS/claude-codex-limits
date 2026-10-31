@@ -9186,24 +9186,28 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     for card in advCards(cl, cx) {
                         let baseline = 38 + card.rows.reduce(CGFloat(0)) { $0 + $1.height }
                             + CGFloat(max(0, card.rows.count - 1)) + card.noticeHeight
-                        manualCheck(card.height == baseline + 32, label + " Advanced card adds only 32pt")
+                        manualCheck(card.height == baseline + CGFloat(remoteQuotaFooterHeight(advanced: true)),
+                                    label + " Advanced card adds only the full footer")
                         cardRects[card.product] = CGRect(x: 15, y: height - top - card.height, width: 330, height: card.height)
                         top += card.height + 5
                     }
                 } else {
-                    let headerExtra = simpleCardViews(cl, cx).isEmpty ? CGFloat(0) : CGFloat(REMOTE_SIMPLE_HEADER_EXTRA)
-                    let body = 152 + scopedRowExtra(cl, cx) + headerExtra
-                    manualCheck(height == 286 + scopedRowExtra(cl, cx) + headerExtra + (presentProducts.isEmpty ? 0 : 32),
-                                label + " Simple baseline plus 32pt footer and reserved second header line")
-                    let simpleProducts = presentProducts.isEmpty ? [] : [("claude", cl), ("codex", cx)].filter { productEnabled($0.0) }
-                    for (index, item) in simpleProducts.enumerated() {
-                        // Original 360pt panel: 16pt margins, 12pt gap, two 158pt cards.
-                        let expectedCard = CGRect(x: simpleProducts.count == 2 && index == 1 ? 186 : 16,
-                            y: height - 58 - body - 32, width: simpleProducts.count == 2 ? 158 : 328, height: body + 32)
-                        cardRects[item.0] = expectedCard
-                        let cardHitID = !item.1.present ? "settings"
-                            : item.0 == "claude" && (item.1.auth == .loggedOut || item.1.auth == .expired)
-                            ? "claudefix" : item.0 == "claude" ? "open:https://claude.ai/settings/usage"
+                    let views = simpleCardViews(cl, cx)
+                    let at = remoteRenderNow()
+                    let layout = remotePanelLayout(views: views, style: .simple, now: at)
+                    let heights = remoteSimplePanelHeights(views: views, now: at)
+                    let fullFooter = views.isEmpty ? 0 : remoteQuotaFooterHeight(advanced: true)
+                    let removedSourceRow = fullFooter - heights.footerHeight
+                    manualCheck(height == CGFloat(layout.windowHeight)
+                                && height == CGFloat(heights.windowBaselineHeight + heights.headerExtra + fullFooter - removedSourceRow),
+                                label + " Simple baseline plus full footer minus source row and reserved second header line")
+                    for (view, slot) in zip(views, layout.cards) {
+                        // Layout slots use top-left coordinates; hits use AppKit's bottom-left.
+                        let expectedCard = CGRect(x: slot.minX, y: height - slot.maxY, width: slot.width, height: slot.height)
+                        cardRects[view.product] = expectedCard
+                        let cardHitID = !view.data.present ? "settings"
+                            : view.product == "claude" && (view.data.auth == .loggedOut || view.data.auth == .expired)
+                            ? "claudefix" : view.product == "claude" ? "open:https://claude.ai/settings/usage"
                             : "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
                         manualCheck(hits.filter { $0.id == cardHitID && $0.rect != gear.rect }.map { $0.rect } == [expectedCard],
                                     label + " Simple whole-card or missing setup hit includes the reserved header line")
@@ -9213,8 +9217,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 manualCheck(footerHits.count == presentProducts.count, label + " feedback only in present provider cards")
                 for footer in footerHits {
                     let product = String(footer.id.dropFirst(14))
-                    manualCheck(cardRects[product]?.contains(footer.rect) == true && footer.rect.height == 32,
-                                label + " 32pt footer contained by own card")
+                    manualCheck(cardRects[product]?.contains(footer.rect) == true
+                                && footer.rect.height == CGFloat(remoteQuotaFooterHeight(advanced: usesAdvanced)),
+                                label + " style-specific footer contained by own card")
                 }
                 for action in quotaActions {
                     let product = action.id.hasSuffix("claude") ? "claude" : "codex"

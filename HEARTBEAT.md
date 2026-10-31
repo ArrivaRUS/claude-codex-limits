@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · AppKit-геометрия поверх `6597268`
+
+- **Mac:** C1 75, C4 730, C2 33, C3 A 590, C3 B 818, C5 481 — 0 FAIL под удалёнными руками, затем ожидаемый134 на AppKit. Терминал владельца нарисовал209 C3 PNG, затем exit1 на Manual refresh UI: старая формула Simple с32pt footer; финальный manifest/следующие наборы не выполнены.
+- **Исправления:** общий `RemoteSimplePanelHeights`/`remoteSimplePanelHeights` выделяет прежние компоненты высот без изменения геометрии. AppKit Manual проверяет canvas по remotePanelLayout и baseline+header+full footer32−removed source row; карточки из layout slots, footer hits по remoteQuotaFooterHeight (Simple18/Advanced32). Advanced literal32 также заменён общей функцией; новых числовых ожиданий в тесте нет.
+- **Полная статическая сверка после первого NSApplication.shared:** C3 render/manifest, Manual52, Settings/subscriptions, Auto88, Auth120, GitHub42. Других stale Simple heights/coords или C5 caption/footer/D6 ожиданий не найдено; независимая геометрия header/poll-footer/Advanced и timestamp tooltip сохранены. Подробности и исходные/новые строки — `docs/c5-appkit-audit.md`.
+- **Проверки:** баланс2 Swift, регистрация до AppKit, bash -n build.sh, git diff --check PASS; алгебраическая сверка0…4 карточек × scoped/no-scoped сохраняет все размеры. Swift/AppKit здесь не запускались; полный Mac/manifest остаётся гейтом. Python не запускался, linux/ не менялся. Один агент, без своего ревью/Git-мутаций. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · ожидания подписей C1/C3 поверх `5a0bbcd`
 
 - **Доказательство владельца:** Mac 3.3.1 собрался; sync-selftest exit0 (C1 73/73, C4 730/730). subscriptions-selftest: C2 33/33 OK, C3 A 501/507; шесть FAIL C3-11 — старые ожидания подписей. Гейт остановил прогон до C3 B и C5, C5-01…11 снова не исполнялись.
