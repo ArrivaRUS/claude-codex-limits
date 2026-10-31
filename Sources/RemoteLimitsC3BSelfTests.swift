@@ -113,14 +113,14 @@ private func c3bC306(_ expect: C3BExpect) {
     // Literal UX vectors, including a model row ONLY in the last visible card.
     // This catches sizing that still consults only the first two/product cards.
     let vectors: [(Int, Bool, Double, Double, [CGRect])] = [
-        (1, false, 197, 331, [CGRect(x: 16, y: 58, width: 328, height: 197)]),
-        (2, false, 197, 331, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197)]),
-        (3, false, 197, 540, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197), CGRect(x: 16, y: 267, width: 328, height: 197)]),
-        (4, false, 197, 540, [CGRect(x: 16, y: 58, width: 158, height: 197), CGRect(x: 186, y: 58, width: 158, height: 197), CGRect(x: 16, y: 267, width: 158, height: 197), CGRect(x: 186, y: 267, width: 158, height: 197)]),
-        (1, true, 212, 346, [CGRect(x: 16, y: 58, width: 328, height: 212)]),
-        (2, true, 212, 346, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212)]),
-        (3, true, 212, 570, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212), CGRect(x: 16, y: 282, width: 328, height: 212)]),
-        (4, true, 212, 570, [CGRect(x: 16, y: 58, width: 158, height: 212), CGRect(x: 186, y: 58, width: 158, height: 212), CGRect(x: 16, y: 282, width: 158, height: 212), CGRect(x: 186, y: 282, width: 158, height: 212)])
+        (1, false, 183, 317, [CGRect(x: 16, y: 58, width: 328, height: 183)]),
+        (2, false, 183, 317, [CGRect(x: 16, y: 58, width: 158, height: 183), CGRect(x: 186, y: 58, width: 158, height: 183)]),
+        (3, false, 183, 512, [CGRect(x: 16, y: 58, width: 158, height: 183), CGRect(x: 186, y: 58, width: 158, height: 183), CGRect(x: 16, y: 253, width: 328, height: 183)]),
+        (4, false, 183, 512, [CGRect(x: 16, y: 58, width: 158, height: 183), CGRect(x: 186, y: 58, width: 158, height: 183), CGRect(x: 16, y: 253, width: 158, height: 183), CGRect(x: 186, y: 253, width: 158, height: 183)]),
+        (1, true, 198, 332, [CGRect(x: 16, y: 58, width: 328, height: 198)]),
+        (2, true, 198, 332, [CGRect(x: 16, y: 58, width: 158, height: 198), CGRect(x: 186, y: 58, width: 158, height: 198)]),
+        (3, true, 198, 542, [CGRect(x: 16, y: 58, width: 158, height: 198), CGRect(x: 186, y: 58, width: 158, height: 198), CGRect(x: 16, y: 268, width: 328, height: 198)]),
+        (4, true, 198, 542, [CGRect(x: 16, y: 58, width: 158, height: 198), CGRect(x: 186, y: 58, width: 158, height: 198), CGRect(x: 16, y: 268, width: 158, height: 198), CGRect(x: 186, y: 268, width: 158, height: 198)])
     ]
     for (count, model, height, window, rects) in vectors {
         let views = (0..<count).map { c3bView($0, product: $0 == 0 ? "claude" : "codex", model: model && $0 == count - 1) }
@@ -491,7 +491,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: healthy local scoped row reserves 15pt")
     localScoped.data.auth = .loggedOut
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now)
-           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 197,
+           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 183,
            "C3-22/A5: local sign-in problem hides model row and removes its 15pt")
     localScoped.data.auth = .ok; localScoped.data.asOf = now.addingTimeInterval(-5 * 3600)
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: stale local card does not reserve hidden scoped row")
@@ -737,17 +737,17 @@ private func c3bC329(_ expect: C3BExpect) {
             now: now, timeZone: zone, productAccountCount: 1)
         let multiple = remotePresentationCard(local, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
-        expect(single.simpleTitle == "Codex" && single.simpleMachines.isEmpty
-               && multiple.simpleTitle == "Codex" && multiple.simpleMachines == "mac",
-               "C3-29/N2: sole local account keeps an empty reserved machine line; multiple accounts use the second line")
-        expect(multiple.advancedTitle == "Codex" && multiple.machineSuffix == "· mac"
+        expect(single.simpleTitle == "Codex" && single.simpleMachines == "● mac"
+               && multiple.simpleTitle == "Codex" && multiple.simpleMachines == "● mac",
+               "C3-29/N2: sole local account keeps its source dot and machine name; multiple accounts use the second line")
+        expect(multiple.advancedTitle == "Codex" && multiple.machineSuffix == "· ● mac"
                && local.data.source == nil && multiple.sourceLine == (language == "ru" ? "Данные 15:50" : "Data 15:50"),
                "C3-29/N2: multi-account header uses machines while local footer remains this-machine Data time")
         let other = c3bView(2, product: "codex")
         let remote = remotePresentationCard(other, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
         expect([multiple.simpleTitle, remote.simpleTitle] == ["Codex", "Codex"]
-               && [multiple.simpleMachines, remote.simpleMachines] == ["mac", "vps"],
+               && [multiple.simpleMachines, remote.simpleMachines] == ["● mac", "● vps"],
                "C3-29/N2: second header lines distinguish both Codex accounts")
         let selectorTitles = [local, other].map { remoteHistorySelectorTitle($0, language: language) }
         expect(selectorTitles == ["Codex · mac", "Codex · vps"] && Set(selectorTitles).count == 2,
@@ -755,7 +755,7 @@ private func c3bC329(_ expect: C3BExpect) {
         var custom = local; custom.caption = "Work Codex"
         let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
-        expect(named.simpleTitle == custom.caption && named.machineSuffix.isEmpty
+        expect(named.simpleTitle == custom.caption && named.machineSuffix == "· ● mac"
                && remoteHistorySelectorTitle(custom, language: language) == custom.caption,
                "C3-29/R1: explicit account caption remains intact in Simple and history selector without duplicate machines")
         var unlabelled = other; unlabelled.historyKey = "u:codex"; unlabelled.label = nil
@@ -911,10 +911,10 @@ private func c3bC334(_ expect: C3BExpect) {
             narrow: false, now: now, timeZone: zone)
         let layout = remotePanelLayout(views: [local], style: .simple, now: now)
         expect(solo.simpleTitle == (product == "claude" ? "Claude" : "Codex")
-               && solo.simpleMachines.isEmpty && layout.cards.first?.height == 197 && layout.windowHeight == 331,
-               "C3-34/D2: sole local \(product) without sync reserves the empty 13pt second header line")
+               && solo.simpleMachines == "● mac" && layout.cards.first?.height == 183 && layout.windowHeight == 317,
+               "C3-34/D2: sole local \(product) without sync retains the dotted 13pt second header line")
         let pair = remotePanelLayout(views: [local, c3bView(1, product: product)], style: .simple, now: now)
-        expect(pair.cards.map { $0.height } == [197, 197] && pair.windowHeight == 331,
+        expect(pair.cards.map { $0.height } == [183, 183] && pair.windowHeight == 317,
                "C3-34/D2: local and remote cards have equal heights in a mixed row")
     }
     let empty = remotePanelLayout(views: [], style: .simple, now: now)
@@ -952,7 +952,7 @@ private func c3bC335(_ expect: C3BExpect) {
     for language in ["ru", "en"] {
         let header = remotePresentationCard(merged, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone)
-        expect(header.simpleTitle == "Codex" && header.simpleMachines == "macbook, alpha +2",
+        expect(header.simpleTitle == "Codex" && header.simpleMachines == "● macbook, ● alpha +2",
                "C3-35/D2: short product first; at most two machine names and +N on second line")
         expect(header.accessibilityLabel == merged.caption && !header.accessibilityLabel.contains("…"),
                "C3-35/D2: full default caption remains available for header tooltip and card AX")
@@ -961,8 +961,8 @@ private func c3bC335(_ expect: C3BExpect) {
         let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone)
         expect(named.simpleTitle == custom.caption && named.simpleMachines == header.simpleMachines
-               && named.accessibilityLabel == custom.caption && named.advancedTitle == custom.caption && named.machineSuffix.isEmpty,
-               "C3-35/D2: complete custom L and machines stay on separate Simple lines; Advanced keeps its custom-title contract")
+               && named.accessibilityLabel == custom.caption && named.advancedTitle == custom.caption && named.machineSuffix == "· " + header.simpleMachines,
+               "C3-35/D2: complete custom L and machines stay on separate Simple lines; Advanced keeps its custom title and dotted sources")
     }
     var measured: [String] = []
     let text = "macbook, vps"
@@ -990,10 +990,13 @@ private func c3bC336(_ expect: C3BExpect) {
             let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
             let narrow = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
             let wide = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: now, timeZone: zone)
+            expect(remoteVisibleSourceLine(narrow, advanced: false).isEmpty
+                   && remoteVisibleSourceLine(wide, advanced: false).isEmpty,
+                   "C5-09/D6: narrow and wide Simple no longer paint the source formatter")
             expect(narrow.sourceLine == (language == "ru" ? "С vps от 11.10" : "From vps on 11.10"),
                    "C3-36/D1: narrow \(state.rawValue) source keeps other-day date without HH:mm")
-            expect(wide.sourceLine == (language == "ru" ? "Данные с vps от 11.10 15:00" : "Data from vps at 11.10 15:00"),
-                   "C3-36/D1: wide Simple and Advanced source retain full date and time")
+            expect(wide.sourceLine == (language == "ru" ? "Данные с vps от 11.10 15:00" : "Data from vps on 11.10 15:00"),
+                   "C3-36/D1: Advanced source model retains full date and time")
             if state == .offline {
                 expect(narrow.statusLine == (language == "ru" ? "vps не на связи с 11.10 ›" : "vps offline since 11.10 ›"),
                        "C3-36/D1: narrow offline status preserves its chevron after the date")

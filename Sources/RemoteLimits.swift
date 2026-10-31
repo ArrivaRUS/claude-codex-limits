@@ -204,6 +204,7 @@ struct AccountView {
     var usageDays: RemoteDays
     var machines: [String]
     var state: RemoteCardState
+    var sourceReadings: [RemoteMachineReading] = []
 }
 
 func accountLabelKey(gistId: String) -> String? {
@@ -671,7 +672,8 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
 
 func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache,
                      hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date,
-                     localMachineName: String = "mac") -> [AccountView] {
+                     localMachineName: String = "mac", localMachineId: String = "local",
+                     localIntervals: [String: TimeInterval] = [:]) -> [AccountView] {
     var views: [AccountView] = []
     let enabled: Bool
     switch sync.phase { case .on: enabled = true; case .off, .revoked, .awaitingCode: enabled = false }
@@ -752,6 +754,17 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 state = RemoteLimitsWire.state(source, sync: sync, now: now)
             } else { state = .fresh }
             let tier = chosen?.tier ?? (!isLocal ? latest?.tier : nil)
+            var sourceReadings: [RemoteMachineReading] = []
+            if isLocal {
+                sourceReadings.append(RemoteMachineReading(machineId: localMachineId, name: localMachineName,
+                    asOf: own.asOf, interval: localIntervals[product], isLocal: true))
+            }
+            var represented = Set(sourceReadings.map { $0.machineId })
+            for account in ordered.sorted(by: { $0.machineName == $1.machineName ? $0.machineId < $1.machineId : $0.machineName < $1.machineName }) {
+                guard represented.insert(account.machineId).inserted else { continue }
+                sourceReadings.append(RemoteMachineReading(machineId: account.machineId, name: account.machineName,
+                    asOf: account.asOf, interval: account.schedule.map { Double($0.interval) }, isLocal: false))
+            }
             return AccountView(product: product, label: label, historyKey: historyKey,
                 caption: label.flatMap { key -> String? in
                     guard enabled, let caption = remote.captions?[key],
@@ -761,7 +774,7 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 }
                     ?? RemoteLimitsWire.caption(product: product, plan: values.plan, tier: tier, machines: machines),
                 data: values, isLocal: isLocal, tier: tier,
-                usageDays: usage, machines: machines, state: state)
+                usageDays: usage, machines: machines, state: state, sourceReadings: sourceReadings)
         }
         if hasLocal && (localLabel == nil || !hidden.contains(localLabel!)) {
             views.append(make(localLabel, accounts: localLabel.flatMap { groups[$0] } ?? [], isLocal: true))
@@ -896,6 +909,39 @@ func readerCardStateEvents(_ views: [AccountView], now: Date) -> [[String: Any]]
     }
 }
 
+struct RemoteAutoCandidate { var label: String; var data: LimitData }
+func remoteAutoLocalLabels(_ cache: SyncRemoteCache, localIds: [String: String]) -> [String: String] {
+    guard let key = cache.labelKey ?? cache.gistId.flatMap({ accountLabelKey(gistId: $0) }) else { return [:] }
+    var result: [String: String] = [:]
+    for product in ["claude", "codex"] {
+        if let id = localIds[product], let label = accountLabel(product: product, localId: id, labelKey: key) { result[product] = label }
+    }
+    return result
+}
+func remoteAutoCandidates(_ cache: SyncRemoteCache, localIds: [String: String], now: Date,
+                          freshRead: Bool) -> [String: RemoteAutoCandidate] {
+    guard freshRead, now.timeIntervalSince1970.isFinite else { return [:] }
+    let labels = remoteAutoLocalLabels(cache, localIds: localIds)
+    var result: [String: RemoteAutoCandidate] = [:]
+    var seen = Set<String>()
+    let ordered = (cache.accounts ?? []).sorted {
+        ($0.attemptAt ?? $0.asOf ?? .distantPast) > ($1.attemptAt ?? $1.asOf ?? .distantPast)
+    }
+    for account in ordered {
+        guard let label = labels[account.product], account.label == label else { continue }
+        let sourceKey = account.product + "|" + account.machineId
+        guard seen.insert(sourceKey).inserted, account.status == "ok",
+              let at = account.asOf, at.timeIntervalSince1970.isFinite,
+              at <= now, at >= now.addingTimeInterval(-900) else { continue }
+        if let existing = result[account.product], existing.data.asOf.map({ $0 >= at }) == true { continue }
+        var data = RemoteLimitsWire.limitData(account, onto: LimitData(present: true))
+        data.apiFresh = true; data.fromCache = false; data.stale = false
+        guard !autoReadingValues(data).isEmpty else { continue }
+        result[account.product] = RemoteAutoCandidate(label: label, data: data)
+    }
+    return result.filter { $0.value.data.apiFresh && !$0.value.data.stale && !$0.value.data.pollFailed && $0.value.data.error == nil }
+}
+
 func readerDidSync(_ cache: SyncRemoteCache, at now: Date, local: (LimitData, LimitData), localIds: [String: String],
                    hidden: Set<String>, sync: ReaderSyncState, history: UsageHistory, pollLog: String) {
     for account in cache.accounts ?? [] {
@@ -979,6 +1025,7 @@ struct RemoteCardPresentation {
     var sessionResetText: String
     var sessionDimmed: Bool, showsValues: Bool
     var simpleMachines: String = ""
+    var sourceHeader: RemoteSourceHeader? = nil
 }
 struct RemoteAutoFooter {
     var products: [String]
@@ -998,9 +1045,11 @@ struct RemoteAccountFrame {
 }
 func remoteAccountFrame(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache,
                         hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date,
-                        localMachineName: String = "mac") -> RemoteAccountFrame {
+                        localMachineName: String = "mac", localMachineId: String = "local",
+                        localIntervals: [String: TimeInterval] = [:]) -> RemoteAccountFrame {
     let all = resolveAccounts(local: local, localIds: localIds, remote: remote, hidden: [], menu: menu,
-                              sync: sync, now: now, localMachineName: localMachineName)
+                              sync: sync, now: now, localMachineName: localMachineName,
+                              localMachineId: localMachineId, localIntervals: localIntervals)
     let visible = all.filter { view in view.label.map { !hidden.contains($0) } ?? true }
     let displayed = ["claude", "codex"].compactMap { menuAccount($0, views: visible, selected: menu) }
     return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: displayed)
@@ -1099,9 +1148,9 @@ func remoteCardSourceLine(_ view: AccountView, language: String, narrow: Bool, n
     guard let at = view.data.asOf else { return (en ? "No data from " : "Нет данных с ") + machine }
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
     let short = compact || (narrow && !calendar.isDate(at, inSameDayAs: now))
-    let dateOnly = narrow && compactOtherDay && !calendar.isDate(at, inSameDayAs: now)
+    let otherDay = !calendar.isDate(at, inSameDayAs: now)
     return (short ? (en ? "From " : "С ") : (en ? "Data from " : "Данные с ")) + machine
-        + (en ? (dateOnly ? " on " : " at ") : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone, compactOtherDay: narrow && compactOtherDay)
+        + (en ? (otherDay ? " on " : " at ") : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone, compactOtherDay: narrow && compactOtherDay)
 }
 
 func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,

@@ -183,6 +183,26 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             else if advanced { hits = drawAdvanced(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             else { hits = drawPanel(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C3-10 actual draw hit bounds " + name)
+            if name.hasPrefix("c5-freshness-") {
+                let headerHits = hits.filter { $0.id.hasPrefix("sourceheader:") }
+                check(headerHits.count == visible.count && headerHits.allSatisfy {
+                    ($0.tooltip ?? "").contains(language == "ru" ? "в срок" : "on time")
+                }, "C5-08 actual header hit/AX exposes per-machine times and status " + name)
+                for account in visible {
+                    let p = cardPresentation(account, narrow: !advanced && visible.count > 1)
+                    check(remoteVisibleSourceLine(p, advanced: advanced).isEmpty == !advanced,
+                          "C5-09 source/time row appears only in Advanced " + name)
+                    if !advanced, let header = p.sourceHeader {
+                        let budget = visible.count > 1 ? 94.0 : 264.0
+                        let font = NSFont.systemFont(ofSize: 10.5, weight: .regular, width: .condensed)
+                        let layout = remoteSourceHeaderLayout(header, availableWidth: budget, measure: {
+                            Double(lineWidth(CTLineCreateWithAttributedString(ctAttr($0, font as CTFont, cg(.white)))))
+                        })
+                        check(layout.width <= budget && layout.runs.count == min(2, header.sources.count),
+                              "C5-08 actual condensed widths retain every source dot " + name)
+                    }
+                }
+            }
             if name.hasPrefix("c3-date-5-longname-"), let account = visible.first(where: { $0.state == .offline }) {
                 let p = cardPresentation(account, narrow: true, now: now)
                 func measure(_ value: String) -> Double {
@@ -243,20 +263,29 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                     let suffix = textWidth(p.machineSuffix, 11, .regular)
                     let warning = account.isLocal ? "" : p.advancedBadge
                     let available = remoteAdvancedHeaderRightBoundary(cardMaxX: 345) - Double(ADV_IX) - 23
+                    let minimumSources = p.sourceHeader.map {
+                        textWidth("· ", 11, .regular) + remoteSourceHeaderMinimumWidth($0, measure: { textWidth($0, 11, .regular) })
+                    } ?? 0
                     let protectedTitle = p.advancedTitle == productName ? title : minimumTitle
                     let badgeGaps = 7.0 + (plan > 0 ? 5.0 : 0) + (p.machineSuffix.isEmpty ? 0 : 5.0)
-                    let badge = warning.isEmpty ? 0 : min(max(14, available - protectedTitle - plan - badgeGaps),
+                    let badge = warning.isEmpty ? 0 : min(max(14, available - protectedTitle - plan - badgeGaps - minimumSources),
                         textWidth(warning, 9.5, .semibold, kern: 0.19) + 14)
                     let allocation = remoteAdvancedHeaderWidths(availableWidth: available, titleWidth: title,
                         badgeWidth: badge, planWidth: plan, machineWidth: suffix,
-                        isCustomTitle: p.advancedTitle != productName, minimumTitleWidth: minimumTitle)
+                        isCustomTitle: p.advancedTitle != productName, minimumTitleWidth: minimumTitle, minimumMachineWidth: minimumSources)
                     let gaps = (badge > 0 || plan > 0 || suffix > 0 ? 7.0 : 0)
                         + (badge > 0 && (plan > 0 || suffix > 0) ? 5.0 : 0) + (plan > 0 && suffix > 0 ? 5.0 : 0)
                     check(allocation.title + allocation.badge + allocation.plan + allocation.machines + gaps <= available,
                           "C3-10 measured Advanced header stays before317pt, clear of arrow " + name)
                     if language == "en", (name == "c3-3a-en-advanced.png" || name == "c3-3b-en-advanced.png") {
-                        check(p.machineSuffix == "· vps" && allocation.machines >= suffix,
-                              "C3-10 EN3a/3b retain complete vps suffix at317pt " + name)
+                        if let header = p.sourceHeader {
+                            let prefix = textWidth("· ", 11, .regular)
+                            let dots = remoteSourceHeaderLayout(header, availableWidth: allocation.machines - prefix,
+                                measure: { textWidth($0, 11, .regular) })
+                            check(p.machineSuffix == "· ● vps" && dots.runs.count == 1
+                                  && dots.runs[0].dotWidth == 6 && dots.width + prefix <= allocation.machines,
+                                  "C3-10 EN3a/3b preserve the source dot before317pt; names may shorten " + name)
+                        }
                     }
                 }
                 let toggles = hits.filter { $0.id == "hist:toggle" }
@@ -514,7 +543,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
             let p = remotePresentationCard(account, sync: sync, language: language, narrow: true,
                 now: datedNow, timeZone: C3_PREVIEW_ZONE)
-            check(p.sourceLine == (language == "ru" ? "С vps от 28.10" : "From vps on 28.10")
+            check(remoteVisibleSourceLine(p, advanced: false).isEmpty
+                  && p.sourceLine == (language == "ru" ? "С vps от 28.10" : "From vps on 28.10")
                   && p.tooltip.contains("28.10 19:30") && p.accessibilityValue == p.tooltip,
                   "C3-10 dated narrow source is compact and full timestamp remains in tooltip/AX")
             if state == .offline {
@@ -588,7 +618,44 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         render("c5-both-reset-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
             accounts: accounts, sync: ReaderSyncState(phase: .on))
     }
-    check(written == 200, "C3-10 200 actual AppKit matrix PNGs saved")
+    // C5 freshness: every card has exactly two source dots. Two wide variants
+    // cover all three age colors without inventing a third source.
+    func freshnessAccount(product: String, identity: Int, ages: [Double]) -> AccountView {
+        var account = c3PreviewView(product: product, identity: identity, machines: ["macbook", "vps"])
+        account.sourceReadings = zip(["macbook", "vps"], ages).map { name, age in
+            RemoteMachineReading(machineId: "c5-" + name, name: name,
+                asOf: C3_PREVIEW_NOW.addingTimeInterval(-age), interval: 1800, isLocal: false)
+        }
+        let winner = account.sourceReadings.max { $0.asOf! < $1.asOf! }!
+        account.data.asOf = winner.asOf; account.data.source?.asOf = winner.asOf
+        account.data.source?.machineId = winner.machineId; account.data.source?.machineName = winner.name
+        account.data.source?.status = "ok"; account.data.source?.interval = 1800
+        account.data.source?.nextAt = winner.asOf?.addingTimeInterval(1800)
+        account.data.source?.lastSeenAt = C3_PREVIEW_NOW
+        return account
+    }
+    for language in ["ru", "en"] {
+        let timely = freshnessAccount(product: "claude", identity: 91, ages: [60, 2701])
+        let old = freshnessAccount(product: "codex", identity: 92, ages: [86401, 60])
+        for view in ["simple-narrow", "advanced"] {
+            render("c5-freshness-\(language)-\(view).png", language: language, view: view,
+                accounts: [timely, old], sync: ReaderSyncState(phase: .on))
+        }
+        for (variant, account) in [("late", timely), ("old", old)] {
+            render("c5-freshness-\(variant)-\(language)-simple-wide.png", language: language, view: "simple-wide",
+                accounts: [account], sync: ReaderSyncState(phase: .on))
+        }
+        let header = remoteSourceHeader(timely, now: C3_PREVIEW_NOW, language: language, timeZone: C3_PREVIEW_ZONE)
+        check(header.sources.map { $0.tone } == [.fresh, .late], "C5-08 preview has independent green/orange sources")
+        check(remoteSourceHeader(old, now: C3_PREVIEW_NOW, language: language, timeZone: C3_PREVIEW_ZONE)
+            .sources.map { $0.tone } == [.old, .fresh], "C5-08 preview includes red and retains two sources")
+    }
+    var solo = c3PreviewView(product: "codex", identity: 93, machines: ["macbook"])
+    solo.isLocal = true; solo.data.source = nil
+    solo.sourceReadings = [RemoteMachineReading(machineId: "mac", name: "macbook",
+        asOf: solo.data.asOf, interval: 1800, isLocal: true)]
+    render("c5-freshness-solo-ru-simple-wide.png", language: "ru", view: "simple-wide", accounts: [solo], sync: ReaderSyncState(phase: .off))
+    check(written == 209, "C3-10 209 actual AppKit matrix PNGs saved")
     return written
 }
 
@@ -641,8 +708,13 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         expected.insert("c3-history-only-unassigned-\(language)-advanced.png")
         for view in ["simple", "advanced"] { expected.insert("c3-actions-two-codex-\(language)-\(view).png") }
     }
+    expected.insert("c5-freshness-solo-ru-simple-wide.png")
+    for language in languages {
+        for view in ["simple-narrow", "advanced"] { expected.insert("c5-freshness-\(language)-\(view).png") }
+        for variant in ["late", "old"] { expected.insert("c5-freshness-\(variant)-\(language)-simple-wide.png") }
+    }
     let registered = Set(files)
-    expect(expected.count == 200, "matrix has 200 specified scenes")
+    expect(expected.count == 209, "matrix has 209 specified scenes")
     expect(expected.isSubset(of: registered), "complete V5/manual/layout/history/data/tray/settings matrix")
     expect(files.count == registered.count, "registered filenames are unique")
     expect(files.allSatisfy { !$0.isEmpty && URL(fileURLWithPath: $0).lastPathComponent == $0 && $0.hasSuffix(".png") },

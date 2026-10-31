@@ -486,6 +486,14 @@ C3-04, цикл правок №1: фикстура прогноза имеет 
 | C5-05 | D5: узкая Simple RU/EN, session/weekly оба сброшены, измеренная ширина меток | между меткой и значением ≥6 pt; значение помещается сжатием; две новые PNG-сцены и manifest | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C505`; `Sources/RemoteLimitsC3BPreviews.swift` |
 | C5-06 | D6: EN источник с датой без времени и с HH:mm, narrow/wide/Advanced | date-only `From vps on 28.10`, время остаётся `at 15:43`; ожидания C3-36/C3-39 обновлены | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C506`; `Sources/RemoteLimitsC3BSelfTests.swift:c3bC336`, `c3bC339` |
 
+| C5-07 | asOf каждой машины, точные границы interval+900 и 86400 с | зелёный/рыжий/красный/серый, fallback4ч | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C507` |
+| C5-08 | две машины, +N, узкий бюджет, solo-local без синка, RU/EN | обе точки 6pt, gap3, имена сжимаются, tooltip/AX по машине | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C508` |
+| C5-09 | Simple1/2/3/4, source/action footer, Advanced | карточка −14pt; окно −14/−28pt; Simple source скрыт, action сохранён | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C509` |
+| C5-10 | чужой рост1п.п./900с, duplicate/old/cache/error/account switch, own control | Auto→900, lastAttempt и own observedAt неизменны | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C510` |
+| C5-11 | HMAC label/localId, fresh sync versus cache, status error | Auto получает только свежие успешные показания того же аккаунта | **RED**, `Sources/RemoteLimitsC5SelfTests.swift:c5C511` |
+
+C5 продолжение поверх `988ab89`: C5-07…11 записаны RED до реализации, Swift здесь не запускался. Точки берут отдельные `asOf`/schedule каждой машины; Simple источник скрыт общей функцией видимости и высот (−14 pt на карточку), Advanced его сохраняет. Добавлены 9 freshness-сцен: 2 narrow + 4 wide (две пары цветов при ровно двух источниках) + RU solo + 2 Advanced; матрица **209**. Изменённые C3-06/29/34/35/36/39 и C5-06 вновь RED до Mac; прежние GREEN относятся к старому виду. Даты Advanced EN используют `on`, часы без даты — `at`. Полный Python повторно не запускался: Linux не менялся.
+
 Статус **RED** означает зарегистрированные новые Swift-проверки до компиляции/прогона на Mac; Linux RED/GREEN и полный before/after фиксируются отдельно в HEARTBEAT. PNG добавлены как сцены генератора, изображения создаются и проверяются на Mac.
 
 2026-10-31, Linux full before/after: **806 → 817 tests; failures 0 → 0; errors 25 → 25; skipped 50 → 51**. Error-ID совпадают, все 25 — sandbox `PermissionError` TCP/loopback-стендов. C5 Python: 11 tests, 10 passed + 1 PyQt5 skip. Целевой body-cap регресс собственного raw-файла также проходит. Независимое Astra code review закрыто после исправлений scalar/grapheme bypass и truncated-status/cache reset. Swift-статусы остаются RED до исполнения на Mac.
@@ -496,7 +504,7 @@ C3-04, цикл правок №1: фикстура прогноза имеет 
 |---|---|---|---|
 | C6-01 | синтетические журналы O1 двух машин: пары 899/900 с, окна `publish failed`, `label_changed` посреди окна | редьюсер G1 считает пары по метке, сшивает метки по `label_changed`, периоды «gist недоступен» выделяет отдельно; G2 = число `token_refresh` с записью | `tools/` скрипт сведения + pure-тест |
 
-**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 20 · C2 — 9 · C3 — 39 (C3-01…C3-39) · C4 — 11 · C5 — 6 · C6 — 1. **Всего 159 ID**, из них Linux 74 (+1 общий C5-01), Swift 84 (C1-10/12/15/16/18 — и Linux-эталон); плюс ручные проверки A5 и визуальная приёмка C3/C6.
+**Итог по числу тестов (ID; многие ID — табличные под-кейсы):** A1 — 15 · A2 — 23 (A2-01…A2-23; прежнее «10» не учитывало A2-11) · A3 — 21 (A3-01 ≈ 30 векторов, A3-20 — сетка 2×3×3 + события) · A4 — 7 · B1 — 6 · B2 — 1 · C1 — 20 · C2 — 9 · C3 — 39 (C3-01…C3-39) · C4 — 11 · C5 — 11 · C6 — 1. **Всего 164 ID**, из них Linux 74 (+1 общий C5-01), Swift 89 (C1-10/12/15/16/18 — и Linux-эталон); плюс ручные проверки A5 и визуальная приёмка C3/C6.
 
 ## 3. Ручные проверки (Юрка) и визуальная приёмка
 

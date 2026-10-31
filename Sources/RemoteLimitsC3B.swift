@@ -1,5 +1,114 @@
 import Foundation
 
+// Per-machine observations stay separate from the winning account values.
+struct RemoteMachineReading {
+    var machineId: String
+    var name: String
+    var asOf: Date?
+    var interval: TimeInterval?
+    var isLocal: Bool
+}
+enum RemoteFreshnessTone: Equatable { case fresh, late, old, unknown }
+func remoteSourceFreshness(asOf: Date?, interval: TimeInterval?, now: Date) -> RemoteFreshnessTone {
+    guard let at = asOf, at.timeIntervalSince1970.isFinite, now.timeIntervalSince1970.isFinite,
+          at <= now else { return .unknown }
+    let age = now.timeIntervalSince(at)
+    let cadence = interval.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 14400
+    // A reading older than a day is always red, even for a malformed long schedule.
+    if age > 86400 { return .old }
+    return age <= cadence + 900 ? .fresh : .late
+}
+struct RemoteHeaderSource {
+    var name: String
+    var tone: RemoteFreshnessTone
+}
+struct RemoteSourceHeader {
+    var sources: [RemoteHeaderSource]
+    var tooltip: String
+    var overflow: Int { max(0, sources.count - 2) }
+    var plainText: String {
+        sources.prefix(2).map { "● " + $0.name }.joined(separator: ", ") + (overflow > 0 ? " +\(overflow)" : "")
+    }
+}
+func remoteSourceHeader(_ raw: AccountView, now: Date, language: String, timeZone: TimeZone) -> RemoteSourceHeader {
+    let view = remoteSanitizedView(raw), en = language == "en"
+    var records = view.sourceReadings
+    if records.isEmpty {
+        var names = view.machines
+        if names.isEmpty { names = [en ? "this computer" : "этот компьютер"] }
+        records = names.enumerated().map { index, name in
+            let ownsValues = view.data.source.map { $0.machineName == name } ?? (view.isLocal && index == 0)
+            return RemoteMachineReading(machineId: name, name: name, asOf: ownsValues ? view.data.asOf : nil,
+                interval: ownsValues ? view.data.source?.interval.map(Double.init) : nil, isLocal: view.isLocal && index == 0)
+        }
+    }
+    var lines: [String] = []
+    let sources = records.map { record -> RemoteHeaderSource in
+        let cleanName = remoteSnapshotText(record.name, limit: 32)
+        let name = cleanName.isEmpty ? (record.isLocal ? (en ? "this computer" : "этот компьютер") : "?") : cleanName
+        let tone = remoteSourceFreshness(asOf: record.asOf, interval: record.interval, now: now)
+        let status: String
+        switch tone {
+        case .fresh: status = en ? "on time" : "в срок"
+        case .late: status = en ? "late" : "давно"
+        case .old: status = en ? "over a day" : "больше суток"
+        case .unknown: status = en ? "no readings" : "нет показаний"
+        }
+        let moment = tone == .unknown ? "—" : remoteCardTimestamp(record.asOf, now: now, timeZone: timeZone,
+            compactOtherDay: tone == .old)
+        lines.append(name + " — " + moment + ", " + status)
+        return RemoteHeaderSource(name: name, tone: tone)
+    }
+    return RemoteSourceHeader(sources: sources, tooltip: lines.joined(separator: "\n"))
+}
+struct RemoteHeaderSourceRun {
+    var name: String
+    var tone: RemoteFreshnessTone
+    var x: Double
+    var dotWidth: Double = 6
+    var nameGap: Double = 3
+}
+struct RemoteSourceHeaderLayout {
+    var runs: [RemoteHeaderSourceRun]
+    var width: Double
+    var overflow: Int
+    var overflowX: Double
+}
+func remoteSourceHeaderMinimumWidth(_ header: RemoteSourceHeader, measure: (String) -> Double) -> Double {
+    let count = min(2, header.sources.count)
+    return Double(count) * 9 + Double(max(0, count - 1)) * measure(", ")
+        + (header.overflow > 0 ? measure(" +\(header.overflow)") : 0)
+}
+func remoteSourceHeaderLayout(_ header: RemoteSourceHeader, availableWidth: Double,
+                              measure: (String) -> Double) -> RemoteSourceHeaderLayout {
+    let shown = Array(header.sources.prefix(2)), budget = max(0, availableWidth)
+    var names = shown.map { $0.name }
+    let fixed = remoteSourceHeaderMinimumWidth(header, measure: measure)
+    func total() -> Double { fixed + names.reduce(0) { $0 + measure($1) } }
+    if total() > budget {
+        names = names.map { $0.count > 8 ? String($0.prefix(8)) + "…" : $0 }
+        while total() > budget, let index = names.indices.filter({ !names[$0].isEmpty })
+            .max(by: { measure(names[$0]) < measure(names[$1]) }) {
+            let base = names[index].hasSuffix("…") ? String(names[index].dropLast()) : names[index]
+            names[index] = base.count > 1 ? String(base.dropLast()) + "…" : ""
+        }
+    }
+    var x = 0.0, runs: [RemoteHeaderSourceRun] = []
+    for i in shown.indices {
+        runs.append(RemoteHeaderSourceRun(name: names[i], tone: shown[i].tone, x: x))
+        x += 9 + measure(names[i])
+        if i + 1 < shown.count { x += measure(", ") }
+    }
+    let overflowX = x
+    if header.overflow > 0 { x += measure(" +\(header.overflow)") }
+    return RemoteSourceHeaderLayout(runs: runs, width: x, overflow: header.overflow, overflowX: overflowX)
+}
+func remoteQuotaFooterHeight(advanced: Bool) -> Double { advanced ? 32 : 18 }
+func remoteVisibleSourceLine(_ text: String, advanced: Bool) -> String { advanced ? text : "" }
+func remoteVisibleSourceLine(_ card: RemoteCardPresentation, advanced: Bool) -> String {
+    remoteVisibleSourceLine(card.sourceLine, advanced: advanced)
+}
+
 // C3-B value models. No preferences, singleton history, AppKit, or runtime effects.
 enum RemotePanelStyle { case simple, advanced }
 // A reserved second header line keeps every Simple card at the same height.
@@ -23,8 +132,9 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
                 historySelectorRect: nil, moneyRows: [])
         }
         let extra = visible.contains { remoteSimpleShowsScopedRow($0, now: now) } ? 15.0 : 0
-        let cardH = 184 + REMOTE_SIMPLE_HEADER_EXTRA + extra, rows = max(1, (visible.count + 1) / 2)
-        let height = 318 + REMOTE_SIMPLE_HEADER_EXTRA + extra + Double(rows - 1) * (cardH + 12)
+        let removedSourceRow = remoteQuotaFooterHeight(advanced: true) - remoteQuotaFooterHeight(advanced: false)
+        let cardH = 184 + REMOTE_SIMPLE_HEADER_EXTRA + extra - removedSourceRow, rows = max(1, (visible.count + 1) / 2)
+        let height = 318 + REMOTE_SIMPLE_HEADER_EXTRA + extra - removedSourceRow + Double(rows - 1) * (cardH + 12)
         let cards = visible.indices.map { i -> CGRect in
             let wide = visible.count == 1 || (visible.count % 2 == 1 && i == visible.count - 1)
             return CGRect(x: wide || i % 2 == 0 ? 16 : 186,
@@ -239,6 +349,9 @@ func remoteSanitizedView(_ raw: AccountView) -> AccountView {
     var view = raw
     view.caption = remoteSnapshotText(raw.caption, limit: 128)
     view.machines = Array(raw.machines.prefix(32)).map { remoteSnapshotText($0, limit: 16) }
+    view.sourceReadings = Array(raw.sourceReadings.prefix(64)).map { record in
+        var copy = record; copy.name = remoteSnapshotText(record.name, limit: 32); return copy
+    }
     view.tier = raw.tier.map { remoteSnapshotText($0, limit: 48) }
     view.data.plan = raw.data.plan.map { remoteSnapshotText($0, limit: 48) }
     if var scoped = view.data.scoped {
@@ -340,10 +453,12 @@ func remotePresentationCard(_ raw: AccountView, sync: ReaderSyncState, language:
     // The account resolver already orders this computer first, then peers.
     // Keep the legacy C3-A presentation and Advanced header contracts intact.
     card.simpleTitle = defaultCaption ? (view.product == "claude" ? "Claude" : "Codex") : view.caption
-    let plainLocal = view.isLocal && view.data.source == nil && view.machines.count <= 1
-        && productAccountCount < 2 && sync.phase != .on
-    card.simpleMachines = plainLocal ? "" : view.machines.prefix(2).joined(separator: ", ")
-        + (view.machines.count > 2 ? " +\(view.machines.count - 2)" : "")
+    let header = remoteSourceHeader(view, now: now, language: language, timeZone: timeZone)
+    card.sourceHeader = header
+    card.simpleMachines = header.plainText
+    card.machineSuffix = "· " + header.plainText
+    // Keep the historical source tooltip verbatim; expose the new per-machine
+    // status on its own header hit/AX element, including sources hidden by +N.
     card.sourceLine = remotePresentationSourceLine(view, language: language, narrow: narrow, now: now, timeZone: timeZone)
     if !view.isLocal && view.state == .signedOut {
         card.paceNotice = nil
@@ -454,7 +569,7 @@ struct RemoteAdvancedHeaderWidths {
 }
 func remoteAdvancedHeaderWidths(availableWidth: Double, titleWidth: Double,
                                  badgeWidth: Double, planWidth: Double, machineWidth: Double,
-                                 isCustomTitle: Bool, minimumTitleWidth: Double) -> RemoteAdvancedHeaderWidths {
+                                 isCustomTitle: Bool, minimumTitleWidth: Double, minimumMachineWidth: Double = 0) -> RemoteAdvancedHeaderWidths {
     let available = max(0, availableWidth), naturalTitle = max(0, titleWidth)
     let badge = max(0, badgeWidth), plan = max(0, planWidth), machines = max(0, machineWidth)
     let titleGap = badge > 0 || plan > 0 || machines > 0 ? 7.0 : 0
@@ -464,9 +579,11 @@ func remoteAdvancedHeaderWidths(availableWidth: Double, titleWidth: Double,
     let titleBudget = max(0, available - fixed)
     // Custom L can shrink, while a product name keeps its natural measured
     // width. The normal 263pt row has room for both fixed pills and the product.
-    let title = isCustomTitle ? min(naturalTitle, max(minimumTitleWidth, titleBudget)) : naturalTitle
+    let originalTitle = isCustomTitle ? min(naturalTitle, max(minimumTitleWidth, titleBudget)) : naturalTitle
+    let minimum = max(0, minimumMachineWidth)
+    let title = minimum > 0 ? min(originalTitle, max(0, available - fixed - minimum)) : originalTitle
     return RemoteAdvancedHeaderWidths(title: title, badge: badge, plan: plan,
-        machines: min(machines, max(0, available - fixed - title)))
+        machines: min(machines, max(minimum, available - fixed - title)))
 }
 
 // C3-A's formatter remains unchanged for its public contract. Actual C3-B scene

@@ -2207,6 +2207,8 @@ final class GitHubSync {
     private var keychainRetryID: UUID?
     var onChange: (() -> Void)?
     var onRead: ((SyncRemoteCache, Date) -> Void)?
+    // Actual complete network reads only: never disk load, failed/partial reads or drawing.
+    var onActivityRead: ((SyncRemoteCache, Date) -> Void)?
     // Offline race tests only; checkpoints run on q, outside the UI lock.
     var selfTestLoginCheckpoint: ((String) -> Void)?
     private func loginCheckpoint(_ point: String) {
@@ -3246,6 +3248,7 @@ final class GitHubSync {
         // The auth owner's publication fence has been released. A reader callback may
         // inspect UI/auth state without recursively acquiring that fence.
         onRead?(cache, readAt)
+        if readWarning == nil { onActivityRead?(cache, clock()) }
         validatingSession = (gid, token, validatedAt, cache, capturedAccess, pass)
         if !readOnly && !deferWrite {
             outcome = writePublisher(passId: pass)
@@ -3954,7 +3957,7 @@ func isQuotaAction(_ id: String) -> Bool {
 /// Inline actions precede their enclosing card; passive feedback never consumes a click.
 func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
     hits.first { isQuotaAction($0.id) && $0.rect.contains(point) }
-        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("moneyaccount:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
+        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("sourceheader:") && !$0.id.hasPrefix("moneyaccount:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
 }
 
 let PANEL_W: CGFloat = 360
@@ -4262,7 +4265,7 @@ struct AutoPollState: Codable {
             for (key, value) in current {
                 guard let old = readings[key], old.reset == value.reset else { continue }
                 comparable = true
-                if (value.used - old.used) * 900 >= elapsed { active = true }
+                if autoReadingGrowth(previous: old, current: value, elapsed: elapsed) { active = true }
             }
         }
         if active { interval = 900 } else if comparable { slowDown() }
@@ -4276,6 +4279,69 @@ struct AutoPollState: Codable {
         interval = 900; return true
     }
 }
+// The same rate threshold is used for local and freshly read peer observations.
+func autoReadingGrowth(previous: AutoReading, current: AutoReading, elapsed: Double) -> Bool {
+    elapsed > 0 && elapsed.isFinite && previous.reset == current.reset
+        && previous.used.isFinite && current.used.isFinite && (current.used - previous.used) * 900 >= elapsed
+}
+func autoReadingValues(_ data: LimitData) -> [String: AutoReading] {
+    var result: [String: AutoReading] = [:]
+    if let value = data.session, value.isFinite { result["session"] = AutoReading(used: value, reset: data.sessionReset?.timeIntervalSince1970) }
+    if let value = data.weekly, value.isFinite { result["weekly"] = AutoReading(used: value, reset: data.weeklyReset?.timeIntervalSince1970) }
+    if let value = data.scoped, value.percent.isFinite { result["model:" + value.name] = AutoReading(used: value.percent, reset: value.reset?.timeIntervalSince1970) }
+    return result
+}
+struct RemoteAutoActivity {
+    struct Sample { var label: String; var at: Double; var readings: [String: AutoReading] }
+    private var samples: [String: Sample] = [:]
+    private var awakeUntil: [String: Double] = [:]
+    mutating func invalidate(products: Set<String>) {
+        for product in products { samples.removeValue(forKey: product); awakeUntil.removeValue(forKey: product) }
+    }
+    mutating func retainIdentities(_ labels: [String: String]) {
+        for product in Array(samples.keys) where samples[product]?.label != labels[product] {
+            samples.removeValue(forKey: product); awakeUntil.removeValue(forKey: product)
+        }
+    }
+    @discardableResult
+    mutating func observe(product: String, label: String, data: LimitData, state: inout AutoPollState,
+                          now: Double, baseline: LimitData? = nil) -> Bool {
+        guard data.present, data.apiFresh, !data.fromCache, !data.stale, data.auth == .ok,
+              data.error == nil, !data.pollFailed, let at = data.asOf?.timeIntervalSince1970,
+              at.isFinite, now.isFinite, at <= now, at >= now - 900 else { return false }
+        let readings = autoReadingValues(data)
+        guard !readings.isEmpty else { return false }
+        if samples[product]?.label != label {
+            samples.removeValue(forKey: product); awakeUntil.removeValue(forKey: product)
+        }
+        if samples[product] == nil, let own = baseline, own.apiFresh, !own.fromCache, !own.stale,
+           own.auth == .ok, own.error == nil, !own.pollFailed,
+           let ownAt = own.asOf?.timeIntervalSince1970, ownAt.isFinite, ownAt >= now - 900, ownAt < at {
+            samples[product] = Sample(label: label, at: ownAt, readings: autoReadingValues(own))
+        }
+        let previous = samples[product]
+        if let previous = previous, at <= previous.at { return false }
+        samples[product] = Sample(label: label, at: at, readings: readings)
+        guard let old = previous else { return false }
+        let active = readings.contains { key, value in
+            old.readings[key].map { autoReadingGrowth(previous: $0, current: value, elapsed: at - old.at) } ?? false
+        }
+        guard active else { return false }
+        awakeUntil[product] = now + 900
+        let changed = state.interval != 900
+        state.interval = 900
+        // Neither lastAttempt nor the local observation/failure state belongs to a peer.
+        return changed
+    }
+    func apply(to states: inout [String: AutoPollState], now: Double) {
+        // C4 can save an older poll mirror after its GET callback. Retain fresh
+        // activity for one window so that save cannot undo the observed wakeup.
+        for (product, until) in awakeUntil where now < until && states[product] != nil {
+            states[product]?.interval = 900
+        }
+    }
+}
+
 func loadAutoPollStates() -> [String: AutoPollState] {
     guard let data = UserDefaults.standard.data(forKey: "autoPollState"),
           let states = try? JSONDecoder().decode([String: AutoPollState].self, from: data) else { return [:] }
@@ -4595,7 +4661,11 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
     let resolved = remoteAccountFrame(local: (selectedLimits(claude, product: "claude"), selectedLimits(codex, product: "codex")),
         localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids, remote: cache, hidden: hidden, menu: menu,
         sync: sync, now: now,
-        localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"))
+        localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"),
+        localMachineId: isolated ? "local" : GitHubSync.shared.machineId,
+        localIntervals: autoPollEnabled() ? loadAutoPollStates().mapValues { $0.interval }
+            : ["claude": normalizedPollInterval(UserDefaults.standard.double(forKey: "interval")),
+               "codex": normalizedPollInterval(UserDefaults.standard.double(forKey: "interval"))])
     var all = applyingLocalCaptions(resolved.allViews, remote: cache.captions ?? [:], now: now).map { remotePresentationView($0, sync: sync, now: now) }
     // Unlabelled usage has no quota card, but remains manageable in Settings/history.
     for product in ["claude", "codex"] {
@@ -4660,6 +4730,37 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date(),
         timeZone: remoteRenderTimeZone(), manual: manualPhase, productAccountCount: max(1, productCount),
         readerManual: readerPhase)
 }
+func drawRemoteSourceHeader(_ ctx: CGContext, header: RemoteSourceHeader, in rect: CGRect,
+                            font: NSFont, prefix: String = "") {
+    func measure(_ value: String) -> Double {
+        Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, font as CTFont, cg(gray(1, 0.5))))))
+    }
+    let prefixWidth = measure(prefix)
+    let layout = remoteSourceHeaderLayout(header, availableWidth: max(0, Double(rect.width) - prefixWidth), measure: measure)
+    ctx.saveGState(); defer { ctx.restoreGState() }
+    ctx.textMatrix = .identity
+    func drawText(_ value: String, x: Double) {
+        ctx.textPosition = CGPoint(x: rect.minX + CGFloat(x), y: rect.midY - 3.5)
+        CTLineDraw(CTLineCreateWithAttributedString(ctAttr(value, font as CTFont, cg(gray(1, 0.5)))), ctx)
+    }
+    drawText(prefix, x: 0)
+    for (index, run) in layout.runs.enumerated() {
+        let ink: NSColor
+        switch run.tone {
+        case .fresh: ink = ADV_MODEL[0]
+        case .late: ink = ADV_WARN
+        case .old: ink = ADV_CRIT
+        case .unknown: ink = gray(1, 0.35)
+        }
+        let x = prefixWidth + run.x
+        ctx.setFillColor(cg(ink))
+        ctx.fillEllipse(in: CGRect(x: rect.minX + CGFloat(x), y: rect.midY - 3, width: 6, height: 6))
+        drawText(run.name, x: x + run.dotWidth + run.nameGap)
+        if index + 1 < layout.runs.count { drawText(", ", x: x + 9 + measure(run.name)) }
+    }
+    if layout.overflow > 0 { drawText(" +\(layout.overflow)", x: prefixWidth + layout.overflowX) }
+}
+
 func remoteToneColor(_ tone: String) -> NSColor {
     tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
         : (tone == "ADV_LINK" ? ADV_LINK : gray(1, 0.5))
@@ -4757,13 +4858,13 @@ func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, ti
     }
     return remoteFittedLineEnd(shortest, availableWidth: width, measure: measure)
 }
-/// Two quiet lines in the existing card. Full status and distinct times live in its tooltip.
+/// Simple keeps the action row; Advanced also shows the source/time row.
 func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
                          view: AccountView? = nil) -> [Hit] {
     let now = (REMOTE_ACCOUNT_FRAME?.now ?? Date()).timeIntervalSince1970
     let feedback = quotaFeedback(data, now: now)
     let inset: CGFloat = advanced ? 11 : 14
-    let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: 32)
+    let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: CGFloat(remoteQuotaFooterHeight(advanced: advanced)))
     let error = !data.refreshInFlight && (data.auth != .ok || data.pollFailed || data.error != nil || (data.serverRetryAt ?? 0) > now)
     let ink = error ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1) : gray(1, 0.5)
     func line(_ value: String, rect: CGRect, weight: NSFont.Weight, color: NSColor, truncate: Bool = true) {
@@ -4775,15 +4876,17 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
     }
     let model = view.map { cardPresentation($0, narrow: !advanced && card.width < 300, now: Date(timeIntervalSince1970: now)) }
     var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
-    if (data.source != nil || view?.isLocal == false), let view = view {
+    if advanced, (data.source != nil || view?.isLocal == false), let view = view {
         sourceLine = remoteFittedSourceLine(view, language: appLang(), now: Date(timeIntervalSince1970: now),
-            timeZone: remoteRenderTimeZone(), narrow: !advanced && card.width < 300,
-            availableWidth: Double(footer.width)) { value in
+            timeZone: remoteRenderTimeZone(), narrow: false, availableWidth: Double(footer.width)) { value in
                 Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, .regular), cg(gray(1, 0.5))))))
             }
     }
-    line(sourceLine, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
-         color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
+    let visibleSource = remoteVisibleSourceLine(sourceLine, advanced: advanced)
+    if !visibleSource.isEmpty {
+        line(visibleSource, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
+             color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
+    }
     let tooltip = view?.isLocal == false ? (model?.tooltip ?? "")
         : [quotaTooltip(data, now: now), data.source != nil ? model?.tooltip ?? "" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
     let duplicate = REMOTE_ACCOUNT_FRAME?.visibleViews.filter { $0.product == product }.count ?? 0
@@ -4977,13 +5080,12 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         if let view = view {
             let header = cardPresentation(view, narrow: w < 300,
                 productAccountCount: cardViews.filter { $0.product == view.product }.count)
-            func machinesAttr(_ value: String) -> NSAttributedString {
-                ctAttr(value, NSFont.systemFont(ofSize: 10.5, weight: .regular, width: .condensed) as CTFont, cg(textMid))
+            if let sources = header.sourceHeader {
+                let headerRect = rectTL(x + 39, cardsTop + 15 + CGFloat(REMOTE_SIMPLE_HEADER_EXTRA), w - 64, 14)
+                drawRemoteSourceHeader(ctx, header: sources, in: headerRect,
+                    font: NSFont.systemFont(ofSize: 10.5, weight: .regular, width: .condensed))
+                hits.append(Hit(id: "sourceheader:" + product + ":" + view.historyKey, rect: rectTL(x + 14, cardsTop + 13, w - 28, 31), tooltip: sources.tooltip))
             }
-            let machines = remoteFittedSimpleMachines(header.simpleMachines, availableWidth: Double(w - 64)) {
-                Double(lineWidth(CTLineCreateWithAttributedString(machinesAttr($0))))
-            }
-            text(machinesAttr(machines), x: x + 39, topY: cardsTop + 15 + CGFloat(REMOTE_SIMPLE_HEADER_EXTRA))
         }
 
         hits += drawQuotaCardFooter(ctx, card: r, data: d, product: product, view: view)
@@ -5700,6 +5802,11 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let planWidth = planLabel.isEmpty ? 0 : width(planAttr) + 14
         let rawTitle = presentation?.advancedTitle ?? c.name
         let machineSuffix = presentation?.machineSuffix ?? ""
+        let sourceHeader = presentation?.sourceHeader
+        func sourceMeasure(_ value: String) -> Double {
+            Double(width(attr(value, 11, .regular, textMid)))
+        }
+        let minimumSourceWidth = sourceHeader.map { sourceMeasure("· ") + remoteSourceHeaderMinimumWidth($0, measure: sourceMeasure) } ?? 0
         let titleWidth = width(attr(rawTitle, 13, .semibold, textHi))
         let minimumTitleWidth = width(attr(String(rawTitle.prefix(8)), 13, .semibold, textHi))
         let availableWidth = CGFloat(remoteAdvancedHeaderRightBoundary(cardMaxX: Double(slot.maxX))) - ADV_IX - 23
@@ -5707,13 +5814,14 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         // of the product name (or the custom caption's first eight characters).
         let protectedTitle = rawTitle == c.name ? titleWidth : minimumTitleWidth
         let badgeGaps: CGFloat = 7 + (planWidth > 0 ? 5 : 0) + (machineSuffix.isEmpty ? 0 : 5)
-        let badgeBudget = max(14, availableWidth - protectedTitle - planWidth - badgeGaps)
+        let badgeBudget = max(14, availableWidth - protectedTitle - planWidth - badgeGaps - CGFloat(minimumSourceWidth))
         let badgeWidth = warningBadge.isEmpty ? 0
             : min(badgeBudget, width(attr(warningBadge, 9.5, .semibold, textMid, kern: 0.19)) + 14)
         let allocation = remoteAdvancedHeaderWidths(availableWidth: Double(availableWidth),
             titleWidth: Double(titleWidth), badgeWidth: Double(badgeWidth),
             planWidth: Double(planWidth), machineWidth: Double(width(attr(machineSuffix, 11, .regular, textMid))),
-            isCustomTitle: rawTitle != c.name, minimumTitleWidth: Double(minimumTitleWidth))
+            isCustomTitle: rawTitle != c.name, minimumTitleWidth: Double(minimumTitleWidth),
+            minimumMachineWidth: minimumSourceWidth)
         let name = fitAttr(rawTitle, maxW: CGFloat(allocation.title)) { attr($0, 13, .semibold, textHi) }
         textC(name, x: ADV_IX + 23, topY: y0, h: 18)
         var px = ADV_IX + 23 + width(name) + 7
@@ -5727,9 +5835,14 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             let r = pill(planAttr, x: px, topY: y0 + 1, h: 16, padX: 7, fill: gray(1, 0.09))
             px = r.maxX + 5
         }
-        if !machineSuffix.isEmpty, allocation.machines > 0 {
-            textC(fitAttr(machineSuffix, maxW: CGFloat(allocation.machines)) { attr($0, 11, .regular, textMid) },
-                  x: px, topY: y0 + 1, h: 16)
+        if let header = sourceHeader, allocation.machines > 0 {
+            let headerRect = rectTL(px, y0 + 1, CGFloat(allocation.machines), 16)
+            drawRemoteSourceHeader(ctx, header: header, in: headerRect, font: NSFont.systemFont(ofSize: 11), prefix: "· ")
+        }
+        if let account = c.account, let header = sourceHeader {
+            hits.append(Hit(id: "sourceheader:" + c.product + ":" + account.historyKey,
+                rect: rectTL(ADV_IX, y0, CGFloat(remoteAdvancedHeaderRightBoundary(cardMaxX: Double(slot.maxX))) - ADV_IX, 18),
+                tooltip: header.tooltip))
         }
         let arrow = rectTL(322, y0 + 3, 12, 12)
         drawSF(ctx, "arrow.up.forward", in: arrow, gray(1, 0.34), weight: .semibold)
@@ -6981,7 +7094,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         }
         if mode == .main {
             var accessibleChildren: [Any] = subviews.filter { !$0.isHidden }
-            for hit in hits where hit.id.hasPrefix("quotafeedback:") {
+            for hit in hits where hit.id.hasPrefix("quotafeedback:") || hit.id.hasPrefix("sourceheader:") {
                 let visible = hit.rect.intersection(bounds)
                 guard !visible.isNull && !visible.isEmpty else { continue }
                 let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
@@ -6992,7 +7105,8 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                 let account = displayedCardViews(claude, codex).first {
                     $0.product == product && (parts.count < 3 || $0.historyKey == parts[2])
                 }
-                element.setAccessibilityLabel(account?.caption ?? (product == "claude" ? "Claude Code" : "Codex"))
+                element.setAccessibilityLabel(hit.id.hasPrefix("sourceheader:") ? (hit.tooltip ?? "")
+                    : (account?.caption ?? (product == "claude" ? "Claude Code" : "Codex")))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityValue(hit.tooltip ?? "")
                 accessibleChildren.append(element)
@@ -7024,6 +7138,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
                        userData data: UnsafeMutableRawPointer?) -> String {
+        if let header = hits.first(where: { $0.id.hasPrefix("sourceheader:") && $0.rect.contains(point) }) { return header.tooltip ?? "" }
         if let feedback = hits.first(where: { $0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }) { return feedback.tooltip ?? "" }
         if let hit = hits.first(where: { $0.tooltip != nil && $0.rect.contains(point) }) { return hit.tooltip ?? "" }
         return onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
@@ -7643,6 +7758,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var fetchingLimits: Bool { quotaStates.values.contains { $0.flight != nil } }
     var refreshDisplayTimer: Timer?
     var autoStates = loadAutoPollStates()
+    private var remoteAutoActivity = RemoteAutoActivity()
     private var c4NextCoordinationRead: Double = 0
     private var c4LastManualRead: Double?
     private var c4MirroredLocalId = UserDefaults.standard.string(forKey: "c4AutoPollAccountId")
@@ -7755,6 +7871,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                           sync: ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at)),
                           history: .shared, pollLog: POLL_LOG_PATH)
         }
+        GitHubSync.shared.onActivityRead = { [weak self] cache, _ in
+            DispatchQueue.main.async { self?.observeRemoteAutoActivity(cache, at: Date()) }
+        }
         GitHubSync.shared.onChange = { [weak self] in
             GitHubSync.shared.recheckKeychainRetry()
             // Main and Settings heights both depend on sync state (orange line, status rows).
@@ -7858,7 +7977,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func observeRemoteAutoActivity(_ cache: SyncRemoteCache, at: Date) {
+        guard autoPollEnabled(), GitHubSync.shared.ui.phase == .on else { return }
+        let current = GitHubSync.shared.remoteSnapshot()
+        guard current.authEpoch == cache.authEpoch, current.authUserID == cache.authUserID,
+              current.labelKey == cache.labelKey else { return }
+        let snapshot = readerLocalSnapshot.snapshot()
+        remoteAutoActivity.retainIdentities(remoteAutoLocalLabels(cache, localIds: snapshot.ids))
+        let candidates = remoteAutoCandidates(cache, localIds: snapshot.ids, now: at, freshRead: true)
+        var changed = false
+        for (product, candidate) in candidates where productEnabled(product) {
+            var state = autoStates[product] ?? AutoPollState()
+            let own = product == "claude" ? snapshot.local.0 : snapshot.local.1
+            if remoteAutoActivity.observe(product: product, label: candidate.label, data: candidate.data,
+                state: &state, now: at.timeIntervalSince1970, baseline: own) { changed = true }
+            autoStates[product] = state
+        }
+        if changed { saveAutoStates() }
+    }
     func publishAutoIntervals() {
+        if autoPollEnabled() { remoteAutoActivity.apply(to: &autoStates, now: Date().timeIntervalSince1970) }
         if let (claude, codex) = last {
             last = (limitsWithPollStatus(claude, product: "claude"), limitsWithPollStatus(codex, product: "codex"))
         }
@@ -8142,6 +8280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let claude = limitsWithPollStatus(selectedLimits(claude, product: "claude"), product: "claude")
         let codex = limitsWithPollStatus(selectedLimits(codex, product: "codex"), product: "codex")
         last = (claude, codex)
+        if !sampleProducts.isEmpty {
+            let previousIds = readerLocalSnapshot.snapshot().ids
+            remoteAutoActivity.invalidate(products: Set(sampleProducts.filter { previousIds[$0] != readingIds[$0] }))
+        }
         readerLocalSnapshot.update(local: (claude, codex), ids: readingIds, identityProducts: sampleProducts)
         applyTrayImage(claude, codex)
         if sampleProducts.contains("claude") { UsageHistory.shared.record(claude, product: "claude", acct: localHistoryKey("claude")) }
@@ -8885,8 +9027,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(saved, "preview " + target.path)
         if saved { previewFiles.append(name) }
     }
-    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 200,
-          "C3-10 200 C3-B preview scenes")
+    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 209,
+          "C3-10 209 C3-B preview scenes")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {

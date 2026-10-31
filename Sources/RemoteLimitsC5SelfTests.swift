@@ -373,11 +373,12 @@ private func c5C506(_ check: C5Check) {
     let view = c5DateView(yesterday)
     let narrow = remotePresentationCard(view, sync: sync, language: "en", narrow: true, now: now, timeZone: zone)
     let wide = remotePresentationCard(view, sync: sync, language: "en", narrow: false, now: now, timeZone: zone)
-    check(narrow.sourceLine == "From vps on 11.10" && !narrow.sourceLine.contains(" at "),
+    check(remoteVisibleSourceLine(narrow, advanced: false).isEmpty
+          && narrow.sourceLine == "From vps on 11.10" && !narrow.sourceLine.contains(" at "),
           "C5-06 EN date-only source uses on, never at")
-    check(wide.sourceLine == "Data from vps at 11.10 15:00" && narrow.tooltip.contains("11.10 15:00")
+    check(wide.sourceLine == "Data from vps on 11.10 15:00" && narrow.tooltip.contains("11.10 15:00")
           && narrow.accessibilityValue == narrow.tooltip,
-          "C5-06 wide/Advanced and tooltip/AX retain full date and time with at")
+          "C5-06 Advanced and tooltip/AX retain full date and time with on")
     let today = c5DateView(now.addingTimeInterval(-600))
     let fresh = remotePresentationCard(today, sync: sync, language: "en", narrow: true, now: now, timeZone: zone)
     check(fresh.sourceLine == "Data from vps at 15:50", "C5-06 time-only source still uses at")
@@ -397,7 +398,162 @@ private func c5C506(_ check: C5Check) {
           "C5-06 C3-36 state6 and active manual phase retain date preposition and reader priority")
 }
 
+// C5-07...11 RED before production implementation (2026-10-31).
+private func c5C507(_ check: C5Check) {
+    let now = C5_NOW
+    for (age, expected) in [(0.0, RemoteFreshnessTone.fresh), (2700, .fresh), (2701, .late),
+                             (86400, .late), (86401, .old)] {
+        check(remoteSourceFreshness(asOf: now.addingTimeInterval(-age), interval: 1800, now: now) == expected,
+              "C5-07 exact interval+15min/day boundaries age=\(age)")
+    }
+    check(remoteSourceFreshness(asOf: now.addingTimeInterval(-2000), interval: 900, now: now) == .late
+          && remoteSourceFreshness(asOf: now.addingTimeInterval(-2000), interval: 3600, now: now) == .fresh,
+          "C5-07 selected/Auto local cadence changes only its own freshness horizon")
+    check(remoteSourceFreshness(asOf: nil, interval: 900, now: now) == .unknown,
+          "C5-07 no reading is grey")
+    check(remoteSourceFreshness(asOf: now.addingTimeInterval(1), interval: 900, now: now) == .unknown,
+          "C5-07 future reading cannot claim freshness")
+    check(remoteSourceFreshness(asOf: now.addingTimeInterval(-15300), interval: nil, now: now) == .fresh,
+          "C5-07 absent schedule uses four hours plus fifteen minutes")
+    check(remoteSourceFreshness(asOf: now.addingTimeInterval(-15301), interval: nil, now: now) == .late,
+          "C5-07 fallback boundary plus one second")
+}
+private func c5C508(_ check: C5Check) {
+    var view = c5DateView(C5_NOW.addingTimeInterval(-120))
+    view.machines = ["macbook", "vps", "third"]
+    view.sourceReadings = [
+        RemoteMachineReading(machineId: "mac", name: "macbook", asOf: C5_NOW.addingTimeInterval(-120), interval: 900, isLocal: true),
+        RemoteMachineReading(machineId: "vps", name: "vps", asOf: C5_NOW.addingTimeInterval(-86401), interval: 1800, isLocal: false),
+        RemoteMachineReading(machineId: "third", name: "third", asOf: nil, interval: nil, isLocal: false)]
+    for language in ["ru", "en"] {
+        let model = remoteSourceHeader(view, now: C5_NOW, language: language, timeZone: TimeZone(secondsFromGMT: 0)!)
+        check(model.sources.map { $0.tone } == [.fresh, .old, .unknown] && model.overflow == 1,
+              "C5-08 provenance retains independent times/statuses and undotted +N")
+        check(model.tooltip.split(separator: "\n").count == 3
+              && model.tooltip.contains(language == "ru" ? "в срок" : "on time")
+              && model.tooltip.contains(language == "ru" ? "больше суток" : "over a day")
+              && model.tooltip.contains(language == "ru" ? "нет показаний" : "no readings"),
+              "C5-08 each machine has its own timestamp/status in RU/EN tooltip and AX")
+        let fitted = remoteSourceHeaderLayout(model, availableWidth: 55, measure: { Double($0.count) * 6 })
+        check(fitted.runs.count == 2 && fitted.runs.allSatisfy { $0.dotWidth == 6 && $0.nameGap == 3 }
+              && fitted.width <= 55 && fitted.overflow == 1,
+              "C5-08 narrow fit shortens names without ever truncating either dot")
+    }
+    var local = view; local.isLocal = true; local.machines = []; local.sourceReadings = []
+    local.data.source = nil; local.data.asOf = C5_NOW
+    let header = remoteSourceHeader(local, now: C5_NOW, language: "ru", timeZone: TimeZone(secondsFromGMT: 0)!)
+    check(header.sources.count == 1 && header.sources[0].name == "этот компьютер" && header.sources[0].tone == .fresh,
+          "C5-08 solo local account without sync still has its source dot and fallback name")
+}
+private func c5C509(_ check: C5Check) {
+    for count in 1...4 {
+        let views = (0..<count).map { index -> AccountView in
+            var view = c5DateView(C5_NOW); view.historyKey = "c509-\(index)"; return view
+        }
+        let layout = remotePanelLayout(views: views, style: .simple, now: C5_NOW)
+        check(layout.cards.allSatisfy { $0.height == 183 }
+              && layout.windowHeight == (count <= 2 ? 317 : 512),
+              "C5-09 Simple \(count) cards remove one 14pt source row per grid row")
+        check(remoteQuotaFooterHeight(advanced: false) == 18 && remoteQuotaFooterHeight(advanced: true) == 32,
+              "C5-09 shared footer geometry retains the action row and full Advanced footer")
+    }
+    let view = c5DateView(C5_NOW.addingTimeInterval(-86400))
+    for narrow in [true, false] {
+        let p = remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: "en", narrow: narrow,
+            now: C5_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
+        check(remoteVisibleSourceLine(p, advanced: false).isEmpty
+              && !remoteVisibleSourceLine(p, advanced: true).isEmpty && !p.statusLine.isEmpty,
+              "C5-09 source is hidden only in Simple; action/status and Advanced source survive")
+    }
+}
+private func c5C510(_ check: C5Check) {
+    let start = 10000.0
+    func reading(_ pct: Double, _ at: Double) -> LimitData {
+        LimitData(session: pct, sessionReset: Date(timeIntervalSince1970: 100000),
+                  asOf: Date(timeIntervalSince1970: at), apiFresh: true)
+    }
+    var poll = AutoPollState(); poll.interval = 14400; poll.lastAttempt = start - 100
+    var tracker = RemoteAutoActivity()
+    let before = poll.lastAttempt
+    check(!tracker.observe(product: "codex", label: C5_LABEL, data: reading(20, start), state: &poll, now: start),
+          "C5-10 first peer reading establishes a baseline")
+    check(tracker.observe(product: "codex", label: C5_LABEL, data: reading(21, start + 900), state: &poll, now: start + 900)
+          && poll.interval == 900 && poll.lastAttempt == before && poll.observedAt == 0,
+          "C5-10 remote 1pp/15min wakes Auto without a local attempt or local observation")
+    var overwritten = poll; overwritten.interval = 14400
+    var mirrors = ["codex": overwritten]
+    tracker.apply(to: &mirrors, now: start + 901)
+    check(mirrors["codex"]?.interval == 900 && mirrors["codex"]?.lastAttempt == before,
+          "C5-10 a late C4 poll-state save cannot undo a fresh peer wakeup")
+    mirrors["codex"]?.interval = 14400; tracker.apply(to: &mirrors, now: start + 1800)
+    check(mirrors["codex"]?.interval == 14400, "C5-10 wake hint expires after fifteen minutes")
+    poll.interval = 14400
+    check(!tracker.observe(product: "codex", label: C5_LABEL, data: reading(21, start + 900), state: &poll, now: start + 901)
+          && poll.interval == 14400, "C5-10 duplicate cannot wake again")
+    check(!tracker.observe(product: "codex", label: C5_LABEL, data: reading(90, start + 899), state: &poll, now: start + 901)
+          && poll.interval == 14400, "C5-10 recent but out-of-order data cannot wake Auto")
+    check(!tracker.observe(product: "codex", label: C5_LABEL, data: reading(90, start + 1), state: &poll, now: start + 2000),
+          "C5-10 old/out-of-order remote reading ignored")
+    for kind in 0..<4 {
+        var bad = reading(80, start + 1200)
+        if kind == 0 { bad.fromCache = true }; if kind == 1 { bad.stale = true }
+        if kind == 2 { bad.error = "synthetic" }; if kind == 3 { bad.apiFresh = false }
+        check(!tracker.observe(product: "codex", label: C5_LABEL, data: bad, state: &poll, now: start + 1200)
+              && poll.interval == 14400, "C5-10 cached/stale/error/nonfresh reading ignored")
+    }
+    check(!tracker.observe(product: "codex", label: "0000000000000002", data: reading(99, start + 1201), state: &poll, now: start + 1201),
+          "C5-10 changed account starts a new baseline, never compares another account")
+    var low = RemoteAutoActivity(), lowState = AutoPollState(); lowState.interval = 14400
+    _ = low.observe(product: "codex", label: C5_LABEL, data: reading(20, start), state: &lowState, now: start)
+    check(!low.observe(product: "codex", label: C5_LABEL, data: reading(20.99, start + 900), state: &lowState, now: start + 900),
+          "C5-10 growth below one percentage point per fifteen minutes stays idle")
+    var reset = reading(90, start + 901); reset.sessionReset = Date(timeIntervalSince1970: 200000)
+    check(!low.observe(product: "codex", label: C5_LABEL, data: reset, state: &lowState, now: start + 901),
+          "C5-10 different reset windows cannot manufacture growth")
+    var own = AutoPollState(); own.interval = 14400
+    own.observe(reading(20, start), now: start); own.observe(reading(21, start + 900), now: start + 900)
+    check(own.interval == 900 && own.lastAttempt == start + 900, "C5-10 existing own-growth semantics remain unchanged")
+}
+private func c5C511(_ check: C5Check) {
+    let id = "account-c511", key = accountLabelKey(gistId: "c511")!
+    let label = accountLabel(product: "codex", localId: id, labelKey: key)!
+    var cache = SyncRemoteCache(); cache.labelKey = key
+    var peer = RemoteAccount(product: "codex", label: label, status: "ok")
+    peer.machineId = "vps"; peer.machineName = "vps"; peer.asOf = C5_NOW
+    peer.windows = RemoteWindows(session: RemoteWindow(pct: 21, resetAt: C5_NOW.addingTimeInterval(3600)))
+    peer.schedule = RemoteSchedule(mode: "auto", interval: 900)
+    var other = peer; other.label = "0000000000000002"
+    cache.accounts = [other, peer]
+    let samples = remoteAutoCandidates(cache, localIds: ["codex": id], now: C5_NOW, freshRead: true)
+    check(samples.count == 1 && samples["codex"]?.label == label && samples["codex"]?.data.session == 21,
+          "C5-11 only the matching localId/HMAC account can wake this product")
+    check(remoteAutoCandidates(cache, localIds: ["codex": id], now: C5_NOW, freshRead: false).isEmpty,
+          "C5-11 disk-cache projection cannot feed Auto")
+    var datedPeer = peer; datedPeer.asOf = C5_NOW.addingTimeInterval(-4000)
+    datedPeer.machineLastSeenAt = C5_NOW; datedPeer.schedule?.interval = 1800
+    cache.accounts = [datedPeer]
+    let own = LimitData(session: 20, asOf: C5_NOW.addingTimeInterval(-800), apiFresh: true)
+    let frame = remoteAccountFrame(local: (LimitData(present: false), own), localIds: ["codex": id], remote: cache,
+        hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: C5_NOW,
+        localMachineName: "macbook", localMachineId: "mac", localIntervals: ["codex": 900])
+    let resolved = frame.allViews.first { $0.label == label }
+    check(resolved?.sourceReadings.map { $0.asOf } == [own.asOf, datedPeer.asOf]
+          && resolved?.sourceReadings.map { $0.interval } == [900, 1800],
+          "C5-11 resolver preserves own/peer observation times and their independent schedules")
+    if let resolved = resolved {
+        check(remoteSourceHeader(resolved, now: C5_NOW, language: "en", timeZone: TimeZone(secondsFromGMT: 0)!)
+            .sources.map { $0.tone } == [.fresh, .late], "C5-11 file heartbeat cannot make an old account reading green")
+    }
+    var stale = peer; stale.asOf = C5_NOW.addingTimeInterval(-901); cache.accounts = [stale]
+    check(remoteAutoCandidates(cache, localIds: ["codex": id], now: C5_NOW, freshRead: true).isEmpty,
+          "C5-11 remote readings older than fifteen minutes do not feed Auto")
+    peer.status = "error"; cache.accounts = [peer]
+    check(remoteAutoCandidates(cache, localIds: ["codex": id], now: C5_NOW, freshRead: true).isEmpty,
+          "C5-11 failed remote account ignored even with retained percentages")
+}
+
 func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C501(check); c5C501Sanitization(check); c5C502(check); c5C503(check)
     c5C504(check); c5C505(check); c5C506(check)
+    c5C507(check); c5C508(check); c5C509(check); c5C510(check); c5C511(check)
 }

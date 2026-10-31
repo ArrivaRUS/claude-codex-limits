@@ -196,7 +196,7 @@ private func c3C302(_ expect: C3Expect) {
         var old = c3View(); old.data.asOf = c3Date("2026-10-11T15:43:00Z"); old.data.source?.asOf = old.data.asOf
         for narrow in [true, false] {
             let expected = lang == "ru" ? (narrow ? "С vps от 11.10 15:43" : "Данные с vps от 11.10 15:43")
-                                       : (narrow ? "From vps at 11.10 15:43" : "Data from vps at 11.10 15:43")
+                                       : (narrow ? "From vps on 11.10 15:43" : "Data from vps on 11.10 15:43")
             expect(c3Presentation(old, language: lang, narrow: narrow).sourceLine == expected, "C3-02 previous day retains complete date/time \(lang)/\(narrow)")
         }
         var absent = c3View(); absent.data.asOf = nil; absent.data.source?.asOf = nil
@@ -237,7 +237,7 @@ private func c3C302(_ expect: C3Expect) {
     for lang in ["ru", "en"] {
         let line = remoteCardSourceLine(collision, language: lang, narrow: true, now: C3_NOW,
                                         timeZone: C3_ZONE, compact: true, machineLimit: 8)
-        expect(line == (lang == "ru" ? "С 11.10 15… от 11.10 15:43" : "From 11.10 15… at 11.10 15:43"),
+        expect(line == (lang == "ru" ? "С 11.10 15… от 11.10 15:43" : "From 11.10 15… on 11.10 15:43"),
                "C3-02 \(lang): machine/date collision truncates only machine, preserves complete snapshot timestamp")
     }
     for phase in [SyncPhase.off, .revoked, .awaitingCode] {
