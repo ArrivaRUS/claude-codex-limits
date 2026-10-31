@@ -107,6 +107,8 @@ private func c3C301(_ expect: C3Expect) {
         let target = product == "claude" ? "open:https://claude.ai/settings/usage" : "open:https://chatgpt.com/codex/cloud/settings/analytics#usage"
         for (state, status) in [(RemoteCardState.fresh, "error"), (.stale, "ok"), (.signInRequired, "expired"),
                                 (.signInRequired, "signed_out"), (.stale, "error"), (.serviceWait, "rate_limited"), (.offline, "error")] {
+            // Raw cached views deliberately bypass caption validation here:
+            // this tests action isolation, not acceptance of wire captions.
             for caption in ["javascript:alert(1)", "file:///synthetic", "%@%n"] {
                 var view = c3View(state: state, status: status, product: product); view.caption = caption
                 expect(!limitCanFix(remote: view), "C3-01 \(product)/\(status): remote recovery is never local CLI recovery")
@@ -619,26 +621,69 @@ private func c3FormatViolations(_ source: String) -> [String] {
     }
 }
 private func c3C311(_ expect: C3Expect) {
-    guard let rows = c3Fixture("c3-malicious.json", as: [C3Malicious].self), rows.count == 6 else {
+    guard var rows = c3Fixture("c3-malicious.json", as: [C3Malicious].self), rows.count == 6 else {
         expect(false, "C3-11 malicious vectors readable"); return
     }
+    rows += [C3Malicious(name: "format-at", value: "%@%n"),
+             C3Malicious(name: "email", value: "user@example.invalid"),
+             C3Malicious(name: "slash", value: "folder/name"),
+             C3Malicious(name: "backslash", value: "folder\\name"),
+             C3Malicious(name: "nfkc-at", value: "user＠example.invalid"),
+             C3Malicious(name: "nfkc-slash", value: "folder／name"),
+             C3Malicious(name: "nfkc-backslash", value: "folder＼name"),
+             C3Malicious(name: "marker-after-limit", value: String(repeating: "x", count: 40) + "@"),
+             C3Malicious(name: "nfc", value: "e\u{301}quipe")]
+    let cleaned = ["control": "helloworld", "bidi": "abcdef", "long": String(repeating: "x", count: 32), "nfc": "équipe"]
+    let rejected: Set<String> = ["format-at", "file-url", "email", "slash", "backslash",
+                                 "nfkc-at", "nfkc-slash", "nfkc-backslash", "marker-after-limit"]
     for g in rows {
-        let object: [String: Any] = ["schema": 1, "machine": ["id": "c3-vps", "name": g.value], "updated": "2026-10-12T16:00:00Z", "lastSeenAt": "2026-10-12T16:00:00Z", "days": [String: Any](),
+        // A fixed machine name prevents a rejected caption from reappearing as
+        // part of the default caption. os independently tests other wire text.
+        let object: [String: Any] = ["schema": 1, "machine": ["id": "c3-vps", "name": "vps", "os": g.value], "updated": "2026-10-12T16:00:00Z", "lastSeenAt": "2026-10-12T16:00:00Z", "days": [String: Any](),
             "captions": [C3_LABEL: ["text": g.value]], "accounts": [["product": "claude", "label": C3_LABEL, "status": "ok", "asOf": "2026-10-12T15:43:00Z", "models": [["name": g.value, "pct": 10]], "windows": ["session": ["pct": 42.5, "resetAt": "2026-10-12T18:00:00Z"]]]]]
         guard let bytes = try? JSONSerialization.data(withJSONObject: object), let json = String(data: bytes, encoding: .utf8) else { expect(false, "C3-11 valid vector JSON"); continue }
         let cache = mergeV11([C3_FILE: json], excluding: "c3-mac", now: C3_NOW)
         guard let view = c3Resolve(cache, now: C3_NOW).first else { expect(false, "C3-11 malformed text preserves valid snapshot \(g.name)"); continue }
         let unsafe = g.name == "control" || g.name == "bidi" || g.name == "long"
-        expect(view.caption.unicodeScalars.count <= 128 && (view.data.scoped?.name.unicodeScalars.count ?? 0) <= 48 && (view.data.source?.machineName.unicodeScalars.count ?? 0) <= 16,
-               "C3-11 \(g.name): reader fields bounded before presentation")
-        if unsafe {
-            expect(cache.captions?[C3_LABEL] == nil && view.data.scoped == nil, "C3-11 \(g.name): unsafe/overlong caption/model rejected")
-        } else {
-            expect(view.caption == g.value && view.data.scoped?.name == g.value, "C3-11 \(g.name): accepted strings retained as literal data")
-        }
         let p = c3Presentation(view)
+        if rejected.contains(g.name) {
+            let fallback = remoteDefaultCaption(view)
+            expect(cache.captions?[C3_LABEL] == nil && view.caption == fallback
+                   && p.simpleTitle == fallback && p.accessibilityLabel == fallback,
+                   "C3-11 \(g.name): forbidden caption rejected whole; default title/AX shown")
+        } else {
+            let expected = cleaned[g.name] ?? g.value
+            expect(cache.captions?[C3_LABEL]?.text == expected && view.caption == expected,
+                   "C3-11 \(g.name): caption follows explicit C5 cleaning/NFC/scalar limit")
+            expect(view.caption.unicodeScalars.count <= 32
+                   && view.caption.unicodeScalars.map { $0.value } == view.caption.precomposedStringWithCanonicalMapping.unicodeScalars.map { $0.value }
+                   && !view.caption.unicodeScalars.contains { [.control, .format, .surrogate, .lineSeparator, .paragraphSeparator].contains($0.properties.generalCategory) },
+                   "C3-11 \(g.name): shown caption is safe NFC text, no Cc/Cf/newlines, at most 32 scalars")
+            expect(p.simpleTitle == expected && p.advancedTitle == expected && p.accessibilityLabel == expected,
+                   "C3-11 \(g.name): accepted caption rendered literally in title/AX")
+        }
+        let models = cache.accounts?.first?.models ?? []
+        expect(unsafe ? models.isEmpty && view.data.scoped == nil
+                      : models.map { $0.name } == [g.value.precomposedStringWithCanonicalMapping]
+                        && view.data.scoped?.name == g.value.precomposedStringWithCanonicalMapping,
+               "C3-11 \(g.name): model names retain whole-field rejection, otherwise literal NFC")
+        expect(cache.machines.first?.os == (unsafe ? "" : g.value),
+               "C3-11 \(g.name): other wire strings retain whole-field rejection, never caption cleaning")
         expect(p.cardHit == "open:https://claude.ai/settings/usage" && !limitCanFix(remote: view), "C3-11 \(g.name): malicious text never changes hit")
-        if g.name == "format-literal" { expect(p.simpleTitle == "%@%n" && p.accessibilityLabel == "%@%n", "C3-11 format tokens rendered literally in title/AX") }
+        // Keep the original hostile machine-name coverage independently of
+        // caption rejection/default selection. Tags have their own 16-scalar cap.
+        var machineObject = object
+        machineObject["captions"] = [String: Any]()
+        machineObject["machine"] = ["id": "c3-vps", "name": g.value]
+        guard let machineBytes = try? JSONSerialization.data(withJSONObject: machineObject) else {
+            expect(false, "C3-11 machine-name vector JSON"); continue
+        }
+        let machineCache = mergeV11([C3_FILE: String(decoding: machineBytes, as: UTF8.self)], excluding: "c3-mac", now: C3_NOW)
+        let tag = g.name == "control" || g.name == "bidi" ? "?" : String(String.UnicodeScalarView(g.value.unicodeScalars.prefix(16)))
+        expect(machineCache.machines.first?.name == tag,
+               "C3-11 \(g.name): machine name rejects controls whole, otherwise retains its existing 16-scalar tag cap")
+        expect(c3Resolve(machineCache, now: C3_NOW).first.map { c3Presentation($0).cardHit } == "open:https://claude.ai/settings/usage",
+               "C3-11 \(g.name): hostile machine name cannot select a destination")
     }
     let forbiddenArguments = ["String(format: caption, 1)", "String (format : model.name)",
                               "String(format: \"%@\", caption)", "String(format: \"%@\", model.name)",

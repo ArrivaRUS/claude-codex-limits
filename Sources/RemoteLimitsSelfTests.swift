@@ -297,7 +297,8 @@ private func rlC102Control(_ fx: RLFixtures, _ expect: RLExpect) {
     expect(c.failed.isEmpty, "C1-02 (control) valid machine-v11.json: every v1.1 field parsed" + c.suffix)
 }
 
-/// (a) pct types, (b) times, (d) projection — machine-v11-hostile.json, same expectations as Linux A1-13 (7 records, 64 captions).
+/// (a) pct types, (b) times, (d) projection — machine-v11-hostile.json,
+/// same bounds as Linux A1-13 (7 records, first 64 valid captions).
 private func rlC102Hostile(_ fx: RLFixtures, _ expect: RLExpect) {
     let now = rlDate("2026-10-12T10:20:00Z")
     guard let text = fx.text("machine-v11-hostile.json"), let obj = fx.object("machine-v11-hostile.json") else {
@@ -358,6 +359,11 @@ private func rlC102Hostile(_ fx: RLFixtures, _ expect: RLExpect) {
     c.add("file lastSeenAt «garbage» → nil", m?.lastSeenAt == nil)
     let caps = r.captions ?? [:]
     c.add("captions capped at 64 (got \(caps.count))", caps.count == 64)
+    c.add("caption budget keeps the 64 short c0…c63 values", (0..<64).allSatisfy {
+        let suffix = String($0, radix: 16)
+        let label = String(repeating: "0", count: 16 - suffix.count) + suffix
+        return caps[label]?.text == "c\($0)"
+    })
     c.add("caption keys 16 hex (NOTHEX dropped)", caps.keys.allSatisfy { rlHex16($0) })
     c.add("caption outside sorted 64-record budget excluded", caps["3f3cddd81d01cbc1"] == nil)
     c.add("caption texts clean ≤ 32", caps.values.allSatisfy { rlControlFree($0.text) && $0.text.unicodeScalars.count <= 32 })
@@ -370,6 +376,20 @@ private func rlC102Hostile(_ fx: RLFixtures, _ expect: RLExpect) {
           accounts.allSatisfy { $0.days.isEmpty } && rlCanon(r.unattributedDays ?? [:]) == rlCanon(root))
     c.add("root days intact (v1 rules)", rlCanon(r.days) == rlCanon(root))
     expect(c.failed.isEmpty, "C1-02(a,b,d) hostile v1.1 block validated record by record (C7, T15, T19, П5-е)" + c.suffix)
+    // The dirty caption is outside the full fixture's 64-record budget. Test
+    // that very record on its own so its C5 cleaning cannot hide behind the cap.
+    var singleCaption = obj
+    let dirtyLabel = "3f3cddd81d01cbc1"
+    let rawCaptions = obj["captions"] as? [String: Any] ?? [:]
+    guard let rawCaption = rawCaptions[dirtyLabel] as? [String: Any], let dirtyText = rawCaption["text"] as? String else {
+        expect(false, "C1-02 hostile dirty-caption fixture record exists"); return
+    }
+    expect(dirtyText == "a\u{0}b\u{202E}c",
+           "C1-02 hostile dirty-caption control contains NUL/bidi before reading")
+    singleCaption["captions"] = [dirtyLabel: rawCaption]
+    let isolated = mergeV11(["machine-fixturehostile.json": rlJSON(singleCaption)], excluding: "selftest-mac", now: now)
+    expect(isolated.captions?.count == 1 && isolated.captions?[dirtyLabel]?.text == "abc",
+           "C1-02 hostile caption without budget pressure is cleaned, not dropped (C5 П4-в)")
     var cache = r
     cache.gistId = RL_G1
     let views = rlResolve(cache, now: now)

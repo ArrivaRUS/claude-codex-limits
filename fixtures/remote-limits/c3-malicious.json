@@ -1,7 +1,7 @@
 [
   {
     "name": "format-literal",
-    "value": "%@%n"
+    "value": "%d %s %n {0} $(x) %%"
   },
   {
     "name": "javascript",

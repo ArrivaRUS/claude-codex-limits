@@ -294,7 +294,7 @@ private func c3bC308(_ expect: C3BExpect) {
     var wait = c3bView(state: .serviceWait); wait.data.asOf = c3bNow().addingTimeInterval(-86400)
     expect(c3bMenu([wait]).lines.first?.sessionAlpha == 0.4, "C3-08: state4 stale metric still dims")
     for language in ["ru", "en"] {
-        var labelled = remote; labelled.caption = "Работа %@%n"
+        var labelled = remote; labelled.caption = "Работа %d %s %n {0} $(x) %%"
         for dark in [false, true] {
             let model = c3bMenu([labelled, local], language: language, dark: dark)
             let source = language == "en" ? "data from vps at 15:50" : "данные с vps от 15:50"
@@ -443,6 +443,24 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
            "C3-17/A3: strict source horizon changes menu freshness immediately after its deadline")
 
     let hostile = "A\u{1B}\u{202E}\u{200B}\u{2028}\u{2029}" + String(repeating: "Z", count: 500)
+    // First pass through the real wire reader: captions have the C5 exception.
+    let captionLabel = "c318000000000000"
+    let object: [String: Any] = ["schema": 1, "machine": ["id": "c318-vps", "name": "vps"],
+        "updated": "2026-10-12T16:00:00Z", "days": [String: Any](),
+        "captions": [captionLabel: ["text": hostile]],
+        "accounts": [["product": "claude", "label": captionLabel, "status": "ok", "asOf": "2026-10-12T15:43:00Z"]]]
+    if let bytes = try? JSONSerialization.data(withJSONObject: object) {
+        let cache = mergeV11(["machine-c318-vps.json": String(decoding: bytes, as: UTF8.self)], excluding: "c318-mac", now: now)
+        let wireViews = resolveAccounts(local: (LimitData(present: false), LimitData(present: false)), localIds: [:],
+            remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: now)
+        let expected = "A" + String(repeating: "Z", count: 31)
+        expect(cache.captions?[captionLabel]?.text == expected && wireViews.first?.caption == expected
+               && c3bMenu(wireViews).lines.first?.caption == expected && c3bSettings(wireViews).accounts.first?.title == expected,
+               "C3-18/D1: wire caption cleaned to 32 scalars by C5 before menu/settings presentation")
+    } else { expect(false, "C3-18/D1: valid wire-caption JSON") }
+    // A hand-built legacy/cache view can bypass the reader. Preserve the wider
+    // presentation guard (also used for generated default captions), without
+    // treating this bypass as wire acceptance of a 128-scalar custom caption.
     var unsafe = c3bView()
     unsafe.caption = hostile; unsafe.machines = [hostile]
     unsafe.data.plan = hostile; unsafe.tier = nil
@@ -455,7 +473,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     } }, "C3-18/D1: snapshot caption/machines/plan/source never leak controls or separators into presentation")
     expect(strings.allSatisfy { $0.unicodeScalars.count < 400 }
            && (menu.lines.first?.caption.unicodeScalars.count ?? 0) <= 128,
-           "C3-18/D1: snapshot strings are bounded in menu/settings/default captions")
+           "C3-18/D1: bypassed legacy/cache strings remain bounded in menu/settings/default captions")
     let safe = remoteSanitizedView(unsafe)
     expect(remoteSanitizedView(safe).caption == safe.caption && remoteSanitizedView(safe).machines == safe.machines,
            "C3-18/D1: sanitizing presentation strings twice is stable")
