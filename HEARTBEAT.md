@@ -2,6 +2,15 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · C5 / 3.3.1: код, независимое ревью и Linux before/after завершены; ожидается Mac
+
+- **Объём:** timestamped captions по метке, writer/metaHash/reset, latest-setAt merge Swift/Linux включая собственный caption без собственного usage; Linux status/tooltip. Редактор по UX §9.3 с NFC/≤32 и отказом запрещённых маркеров. D4-а/б (120/15 с + кнопка/высота), D5 (измеренная метка, зазор 6 pt, 2 сцены), D6 (`on` для date-only). Матрица PNG 200, новая модель C5-01…06 до AppKit.
+- **База/дерево:** старт HEAD `9ec19f3`, ветка `remote-limits`. В ходе работы внешний commit `516bd31` добавил только UX/решения (точки свежести и remote Auto — отдельное продолжение после текущего прохода), сохранён. Git-мутаций нашей командой не было; новые файлы остаются untracked.
+- **Проверки:** Swift отсутствует, не компилировался и не запускался; статический баланс 7 Swift-файлов, версия/build/wiring до AppKit/200 сцен, `bash -n build.sh`, `git diff --check` прошли. Независимый Astra code review: исправлены P1 (Character вместо UnicodeScalar позволял @ с combining mark; 24 decorated vectors) и P2 (truncated live-status вытеснял более новый cached reset); обе находки перечитаны, открытых конкретных дефектов нет. Linux целевые C5 + adjusted own-file raw fixture: 12 tests OK / skip1 (PyQt5 отсутствует).
+- **Полные Python:** исходный HEAD `9ec19f3`: **806 tests, failures=0, errors=25, skipped=50**, 988.392 с, `/tmp/ccl-c5-python-before.log`. Финальный after: **817 tests, failures=0, errors=25, skipped=51**, 1936.900 с, `/tmp/ccl-c5-python-after.log`. Все 25 error-ID совпадают, это `PermissionError` loopback/socket-стендов sandbox; новых ошибок нет. Дополнительный skip — PyQt5 C5-tooltip, 10 остальных новых C5 tests прошли. Сравнение — `/tmp/ccl-c5-python-comparison.json`; hashes финальных Python-файлов после прогона не изменились. Начальный 143 относился к оболочке: дочерний Python дописал полную исходную сводку; диагностический повторный RED-log не используется как baseline.
+- **Остаток этого прохода:** сборка и селфтесты `--subscriptions-selftest`/`--sync-selftest` на Mac, 200 PNG/manifest, нативный Enter/Esc/error/reset и системный диалог Keychain, живой Mac→Linux caption/reset. Стабильная подпись/ACL и выпуск — C6; production VPS ccl-sync не обновлялся и не запускался.
+- **Команда:** Codex developer_complex Astra/high (Swift), developer Sol6.1/high (Linux), tester Sol6.1/high (RED-модели), code_reviewer Astra/high (независимое ревью). Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 ~07:00 UTC · C4 закрыта целиком (живая проверка пройдена); дальше — C5
 
 - **Состояние:** мак 3.3.0 (`f93f9c3`, из `dist/`) публикует: файл мака в gist — `macos 3.3.0`, блок `codex` с меткой 16 hex, `status ok`, поля v1.1; приватность чистая; `credentialWrite` = `never`, `poll-log`: `publish` 1, `token_refresh` 0. Решения — `decisions/log.md` 2026-10-31. Урок 018.

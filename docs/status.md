@@ -1,3 +1,5 @@
+> Актуализация 2026-10-31: C1–C4 приняты, включая живую публикацию macOS 3.3.0. C5 / 3.3.1 — рабочий патч подписей и долгов D4-а/б, D5, D6; независимое Astra-ревью закрыто, Linux 806→817 tests / 0→0 failures / 25→25 sandbox errors / 50→51 skips; Mac-валидация ожидается (HEARTBEAT). Исторический блок 2026-10-12 ниже не описывает текущую веху. VPS-публикация не обновлялась.
+
 # REMOTE-LIMITS · 2026-10-12
 
 Живой блок (обновлять на месте; первый `Next` — первая незакрытая веха). Ревизия кода `c950fb1` (= macOS 3.2.7 / Linux 0.4.5 + документы REMOTE-LIMITS). План — [plans.md](plans.md), раздел REMOTE-LIMITS; тест-план — [test-plan-remote-limits.md](test-plan-remote-limits.md) (Tester, 100 тестов; расхождения §6 решены Юркой 2026-10-12 и внесены в synth v2 и plans.md); архитектура — [synth v2](../arch/plan-synth.md); модель угроз — [security-remote-limits.md](security-remote-limits.md).

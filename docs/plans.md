@@ -169,11 +169,13 @@ T1: П4-а (мак), П5-а.
 Валидация: `"$APP" --sync-selftest` (C4-01…, `decide-vectors.json` общие с A3-01), `"$APP" --auth-selftest`; Т11, Т23–Т25 (Swift), Т31–Т32 (Swift), Т35 (`noRedirects` уже есть — регресс).
 T1: П3-а, П3-д, П7, §5 (регресс).
 
-## C5 — подписи и список аккаунтов (Should) `[ ]`
+## C5 — подписи и список аккаунтов (Should) `[~]` (реализация 3.3.1, независимое ревью завершено; Linux 806→817 / 0 новых ошибок; Swift/Mac и живой обмен ожидают проверки)
 
-Зависит от: C4. Файлы: `Sources/LimitsMonitor.swift` (блок «Аккаунты», правка подписи ≤ 32 с чисткой, `captions` в `machineFile`), `linux/ccl/accounts.py` (merge подписей по `setAt`).
-Готово, когда: подпись, заданная на маке, видна на всех машинах после цикла; ввод с `@`, `/`, управляющими символами отклонён (П4-в).
-Валидация: Т14; `"$APP" --subscriptions-selftest`.
+Зависит от: C4. Файлы: `Sources/LimitsMonitor.swift`, `Sources/RemoteLimits.swift`, `Sources/RemoteLimitsC3B.swift`, `Sources/RemoteLimitsC5SelfTests.swift`, Linux accounts/читатели и общая golden-фикстура.
+Задачи: timestamped captions по метке, публикация только своих правок, merge позднего `setAt` между всеми машинами, пустой tombstone сброса; редактор по UX §9.3, NFC/≤32/Cc/Cf/newline cleaning и отказ `@`/`/` до сохранения. Caption меняет metaHash без pushHash. Linux показывает результат в status и tooltip трея.
+Долги C4: D4-а — ручной повтор Keychain с общим пределом 120 с, фон 15 с; D4-б — кнопка/высота только locked/unreachable/timeout; D5 — измеренная метка и зазор ≥6 pt в narrow Simple, RU/EN PNG; D6 — EN date-only `on`, время `at`.
+Готово, когда: C5-01…06 прошли на Mac, PNG/manifest сверены, подпись мака после цикла видна на Linux и поздний сброс не восстанавливает старый текст. Политика подписи/ACL — C6.
+Валидация: Т14; `"$APP" --sync-selftest`, `"$APP" --subscriptions-selftest`; полный Python before/after, статические Swift/build проверки на Linux. Swift-тесты зарегистрированы до AppKit, локального GREEN до Mac нет.
 T1: П4-в.
 
 ## C6 — релиз и проверка гипотезы `[ ]`

@@ -1,0 +1,50 @@
+{
+  "now": "2026-10-31T14:00:00Z",
+  "label": "3f9a0c71b2d4e5f6",
+  "cases": [
+    {
+      "id": "latest-mac",
+      "machines": [
+        {
+          "schema": 1,
+          "machine": {"id": "c5-linux", "name": "linux", "os": "Linux", "app": "linux fixture"},
+          "updated": "2026-10-31T14:00:00Z",
+          "days": {},
+          "accounts": [{"product": "claude", "label": "3f9a0c71b2d4e5f6", "status": "ok", "days": {}}],
+          "captions": {"3f9a0c71b2d4e5f6": {"text": "Личное", "setAt": "2026-10-31T11:00:00Z"}}
+        },
+        {
+          "schema": 1,
+          "machine": {"id": "c5-mac", "name": "mac", "os": "macOS", "app": "mac fixture"},
+          "updated": "2026-10-31T14:00:00Z",
+          "days": {},
+          "accounts": [{"product": "claude", "label": "3f9a0c71b2d4e5f6", "status": "ok", "days": {}}],
+          "captions": {"3f9a0c71b2d4e5f6": {"text": "Команда", "setAt": "2026-10-31T12:00:00Z"}}
+        }
+      ],
+      "expected": {"text": "Команда", "setAt": "2026-10-31T12:00:00Z", "display": "Команда"}
+    },
+    {
+      "id": "reset",
+      "machines": [
+        {
+          "schema": 1,
+          "machine": {"id": "c5-mac", "name": "mac", "os": "macOS", "app": "mac fixture"},
+          "updated": "2026-10-31T14:00:00Z",
+          "days": {},
+          "accounts": [{"product": "claude", "label": "3f9a0c71b2d4e5f6", "status": "ok", "days": {}}],
+          "captions": {"3f9a0c71b2d4e5f6": {"text": "Команда", "setAt": "2026-10-31T12:00:00Z"}}
+        },
+        {
+          "schema": 1,
+          "machine": {"id": "c5-linux", "name": "linux", "os": "Linux", "app": "linux fixture"},
+          "updated": "2026-10-31T14:00:00Z",
+          "days": {},
+          "accounts": [{"product": "claude", "label": "3f9a0c71b2d4e5f6", "status": "ok", "days": {}}],
+          "captions": {"3f9a0c71b2d4e5f6": {"text": "", "setAt": "2026-10-31T13:00:00Z"}}
+        }
+      ],
+      "expected": {"text": "", "setAt": "2026-10-31T13:00:00Z", "display": "Claude Code"}
+    }
+  ]
+}

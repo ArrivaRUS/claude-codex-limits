@@ -990,7 +990,7 @@ private func c3bC336(_ expect: C3BExpect) {
             let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
             let narrow = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
             let wide = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: now, timeZone: zone)
-            expect(narrow.sourceLine == (language == "ru" ? "С vps от 11.10" : "From vps at 11.10"),
+            expect(narrow.sourceLine == (language == "ru" ? "С vps от 11.10" : "From vps on 11.10"),
                    "C3-36/D1: narrow \(state.rawValue) source keeps other-day date without HH:mm")
             expect(wide.sourceLine == (language == "ru" ? "Данные с vps от 11.10 15:00" : "Data from vps at 11.10 15:00"),
                    "C3-36/D1: wide Simple and Advanced source retain full date and time")
@@ -1028,7 +1028,7 @@ private func c3bC336(_ expect: C3BExpect) {
     independent.data.source?.asOf = independent.data.asOf; independent.data.source?.lastSeenAt = seen
     let distinct = remotePresentationCard(independent, sync: ReaderSyncState(phase: .on), language: "en",
         narrow: true, now: now, timeZone: zone)
-    expect(distinct.sourceLine == "From vps at 10.10" && distinct.statusLine == "vps offline since 11.10 ›"
+    expect(distinct.sourceLine == "From vps on 10.10" && distinct.statusLine == "vps offline since 11.10 ›"
            && distinct.tooltip.contains("10.10 15:00") && distinct.tooltip.contains("11.10 15:00"),
            "C3-36/D1: observation date and last-seen date remain independent in compact and full copy")
     // Same instant is yesterday in UTC, today in UTC+3: use the scene calendar.
@@ -1080,7 +1080,7 @@ private func c3bC338(_ expect: C3BExpect) {
         badgeWidth: 79, planWidth: 59, machineWidth: 31, isCustomTitle: false, minimumTitleWidth: 64)
     expect(widths.title == 82 && widths.badge == 79 && widths.plan == 59 && widths.machines == 31,
            "C3-38: corrected 268pt header budget fits complete product, status, plan and vps suffix")
-    expect(APP_VERSION == "3.3.0", "C3-38: C-slice application version is 3.3.0")
+    expect(APP_VERSION == "3.3.1", "C3-38: C-slice application version is 3.3.1")
 }
 
 // R2: real CoreText widths are covered by c3-...-longname-... PNG scenes. This
@@ -1103,7 +1103,8 @@ private func c3bC339(_ expect: C3BExpect) {
                 now: now, timeZone: zone, availableWidth: 130, measure: measure)
             let source = remoteFittedSourceLine(view, language: language, now: now, timeZone: zone, narrow: true,
                 availableWidth: 130, measure: measure)
-            expect(source.hasSuffix("11.10") && source.contains("…") && !source.contains(machine) && measure(source) <= 130,
+            expect(source.hasSuffix("11.10") && source.contains(language == "ru" ? " от " : " on ")
+                   && source.contains("…") && !source.contains(machine) && measure(source) <= 130,
                    "C3-39/R2: \(language) state\(state.rawValue) source shortens machine before the complete date")
             if state == .offline {
                 expect(status.hasSuffix("11.10 ›") && status.contains("…") && !status.contains(machine)

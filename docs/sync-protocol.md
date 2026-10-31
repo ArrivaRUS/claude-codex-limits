@@ -490,10 +490,20 @@ UTC; strings are shown only as plain text.
   - Unparsable time → that field dropped; a broken `asOf` leaves the record without a reading.
   - `models` > 8 → tail dropped. A string containing control/format characters or a lone surrogate (`Cc`/`Cf`/`Cs`,
     i.e. not encodable as UTF-8) is dropped **whole** (never cleaned); a string over its limit is dropped.
+    Caption text is the C5 exception (П4-в): writer and reader first refuse `@`, `/`, `\`
+    and their NFKC equivalents in the whole input, then remove line breaks and `Cc`/`Cf`,
+    NFC-normalize and truncate to 32 Unicode scalars. A lone surrogate is refused.
+    Other string fields retain the whole-field rejection rule above.
   - The same rule covers the v1 envelope: `machine.id` → file skipped; `machine.name/os/app` → field dropped
     (`os`/`app` over 64 are dropped, `machine.name` is checked, then truncated to 16); `tz` → dropped, also over 64;
     a product, day or model key of the root `days` → that entry skipped.
   - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
+  - Captions merge across all machines by label, including locally authored captions. A reset is a retained
+    `{"text": "", "setAt": "<new UTC timestamp>"}` record: the empty text selects the default caption and
+    prevents an older nonempty caption from returning. Writers retain their own records, including resets,
+    and never republish a peer's caption. A missing legacy `setAt` ranks below a valid timestamp; equal
+    timestamps use the lexicographically greater NFC text by Unicode scalar value for deterministic convergence.
+    Caption-only edits change `metaHash`, leaving root-days `pushHash` unchanged.
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
 - **Read deadline (60 s per read phase).** Linux: the read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
   every `raw_url` body) shares one deadline of **60 s**. Once it is spent the remaining raw files are skipped without a

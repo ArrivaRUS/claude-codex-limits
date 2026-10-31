@@ -219,6 +219,15 @@ def validate_entry(entry):
     return out
 
 
+def _caption_clean(value):
+    """One caption policy for local writers, remote readers and cached text."""
+    if not isinstance(value, str):
+        return None
+    # Line/paragraph separators are newlines too; leave other string fields on
+    # their existing policy. _writer_name refuses private markers before truncation.
+    return _writer_name(value.replace("\u2028", "").replace("\u2029", ""), 32)
+
+
 def _captions(value):
     out = {}
     if not isinstance(value, dict):
@@ -226,7 +235,7 @@ def _captions(value):
     for key, caption in value.items():
         if _label(key) is None or not isinstance(caption, dict):
             continue
-        text = _text(caption.get("text"), 32, nfc=True)
+        text = _caption_clean(caption.get("text"))
         if text is None:
             continue
         out[key] = {"text": text}
@@ -234,6 +243,73 @@ def _captions(value):
         if len(out) == 64:
             break
     return out
+
+
+def merge_captions(machines, now=None):
+    """Latest setAt per label, including empty reset tombstones; pure/no I/O.
+
+    Missing/broken times rank below valid ones. Equal times choose the largest
+    NFC text in Unicode scalar order so file enumeration cannot change a caption.
+    """
+    now = time.time() if now is None else now
+    out = {}
+    for machine in machines if isinstance(machines, (list, tuple)) else ():
+        if not isinstance(machine, dict):
+            continue
+        for key, caption in _captions(machine.get("captions")).items():
+            stamp = _epoch(caption.get("setAt"))
+            if stamp is not None and stamp > now + 60:
+                continue
+            previous = out.get(key)
+            old_stamp = _epoch(previous.get("setAt")) if previous is not None else None
+            rank = (stamp if stamp is not None else -math.inf, caption["text"])
+            old_rank = (old_stamp if old_stamp is not None else -math.inf,
+                        previous["text"]) if previous is not None else None
+            if old_rank is None or rank > old_rank:
+                out[key] = caption
+    return out
+
+
+def caption_text(captions, label, default):
+    """An empty winning caption means the normal product title, never an old edit."""
+    value = captions.get(label) if isinstance(captions, dict) and _label(label) else None
+    text = _caption_clean(value.get("text")) if isinstance(value, dict) else None
+    return text or default
+
+
+def caption_lines(remote, fallback=None):
+    """Plain text names; an incomplete inline status read can retain cached edits."""
+    snapshots = [value for value in (remote, fallback) if isinstance(value, dict)]
+    if not snapshots:
+        return []
+    machines, cached_captions, sources = [], [], []
+    for snapshot in snapshots:
+        values = snapshot.get("machines")
+        if isinstance(values, list):
+            machines.extend(values[:64])
+        values = snapshot.get("captions")
+        cached_captions.append(values if isinstance(values, dict) else {})
+        sources.append({"accounts": snapshot.get("captionAccounts")})
+    captions = merge_captions(machines)
+    sources.extend(machines)
+    keys = set()
+    for machine in sources:
+        records = machine.get("accounts") if isinstance(machine, dict) else None
+        for record in records[:512] if isinstance(records, list) else ():
+            if not isinstance(record, dict):
+                continue
+            product, label = record.get("product"), _label(record.get("label"))
+            if product in _PRODUCTS and label is not None:
+                keys.add((product, label))
+    lines = []
+    for product, label in sorted(keys):
+        # The merged cache can hold more than one file's 64 captions. Validate
+        # only known account labels, without applying that file cap to the union.
+        resolved = merge_captions([{"captions": {label: values.get(label)}}
+                                   for values in [captions] + cached_captions])
+        lines.append(caption_text(resolved, label, "Claude Code" if product == "claude" else "Codex")
+                     + " · " + label)
+    return lines
 
 
 def _sum_days(target, source):
@@ -364,20 +440,7 @@ def _writer_entry(raw, gist_id):
 
 
 def _writer_captions(value):
-    out = {}
-    if not isinstance(value, dict):
-        return out
-    for key, caption in value.items():
-        if _label(key) is None or not isinstance(caption, dict):
-            continue
-        text = _writer_name(caption.get("text"), 32)
-        if text is None:
-            continue
-        out[key] = {"text": text}
-        _copy_time(caption, out[key], "setAt")
-        if len(out) == 64:
-            break
-    return out
+    return _captions(value)
 
 
 def build(*, gist_id, entries, unattributed_days, captions):

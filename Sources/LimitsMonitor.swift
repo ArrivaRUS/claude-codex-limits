@@ -1500,7 +1500,7 @@ private func githubKeychainProcess(_ args: [String], input: String? = nil, lifet
     let p = Process(), output = Pipe(), stdin = Pipe()
     let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
     let result = SyncSecurityOutput()
-    let deadline = DispatchTime.now() + 15
+    let timeout = githubKeychainTimeoutSeconds(interactive: action != nil)
     guard let executable = Bundle.main.executableURL else { lifetime?.ended(); return (.failure(-1), "") }
     p.executableURL = executable; p.arguments = args
     p.standardOutput = output; p.standardError = FileHandle.nullDevice
@@ -1524,8 +1524,10 @@ private func githubKeychainProcess(_ args: [String], input: String? = nil, lifet
             try? stdin.fileHandleForWriting.close()
         }
     }
-    guard ended.wait(timeout: deadline) == .success,
-          drained.wait(timeout: deadline) == .success else {
+    guard githubKeychainWait(timeout: timeout, now: { ProcessInfo.processInfo.systemUptime }, waits: [
+        { ended.wait(timeout: .now() + $0) == .success },
+        { drained.wait(timeout: .now() + $0) == .success }
+    ]) else {
         if p.isRunning { p.terminate() }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
             if p.isRunning { _ = kill(p.processIdentifier, SIGKILL) }
@@ -2917,16 +2919,19 @@ final class GitHubSync {
         let file: [String: Any] = ["days": days]
         return (days, c4Fingerprints(file).push)
     }
-    private func machineFile(_ days: [String: Any]) -> String {
-        var input = publisherInput(); input.days = days
+    private func machineFile(_ days: [String: Any]? = nil) -> String {
+        var input = publisherInput()
+        if let days = days { input.days = days }
         let object = machineObject(input, gistId: defaults.string(forKey: "syncGistId"))
         let bytes = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
         return String(decoding: bytes, as: UTF8.self)
     }
     private func machineObject(_ input: C4PublisherSnapshot, gistId: String?) -> [String: Any] {
-        c4MachineFile(days: input.days, accountByDay: input.accountByDay, localId: input.localId, codex: input.codex,
+        var object = c4MachineFile(days: input.days, accountByDay: input.accountByDay, localId: input.localId, codex: input.codex,
             poll: input.poll, gistId: gistId, machineId: machineId, machineName: machineName, osName: osName,
             now: clock(), attemptKind: input.attemptKind, automatic: input.automatic)
+        object["captions"] = remoteCaptionWire(localAccountCaptions(defaults: defaults), now: clock())
+        return object
     }
     private func publisherEvent(_ event: [String: Any]) {
         if let path = pollLogPath { _ = appendPollLog([event], path: path) }
@@ -3143,9 +3148,9 @@ final class GitHubSync {
         let readDeadline = readAt.addingTimeInterval(syncRawReadDeadline)
         var rejected = rejectedRaw(now: readAt)
         defaults.set(rejected, forKey: "syncRejectedRaw")
-        // Select before excluding this machine, matching the Linux reader's slot budget.
+        // Read captions from every selected file; mergeV11 excludes own usage/accounts.
         for name in names.prefix(64) {
-            guard name != myFile, let f = files[name] as? [String: Any] else { continue }
+            guard let f = files[name] as? [String: Any] else { continue }
             guard total < syncMaxTotalBody else {
                 readWarning = tr("Слишком большой ответ синхронизации (предел 64 МиБ)", "Sync response too large (64 MiB limit)"); break
             }
@@ -3288,7 +3293,7 @@ final class GitHubSync {
         return cache
     }
     /// Test seam: the file this machine would write, and the merge of arbitrary files.
-    func selfTestFile() -> String { machineFile(snapshotJSON().days) }
+    func selfTestFile() -> String { machineFile() }
     func setRemoteForPreview(_ c: SyncRemoteCache) { lock.lock(); _remote = c; _ui.phase = .on; lock.unlock() }
 }
 
@@ -4020,7 +4025,7 @@ struct SyncUIState {
         return language == "en" ? "Computer and GitHub clocks differ; check time synchronization."
             : "Системные часы и GitHub расходятся; проверьте синхронизацию времени."
     }
-    var canRetryKeychain: Bool { keychainRetryAvailable || ["locked", "timeout", "unreachable"].contains(authReason ?? "") }
+    var canRetryKeychain: Bool { syncShowsKeychainRetry(authReason) }
     var canSignOut: Bool {
         phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
     }
@@ -4198,7 +4203,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     return CGFloat(remotePanelLayout(views: views, style: .simple, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.3.0"
+let APP_VERSION = "3.3.1"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -4557,16 +4562,15 @@ private func renderedMoneySummary(_ view: AccountView, local: UsageIndex, now: D
         perCalendarDay: value.perCalendarDay, perActiveDay: value.perActiveDay, subMonthly: price.usd, subEstimated: price.estimated)
 }
 
-private func localAccountCaptions() -> [String: String] {
-    UserDefaults.standard.object(forKey: "localAccountCaptions") as? [String: String] ?? [:]
+func localAccountCaptions(defaults: UserDefaults = .standard) -> [String: RemoteCaption] {
+    remoteCaptionStoredRecords(defaults.object(forKey: "localAccountCaptions") as? [String: Any] ?? [:])
 }
-private func applyingLocalCaptions(_ views: [AccountView]) -> [AccountView] {
-    let captions = localAccountCaptions()
+private func applyingLocalCaptions(_ views: [AccountView], remote: [String: RemoteCaption] = [:], now: Date) -> [AccountView] {
+    let captions = remoteCaptionMerge(local: localAccountCaptions(), remote: remote, now: now)
     return views.map { value in
         var value = remoteSanitizedView(value)
-        if let text = captions[value.label ?? value.historyKey] {
-            let clean = remoteCaptionInput(text)
-            value.caption = clean.isEmpty ? remoteDefaultCaption(value) : clean
+        if let label = value.label, let caption = captions[label] {
+            value.caption = caption.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? remoteDefaultCaption(value) : caption.text
         }
         return value
     }.sorted {
@@ -4583,7 +4587,7 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
     let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now))
     let hidden = hiddenAccounts(), menu = menuAccountSelection()
     if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
-        let all = applyingLocalCaptions(all).map { remotePresentationView($0, sync: sync, now: now) }
+        let all = applyingLocalCaptions(all, now: now).map { remotePresentationView($0, sync: sync, now: now) }
         let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
         return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
     }
@@ -4592,7 +4596,7 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
         localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids, remote: cache, hidden: hidden, menu: menu,
         sync: sync, now: now,
         localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"))
-    var all = applyingLocalCaptions(resolved.allViews).map { remotePresentationView($0, sync: sync, now: now) }
+    var all = applyingLocalCaptions(resolved.allViews, remote: cache.captions ?? [:], now: now).map { remotePresentationView($0, sync: sync, now: now) }
     // Unlabelled usage has no quota card, but remains manageable in Settings/history.
     for product in ["claude", "codex"] {
         let days = cache.unattributedDays?[product] ?? (cache.accounts == nil ? cache.days[product] : nil) ?? [:]
@@ -5075,20 +5079,27 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             }
         } else {
             let lx = x + 16
-            dot(lx, centerTopY: l1 + 5, sCol)
-            text(attr(tr("Сессия", "Session"), 10.5, .regular, textMid), x: lx + 11, topY: l1)
-            let sessionReset = limitResetText(d.sessionReset, now: now)
-            let sessionLabelW = lineWidth(CTLineCreateWithAttributedString(attr(tr("Сессия", "Session"), 10.5, .regular, textMid)))
-            let resetRoom = x + w - 14 - (lx + 11 + sessionLabelW + 4)
-            var resetText = attr(sessionReset, 10, .regular, textLo)
-            if remote, lineWidth(CTLineCreateWithAttributedString(resetText)) > resetRoom {
-                let fullWidth = lineWidth(CTLineCreateWithAttributedString(resetText))
-                resetText = attr(sessionReset, max(8, 10 * resetRoom / max(1, fullWidth)), .regular, textLo)
+            func resetRow(_ label: String, _ value: String, top: CGFloat, color: NSColor) {
+                dot(lx, centerTopY: top + 5, color)
+                let labelText = attr(label, 10.5, .regular, textMid)
+                let valueText = attr(value, 10, .regular, textLo)
+                let valueWidth = lineWidth(CTLineCreateWithAttributedString(valueText))
+                let layout = remoteSimpleHeaderLayout(availableWidth: Double(x + w - 14 - (lx + 11)),
+                    measuredLabelWidth: Double(lineWidth(CTLineCreateWithAttributedString(labelText))),
+                    measuredValueWidth: Double(valueWidth))
+                text(labelText, x: lx + 11, topY: top)
+                // Scale only the value; both session and week keep the complete
+                // measured label and a six-point gap, including two reset windows.
+                guard valueWidth > 0, layout.valueWidth > 0 else { return }
+                let scale = min(1, CGFloat(layout.valueWidth) / valueWidth)
+                ctx.saveGState()
+                let right = x + w - 14
+                ctx.translateBy(x: right, y: 0); ctx.scaleBy(x: scale, y: 1); ctx.translateBy(x: -right, y: 0)
+                text(valueText, x: right, topY: top, align: 2)
+                ctx.restoreGState()
             }
-            text(resetText, x: x + w - 14, topY: l1, align: 2)
-            dot(lx, centerTopY: l2 + 5, wCol)
-            text(attr(tr("Неделя", "Week"), 10.5, .regular, textMid), x: lx + 11, topY: l2)
-            text(attr(limitResetText(d.weeklyReset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l2, align: 2)
+            resetRow(tr("Сессия", "Session"), limitResetText(d.sessionReset, now: now), top: l1, color: sCol)
+            resetRow(tr("Неделя", "Week"), limitResetText(d.weeklyReset, now: now), top: l2, color: wCol)
             // Per-model weekly limit — named by the backend, so a future model needs no code change.
             if showsScopedRow(d, remote: remote), let s = d.scoped {
                 let l3 = l2 + SCOPED_ROW_H
@@ -6812,6 +6823,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     private var mainScroller: NSScroller?
     private var captionEditor: NSTextField?
     private var captionCounter: NSTextField?
+    private var captionError: NSTextField?
     private var captionReset: NSButton?
     private var editingCaptionKey: String?
     private var editingCaptionOriginal: String?
@@ -7090,18 +7102,22 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         editor.frame = CGRect(x: 56, y: rowTop - 22, width: 165, height: 21)
         captionCounter?.frame = CGRect(x: 222, y: rowTop - 18, width: 42, height: 14)
         captionReset?.frame = CGRect(x: 224, y: rowTop - 35, width: 60, height: 15)
+        captionError?.frame = CGRect(x: 56, y: rowTop - 35, width: 165, height: 14)
         let visible = editor.frame.intersects(bounds)
         editor.isHidden = !visible; captionCounter?.isHidden = !visible; captionReset?.isHidden = !visible
+        captionError?.isHidden = !visible || captionError?.stringValue.isEmpty != false
     }
     private func beginCaptionEdit(_ key: String) {
         finishCaptionEdit(.escape)
         guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
         editingCaptionKey = key
-        editingCaptionOriginal = localAccountCaptions()[view.label ?? key]
-        captionDraft = remoteCaptionInput(view.caption)
+        editingCaptionOriginal = view.caption == remoteDefaultCaption(view) ? nil : view.caption
+        captionDraft = remoteCaptionInput(editingCaptionOriginal ?? "")
         let editor = NSTextField(frame: .zero)
         editor.font = NSFont.systemFont(ofSize: 12.5)
         editor.stringValue = captionDraft; editor.delegate = self
+        editor.placeholderString = remoteDefaultCaption(view)
+        editor.usesSingleLineMode = true
         editor.focusRingType = .default
         editor.toolTip = tr("Подпись видна на всех ваших компьютерах", "The label is shown on all your computers")
         editor.setAccessibilityLabel(tr("Подпись аккаунта", "Account label"))
@@ -7110,18 +7126,26 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         let reset = NSButton(title: tr("Сбросить", "Reset"), target: self, action: #selector(resetCaption(_:)))
         reset.isBordered = false; reset.font = NSFont.systemFont(ofSize: 10)
         reset.contentTintColor = ADV_LINK
-        addSubview(editor); addSubview(counter); addSubview(reset)
+        let error = NSTextField(labelWithString: "")
+        error.font = NSFont.systemFont(ofSize: 9); error.textColor = .systemRed
+        error.usesSingleLineMode = true
+        error.drawsBackground = true; error.backgroundColor = .windowBackgroundColor
+        addSubview(editor); addSubview(counter); addSubview(reset); addSubview(error)
         captionEditor = editor; captionCounter = counter; captionReset = reset
+        captionError = error
         updateCaptionEditorFrame(); window?.makeFirstResponder(editor)
     }
     func controlTextDidChange(_ notification: Notification) {
         guard let editor = notification.object as? NSTextField, editor === captionEditor else { return }
         let raw = editor.stringValue
-        let normalized = raw.precomposedStringWithCompatibilityMapping
-        if normalized.contains(where: { $0 == "@" || $0 == "/" || $0 == "\\" }) {
+        let input = remoteCaptionValidatedInput(raw, english: appLang() == "en")
+        captionError?.stringValue = input.error ?? ""
+        captionError?.toolTip = input.error
+        captionError?.isHidden = input.error == nil
+        if input.error != nil {
             editor.stringValue = captionDraft
         } else {
-            captionDraft = remoteCaptionInput(raw); editor.stringValue = captionDraft
+            captionDraft = input.value; editor.stringValue = captionDraft
         }
         captionCounter?.stringValue = "\(captionDraft.unicodeScalars.count)/32"
     }
@@ -7134,17 +7158,30 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     @objc private func resetCaption(_ sender: NSButton) { finishCaptionEdit(.reset) }
     private func finishCaptionEdit(_ command: RemoteCaptionCommand) {
         guard let key = editingCaptionKey else { return }
+        if command == .enter, captionError?.stringValue.isEmpty == false { return }
         let view = accountForSettings(key)
         let result = remoteCaptionEdit(original: editingCaptionOriginal, draft: captionEditor?.stringValue ?? captionDraft, command: command)
-        if result.committed {
-            var captions = localAccountCaptions()
-            // Empty sentinel deliberately overrides a custom caption imported from gist.
-            captions[view?.label ?? key] = result.value ?? ""
-            UserDefaults.standard.set(captions, forKey: "localAccountCaptions")
+        if result.committed, let label = view?.label {
+            let captions = localAccountCaptions()
+            let now = Date()
+            let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
+            let remote = isolated ? [:] : (GitHubSync.shared.remoteSnapshot().captions ?? [:])
+            let previous = remoteCaptionMerge(local: captions, remote: remote, now: now)[label]?.setAt ?? .distantPast
+            // Millisecond wire precision; a rapid second edit/reset still wins.
+            let at = Date(timeIntervalSince1970: max(ceil(now.timeIntervalSince1970 * 1000) / 1000,
+                previous.timeIntervalSince1970 + 0.001))
+            if let record = remoteCaptionRecord(result.value ?? "", at: at) {
+                // Change only this label. A clock correction or wire size cap
+                // must not delete unrelated locally stored preferences.
+                var stored = UserDefaults.standard.object(forKey: "localAccountCaptions") as? [String: Any] ?? [:]
+                stored[label] = remoteCaptionWire([label: record], now: at)[label]
+                UserDefaults.standard.set(stored, forKey: "localAccountCaptions")
+            }
         }
         editingCaptionKey = nil
         captionEditor?.delegate = nil; captionEditor?.removeFromSuperview(); captionEditor = nil
         captionCounter?.removeFromSuperview(); captionCounter = nil
+        captionError?.removeFromSuperview(); captionError = nil
         captionReset?.removeFromSuperview(); captionReset = nil
         if result.committed { onTrayChanged?(); resizeToContent() }
         needsDisplay = true
@@ -8825,6 +8862,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(remoteLimitsC2Failures == 0, "C2 remote-limits selftests (C2-01…C2-09)")
     check(runRemoteLimitsC3SelfTests() == 0, "C3 remote-limits model selftests (part A)")
     check(runRemoteLimitsC3BSelfTests() == 0, "C3 remote-limits model selftests (part B)")
+    runRemoteLimitsC5SelfTests(check: check)
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,
@@ -8847,8 +8885,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         check(saved, "preview " + target.path)
         if saved { previewFiles.append(name) }
     }
-    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 198,
-          "C3-10 198 C3-B preview scenes")
+    check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 200,
+          "C3-10 200 C3-B preview scenes")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
     for lang in ["ru", "en"] {

@@ -209,22 +209,14 @@ func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String 
 enum RemoteCaptionCommand { case enter, escape, reset }
 struct RemoteCaptionEdit { var text: String; var count: Int; var value: String?; var committed: Bool }
 func remoteCaptionInput(_ raw: String) -> String {
-    let compatibility = raw.precomposedStringWithCompatibilityMapping
-    guard !compatibility.contains(where: { $0 == "@" || $0 == "/" || $0 == "\\" }) else { return "" }
-    let clean = String(String.UnicodeScalarView(raw.unicodeScalars.filter {
-        let category = $0.properties.generalCategory
-        return category != .control && category != .format && category != .surrogate
-            && category != .lineSeparator && category != .paragraphSeparator
-    })).precomposedStringWithCanonicalMapping
-    return String(String.UnicodeScalarView(clean.unicodeScalars.prefix(32)))
+    remoteCaptionValidatedInput(raw).value
 }
 func remoteCaptionEdit(original: String?, draft: String, command: RemoteCaptionCommand) -> RemoteCaptionEdit {
     if command == .escape {
         let text = original ?? ""
         return RemoteCaptionEdit(text: text, count: text.unicodeScalars.count, value: original, committed: false)
     }
-    if command == .enter, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-       remoteCaptionInput(draft).isEmpty {
+    if command == .enter, remoteCaptionValidatedInput(draft).error != nil {
         let text = original ?? ""
         return RemoteCaptionEdit(text: text, count: text.unicodeScalars.count, value: original, committed: false)
     }

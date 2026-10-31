@@ -532,11 +532,13 @@ def _machine_text(value, key):
 
 def merge(contents, my_id, now=None):
     """Other machines' files (name → JSON text) → {"machines": [...], "days": {...}}.
-    Skips this machine's own id, other schemas, unparsable JSON, and files not updated in
-    45 days. Merge = plain sum per product → day → model. Pure — no network."""
+    Skips own usage, other schemas, unparsable JSON, and files not updated in 45 days.
+    Captions include the own file too. Merge = plain sum per product → day → model.
+    Pure — no network."""
     now = now or time.time()
     oldest = now - KEEP_DAYS * 86400
     machines, sources, seen = [], [], set()
+    caption_sources, caption_accounts = [], set()
     total = 0
     for name in _machine_files(contents):
         size = _content_size(contents[name])
@@ -560,7 +562,7 @@ def merge(contents, my_id, now=None):
         if not isinstance(m, dict):
             continue
         mid = m.get("id")
-        if (accounts._text(mid) is None or not mid or mid == my_id or mid in seen
+        if (accounts._text(mid) is None or not mid or mid in seen
                 or name != "machine-%s.json" % mid):
             continue
         updated = common.parse_iso(obj.get("updated"))
@@ -569,11 +571,17 @@ def merge(contents, my_id, now=None):
         if updated is not None and updated < oldest:
             continue
         seen.add(mid)
+        block = accounts.parse_block(obj)
+        caption_sources.append(block)
+        caption_accounts.update((entry["product"], entry["label"]) for entry in block["accounts"]
+                                if entry["label"] is not None)
+        if mid == my_id:
+            continue
         metadata = {k: _machine_text(m.get(k), k) for k in ("name", "os", "app")}
         machine = dict(metadata, id=mid, name=metadata["name"] or "?", updated=updated,
                        tz=accounts._text(obj.get("tz"), 64) or "")
         if any(k in obj for k in ("accounts", "unattributedDays", "captions", "lastSeenAt")):
-            machine.update(accounts.parse_block(obj))
+            machine.update(block)
         machines.append(machine)
         days = obj.get("days")
         if not isinstance(days, dict):
@@ -592,7 +600,10 @@ def merge(contents, my_id, now=None):
                         if all(type(n) is int and 0 <= n <= usage.MAX_VALUE for n in counts.values()):
                             usage.add_usage(clean, p, d, model, counts)
         sources.append(clean)
-    return {"machines": machines, "days": usage.merge_days(*sources)}
+    return {"machines": machines, "days": usage.merge_days(*sources),
+            "captions": accounts.merge_captions(caption_sources, now=now),
+            "captionAccounts": [{"product": product, "label": label}
+                                for product, label in sorted(caption_accounts)]}
 
 
 def remote_matches_session(remote, st=None):
@@ -1107,7 +1118,7 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
             if not _write_locked(session, text, st):
                 return res
 
-        # read + merge everyone else
+        # Read every file for captions; merge excludes own usage and cards.
         contents = {}
         total = 0
         size_error = None
@@ -1119,7 +1130,7 @@ def _sync_cycle(days, force, auto, res, allow_push=True, opening=False, lock_tim
                                    "Sync response too large (64 file limit)")
         for name in selected[:MAX_MACHINE_FILES]:
             f = files[name]
-            if name == mine or not isinstance(f, dict):
+            if not isinstance(f, dict):
                 continue
             if _read_timeout(30) <= 0:
                 read_error = common.tr("Чтение синхронизации прервано по сроку", _READ_TIMEOUT)

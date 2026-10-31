@@ -5,6 +5,7 @@ Limits are polled every 15/30/60/240 minutes (30 by default); local logs are ind
 gist every 10 minutes (the same code `ccl-sync push --auto` runs from the systemd timer).
 """
 
+import html
 import math
 import os
 import shlex
@@ -1060,7 +1061,10 @@ class TrayApp(QObject):
         if not m.loaded:
             rows, mark = [], None
         self.tray.setIcon(trayicon.make_icon(rows, mark))
-        tip = trayicon.tooltip(claude, codex) if m.loaded else "Claude Codex Limits"
+        remote = getattr(m, "caption_remote", {})
+        tip = trayicon.tooltip(claude, codex, remote=remote) if m.loaded or remote else "Claude Codex Limits"
+        # Tooltips support rich text; captions and model names are literal text.
+        tip = "<qt>" + html.escape(tip).replace("\n", "<br>") + "</qt>"
         self.tray.setToolTip(tip)
         if separate:
             if self.codex_tray is None:
@@ -1341,19 +1345,22 @@ class TrayApp(QObject):
     def apply_days(self, local_days, remote):
         m = self.model
         m.local_days = local_days
+        m.caption_remote = {}
         # signed in and not revoked → add the other machines. Decided from the sync state, not
         # from a keyring read: this runs on the GUI thread, and a revoked sign-in is not hidden
         # here — update_sync_warning says it on the main screen.
         st = sync.sync_state()
-        if (remote.get("machines") and st.get("login") and not st.get("revoked")
+        if ((remote.get("machines") or remote.get("captionAccounts")) and st.get("login") and not st.get("revoked")
                 and sync.remote_matches_session(remote, st)):
             m.days = usage.merge_days(local_days, remote.get("days", {}))
             m.other_machines = len(remote.get("machines", []))
+            m.caption_remote = remote
         else:
             m.days = local_days
             m.other_machines = 0
         m.days = common.selected_days(m.days)
         self.update_sync_warning(st)
+        self.update_tray()
 
     def update_sync_warning(self, st=None):
         try:

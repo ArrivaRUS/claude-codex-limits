@@ -499,7 +499,17 @@ def cmd_status(_args):
         _say(common.tr("Синхронизация идёт в другом процессе — показан кэш",
                        "Sync is running in another process — showing cached machines"))
     machines = None
+    caption_remote = sync.load_remote()
+    caption_fallback = None
     if isinstance(gist, dict) and isinstance(gist.get("files"), dict):
+        selected = {name: gist["files"][name] for name in sync._machine_files(gist["files"])}
+        if any(not isinstance(f, dict) or f.get("truncated") or not isinstance(f.get("content"), str)
+               for f in selected.values()):
+            # Status never fetches raw bodies. Keep a newer cached edit/reset
+            # when the live inline projection cannot include its author's file.
+            caption_fallback = caption_remote
+        caption_remote = sync.merge({name: f.get("content") for name, f in selected.items()
+                                     if isinstance(f, dict) and isinstance(f.get("content"), str)}, "")
         machines = []
         for name in sync._machine_files(gist["files"]):
             f = gist["files"][name]
@@ -530,6 +540,11 @@ def cmd_status(_args):
         _say("  • %s%s — %s%s" % (name, common.tr(" (эта)", " (this one)") if me else "",
                                   (osn + ", " + app + ", ") if osn else "",
                                   common.tr("обновлён ", "updated ") + _fmt_time(upd)))
+    caption_lines = accounts.caption_lines(caption_remote, fallback=caption_fallback)
+    if caption_lines:
+        _say(common.tr("Аккаунты:", "Accounts:"))
+        for line in caption_lines:
+            _say("  • " + line)
     ix = usage.load_index()
     _say(common.tr("Индекс: ", "Index: ") + "%d %s · %s" % (
         len(ix["files"]), common.tr("файлов", "files"), common.USAGE_INDEX_PATH))

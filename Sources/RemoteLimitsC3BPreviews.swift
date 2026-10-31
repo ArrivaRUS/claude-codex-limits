@@ -514,7 +514,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
             let p = remotePresentationCard(account, sync: sync, language: language, narrow: true,
                 now: datedNow, timeZone: C3_PREVIEW_ZONE)
-            check(p.sourceLine == (language == "ru" ? "С vps от 28.10" : "From vps at 28.10")
+            check(p.sourceLine == (language == "ru" ? "С vps от 28.10" : "From vps on 28.10")
                   && p.tooltip.contains("28.10 19:30") && p.accessibilityValue == p.tooltip,
                   "C3-10 dated narrow source is compact and full timestamp remains in tooltip/AX")
             if state == .offline {
@@ -576,7 +576,19 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 accounts: accounts, sync: ReaderSyncState(phase: .on), settings: true, hidden: hidden)
         }
     }
-    check(written == 198, "C3-10 198 actual AppKit matrix PNGs saved")
+    // D5 regression: both rows in each narrow card show the longest reset value.
+    for language in ["ru", "en"] {
+        var accounts = [c3PreviewView(), c3PreviewView(product: "codex", identity: 2)]
+        for index in accounts.indices {
+            accounts[index].data.sessionReset = c3PreviewDate("2026-10-12T15:55:00Z")
+            accounts[index].data.weeklyReset = c3PreviewDate("2026-10-12T15:55:00Z")
+            check(["session", "weekly"].allSatisfy { metricIsStale(accounts[index].data, metric: $0, now: C3_PREVIEW_NOW) },
+                  "C5/D5 both windows reset in narrow " + language)
+        }
+        render("c5-both-reset-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
+            accounts: accounts, sync: ReaderSyncState(phase: .on))
+    }
+    check(written == 200, "C3-10 200 actual AppKit matrix PNGs saved")
     return written
 }
 
@@ -620,6 +632,7 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         }
     }
     for language in languages {
+        expected.insert("c5-both-reset-\(language)-simple-narrow.png")
         for state in [5, 6] { expected.insert("c3-date-\(state)-\(language)-simple-narrow.png") }
         expected.insert("c3-date-5-longname-\(language)-simple-narrow.png")
         expected.insert("c3-settings-long-error-\(language)-simple.png")
@@ -629,7 +642,7 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         for view in ["simple", "advanced"] { expected.insert("c3-actions-two-codex-\(language)-\(view).png") }
     }
     let registered = Set(files)
-    expect(expected.count == 198, "matrix has 198 specified scenes")
+    expect(expected.count == 200, "matrix has 200 specified scenes")
     expect(expected.isSubset(of: registered), "complete V5/manual/layout/history/data/tray/settings matrix")
     expect(files.count == registered.count, "registered filenames are unique")
     expect(files.allSatisfy { !$0.isEmpty && URL(fileURLWithPath: $0).lastPathComponent == $0 && $0.hasSuffix(".png") },

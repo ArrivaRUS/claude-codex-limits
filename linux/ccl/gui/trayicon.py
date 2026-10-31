@@ -5,7 +5,7 @@ with a thin product stripe along the bottom (Claude orange, Codex blue)."""
 from PyQt5.QtCore import QRectF, Qt
 from PyQt5.QtGui import QColor, QFont, QFontMetricsF, QIcon, QPainter, QPixmap
 
-from .. import common, limits
+from .. import common, limits, accounts
 from . import fmt, paint
 
 SIZES = (16, 22, 24, 32, 44, 48, 64, 96, 128)
@@ -102,7 +102,7 @@ def make_icon(rows, mark):
     return icon
 
 
-def tooltip(claude, codex):
+def tooltip(claude, codex, remote=None):
     def line(name, d):
         if not d.present:
             return None
@@ -122,4 +122,8 @@ def tooltip(claude, codex):
             s += common.tr(" — данные от ", " — as of ") + fmt.fmt_reset(d.as_of)
         return s
     lines = [x for x in (line("Claude Code", claude), line("Codex", codex)) if x]
+    caption_lines = accounts.caption_lines(remote)
+    if caption_lines:
+        lines.append(common.tr("Аккаунты:", "Accounts:"))
+        lines.extend(caption_lines)
     return "\n".join(lines) if lines else common.tr("Claude Code и Codex не найдены", "Claude Code and Codex not found")

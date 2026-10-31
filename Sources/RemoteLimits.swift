@@ -35,6 +35,112 @@ struct RemoteCaption: Codable {
     var setAt: Date? = nil
 }
 
+struct RemoteCaptionInputResult {
+    var value: String
+    var error: String?
+}
+
+func remoteCaptionValidatedInput(_ raw: String, english: Bool = false) -> RemoteCaptionInputResult {
+    // Compatibility folding is ONLY for detecting disguised separators. The
+    // stored/displayed text uses NFC, preserving the user's other characters.
+    let compatibility = raw.precomposedStringWithCompatibilityMapping
+    // Check scalars, not graphemes: a combining mark/variation selector must
+    // never hide a forbidden separator inside a multi-scalar Character.
+    guard !compatibility.unicodeScalars.contains(where: { $0.value == 0x40 || $0.value == 0x2F || $0.value == 0x5C }) else {
+        return RemoteCaptionInputResult(value: "", error: english ? "Do not use @, / or \\" : "Без @, / и \\")
+    }
+    let clean = String(String.UnicodeScalarView(raw.unicodeScalars.filter {
+        switch $0.properties.generalCategory {
+        case .control, .format, .surrogate, .lineSeparator, .paragraphSeparator: return false
+        default: return true
+        }
+    })).precomposedStringWithCanonicalMapping
+    return RemoteCaptionInputResult(value: String(String.UnicodeScalarView(clean.unicodeScalars.prefix(32))), error: nil)
+}
+
+func remoteCaptionRecord(_ raw: String, at: Date, english: Bool = false) -> RemoteCaption? {
+    let input = remoteCaptionValidatedInput(raw, english: english)
+    guard input.error == nil, at.timeIntervalSince1970.isFinite else { return nil }
+    return RemoteCaption(text: input.value.trimmingCharacters(in: .whitespacesAndNewlines), setAt: at)
+}
+
+func remoteCaptionMerge(local: [String: RemoteCaption], remote: [String: RemoteCaption], now: Date) -> [String: RemoteCaption] {
+    var result: [String: RemoteCaption] = [:]
+    for records in [local, remote] {
+        for (key, record) in records {
+            guard RemoteLimitsWire.label(key) != nil,
+                  record.setAt.map({ $0.timeIntervalSince1970.isFinite && $0 <= now.addingTimeInterval(60) }) ?? true else { continue }
+            let input = remoteCaptionValidatedInput(record.text)
+            guard input.error == nil else { continue }
+            let candidate = RemoteCaption(text: input.value, setAt: record.setAt)
+            if let old = result[key] {
+                let oldAt = old.setAt ?? .distantPast, newAt = candidate.setAt ?? .distantPast
+                // Match Python codepoint ordering, including supplementary scalars.
+                guard newAt > oldAt || (newAt == oldAt && old.text.unicodeScalars.map({ $0.value })
+                    .lexicographicallyPrecedes(candidate.text.unicodeScalars.map({ $0.value }))) else { continue }
+            }
+            result[key] = candidate
+        }
+    }
+    return result
+}
+
+func remoteCaptionWire(_ captions: [String: RemoteCaption], now: Date) -> [String: Any] {
+    let safe = remoteCaptionMerge(local: captions, remote: [:], now: now)
+    let formatter = ISO8601DateFormatter()
+    var result: [String: Any] = [:]
+    for key in safe.keys.sorted().prefix(64) {
+        guard let record = safe[key], let at = record.setAt else { continue }
+        formatter.formatOptions = at.timeIntervalSince1970.rounded() == at.timeIntervalSince1970
+            ? [.withInternetDateTime] : [.withInternetDateTime, .withFractionalSeconds]
+        result[key] = ["text": record.text, "setAt": formatter.string(from: at)]
+    }
+    return result
+}
+
+func remoteCaptionStoredRecords(_ stored: [String: Any]) -> [String: RemoteCaption] {
+    var result: [String: RemoteCaption] = [:]
+    for (key, value) in stored where RemoteLimitsWire.label(key) != nil {
+        if let legacy = value as? String {
+            // Pre-C5 overrides have no edit time and must lose to dated edits.
+            result[key] = remoteCaptionRecord(legacy, at: Date(timeIntervalSince1970: 0))
+        } else if let record = value as? [String: Any], let text = record["text"] as? String,
+                  let at = RemoteLimitsWire.date(record["setAt"]) {
+            result[key] = remoteCaptionRecord(text, at: at)
+        }
+    }
+    return result
+}
+
+func githubKeychainTimeoutSeconds(interactive: Bool) -> Double { interactive ? 120 : 15 }
+
+/// One monotonic budget for process termination AND output drain; no real I/O
+/// in this model. Production supplies semaphore waits, tests an advancing clock.
+func githubKeychainWait(timeout: Double, now: () -> Double, waits: [(Double) -> Bool]) -> Bool {
+    guard timeout.isFinite, timeout > 0 else { return false }
+    let start = now(), deadline = start + timeout
+    guard start.isFinite, deadline.isFinite else { return false }
+    for wait in waits {
+        let instant = now(), remaining = deadline - instant
+        guard instant.isFinite, instant >= start, remaining > 0, wait(remaining) else { return false }
+        let finished = now()
+        guard finished.isFinite, finished >= instant, finished <= deadline else { return false }
+    }
+    return true
+}
+
+func syncShowsKeychainRetry(_ issue: String?) -> Bool {
+    ["locked", "unreachable", "timeout"].contains(issue ?? "")
+}
+
+func remoteSimpleHeaderLayout(availableWidth: Double, measuredLabelWidth: Double, measuredValueWidth: Double)
+    -> (labelWidth: Double, valueWidth: Double, gap: Double, wrapsValue: Bool) {
+    let width = max(0, availableWidth), gap = min(6, width)
+    let label = min(max(0, measuredLabelWidth), max(0, width - gap))
+    let value = min(max(0, measuredValueWidth), max(0, width - label - gap))
+    return (label, value, gap, false) // value scales to its budget on the same row
+}
+
 struct RemoteAccount: Codable {
     var product: String
     var label: String? = nil
@@ -477,11 +583,31 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
               let obj = (try? JSONSerialization.jsonObject(with: RemoteLimitsWire.strictIntegerJSON(content))) as? [String: Any],
               RemoteLimitsWire.legacyInteger(obj["schema"], maximum: 1) == 1,
               let machine = obj["machine"] as? [String: Any], let id = RemoteLimitsWire.text(machine["id"]), !id.isEmpty,
-              id != myId, !seen.contains(id), name == "machine-\(id).json" else { continue }
+              !seen.contains(id), name == "machine-\(id).json" else { continue }
         let updated = RemoteLimitsWire.isoDate(obj["updated"])
         if obj["updated"] != nil && updated == nil { continue }
         if let updated = updated, updated < now.addingTimeInterval(-45 * 86400) { continue }
         seen.insert(id)
+        if let rawCaptions = obj["captions"] as? [String: Any] {
+            var fileCaptions: [String: RemoteCaption] = [:]
+            var accepted = 0
+            for key in rawCaptions.keys.sorted() {
+                guard RemoteLimitsWire.label(key) != nil, let raw = rawCaptions[key] as? [String: Any],
+                      let text = raw["text"] as? String else { continue }
+                let input = remoteCaptionValidatedInput(text)
+                guard input.error == nil else { continue }
+                let setAt = RemoteLimitsWire.date(raw["setAt"])
+                if let setAt = setAt, setAt > now.addingTimeInterval(60) { continue }
+                let caption = RemoteCaption(text: input.value, setAt: setAt)
+                fileCaptions[key] = caption
+                accepted += 1
+                if accepted == 64 { break }
+            }
+            captions = remoteCaptionMerge(local: captions, remote: fileCaptions, now: now)
+        }
+        // Captions are account metadata, including our own previously published edits.
+        // Only usage, accounts and machine rows exclude this machine.
+        if id == myId { continue }
         let tag = String(String.UnicodeScalarView((RemoteLimitsWire.text(machine["name"]) ?? "").unicodeScalars.prefix(16)))
         let machineName = tag.isEmpty ? "?" : tag
         let os = RemoteLimitsWire.text(machine["os"], limit: 64) ?? ""
@@ -537,21 +663,6 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
             var merged = unattributed[product] ?? [:]
             RemoteLimitsWire.add(days, to: &merged)
             unattributed[product] = merged
-        }
-        if let rawCaptions = obj["captions"] as? [String: Any] {
-            var accepted = 0
-            for key in rawCaptions.keys.sorted() {
-                guard RemoteLimitsWire.label(key) != nil, let raw = rawCaptions[key] as? [String: Any],
-                      let text = RemoteLimitsWire.text(raw["text"], limit: 32, nfc: true) else { continue }
-                let setAt = RemoteLimitsWire.date(raw["setAt"])
-                if let setAt = setAt, setAt > now.addingTimeInterval(60) { continue }
-                let caption = RemoteCaption(text: text, setAt: setAt)
-                if captions[key] == nil || (caption.setAt.map { new in captions[key]?.setAt.map { new > $0 } ?? true } ?? false) {
-                    captions[key] = caption
-                }
-                accepted += 1
-                if accepted == 64 { break }
-            }
         }
     }
     result.accounts = records; result.captions = captions; result.unattributedDays = unattributed
@@ -645,7 +756,8 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 caption: label.flatMap { key -> String? in
                     guard enabled, let caption = remote.captions?[key],
                           caption.setAt.map({ $0 <= now.addingTimeInterval(60) }) ?? true else { return nil }
-                    return caption.text
+                    let input = remoteCaptionValidatedInput(caption.text)
+                    return input.error == nil && !input.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? input.value : nil
                 }
                     ?? RemoteLimitsWire.caption(product: product, plan: values.plan, tier: tier, machines: machines),
                 data: values, isLocal: isLocal, tier: tier,
@@ -987,8 +1099,9 @@ func remoteCardSourceLine(_ view: AccountView, language: String, narrow: Bool, n
     guard let at = view.data.asOf else { return (en ? "No data from " : "Нет данных с ") + machine }
     var calendar = Calendar(identifier: .gregorian); calendar.timeZone = timeZone
     let short = compact || (narrow && !calendar.isDate(at, inSameDayAs: now))
+    let dateOnly = narrow && compactOtherDay && !calendar.isDate(at, inSameDayAs: now)
     return (short ? (en ? "From " : "С ") : (en ? "Data from " : "Данные с ")) + machine
-        + (en ? " at " : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone, compactOtherDay: narrow && compactOtherDay)
+        + (en ? (dateOnly ? " on " : " at ") : " от ") + remoteCardTimestamp(at, now: now, timeZone: timeZone, compactOtherDay: narrow && compactOtherDay)
 }
 
 func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language: String, narrow: Bool,

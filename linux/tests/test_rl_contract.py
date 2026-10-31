@@ -661,9 +661,12 @@ class TestA114ReaderLimits(Base):
         self.gh.on("GET", "/gists/g1", socket_answer("gist", gist_bytes))
         self.gh.on("GET", "/gists?per_page=100", rl._sync_env.resp(200, listing))
         self.gh.on("GET", raw_url, socket_answer("raw", huge.encode()))
+        # C5 reads the own file for captions too, within the same body budgets.
+        self.gh.on("GET", self.RAW % "mine", rl._sync_env.resp(200, raw=b"{}"))
         res = self.cycle()
 
-        self.assertEqual(self.gh.urls(), [("GET", "/gists/g1"), ("GET", "/gists?per_page=100"), ("GET", raw_url)])
+        self.assertEqual(self.gh.urls(), [("GET", "/gists/g1"), ("GET", "/gists?per_page=100"),
+                                         ("GET", self.RAW % "mine"), ("GET", raw_url)])
         for kind, cap in (("gist", sync.MAX_BODY), ("raw", sync.MAX_MACHINE_BODY)):
             self.assertTrue(reads[kind], kind)
             self.assertTrue(all(n is not None and 0 <= n <= cap + 1 for n, _ in reads[kind]), (kind, reads[kind]))

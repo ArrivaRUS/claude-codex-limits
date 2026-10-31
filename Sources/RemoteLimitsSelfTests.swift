@@ -359,7 +359,7 @@ private func rlC102Hostile(_ fx: RLFixtures, _ expect: RLExpect) {
     let caps = r.captions ?? [:]
     c.add("captions capped at 64 (got \(caps.count))", caps.count == 64)
     c.add("caption keys 16 hex (NOTHEX dropped)", caps.keys.allSatisfy { rlHex16($0) })
-    c.add("caption with NUL/U+202E dropped whole", caps["3f3cddd81d01cbc1"] == nil)
+    c.add("caption outside sorted 64-record budget excluded", caps["3f3cddd81d01cbc1"] == nil)
     c.add("caption texts clean ≤ 32", caps.values.allSatisfy { rlControlFree($0.text) && $0.text.unicodeScalars.count <= 32 })
     let root = rlJSONProductDays(obj["days"])
     var split = RLProductDays()
@@ -442,12 +442,16 @@ private func rlC102Strings(_ fx: RLFixtures, _ expect: RLExpect) {
         expect(false, "C1-02 sanitize-vectors.json readable"); return
     }
     var captions: [String: Any] = [:]
-    var expected: [(label: String, text: String, ok: Bool?)] = []
+    // C5 aligns reader captions with editor/writer cleaning (П4-в); other
+    // wire strings and root-days keys retain their strict rejection contract.
+    let cleaned: [String?] = ["команда", "ab", "bidievil", "zerowidth", String(repeating: "x", count: 32), nil, nil, nil, nil]
+    expect(vectors.count == cleaned.count, "C1-02 caption sanitation vectors have explicit C5 outcomes")
+    var expected: [(label: String, text: String?)] = []
     for (i, v) in vectors.enumerated() where i < 16 {
         guard let text = v["text"] as? String else { continue }
         let label = "ccccccccccccccc" + String(i, radix: 16)
         captions[label] = ["text": text, "setAt": "2026-10-12T09:00:00Z"]
-        expected.append((label: label, text: text, ok: v["ok"] as? Bool))
+        expected.append((label: label, text: i < cleaned.count ? cleaned[i] : nil))
     }
     let counts: [String: Int] = ["input": 1, "output": 0, "cacheRead": 0, "cacheWrite5m": 0, "cacheWrite1h": 0, "turns": 1]
     let claudeDays: [String: [String: [String: Int]]] = [
@@ -462,14 +466,12 @@ private func rlC102Strings(_ fx: RLFixtures, _ expect: RLExpect) {
     var c = RLChecks()
     for e in expected {
         let got = caps[e.label]?.text
-        let safe = rlControlFree(e.text) && e.text.unicodeScalars.count <= 32
-        if e.ok == true { c.add("caption kept: \(e.label)", got == e.text.precomposedStringWithCanonicalMapping) }
-        if !safe { c.add("unsafe caption dropped whole (never cleaned): \(e.label)", got == nil) }
+        c.add("caption cleaned or forbidden input rejected: \(e.label)", got == e.text)
         if let g = got { c.add("kept caption clean: \(e.label)", rlControlFree(g) && g.unicodeScalars.count <= 32) }
     }
     let want = rlCanon(["claude": ["2026-10-12": ["claude-fable-5-1": DayModelUsage(input: 1, turns: 1)]]])
     c.add("П5-е: Cc/Cf in a product/day/model key of root days → that entry skipped", rlCanon(r.days) == want)
-    expect(c.failed.isEmpty, "C1-02 strings: caption vectors at the reader (Cc/Cf/> 32 dropped whole), root-days keys (П4-в, П5-е)" + c.suffix)
+    expect(c.failed.isEmpty, "C1-02 strings: caption vectors cleaned/bounded, forbidden separators rejected, root-days keys unchanged (П4-в, П5-е)" + c.suffix)
 }
 
 /// (c) reader limits on contents — pure. Own file takes one of 64 slots (review A1 p. 1), 8 MiB per file, 64 MiB total,
