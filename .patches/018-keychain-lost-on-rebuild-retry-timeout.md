@@ -25,3 +25,9 @@
 нужно выводить из единого состояния, включая восстановленные ошибки. C5-13/14,
 actual Settings hits и живой гейт без logout/login — docs/c5-github-keychain-audit.md.
 Стабильная подпись сборок остаётся C6.
+
+После принятого security-review `48ac3ad` (S1–S5): tool44 подтверждается нативным
+attributes-only запросом; background получает native quiet preflight/unlocked
+check.120с нужно проверять через owner retry, а не только runner: quiet-first
+может оборвать ручную попытку за15с. Трубу ограничивать при чтении, не после;
+retry hit/height должны отсутствовать в awaitingCode, где обработчик отказывает.

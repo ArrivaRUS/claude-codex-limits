@@ -1,5 +1,7 @@
 # Бэклог
 
+- C5 security fix9 после `48ac3ad`: S1–S5 исправлены; C5-15…18 и64 actual Settings draw RED до Mac. Живые гейты: quiet lock/unlock, неоднозначный44 без logout, ручной пароль>15с. Fix8 сохранён, PNG counts прежние.
+
 - C5 D4: устойчивое V2 чтение после пересборки через system tool и восстановление пропавшей кнопки реализованы, C5-13/14 RED. Остаток — Mac-прогон и живой sync без logout/login; стабильная подпись сборок остаётся C6. См. docs/c5-github-keychain-audit.md.
 
 - C5 поверх `16f7aab`: live typing подтверждён; native fixture capture и CLI activation probe/узкий SKIP исправлены, initial L/full selection добавлены в модель и AppKit. Остаток — Mac повтор новых C5-02/12 и подпись между машинами.

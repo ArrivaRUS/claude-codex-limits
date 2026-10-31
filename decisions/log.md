@@ -10,6 +10,12 @@
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
 
+## 2026-10-31 — C5: приняты S1–S5 независимого security-review fix9
+
+1. Решения предыдущего fix9 уточнены: SecurityTool44 не доказывает отсутствие; native exact-ref attributes query с запрещённым interaction подтверждает missing, иначе сохраняем временную ошибку/действие, не предлагаем новый вход. Background допускается к tool после native quiet preflight атрибутов и unlocked-статуса связки самого пункта. ACL не расширяется; native secret-read fallback не добавлен.
+2. Кнопка keychain_manual сразу передаёт action в interactive read, без quiet-first15с. Login probe/stage/delete сохраняют прежнюю политику; в recovery ручной source-read переиспользуется в пределах одного owner lock, разрешение не достаётся случайному candidate. Metadata probes не потребляют action, общий monotonic budget15/120 не сбрасывается между дочерними процессами.
+3. Stdout ограничен128KiB при накоплении, chunk≤8192; overflow прерывает процесс и выдаёт corrupt, не timeout/частичный token. AwaitingCode не рисует ошибку Keychain, поэтому retry hit/height там отсутствуют; startLogin очищает её старое UI/defaults состояние. C5-15…18 RED, старые C5-04/13 и legacy fixture обновлены по конкретному новому правилу, actual C5-14 matrix64 без новых PNG. Своё ревью/агенты/Python не запускались; Mac build/selftests ещё нужны.
+
 ## 2026-10-31 — C5: D4 перенесён изC6, V2 чтение через уже доверенный system tool
 
 1. По запросу владельца D4 read continuity входит в C5: V2 читает `/usr/bin/security find-generic-password -s fixed-service -a generation -w` через приватную трубу. V2 writer уже доверяет этой утилите и helper; legacy явного ACL не задаёт. Фактическая ACL пункта владельца не проверена, существующие права не расширяются.

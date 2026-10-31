@@ -103,8 +103,8 @@ struct GitHubAuthDependencies {
             return Double(c.seconds) + Double(c.attoseconds) / 1e18
         }
     }()
-    // Quiet adapters are mandatory. Interactive variants are called only after a
-    // quiet .locked result, for one exact operation per explicit user action.
+    // Quiet adapters are mandatory. Manual Keychain retry reads directly through
+    // the interactive adapter; login writes/deletes keep quiet-first admission.
     var interactiveReadStore: ((GitHubAuthRef, GitHubAuthUserAction) -> GitHubAuthRead)? = nil
     var interactiveStageStore: ((GitHubAuthRef, GitHubCredentialV2, GitHubAuthUserAction) -> GitHubAuthStoreStatus)? = nil
     var interactiveDeleteStore: ((GitHubAuthRef, GitHubAuthUserAction) -> GitHubAuthStoreStatus)? = nil
@@ -120,11 +120,12 @@ struct GitHubKeychainHelperRequest: Equatable {
     let interactive: Bool
     static func parse(_ arguments: [String]) -> GitHubKeychainHelperRequest? {
         guard arguments.count == 5, arguments[1] == "--github-auth-keychain-helper",
-              ["read", "delete", "legacy-write"].contains(arguments[2]),
+              ["read", "attributes", "preflight", "delete", "legacy-write"].contains(arguments[2]),
               ["quiet", "interactive"].contains(arguments[4]) else { return nil }
         let generation = arguments[3]
         guard generation == "legacy" || UUID(uuidString: generation)?.uuidString.lowercased() == generation else { return nil }
         guard arguments[2] != "legacy-write" || (generation == "legacy" && arguments[4] == "quiet") else { return nil }
+        guard !["attributes", "preflight"].contains(arguments[2]) || (generation != "legacy" && arguments[4] == "quiet") else { return nil }
         return Self(operation: arguments[2], generation: generation, interactive: arguments[4] == "interactive")
     }
     var service: String { generation == "legacy" ? "Claude Codex Limits GitHub" : "Claude Codex Limits GitHub Credential V2" }
@@ -209,6 +210,8 @@ final class GitHubAuthOwner {
     private var retiring = false
     private var storeFailedInPass = false
     private var touchedStoreInPass = false
+    private var directManualRead = false
+    private var manualReadCache: [GitHubAuthRef: GitHubAuthRead] = [:]
 
     /// Scheduler integration: relative monotonic delay, never manifest.retryAt.
     func keychainRetryDelay() -> Double? {
@@ -220,6 +223,7 @@ final class GitHubAuthOwner {
         guard operationLock.try() else { throw GitHubStoreUnavailable.busy }
         defer { operationLock.unlock() }
         manualStorePass = manual; storeFailedInPass = false; touchedStoreInPass = false
+        directManualRead = false; manualReadCache.removeAll()
         userAction = action
         interactionAvailable = manual && action != nil; interactionTarget = nil; cleanupInteractionTarget = nil
         defer {
@@ -228,6 +232,7 @@ final class GitHubAuthOwner {
             }
             userAction?.cancel(); userAction = nil
             manualStorePass = false; interactionAvailable = false; interactionTarget = nil; cleanupInteractionTarget = nil
+            directManualRead = false; manualReadCache.removeAll()
         }
         try dependencies.withLock {
             do { try body() }
@@ -274,7 +279,13 @@ final class GitHubAuthOwner {
         return true
     }
     private func readStore(_ ref: GitHubAuthRef) throws -> GitHubAuthRead {
-        try checkedRead {
+        if let cached = manualReadCache[ref] { try checkStoreAccess(); return cached }
+        return try checkedRead {
+            if directManualRead, interactionAvailable {
+                guard let interactive = dependencies.interactiveReadStore,
+                      consumeInteraction(for: ref), let action = userAction else { return .locked }
+                return interactive(ref, action)
+            }
             let value = dependencies.readStore(ref)
             if case .locked = value, let interactive = dependencies.interactiveReadStore,
                consumeInteraction(for: ref), let action = userAction { return interactive(ref, action) }
@@ -283,6 +294,12 @@ final class GitHubAuthOwner {
     }
     private func readLegacy() throws -> GitHubAuthRead {
         try checkedRead {
+            if directManualRead, interactionAvailable {
+                guard let interactive = dependencies.interactiveLegacy,
+                      consumeInteraction(for: GitHubAuthRef(generation: "legacy", backend: "legacy-keychain")),
+                      let action = userAction else { return .locked }
+                return interactive(action)
+            }
             let value = dependencies.legacy()
             if case .locked = value, let interactive = dependencies.interactiveLegacy,
                consumeInteraction(for: GitHubAuthRef(generation: "legacy", backend: "legacy-keychain")), let action = userAction {
@@ -827,6 +844,7 @@ final class GitHubAuthOwner {
         do {
             try withAuthLock(manual: manual, action: action) {
                 self.issuerPostsInOperation = 0
+                self.directManualRead = manual && reason == "keychain_manual"
                 let now = suppliedNow ?? self.dependencies.clock()
                 guard var m = try self.dependencies.loadManifest() else {
                     let legacy = try self.readLegacy()
@@ -845,6 +863,13 @@ final class GitHubAuthOwner {
                     try? self.retireRevoked(&m)
                     result = .actionRequired("revoked")
                     self.present("actionRequired", "revoked", manifest: m); return
+                }
+                if self.directManualRead, m.transition != nil, let active = m.active {
+                    // Recovery may inspect a missing candidate first. Give the
+                    // user's one permission to the active source immediately,
+                    // and reuse that result within this locked pass.
+                    self.interactionTarget = active
+                    self.manualReadCache[active] = try self.readStore(active)
                 }
                 if let recovered = try self.recover(&m, now: now, canPublish: { true }) {
                     if case .ready = recovered { result = recovered; return }

@@ -178,7 +178,10 @@ private final class GHAuthFixture {
             }, monotonicClock: { self.monotonicNow ?? self.now },
             interactiveReadStore: { ref, action in
                 guard action.admit({ self.storeTrace.append(("read", ref, true)) }) else { return .locked }
-                return self.interactiveRead?(ref) ?? .locked
+                if let result = self.interactiveRead?(ref) { return result }
+                if let fault = self.readForRef?(ref) { return fault }
+                if let fault = self.readOverride { return fault }
+                return self.items[ref].map { .ready($0) } ?? .missing
             }, interactiveStageStore: { ref, credential, action in
                 guard action.admit({ self.storeTrace.append(("stage", ref, true)) }) else { return .locked }
                 return self.interactiveStage?(ref, credential) ?? .locked
@@ -187,7 +190,7 @@ private final class GHAuthFixture {
                 return self.interactiveDelete?(ref) ?? .locked
             }, interactiveLegacy: { action in
                 guard action.admit({ self.storeTrace.append(("read", GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), true)) }) else { return .locked }
-                return self.interactiveLegacyRead?() ?? .locked
+                return self.interactiveLegacyRead?() ?? self.legacyRead
             }, storeIdle: { self.idle })
         return GitHubAuthOwner(dependencies: deps, clientID: "fixture-client")
     }
@@ -353,7 +356,7 @@ func runGitHubAuthSelfTests() {
         f.now += 601; _ = owner.ensureAccess(reason: "wake")
         check(f.storeTrace.filter { $0.interactive }.count == 1, "failed probe cannot interact on wake")
     }
-    // Legacy goes through the same quiet-first, one-attempt boundary.
+    // Legacy manual retry also starts interactive; background remains quiet.
     do {
         let f = GHAuthFixture(); let owner = f.owner()
         f.legacyRead = .locked
@@ -361,7 +364,7 @@ func runGitHubAuthSelfTests() {
         check(isTemporary(owner.retryKeychainAccess()), "legacy explicit denial")
         f.now += 601; _ = f.owner().ensureAccess(reason: "wake")
         check(f.storeTrace.filter { $0.interactive }.count == 1
-              && f.storeTrace.filter { !$0.interactive }.count == 3, "legacy permit is neither global nor persisted")
+              && f.storeTrace.filter { !$0.interactive }.count == 2, "legacy permit is neither global nor persisted; manual retry has no preliminary quiet read")
     }
 
     // Snapshot2 P2: A passed its current-ID check, then UI cancels A and

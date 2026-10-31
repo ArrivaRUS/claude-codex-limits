@@ -1,3 +1,5 @@
+> C5 поверх `48ac3ad`: приняты S1–S5 fix9. Tool44 подтверждается native attributes-only query; background gated quiet preflight/unlocked, owner manual read сразу120с, stdout bounded128KiB, awaitingCode без retry. C5-15…18 RED до Mac, actual Settings draw64 без новых PNG; fix8 не менялся. Подробности — docs/c5-github-keychain-audit.md.
+
 > C5 D4 (перенесён изC6): V2 GitHub token read теперь через уже доверенный `/usr/bin/security`, private pipe15/120с, legacy — прежний native путь. lastError и очищенный authReason больше не расходятся с кнопкой: единый keychainIssue. C5-13/14 RED до Mac; audit — docs/c5-github-keychain-audit.md. Fix8 сохранён, Python/VPS не тронуты.
 
 > C5 / `16f7aab`: владелец подтвердил живой ввод. CLI C5-12:7920 OK/20 FAIL; исправлен capture fixture при NSView.draw, activation-only проверки имеют контрольный probe/SKIP, остальная функциональность обязательна. Новое UX9.3: текущая L сразу в поле и целиком выделена, counter заполнен. C5-02/native новые проверки RED до Mac; Python не запускался.

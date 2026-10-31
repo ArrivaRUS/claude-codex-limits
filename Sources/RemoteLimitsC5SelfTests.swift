@@ -328,8 +328,9 @@ private func c5C504(_ check: C5Check) {
         for phase in [SyncPhase.off, .on, .revoked, .awaitingCode] {
             var plain = SyncUIState(); plain.phase = phase
             var failed = plain; failed.authReason = issue
-            check(failed.canRetryKeychain && setSyncCardH(failed) - setSyncCardH(plain) == 36,
-                  "C5-04 \(issue): retry row reserves exactly 36pt in each settings phase")
+            let visible = phase != .awaitingCode
+            check(failed.canRetryKeychain == visible && setSyncCardH(failed) - setSyncCardH(plain) == (visible ? 36 : 0),
+                  "C5-04 \(issue): retry row exists only in an actionable settings phase")
             if phase == .on {
                 // Production height entry; nil lastError keeps this branch
                 // Foundation-only, before NSApplication registration.
@@ -621,7 +622,7 @@ private func c5C513(_ check: C5Check) {
         .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     for interactive in [false, true] {
         var calls: [GitHubAuthReadCommand] = [], logs: [String] = []
-        let result = githubAuthReadWithCommand(ref, interactive: interactive, run: { command in
+        let result = githubAuthReadWithCommand(ref, interactive: interactive, probe: { _ in .success }, run: { command in
             calls.append(command); return (.success, encoded + "\n")
         }, log: { logs.append($0) })
         if case .ready(let value) = result { check(value == credential, "C5-13 private system-tool output decodes complete credential pair") }
@@ -636,7 +637,7 @@ private func c5C513(_ check: C5Check) {
         check(legacy?.systemTool == false && legacy?.arguments == ["--github-auth-keychain-helper", "read", "legacy", interactive ? "interactive" : "quiet"],
               "C5-13 legacy without guaranteed system-tool ACL keeps explicit native permission policy")
     }
-    let cases: [(Int32?, Bool, SyncKeychainStatus)] = [(0, false, .success), (44, false, .missing),
+    let cases: [(Int32?, Bool, SyncKeychainStatus)] = [(0, false, .success), (44, false, .failure(44)),
         (51, false, .failure(36)), (128, false, .failure(36)), (36, false, .failure(36)), (29, false, .failure(36)),
         (1, false, .failure(1)), (nil, false, .failure(-1)), (0, true, .timedOut)]
     for (code, timedOut, expected) in cases {
@@ -644,13 +645,14 @@ private func c5C513(_ check: C5Check) {
         check(status == expected, "C5-13 security exit classification preserves missing/denial/timeout distinctions")
         if status != .success {
             var logs: [String] = [], calls = 0
-            let result = githubAuthReadWithCommand(ref, interactive: false, run: { _ in
+            let result = githubAuthReadWithCommand(ref, interactive: false, probe: { _ in .success }, run: { _ in
                 calls += 1; return (status, secret)
             }, log: { logs.append($0) })
             let matches: Bool
             switch (status, result) {
             case (.missing, .missing), (.timedOut, .timeout), (.failure(36), .locked): matches = true
-            case (.failure(let value), .unreachable): matches = value != 36
+            case (.failure(44), .locked): matches = true // Native attributes found it: tool's 44 is not absence.
+            case (.failure(let value), .unreachable): matches = ![36, 44, 65].contains(value)
             default: matches = false
             }
             check(matches && calls == 1 && !logs.joined().contains(secret), "C5-13 failure does not downgrade to success, expose stdout or launch fallback")
@@ -658,14 +660,132 @@ private func c5C513(_ check: C5Check) {
     }
     for invalid in [GitHubAuthRef(generation: "legacy"), GitHubAuthRef(generation: "../escape"), GitHubAuthRef(generation: generation, backend: "file")] {
         var ran = false
-        let result = githubAuthReadWithCommand(invalid, interactive: false, run: { _ in ran = true; return (.success, encoded) })
+        let result = githubAuthReadWithCommand(invalid, interactive: false, probe: { _ in .success }, run: { _ in ran = true; return (.success, encoded) })
         if case .corrupt = result { check(!ran, "C5-13 invalid reference rejected before process creation") }
         else { check(false, "C5-13 invalid reference is corrupt") }
     }
     for malformed in ["", secret, String(repeating: "A", count: 128 * 1024 + 1)] {
-        let result = githubAuthReadWithCommand(ref, interactive: false, run: { _ in (.success, malformed) })
+        let result = githubAuthReadWithCommand(ref, interactive: false, probe: { _ in .success }, run: { _ in (.success, malformed) })
         if case .corrupt = result { check(true, "C5-13 empty/malformed/oversized successful output fails closed") }
         else { check(false, "C5-13 malformed envelope cannot become a credential") }
+    }
+}
+
+private func c5C515(_ check: C5Check) {
+    let ref = GitHubAuthRef(generation: "01234567-89ab-cdef-0123-456789abcdef")
+    for interactive in [false, true] {
+        for status in [SyncKeychainStatus.success, .missing, .failure(36), .failure(1), .failure(65)] {
+            var probes: [Bool] = [], executions = 0
+            let result = githubAuthReadWithCommand(ref, interactive: interactive, probe: { unlocked in
+                probes.append(unlocked)
+                return unlocked ? .success : status
+            }, run: { _ in executions += 1; return (githubSecurityReadStatus(exitCode: 44), "") })
+            let matches: Bool
+            switch (status, result) {
+            case (.missing, .missing), (.success, .locked), (.failure(36), .locked), (.failure(1), .unreachable), (.failure(65), .unreachable): matches = true
+            default: matches = false
+            }
+            check(matches && executions == 1 && probes == (interactive ? [false] : [true, false]),
+                  "C5-15 S1 tool44 becomes missing only after native attributes confirms absence")
+        }
+    }
+    for status in [SyncKeychainStatus.failure(36), .failure(1), .missing, .timedOut] {
+        var ran = false
+        let result = githubAuthReadWithCommand(ref, interactive: false, probe: { _ in status }, run: { _ in ran = true; return (.success, "") })
+        let blocked: Bool
+        switch result { case .locked, .unreachable, .missing, .timeout: blocked = true; default: blocked = false }
+        check(!ran && blocked, "C5-15 S2 quiet locked/unavailable/missing preflight never launches security")
+    }
+    for operation in ["attributes", "preflight"] {
+        let quiet = githubAuthKeychainArguments(operation: operation, ref: ref)
+        check(quiet != nil && githubAuthKeychainArguments(operation: operation, ref: ref, interactive: true) == nil,
+              "C5-15 metadata helper is exact-ref, quiet-only and cannot request secret data")
+    }
+}
+
+private func c5C516(_ check: C5Check) {
+    let generation = "01234567-89ab-cdef-0123-456789abcdef", ref = GitHubAuthRef(generation: "01234567-89ab-cdef-0123-456789abcdef")
+    let credential = GitHubCredentialV2(epoch: generation, generation: generation, accessToken: "c5-action-token",
+        obtainedAt: 1000, userID: "1001", login: "fixture")
+    var manifest = GitHubAuthManifest(epoch: generation, active: ref, userID: "1001", login: "fixture")
+    let encoded = try! JSONEncoder().encode(credential).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    var quiet = 0, probes = 0, deadlines: [Double] = []
+    let deps = GitHubAuthDependencies(clock: { 1000 }, loadManifest: { manifest }, saveManifest: { manifest = $0 },
+        readStore: { _ in quiet += 1; return .timeout }, stageStore: { _, _ in .failed }, deleteStore: { _ in .success },
+        transport: { _ in check(false, "C5-16 no issuer request"); return GitHubAuthHTTP(status: 0, json: nil) },
+        identity: { _ in .ready(userID: "1001", login: "fixture") }, withLock: { try $0() },
+        checkpoint: { _, _, _ in }, jitter: { 0 }, legacy: { .signedOut }, settled: { _ in true },
+        interactiveReadStore: { requested, action in
+            githubAuthReadWithCommand(requested, interactive: true, probe: { _ in probes += 1; return .success }, run: { _ in
+                let deadline = githubKeychainProcessTimeout(action: action)
+                guard action.admit({ deadlines.append(deadline) }) else { return (.failure(36), "") }
+                // A human takes 16s; this would fail under the old quiet-first 15s path.
+                return 16 < deadline ? (.success, encoded) : (.timedOut, "")
+            })
+        })
+    let owner = GitHubAuthOwner(dependencies: deps, clientID: "fixture")
+    let result = owner.retryKeychainAccess()
+    if case .ready = result {
+        check(quiet == 0 && probes == 0 && deadlines == [120], "C5-16 S3 owner retry -> interactive adapter -> child timeout120, no prior quiet read")
+    } else { check(false, "C5-16 owner retry survives simulated16s password entry") }
+    _ = owner.ensureAccess(reason: "background")
+    check(quiet == 1 && deadlines == [120] && githubKeychainProcessTimeout(action: nil) == 15,
+          "C5-16 successful manual permission does not turn later background reads interactive")
+    let remainingAction = GitHubAuthUserAction()
+    check(githubKeychainProcessTimeout(action: remainingAction, remaining: 7) == 7
+          && githubKeychainProcessTimeout(action: nil, remaining: 7) == 7
+          && githubKeychainProcessTimeout(action: remainingAction, remaining: -1) == 0,
+          "C5-16 metadata/tool confirmation share remaining budget instead of restarting15/120")
+    for attributes in [SyncKeychainStatus.success, .failure(36), .failure(1), .missing] {
+        var confirming = deps
+        confirming.readStore = { requested in
+            githubAuthReadWithCommand(requested, interactive: false, probe: { unlocked in unlocked ? .success : attributes },
+                run: { _ in (githubSecurityReadStatus(exitCode: 44), "") })
+        }
+        let checkingOwner = GitHubAuthOwner(dependencies: confirming, clientID: "fixture")
+        let result = checkingOwner.ensureAccess(reason: "background")
+        let confirmed: Bool
+        switch (attributes, result) {
+        case (.missing, .actionRequired("missing")): confirmed = true
+        case (.success, .temporary), (.failure, .temporary): confirmed = true
+        default: confirmed = false
+        }
+        check(confirmed && !manifest.signedOut && manifest.active == ref,
+              "C5-16 S1 owner requests sign-in only for native-confirmed absence, never for ambiguous tool44")
+    }
+}
+
+private func c5C517(_ check: C5Check) {
+    for size in [128 * 1024 - 1, 128 * 1024, 128 * 1024 + 1, 256 * 1024] {
+        var offset = 0, stops = 0, requests: [Int] = []
+        let result = githubBoundedReadOutput(read: { count in
+            requests.append(count)
+            let length = min(count, size - offset); offset += length
+            return Data(repeating: 65, count: length)
+        }, stop: { stops += 1 })
+        check(result.corrupt == (size > 128 * 1024) && result.data.count == (result.corrupt ? 0 : size)
+              && stops == (result.corrupt ? 1 : 0) && requests.allSatisfy { $0 <= 8192 }
+              && offset <= 128 * 1024 + 1, "C5-17 S4 stdout is bounded during accumulation; overflow stops child immediately")
+    }
+    let ref = GitHubAuthRef(generation: "01234567-89ab-cdef-0123-456789abcdef")
+    let result = githubAuthReadWithCommand(ref, interactive: true, probe: { _ in .success }, run: { _ in (.failure(65), "") })
+    if case .corrupt = result { check(true, "C5-17 oversized child output reaches auth as corrupt") }
+    else { check(false, "C5-17 oversized output cannot become timeout/success") }
+}
+
+private func c5C518(_ check: C5Check) {
+    for language in ["ru", "en"] {
+        var pending = SyncUIState(phase: .awaitingCode, authReason: "locked")
+        pending.lastError = githubAuthMessage("locked", language: language)
+        pending.keychainRetryAvailable = true
+        var plain = pending; plain.lastError = nil; plain.authReason = nil; plain.keychainRetryAvailable = false
+        check(!pending.canRetryKeychain && pending.keychainIssue == nil && setSyncCardH(pending) == setSyncCardH(plain),
+              "C5-18 S5 awaiting-code hides stale recovery action and its height")
+        pending.phase = .on; pending.lastErrorAt = Date(); pending.prepareForGitHubLogin()
+        check(pending.phase == .awaitingCode && pending.lastError == nil && pending.lastErrorAt == nil
+              && pending.authReason == nil && !pending.keychainRetryAvailable,
+              "C5-18 startLogin transition clears stale Keychain UI state")
     }
 }
 
@@ -674,4 +794,5 @@ func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C504(check); c5C505(check); c5C506(check)
     c5C507(check); c5C508(check); c5C509(check); c5C510(check); c5C511(check)
     c5C513(check)
+    c5C515(check); c5C516(check); c5C517(check); c5C518(check)
 }

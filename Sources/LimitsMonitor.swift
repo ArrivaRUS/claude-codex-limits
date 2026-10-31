@@ -1528,7 +1528,7 @@ func githubSecurityReadStatus(exitCode: Int32?, timedOut: Bool = false) -> SyncK
     if timedOut { return .timedOut }
     switch exitCode {
     case 0: return .success
-    case 44: return .missing
+    case 44: return .failure(44) // SecurityTool can collapse search failures to not-found.
     // OSStatus modulo 256: interaction-not-allowed/required, auth failed,
     // user cancelled. They need permission, never an automatic sign-out.
     case 36, 29, 51, 128: return .failure(36)
@@ -1547,15 +1547,32 @@ protocol SyncKeychain {
 private final class SyncSecurityOutput {
     private let lock = NSLock()
     private var data = Data()
+    private var corrupt = false
     func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
+    func store(_ value: Data, corrupt: Bool) { lock.lock(); data = value; self.corrupt = corrupt; lock.unlock() }
+    var isCorrupt: Bool { lock.lock(); defer { lock.unlock() }; return corrupt }
     func string() -> String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
-private func githubKeychainProcess(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil, action: GitHubAuthUserAction? = nil, systemTool: Bool = false) -> (status: SyncKeychainStatus, out: String) {
+func githubBoundedReadOutput(limit: Int = 128 * 1024, read: (Int) throws -> Data?, stop: () -> Void) -> (data: Data, corrupt: Bool) {
+    var data = Data()
+    do {
+        while let chunk = try read(min(8192, max(1, limit + 1 - data.count))), !chunk.isEmpty {
+            guard chunk.count <= limit - data.count else { stop(); return (Data(), true) }
+            data.append(chunk)
+        }
+    } catch { stop(); return (Data(), true) }
+    return (data, false)
+}
+func githubKeychainProcessTimeout(action: GitHubAuthUserAction?, remaining: Double? = nil) -> Double {
+    min(githubKeychainTimeoutSeconds(interactive: action != nil), max(0, remaining ?? .infinity))
+}
+private func githubKeychainProcess(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil, action: GitHubAuthUserAction? = nil, systemTool: Bool = false, remaining: Double? = nil) -> (status: SyncKeychainStatus, out: String) {
+    let timeout = githubKeychainProcessTimeout(action: action, remaining: remaining)
+    guard timeout > 0 else { return (.timedOut, "") }
     guard lifetime?.begin() != false else { return (.timedOut, "") }
     let p = Process(), output = Pipe(), stdin = Pipe()
     let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
     let result = SyncSecurityOutput()
-    let timeout = githubKeychainTimeoutSeconds(interactive: action != nil)
     guard let executable = systemTool ? URL(fileURLWithPath: "/usr/bin/security") : Bundle.main.executableURL else { lifetime?.ended(); return (.failure(-1), "") }
     p.executableURL = executable; p.arguments = args
     p.standardOutput = output; p.standardError = FileHandle.nullDevice
@@ -1567,7 +1584,13 @@ private func githubKeychainProcess(_ args: [String], input: String? = nil, lifet
         } else { try p.run() }
     } catch { lifetime?.ended(); return (.failure(-1), "") }
     DispatchQueue.global(qos: .utility).async {
-        result.store(output.fileHandleForReading.readDataToEndOfFile())
+        let bounded = githubBoundedReadOutput(read: { try output.fileHandleForReading.read(upToCount: $0) }, stop: {
+            if p.isRunning { p.terminate() }
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                if p.isRunning { _ = kill(p.processIdentifier, SIGKILL) }
+            }
+        })
+        result.store(bounded.data, corrupt: bounded.corrupt)
         try? output.fileHandleForReading.close()
         drained.signal()
     }
@@ -1587,8 +1610,9 @@ private func githubKeychainProcess(_ args: [String], input: String? = nil, lifet
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
             if p.isRunning { _ = kill(p.processIdentifier, SIGKILL) }
         }
-        return (.timedOut, "")
+        return (result.isCorrupt ? .failure(65) : .timedOut, "")
     }
+    guard !result.isCorrupt else { return (.failure(65), "") }
     guard p.terminationReason == .exit else { return (.failure(-1), "") }
     let code = p.terminationStatus
     let status = systemTool ? githubSecurityReadStatus(exitCode: code)
@@ -1748,13 +1772,35 @@ func githubAuthReadCommand(_ ref: GitHubAuthRef, interactive: Bool) -> GitHubAut
 }
 /// Pure orchestration: model tests supply the runner and collect nonsecret diagnostics.
 func githubAuthReadWithCommand(_ ref: GitHubAuthRef, interactive: Bool,
+    probe: (Bool) -> SyncKeychainStatus,
     run: (GitHubAuthReadCommand) -> (status: SyncKeychainStatus, out: String), log: (String) -> Void = { _ in }) -> GitHubAuthRead {
     guard let command = githubAuthReadCommand(ref, interactive: interactive) else { return .corrupt }
+    func unavailable(_ status: SyncKeychainStatus) -> GitHubAuthRead {
+        switch status {
+        case .missing: return .missing // Only the native attributes query can confirm this.
+        case .timedOut: return .timeout
+        case .failure(36): return .locked
+        default: return .unreachable
+        }
+    }
+    if command.systemTool && !interactive {
+        let status = probe(true)
+        if status != .success { return unavailable(status) }
+    }
     log(command.diagnostic)
     let result = run(command)
     switch result.status {
-    case .missing: return .missing
+    case .missing:
+        if command.systemTool {
+            let status = probe(false)
+            return status == .success ? .locked : unavailable(status)
+        }
+        return .missing
     case .timedOut: return .timeout
+    case .failure(44) where command.systemTool:
+        let status = probe(false)
+        return status == .success ? .locked : unavailable(status)
+    case .failure(65): return .corrupt
     case .failure(let code): return code == 36 ? .locked : .unreachable
     case .success:
         let encoded = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1767,8 +1813,14 @@ func githubAuthReadWithCommand(_ ref: GitHubAuthRef, interactive: Bool,
     }
 }
 private func githubAuthRead(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
-    githubAuthReadWithCommand(ref, interactive: action != nil, run: { command in
-        githubKeychainProcess(command.arguments, lifetime: githubAuthProcessFence, action: action, systemTool: command.systemTool)
+    let deadline = ProcessInfo.processInfo.systemUptime + githubKeychainProcessTimeout(action: action)
+    return githubAuthReadWithCommand(ref, interactive: action != nil, probe: { unlocked in
+        guard let args = githubAuthKeychainArguments(operation: unlocked ? "preflight" : "attributes", ref: ref) else { return .failure(1) }
+        return githubKeychainProcess(args, lifetime: githubAuthProcessFence,
+            remaining: deadline - ProcessInfo.processInfo.systemUptime).status
+    }, run: { command in
+        githubKeychainProcess(command.arguments, lifetime: githubAuthProcessFence, action: action, systemTool: command.systemTool,
+            remaining: deadline - ProcessInfo.processInfo.systemUptime)
     })
 }
 private func githubAuthStatus(_ status: SyncKeychainStatus) -> GitHubAuthStoreStatus {
@@ -1893,6 +1945,25 @@ private func githubAuthNativeKeychainHelper() -> Int32 {
                                     kSecAttrService as String: request.service]
         if request.generation != "legacy" { query[kSecAttrAccount as String] = request.generation }
         switch request.operation {
+        case "attributes", "preflight":
+            query[kSecReturnAttributes as String] = true
+            query[kSecMatchLimit as String] = kSecMatchLimitOne
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+            if request.operation == "preflight" { query[kSecReturnRef as String] = true }
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            guard status == errSecSuccess else { return githubAuthNativeExit(status) }
+            if request.operation == "preflight" {
+                guard let attributes = item as? [String: Any], let value = attributes[kSecValueRef as String],
+                      CFGetTypeID(value as CFTypeRef) == SecKeychainItemGetTypeID() else { return 1 }
+                let reference = value as! SecKeychainItem
+                var keychain: SecKeychain?
+                guard SecKeychainItemCopyKeychain(reference, &keychain) == errSecSuccess, let keychain = keychain else { return 1 }
+                var flags: SecKeychainStatus = 0
+                guard SecKeychainGetStatus(keychain, &flags) == errSecSuccess else { return 1 }
+                guard flags & SecKeychainStatus(kSecUnlockStateStatus) != 0 else { return 36 }
+            }
+            return 0 // No secret bytes or attributes are written to stdout.
         case "read":
             query[kSecReturnData as String] = true
             query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -2587,10 +2658,15 @@ final class GitHubSync {
         setUI {
             guard $0.phase != .awaitingCode, !keychainManualRetryPending else { return }
             keychainUserAction = attempt.action
-            loginID = attempt.id; $0.phase = .awaitingCode; $0.userCode = nil; $0.error = nil
+            loginID = attempt.id; $0.prepareForGitHubLogin()
             accepted = true
         }
-        if accepted { q.async { self.runLogin(attempt) } }
+        if accepted { q.async {
+            if githubKeychainIssue(forMessage: self.defaults.string(forKey: "syncLastError")) != nil {
+                self.defaults.removeObject(forKey: "syncLastError"); self.defaults.removeObject(forKey: "syncLastErrorAt")
+            }
+            self.runLogin(attempt)
+        } }
     }
     private var cancelledLoginPhase: SyncPhase {
         defaults.bool(forKey: "syncRevoked") || defaults.string(forKey: "syncLogin") != nil ? .revoked : .off
@@ -4123,6 +4199,7 @@ struct SyncUIState {
             : "Системные часы и GitHub расходятся; проверьте синхронизацию времени."
     }
     var keychainIssue: String? {
+        guard phase != .awaitingCode else { return nil }
         if syncShowsKeychainRetry(authReason) { return authReason }
         return githubKeychainIssue(forMessage: lastError) ?? githubKeychainIssue(forMessage: error)
     }
@@ -4130,6 +4207,12 @@ struct SyncUIState {
         keychainIssue.map { githubAuthMessage($0, language: appLang()) } ?? raw
     }
     var canRetryKeychain: Bool { keychainIssue != nil }
+    mutating func prepareForGitHubLogin() {
+        if githubKeychainIssue(forMessage: lastError) != nil { lastError = nil; lastErrorAt = nil }
+        if syncShowsKeychainRetry(authReason) { authReason = nil }
+        keychainRetryAvailable = false
+        phase = .awaitingCode; userCode = nil; error = nil
+    }
     var canSignOut: Bool {
         phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
     }
@@ -4142,7 +4225,10 @@ let SYNC_STALE_AFTER: TimeInterval = 30 * 60
 func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String? {
     if let clock = s.clockSkewWarning(language: appLang()) { return clock }
     if let issue = s.keychainIssue { return githubAuthMessage(issue, language: appLang()) }
-    if let reason = s.authReason { return githubAuthMessage(reason, language: appLang()) }
+    if let reason = s.authReason {
+        if s.phase == .awaitingCode && syncShowsKeychainRetry(reason) { return nil }
+        return githubAuthMessage(reason, language: appLang())
+    }
     switch s.phase {
     case .revoked:
         return tr("Войдите в GitHub заново — суммы без других компьютеров", "Sign in to GitHub again — totals exclude other computers")
@@ -8102,33 +8188,35 @@ func runGitHubKeychainRetryAppKitSelfTests(check: (Bool, String) -> Void) {
             defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
             for issue in ["locked", "unreachable", "timeout", "none"] {
                 for restored in [false, true] {
-                    AppKitSelfTestWatchdog.shared.begin("C5-14 Settings \(issue) \(language) advanced=\(advanced) restored=\(restored)")
-                    var state = SyncUIState(phase: .on, authState: restored ? "healthy" : "temporarilyUnavailable",
-                        authReason: restored || issue == "none" ? nil : issue, login: "fixture-account")
-                    state.lastError = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: restored ? (language == "en" ? "ru" : "en") : language)
-                    state.lastErrorAt = now; state.keychainRetryAvailable = issue == "none"
-                    SYNC_PREVIEW = state
-                    let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
-                        allViews: [], visibleViews: [], displayedViews: [])
-                    withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
-                        let height = settingsTotalHeight(AboutState())
-                        guard let ctx = bitmapContext(Int(PANEL_W * 2), Int(height * 2)) else {
-                            check(false, "C5-14 bitmap allocation"); return
-                        }
-                        ctx.scaleBy(x: 2, y: 2)
-                        let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: height), about: AboutState())
-                        let errors = hits.filter { $0.id == "syncerror:github" }
-                        let retries = hits.filter { $0.id == "sync:keychain-retry" }
-                        let expected = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: language)
-                        check(errors.count == 1 && errors[0].tooltip?.contains(expected) == true,
-                              "C5-14 actual drawn error/AX text uses current-language Keychain state")
-                        check(retries.count == (issue == "none" ? 0 : 1),
-                              "C5-14 actual retry hit exists exactly when the drawn error requests it")
-                        check((errors + retries).allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height },
-                              "C5-14 shared height model keeps error and recovery action in bounds")
-                        if let error = errors.first, let retry = retries.first {
-                            check(!error.rect.intersects(retry.rect), "C5-14 wrapped error does not cover recovery action")
-                        }
+                    for awaiting in [false, true] {
+                          AppKitSelfTestWatchdog.shared.begin("C5-14 Settings \(issue) \(language) advanced=\(advanced) restored=\(restored) awaiting=\(awaiting)")
+                          var state = SyncUIState(phase: awaiting ? .awaitingCode : .on, authState: restored ? "healthy" : "temporarilyUnavailable",
+                              authReason: restored || issue == "none" ? nil : issue, login: "fixture-account")
+                          state.lastError = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: restored ? (language == "en" ? "ru" : "en") : language)
+                          state.lastErrorAt = now; state.keychainRetryAvailable = issue == "none"
+                          SYNC_PREVIEW = state
+                          let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+                              allViews: [], visibleViews: [], displayedViews: [])
+                          withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+                              let height = settingsTotalHeight(AboutState())
+                              guard let ctx = bitmapContext(Int(PANEL_W * 2), Int(height * 2)) else {
+                                  check(false, "C5-14 bitmap allocation"); return
+                              }
+                              ctx.scaleBy(x: 2, y: 2)
+                              let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: height), about: AboutState())
+                              let errors = hits.filter { $0.id == "syncerror:github" }
+                              let retries = hits.filter { $0.id == "sync:keychain-retry" }
+                              let expected = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: language)
+                              check(awaiting ? errors.isEmpty : (errors.count == 1 && errors[0].tooltip?.contains(expected) == true),
+                                    "C5-14 actual drawn error/AX text uses current-language Keychain state")
+                              check(retries.count == (awaiting || issue == "none" ? 0 : 1),
+                                    "C5-14 actual retry hit exists exactly when the drawn error requests it")
+                              check((errors + retries).allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height },
+                                    "C5-14 shared height model keeps error and recovery action in bounds")
+                              if let error = errors.first, let retry = retries.first {
+                                  check(!error.rect.intersects(retry.rect), "C5-14 wrapped error does not cover recovery action")
+                              }
+                          }
                     }
                 }
             }

@@ -1,53 +1,77 @@
 # C5 / D4 — GitHub после пересборки, 2026-10-31
 
-Владелец: установлен `16f7aab` / 3.3.1; отправка остановилась, в Settings видна
-ошибка разрешения Связки, кнопки повтора нет. Это отдельная задача поверх fix8;
-его редактор/C5-12 в этом проходе не менялись. Доказательства Mac до патча
-не доказывают работоспособность нового пути.
+Текущий контракт после принятых владельцем S1–S5 независимого security-review
+fix9 (`16f7aab..48ac3ad -- Sources`). Предыдущая реализация44→missing и прямой
+фоновой команды без preflight признана неверной. Новые проверки RED до Mac.
+Fix8 (редактор/C5-12) в этом проходе не менялся.
 
-| Пункт | Создание и ACL по коду |
-|---|---|
-| V2, service `Claude Codex Limits GitHub Credential V2`, account UUID поколения | `githubAuthNativeStoreHelper`: SecTrustedApplication для `/usr/bin/security` и текущего helper; SecAccessCreate с обоими; SecItemAdd с kSecAttrAccess. Только add, duplicate не меняет существующий ACL. Этот путь уже был в исходном коде 3.3.0/3.3.1 и в установленном владельцем 16f7aab; текущий патч его не меняет. |
-| Legacy, service `Claude Codex Limits GitHub`, account NSUserName при создании | `githubAuthNativeKeychainHelper`, legacy-write: SecItemUpdate либо SecItemAdd без явного kSecAttrAccess. Доверие системной утилите по этому пути не гарантируется. Read исторически выбирает один service-match. |
+## ACL и чтение
 
-Идентичность ad-hoc helper меняется при пересборке; прежний ACL может потребовать
-разрешения для нового бинаря. Явный доверенный system tool позволяет V2-чтению
-не зависеть от этой идентичности. Фактический ACL пункта на Mac владельца и старых
-пунктов не считывался: подтверждён конструктор, а не содержимое живой Связки.
+V2 writer по-прежнему создаёт service `Claude Codex Limits GitHub Credential V2`,
+account UUID поколения, SecAccessCreate с `/usr/bin/security` и текущим helper,
+kSecAttrAccess при SecItemAdd. Add-only не расширяет ACL старого пункта.
+Legacy writer явного ACL не задаёт и сохраняет прежний native read.
+Фактические ACL Mac владельца из этой сессии не считывались.
 
-V2 background/manual read теперь запускает **один** `/usr/bin/security` с argv
-`find-generic-password -s <фиксированный service> -a <UUID> -w`. Stdout — приватная
-труба; stdin/null, stderr/null; диагностик с output нет. Access/refresh/envelope
-не проходят через argv или файлы. Валидация V2 envelope использует прежний pure
-validator writer (schema/generation/epoch, размер и формат токенов).
+S1: SecurityTool может потерять ошибку поиска и вернуть44 при существующем
+пункте. Raw44 теперь .failure(44), не .missing. После него выполняется native
+helper `attributes quiet`: exact service/account, kSecReturnAttributes,
+kSecUseAuthenticationUIFail, без kSecReturnData. Только errSecItemNotFound
+этого запроса подтверждает отсутствие. Success→locked (пункт существует,
+но tool не прочитал), прочие ошибки→locked/unreachable/timeout. Owner остаётся
+временно недоступным, а не требует нового входа из-за одного tool44.
 
-Нативного fallback для V2 нет: он снова зависел бы от меняющейся подписи и
-создавал второй срок ожидания/второе потребление разрешения. Exit0 — decode,
-44 — missing,51/128/36/29 — locked, прочее — unreachable, timeout — timeout.
-Нет тихого успеха/обнуления токена. Общий deadline15с фон/120с explicit retry,
-fence и TERM→KILL сохраняются. Legacy оставлен на прежнем native quiet/interactive
-пути; ACL существующих пунктов не расширяется. Прямая system-tool команда сама
-не имеет native quiet-флага: если Связка заблокирована или конкретный V2 ACL не
-доверяет tool, системное разрешение/отказ всё ещё возможны в пределах deadline.
+S2: background перед tool выполняет `preflight quiet`. Helper запрещает UI
+через SecKeychainSetUserInteractionAllowed(false), получает attributes+ref
+без secret data, затем SecKeychainItemCopyKeychain и SecKeychainGetStatus.
+Только найденный пункт в unlocked-связке допускает tool; locked/unavailable
+preflight не запускает его. Операции attributes/preflight строго quiet-only
+и не возвращают ни атрибутов, ни секрета в stdout. Проверка статуса — снимок:
+Apple отмечает, что lock-состояние может меняться; живой sleep/lock smoke нужен.
 
-Коды сверены с [Apple SecurityTool](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/keychain_find.c) и [SecBase.h](https://github.com/apple-oss-distributions/Security/blob/main/base/SecBase.h): CLI возвращает OSStatus, родитель получает младшие8бит.
+S3: owner.retryKeychainAccess → keychain_manual сразу передаёт action в
+interactive readStore/legacy, без начального15с quiet-read. Если есть recovery
+transition, сначала читается active source с этим разрешением; результат
+переиспользуется только внутри текущего owner lock. Candidate/GC не забирают
+это разрешение. Login stage/delete сохраняют прежнюю quiet-first политику.
+Сам процесс использует githubKeychainProcessTimeout(action:):120с против15с
+в фоне. Quiet metadata probes action не потребляют; wrapper делит общий
+монотонный deadline между preflight/tool/confirmation, не добавляет новый срок.
 
-Кнопка пропадала независимо от ACL: `projectAuth(.ready)` очищает authReason,
-но `lastError` живёт до успешного sync-cycle. Settings рисовал lastError, а кнопка
-смотрела только authReason. Теперь `SyncUIState.keychainIssue` — общий источник
-для текста, syncWarning, canRetryKeychain и высоты. Точные старые сообщения RU/EN
-из defaults распознаются, а не ищутся по произвольной подстроке; текущий язык
-применяется заново. Один scheduler-flag и HTTP500 кнопки не создают.
+S4: stdout читается chunks≤8192 с буфером≤128KiB. Первый лишний байт вызывает
+TERM→KILL и .failure(65)→.corrupt; partial output не возвращается. Труба private,
+stdin/stderr null, секретов нет в argv/diagnostics/файлах. Native secret-read
+fallback для V2 не добавлен, только metadata confirmation/preflight.
 
-- C5-13, до AppKit: injected runner, V2/legacy route, exit codes/timeout,
-  единственный процесс, exact argv, private output, отсутствие секретов в diagnostics,
-  invalid ref и повреждённый envelope. Никаких реальных процессов/Связки.
-- C5-14: pure восстановление старого сообщения после очистки reason; после AppKit
-  32 bitmap Settings draw (RU/EN × Simple/Advanced ×3 issue+HTTP500 × current/restored).
-  Проверяются текст/AX error hit, retry hit, границы/перекрытия; PNG не добавляются.
+S5: lastError мог жить дольше authReason. keychainIssue связывает текст/action/
+height, но в awaitingCode возвращает nil: там ошибка не рисуется и retry handler
+не работает. startLogin очищает старые Keychain error/time/reason/scheduling
+flag из UI и известную старую ошибку из defaults. Прочие сетевые ошибки не
+превращаются в Keychain action.
 
-Новые проверки RED до сборки и запуска на Mac. Статические проверки Linux —
-баланс Swift, wiring, build syntax и diff whitespace. Python не запускался.
-Следующий живой гейт: без logout/login после пересборки свежие upload/read;
-при отказе Связки — видимая кнопка, ручной повтор с120с; фактическая ACL-проверка
-остаётся у владельца. Стабильная подпись сборок остаётся C6; D4 read continuity — C5.
+## Проверки и прежние ожидания
+
+- C5-13 обновлён: raw44 неоднозначен; отдельный injected probe обязателен.
+- C5-15 (до AppKit):44 с native success/missing/denied/unreachable, blocked
+  background без tool, exact-ref quiet-only metadata commands.
+- C5-16 (до AppKit): retry через owner до фактической функции срока процесса,
+  пароль16с проходит при120с; preliminary quiet-read отсутствует, background
+  остаётся15с; ambiguous44 не переводит owner в actionRequired(missing).
+- C5-17 (до AppKit):128KiB−1/= /+1, большой stream, ограничение запроса/chunk,
+  немедленный stop, overflow доходит до auth как corrupt.
+- C5-18 и C5-04:awaitingCode без retry/его высоты, чистка начала login.
+- C5-14 после AppKit:64 actual Settings draws RU/EN × Simple/Advanced ×
+  three Keychain issues+HTTP500 × current/restored × on/awaitingCode.
+  Проверяются error tooltip/retry hit/bounds/nonoverlap; новых PNG нет.
+- Старый GHAuthFixture теперь отвечает на direct interactive read тем же
+  fault/items oracle, если явного interactive override нет; legacy quiet count
+  3→2. Проверки запрета утечки permit, transitions/GC/login не ослаблялись.
+
+Баланс Swift, статические wiring/build/diff checks выполняются на Linux;
+Swift/AppKit и живая Связка требуют Mac. Python/агенты/своё ревью не запускались.
+PNG209/523 и manifest expectations прежние. Живой гейт — пересборка без
+logout/login, background lock/unlock, ручной пароль дольше15с, видимость retry.
+
+Источники API: [Apple SecurityTool](https://github.com/apple-oss-distributions/Security/blob/main/SecurityTool/macOS/keychain_find.c),
+[SecKeychainGetStatus](https://developer.apple.com/documentation/security/seckeychaingetstatus(_:_:)),
+[SecKeychainItemCopyKeychain](https://developer.apple.com/documentation/security/seckeychainitemcopykeychain(_:_:)).

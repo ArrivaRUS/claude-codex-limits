@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · принятые S1–S5 security fix9 поверх `48ac3ad`
+
+- **Основание:** владелец принял независимое Astra-review `16f7aab..48ac3ad -- Sources`:3 major/2 minor. Работа одним агентом, без своего ревью/Python/Git-мутаций. Fix8 не меняется.
+- **S1/S2:** tool44 теперь ambiguous, не missing. Native helper `attributes quiet` проверяет только атрибуты exact UUID, без secret data/UI; только его errSecItemNotFound подтверждает отсутствие. Background сначала `preflight quiet`: те же атрибуты+ref, SecKeychainGetStatus именно связки пункта, unlocked; иначе tool не запускается. После неоднозначного44 — повторный attributes-only запрос. Все фазы делят общий15/120с budget.
+- **S3/S4:** owner keychain_manual сразу передаёт action интерактивному readStore/legacy; recovery при активном source сначала читает его и переиспользует результат внутри locked pass. Login write/delete policy прежняя. Stdout накапливается bounded chunks≤8192, максимум128KiB; overflow TERM→KILL, очищенный buffer и corrupt. Legacy fixture quiet-read count3→2 обновлён под новый manual contract.
+- **S5/тесты:** awaitingCode не показывает действие/его высоту; startLogin очищает stale Keychain UI/defaults. C5-15…18 до AppKit, C5-13/04 обновлены точечно, C5-14 actual draw32→64 с awaitingCode, PNG209/523 прежние. Новые ожидания RED до Mac; static balance/wiring/build/diff PASS. Audit docs/c5-github-keychain-audit.md; session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · D4: system-tool read и пропавшая кнопка
 
 - **Живой дефект владельца:** установлен16f7aab/3.3.1, GitHub зелёный, upload/read старые, lastError просит разрешение Связки, кнопки нет. D4 read continuity перенесён изC6 вC5. Fix8 завершён предыдущим проходом, его код не менялся; его незакоммиченный diff сохранён.
