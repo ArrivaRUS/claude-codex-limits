@@ -345,6 +345,23 @@ struct RemoteCaptionEdit { var text: String; var count: Int; var value: String?;
 func remoteCaptionInput(_ raw: String) -> String {
     remoteCaptionValidatedInput(raw).value
 }
+struct RemoteCaptionEditorSeed {
+    var text: String
+    var count: Int
+    var selection: NSRange
+}
+/// Initial display text only: machine-derived defaults can contain separators.
+/// Typed/pasted input still rejects the whole string through the normal validator.
+func remoteCaptionEditorSeed(_ caption: String) -> RemoteCaptionEditorSeed {
+    let safe = caption.unicodeScalars.filter { scalar in
+        !String(scalar).precomposedStringWithCompatibilityMapping.unicodeScalars.contains {
+            $0.value == 0x40 || $0.value == 0x2F || $0.value == 0x5C
+        }
+    }
+    let text = remoteCaptionInput(String(String.UnicodeScalarView(safe)))
+    return RemoteCaptionEditorSeed(text: text, count: text.unicodeScalars.count,
+        selection: NSRange(location: 0, length: text.utf16.count))
+}
 func remoteCaptionEdit(original: String?, draft: String, command: RemoteCaptionCommand) -> RemoteCaptionEdit {
     if command == .escape {
         let text = original ?? ""

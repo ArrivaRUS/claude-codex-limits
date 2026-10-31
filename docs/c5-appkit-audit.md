@@ -1,5 +1,34 @@
 # C5: статическая сверка AppKit-проверок после `6597268`
 
+## `16f7aab`: CLI-активация и fixture настоящего NSView
+
+Владелец подтвердил живой ввод в installed app. Полный CLI прогон завершился
+без timeout:7920 OK/20 FAIL, все C5-12. Эти сведения не означают GREEN нового патча.
+
+| FAIL в C5-12 | Причина по коду/данным владельца → изменение |
+|---|---|
+| actual Settings pencil exists | NSView.draw вызывал captureAccountFrame поверх scoped bitmap frame; fixture не задавал views/sync. Теперь preview views/sync заданы на весь native набор и восстановлены defer; Accounts/pencil и фактическая геометрия проверяются. |
+| app activated by edit (все фазы) | Среда не даёт cooperative activation CLI-процессу. Перед каждой фазой отдельная попытка через тот же production helper; при её отказе только activation-dependent assertions SKIP. |
+| editing panel is key and native editor is first responder | Общее ожидание смешивало key со firstResponder. Key проверяется при успешном probe; editable/selectable/key eligibility обязательны, firstResponder/selection проверяются при предоставленном AppKit field editor. |
+| key event starts in active app (X, invalid input, Return/Escape и другие фазы) | То же CLI-ограничение. Только active assertion условен; реальные keyDown/up обязательны, через NSApp.sendEvent при доступной activation и panel.sendEvent в inactive CLI. |
+| counter click preserves editor and draft | При пропавшем pencil updateCaptionEditorFrame оставлял поля в нулевой геометрии; центр клика был (0,0), а не счётчик, возможен Reset. Исправлен источник сцены; добавлены visible/nonempty/non-overlap checks. |
+| validation error is visible | Каскад предыдущего ошибочно адресованного клика: @ мог прийти уже после уничтожения editor. Правильная геометрия восстановлена, ввод @ и visible error по-прежнему обязательны. |
+| pencil remains available | Та же потеря fixture во время redraw. Правильный capture seam сохраняет pencil; проверка и реальный клик оставлены. |
+| focus returned to previous app (Escape) | Нельзя требовать возврата фокуса, который CLI не получил. Assert только при успешном independent activation probe; предыдущая app сохраняется вокруг probe. |
+| Esc does not save the draft | Каскад: клик в (0,0) мог уже запустить Reset и записать tombstone до Esc; сам Escape ничего не записывает. Исправлена геометрия; обе проверки отсутствия записи после custom/default Escape обязательны. |
+
+Точное попадание старого (0,0) в Reset без повторного Mac-run не измерено;
+нулевой frame и потеря pencil установлены статически. Пустая геометрия теперь
+даёт собственный FAIL, вместо объяснения через недоступную activation.
+
+Новое UX9.3 покрыто C5-02 до AppKit:6 seed vectors (custom/default/пусто,
+NFC+controls+astral, ASCII/NFKC-разделители,33 скаляра), text/count/UTF-16 selection.
+Native start проверяет current L/counter/full selection; Right→X даёт TeamX,
+печать поверх default даёт X, Escape сохраняет пустой persisted map. Геометрия
+и число PNG не меняются. Новые key dispatch sites: Right, X, @, Esc, default X,
+default Esc, Return; все down/up. Шесть mouse clicks остаются paired. Старые
+C3/C5 pure Empty/Reset/Escape tests не описывают начальное поле и не меняются.
+
 ## Зависание `1109396`: полный перечень синтетических событий
 
 WindowServer sample владельца подтвердил ожидание mouseUp внутри NSControlTrackMouse:

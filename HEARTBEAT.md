@@ -2,6 +2,20 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · D4: system-tool read и пропавшая кнопка
+
+- **Живой дефект владельца:** установлен16f7aab/3.3.1, GitHub зелёный, upload/read старые, lastError просит разрешение Связки, кнопки нет. D4 read continuity перенесён изC6 вC5. Fix8 завершён предыдущим проходом, его код не менялся; его незакоммиченный diff сохранён.
+- **ACL:** V2 writer уже создаёт пункты с trusted `/usr/bin/security` + helper через SecAccessCreate/kSecAttrAccess, add-only. Legacy writer явного ACL не задаёт; чужие/старые ACL не расширяются. Live ACL не считывался, вывод подтверждён конструктором в коде, а не аудитом пункта владельца.
+- **Код:** V2 read — один `/usr/bin/security find-generic-password -s fixed-service -a UUID -w`, private pipe,15/120с, прежний fence/kill. Без второго native read; legacy остаётся native quiet/interactive. 44 missing;51/128/36/29 locked; timeout отдельно. Кнопка/текст/высота из keychainIssue: authReason может очиститься раньше lastError; точные persisted RU/EN ошибки восстанавливают действие, HTTP500/stale scheduler flag — нет.
+- **Проверки:** C5-13 injected process models до AppKit, C5-14 state models +32 actual Settings draws без новых PNG. RED до Mac; баланс/wiring/build/diff статически PASS. Python, агенты, своё ревью, Git-мутации, VPS и живая Связка не тронуты. Подробности docs/c5-github-keychain-audit.md; session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
+## 🔁 Точка возобновления · 2026-10-31 · CLI-условия C5-12 и начальная L поверх `16f7aab`
+
+- **Mac владельца:** полный прогон завершился без watchdog:7920 OK/20 FAIL, все C5-12. Живой ввод в установленном `16f7aab` работает. Отказ CLI activation — ограничение среды; отдельная ошибка обвязки найдена по коду: NSView.draw заново захватывал frame без fixture views/sync, терялись Accounts/pencil и координаты editor controls.
+- **Исправления:** native fixture задаёт и восстанавливает REMOTE_ACCOUNT_VIEWS_PREVIEW/SYNC_PREVIEW; actual redraw и ненулевая видимая геометрия проверяются. Перед каждой фазой контрольная requestApplicationActivation тем же shared helper, что в production; отказ даёт ровно SKIP activation-dependent checks, не подавляет поле/firstResponder при доступном field editor/события/валидацию/draft/counter/Esc/reset/clicks. В inactive CLI клавиши идут через panel.sendEvent; active — NSApp.sendEvent. Клики по-прежнему paired через реальный local monitor.
+- **Новое решение UX9.3:** текущая пользовательская/default L сразу в поле, полностью выделена; counter по скалярам. Начальный seed удаляет запрещённые NFKC-разделители, затем C5 NFC/control cleaning/32; правило отказа typed/pasted ввода не меняется. C5-02 добавляет6 golden seed vectors до AppKit; C5-12 проверяет initial value/counter/selection, Right→TeamX и замену default L печатью, Esc без записи.
+- **Проверки:** баланс3 Swift, static wiring/границы SKIP, bash -n build.sh, git diff --check PASS; Swift/AppKit здесь не запускаются, новые ожидания RED до Mac. Старые pure reset/empty/Enter/Esc C3/C5 остаются верны; PNG count209/523 прежний. Python, агенты, своё ревью и Git-мутации не выполнялись. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · зависание AppKit C5-12 на `1109396`
 
 - **Доказательство владельца:** модели под удалёнными руками GREEN; WindowServer-прогон завис в NSControlTrackMouse после синтетического mouseDown без mouseUp, снят sample и процесс убит. Последний вывод потерян из-за блочной буферизации.

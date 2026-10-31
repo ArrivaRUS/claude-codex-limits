@@ -1516,13 +1516,24 @@ private func syncCount(_ value: Any?) -> Int? {
     return n
 }
 
-/// GitHub Keychain I/O runs only in short-lived native helpers. Quiet is the
-/// default for every operation, including legacy compatibility; secrets use pipes.
+/// Keychain secrets use private pipes. V2 reads use the already-trusted system
+/// tool; legacy reads and all writes/deletes retain the native helper policy.
 enum SyncKeychainRead {
     case token(String), missing, timedOut, failure(Int32)
 }
 enum SyncKeychainStatus: Equatable {
     case success, missing, timedOut, failure(Int32)
+}
+func githubSecurityReadStatus(exitCode: Int32?, timedOut: Bool = false) -> SyncKeychainStatus {
+    if timedOut { return .timedOut }
+    switch exitCode {
+    case 0: return .success
+    case 44: return .missing
+    // OSStatus modulo 256: interaction-not-allowed/required, auth failed,
+    // user cancelled. They need permission, never an automatic sign-out.
+    case 36, 29, 51, 128: return .failure(36)
+    default: return .failure(exitCode ?? -1)
+    }
 }
 protocol SyncKeychain {
     func read() -> SyncKeychainRead
@@ -1530,8 +1541,8 @@ protocol SyncKeychain {
     func delete() -> SyncKeychainStatus
 }
 
-/// One native helper call with a hard 15 s deadline. Pipes are pumped on helper
-/// threads. SIGTERM is followed by SIGKILL after 2 s; the process fence is held
+/// One child call with a shared 15 s background / 120 s explicit-action deadline.
+/// Pipes are pumped on helper threads. SIGTERM is followed by SIGKILL after 2 s; the process fence is held
 /// until actual termination, including after a timeout in an explicit action.
 private final class SyncSecurityOutput {
     private let lock = NSLock()
@@ -1539,13 +1550,13 @@ private final class SyncSecurityOutput {
     func store(_ value: Data) { lock.lock(); data = value; lock.unlock() }
     func string() -> String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
-private func githubKeychainProcess(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil, action: GitHubAuthUserAction? = nil) -> (status: SyncKeychainStatus, out: String) {
+private func githubKeychainProcess(_ args: [String], input: String? = nil, lifetime: GitHubAuthProcessFence? = nil, action: GitHubAuthUserAction? = nil, systemTool: Bool = false) -> (status: SyncKeychainStatus, out: String) {
     guard lifetime?.begin() != false else { return (.timedOut, "") }
     let p = Process(), output = Pipe(), stdin = Pipe()
     let ended = DispatchSemaphore(value: 0), drained = DispatchSemaphore(value: 0)
     let result = SyncSecurityOutput()
     let timeout = githubKeychainTimeoutSeconds(interactive: action != nil)
-    guard let executable = Bundle.main.executableURL else { lifetime?.ended(); return (.failure(-1), "") }
+    guard let executable = systemTool ? URL(fileURLWithPath: "/usr/bin/security") : Bundle.main.executableURL else { lifetime?.ended(); return (.failure(-1), "") }
     p.executableURL = executable; p.arguments = args
     p.standardOutput = output; p.standardError = FileHandle.nullDevice
     if input == nil { p.standardInput = FileHandle.nullDevice } else { p.standardInput = stdin }
@@ -1580,7 +1591,9 @@ private func githubKeychainProcess(_ args: [String], input: String? = nil, lifet
     }
     guard p.terminationReason == .exit else { return (.failure(-1), "") }
     let code = p.terminationStatus
-    return (code == 0 ? .success : code == 44 ? .missing : .failure(code), result.string())
+    let status = systemTool ? githubSecurityReadStatus(exitCode: code)
+        : (code == 0 ? .success : code == 44 ? .missing : .failure(code))
+    return (status, status == .success ? result.string() : "")
 }
 struct SecuritySyncKeychain: SyncKeychain {
     var lifetime: GitHubAuthProcessFence? = nil
@@ -1717,31 +1730,46 @@ private let GITHUB_AUTH_SERVICE = "Claude Codex Limits GitHub Credential V2"
 private func githubAuthRefSafe(_ ref: GitHubAuthRef) -> Bool {
     ref.backend == "keychain" && UUID(uuidString: ref.generation)?.uuidString.lowercased() == ref.generation
 }
-private func githubAuthRead(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
-    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain") {
-        switch SecuritySyncKeychain(lifetime: githubAuthProcessFence, action: action).read() {
-        case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token, refreshToken: nil, obtainedAt: 0))
-        case .missing: return .missing
-        case .timedOut: return .timeout
-        case .failure(let code): return code == 36 ? .locked : .unreachable
-        }
+struct GitHubAuthReadCommand {
+    var arguments: [String]
+    var systemTool: Bool
+    var timeout: Double
+    var diagnostic: String { systemTool ? "GitHub Keychain read: system tool" : "GitHub Keychain read: native legacy" }
+}
+func githubAuthReadCommand(_ ref: GitHubAuthRef, interactive: Bool) -> GitHubAuthReadCommand? {
+    let timeout = githubKeychainTimeoutSeconds(interactive: interactive)
+    if ref == GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"),
+       let args = githubAuthKeychainArguments(operation: "read", ref: ref, interactive: interactive) {
+        return GitHubAuthReadCommand(arguments: args, systemTool: false, timeout: timeout)
     }
-    guard githubAuthRefSafe(ref) else { return .corrupt }
-    guard let args = githubAuthKeychainArguments(operation: "read", ref: ref, interactive: action != nil) else { return .corrupt }
-    let result = githubKeychainProcess(args, lifetime: githubAuthProcessFence, action: action)
+    guard githubAuthRefSafe(ref) else { return nil }
+    return GitHubAuthReadCommand(arguments: ["find-generic-password", "-s", GITHUB_AUTH_SERVICE, "-a", ref.generation, "-w"],
+        systemTool: true, timeout: timeout)
+}
+/// Pure orchestration: model tests supply the runner and collect nonsecret diagnostics.
+func githubAuthReadWithCommand(_ ref: GitHubAuthRef, interactive: Bool,
+    run: (GitHubAuthReadCommand) -> (status: SyncKeychainStatus, out: String), log: (String) -> Void = { _ in }) -> GitHubAuthRead {
+    guard let command = githubAuthReadCommand(ref, interactive: interactive) else { return .corrupt }
+    log(command.diagnostic)
+    let result = run(command)
     switch result.status {
     case .missing: return .missing
     case .timedOut: return .timeout
     case .failure(let code): return code == 36 ? .locked : .unreachable
     case .success:
-        var encoded = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
-        guard let data = Data(base64Encoded: encoded),
-              let c = try? JSONDecoder().decode(GitHubCredentialV2.self, from: data), c.schema == 2,
-              c.generation == ref.generation else { return .corrupt }
+        let encoded = result.out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !command.systemTool {
+            guard !encoded.isEmpty else { return .unreachable }
+            return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: encoded, refreshToken: nil, obtainedAt: 0))
+        }
+        guard let c = githubAuthHelperEnvelope(Data(encoded.utf8), generation: ref.generation) else { return .corrupt }
         return .ready(c)
     }
+}
+private func githubAuthRead(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
+    githubAuthReadWithCommand(ref, interactive: action != nil, run: { command in
+        githubKeychainProcess(command.arguments, lifetime: githubAuthProcessFence, action: action, systemTool: command.systemTool)
+    })
 }
 private func githubAuthStatus(_ status: SyncKeychainStatus) -> GitHubAuthStoreStatus {
     switch status {
@@ -2202,6 +2230,21 @@ func githubAuthMessage(_ reason: String, language: String) -> String {
     case "identity_unavailable", "candidate_unauthorized", "login_pending": return english ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."
     default: return english ? "Sign-in is temporarily unavailable; retrying automatically." : "Вход временно недоступен; повторим автоматически."
     }
+}
+
+/// Old defaults store localized error text, not authReason. Match only our
+/// exact messages (both languages), so a successful token read cannot strand
+/// the still-visible persisted Keychain error without its recovery action.
+func githubKeychainIssue(forMessage message: String?) -> String? {
+    guard let message = message else { return nil }
+    for issue in ["locked", "unreachable", "timeout"] {
+        if ["ru", "en"].contains(where: { githubAuthMessage(issue, language: $0) == message }) { return issue }
+    }
+    if ["Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s"].contains(message) { return "timeout" }
+    for prefix in ["Ошибка Связки ключей: ", "Keychain error: "] where message.hasPrefix(prefix) {
+        if let code = Int32(message.dropFirst(prefix.count)) { return code == 36 ? "locked" : "unreachable" }
+    }
+    return nil
 }
 
 // Pure deadline admission; all runtime state is owned by GitHubSync.q.
@@ -4079,7 +4122,14 @@ struct SyncUIState {
         return language == "en" ? "Computer and GitHub clocks differ; check time synchronization."
             : "Системные часы и GitHub расходятся; проверьте синхронизацию времени."
     }
-    var canRetryKeychain: Bool { syncShowsKeychainRetry(authReason) }
+    var keychainIssue: String? {
+        if syncShowsKeychainRetry(authReason) { return authReason }
+        return githubKeychainIssue(forMessage: lastError) ?? githubKeychainIssue(forMessage: error)
+    }
+    func presentedError(_ raw: String) -> String {
+        keychainIssue.map { githubAuthMessage($0, language: appLang()) } ?? raw
+    }
+    var canRetryKeychain: Bool { keychainIssue != nil }
     var canSignOut: Bool {
         phase == .on || ((phase == .off || phase == .revoked) && keychainItemLeft)
     }
@@ -4091,6 +4141,7 @@ let SYNC_STALE_AFTER: TimeInterval = 30 * 60
 /// the totals silently lose the other computers otherwise.
 func syncWarning(_ s: SyncUIState = syncUIState(), now: Date = Date()) -> String? {
     if let clock = s.clockSkewWarning(language: appLang()) { return clock }
+    if let issue = s.keychainIssue { return githubAuthMessage(issue, language: appLang()) }
     if let reason = s.authReason { return githubAuthMessage(reason, language: appLang()) }
     switch s.phase {
     case .revoked:
@@ -4142,7 +4193,7 @@ func syncSignOutHint(_ lang: String = appLang()) -> String {
 }
 func remoteSyncErrorPresentation(_ s: SyncUIState, width: CGFloat = PANEL_W - 60) -> RemoteSettingsErrorPresentation {
     let full = s.lastError.map { error in
-        tr("Ошибка ", "Error ") + (s.lastErrorAt.map { fmtMoment($0) + ": " } ?? "") + error
+        tr("Ошибка ", "Error ") + (s.lastErrorAt.map { fmtMoment($0) + ": " } ?? "") + s.presentedError(error)
     } ?? ""
     return remoteSettingsErrorPresentation(full, availableWidth: Double(width)) { value in
         Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10.5, .regular), cg(gray(1, 0.5))))))
@@ -4164,7 +4215,7 @@ func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
     }
 }
 private func disconnectedSyncNote(_ s: SyncUIState) -> String {
-    if s.phase == .off, let error = s.error { return error }
+    if s.phase == .off, let error = s.error { return s.presentedError(error) }
     return s.phase == .revoked
         ? tr("Расход других компьютеров не обновляется. Последние полученные данные остаются в истории.",
              "Other computers' usage isn't updating. The last data received stays in the history.")
@@ -7300,7 +7351,8 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
         editingCaptionKey = key
         editingCaptionOriginal = view.caption == remoteDefaultCaption(view) ? nil : view.caption
-        captionDraft = remoteCaptionInput(editingCaptionOriginal ?? "")
+        let seed = remoteCaptionEditorSeed(view.caption.isEmpty ? remoteDefaultCaption(view) : view.caption)
+        captionDraft = seed.text
         let editor = NSTextField(frame: .zero)
         editor.font = NSFont.systemFont(ofSize: 12.5)
         editor.stringValue = captionDraft; editor.delegate = self
@@ -7310,7 +7362,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         editor.focusRingType = .default
         editor.toolTip = tr("Подпись видна на всех ваших компьютерах", "The label is shown on all your computers")
         editor.setAccessibilityLabel(tr("Подпись аккаунта", "Account label"))
-        let counter = NSTextField(labelWithString: "\(captionDraft.unicodeScalars.count)/32")
+        let counter = NSTextField(labelWithString: "\(seed.count)/32")
         counter.font = NSFont.systemFont(ofSize: 10); counter.textColor = .secondaryLabelColor
         let reset = NSButton(title: tr("Сбросить", "Reset"), target: self, action: #selector(resetCaption(_:)))
         reset.isBordered = false; reset.font = NSFont.systemFont(ofSize: 10)
@@ -7324,6 +7376,8 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         captionError = error
         updateCaptionEditorFrame()
         panel.beginKeyboardInput(editor)
+        editor.selectText(nil)
+        editor.currentEditor()?.selectedRange = seed.selection
     }
     fileprivate func dismissCaptionEditorIfOutside(_ point: CGPoint) {
         guard let key = editingCaptionKey else { return }
@@ -7571,6 +7625,10 @@ final class LimitsPanelWindow: NSPanel {
     override var canBecomeKey: Bool { keyboardInputEnabled }
     override var canBecomeMain: Bool { false }
 
+    static func requestApplicationActivation() {
+        if #available(macOS 14.0, *) { NSApp.activate() }
+        else { NSApp.activate(ignoringOtherApps: true) }
+    }
     func beginKeyboardInput(_ editor: NSView) {
         if !keyboardInputEnabled {
             let previous = NSWorkspace.shared.frontmostApplication
@@ -7582,8 +7640,7 @@ final class LimitsPanelWindow: NSPanel {
         }
         focusGeneration += 1
         keyboardInputEnabled = true
-        if #available(macOS 14.0, *) { NSApp.activate() }
-        else { NSApp.activate(ignoringOtherApps: true) }
+        Self.requestApplicationActivation()
         makeKey()
         makeFirstResponder(editor)
     }
@@ -7752,6 +7809,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
     let defaults = UserDefaults.standard
     let savedArguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
     let savedCaptions = defaults.object(forKey: "localAccountCaptions")
+    let savedViews = REMOTE_ACCOUNT_VIEWS_PREVIEW, savedSync = SYNC_PREVIEW
     let policy = NSApp.activationPolicy()
     var arguments = savedArguments
     arguments["lang"] = "en"; arguments["advanced"] = false
@@ -7781,6 +7839,7 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         _ = NSApp.setActivationPolicy(policy)
         defaults.set(savedCaptions, forKey: "localAccountCaptions")
         defaults.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+        REMOTE_ACCOUNT_VIEWS_PREVIEW = savedViews; SYNC_PREVIEW = savedSync
     }
     let now = Date(), label = "c512000000000000"
     let account = AccountView(product: "codex", label: label, historyKey: label, caption: "Team",
@@ -7788,6 +7847,11 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         usageDays: [:], machines: ["vps"], state: .fresh)
     let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
         allViews: [account], visibleViews: [account], displayedViews: [account])
+    // NSView.draw captures a NEW frame; the bitmap-only scoped frame alone is
+    // insufficient. Keep the same account/sync in the real view's capture seam.
+    REMOTE_ACCOUNT_VIEWS_PREVIEW = [account]
+    SYNC_PREVIEW = SyncUIState(phase: .on)
+    var activationAvailable = false
     func waitFor(_ ready: () -> Bool) {
         let end = Date().addingTimeInterval(1)
         while !ready() && Date() < end {
@@ -7797,7 +7861,9 @@ func runCaptionEditorAppKitSelfTests() -> Int {
     func sendKey(_ characters: String, code: UInt16, ignoring: String? = nil,
                  modifiers: NSEvent.ModifierFlags = [], phase: String) {
         watchdog.begin("C5-12 key: " + phase)
-        check(NSApp.isActive, "C5-12 key event starts in active app (\(phase), actual=\(NSApp.isActive))")
+        if activationAvailable {
+            check(NSApp.isActive, "C5-12 key event starts in active app (\(phase), actual=\(NSApp.isActive))")
+        }
         for type in [NSEvent.EventType.keyDown, .keyUp] {
             guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: controller.panel.windowNumber,
@@ -7805,7 +7871,10 @@ func runCaptionEditorAppKitSelfTests() -> Int {
                 isARepeat: false, keyCode: code) else {
                 check(false, "C5-12 native key event allocation (\(phase))"); continue
             }
-            NSApp.sendEvent(event)
+            // In an inactive CLI process NSApplication has no keyWindow to
+            // route to. Still test real window/responder dispatch every time.
+            if activationAvailable { NSApp.sendEvent(event) }
+            else { controller.panel.sendEvent(event) }
         }
     }
     var clickNumber = 0
@@ -7860,51 +7929,90 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         var previousApplication: NSRunningApplication?
         func waitForExit(_ phase: String) {
             watchdog.begin("C5-12 exit: " + phase)
-            waitFor { !panel.isKeyWindow && !NSApp.isActive }
-            check(!NSApp.isActive, "C5-12 app deactivated after edit (\(phase), actual=\(NSApp.isActive))")
-            if let previous = previousApplication, !previous.isTerminated {
+            waitFor { !panel.isKeyWindow && (!activationAvailable || !NSApp.isActive) }
+            if activationAvailable {
+                check(!NSApp.isActive, "C5-12 app deactivated after edit (\(phase), actual=\(NSApp.isActive))")
+            }
+            if activationAvailable, let previous = previousApplication, !previous.isTerminated {
                 waitFor { NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier }
                 check(NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier,
                       "C5-12 focus returned to previous app (\(phase))")
             }
             print("C5-12 key-ordering fallbacks after \(phase): \(panel.keyboardFocusOrderingFallbacks)")
         }
-        func start(_ phase: String) -> (NSTextField, NSTextView)? {
+        func start(_ phase: String, currentCaption: String = "Team") -> NSTextField? {
             watchdog.begin("C5-12 begin edit: " + phase)
             view.finishCaptionEdit(.escape)
             waitFor { !panel.isKeyWindow }
             NSApp.deactivate()
             waitFor { !NSApp.isActive }
-            check(!NSApp.isActive, "C5-12 inactive activation baseline (\(phase))")
+            let beforeProbe = NSWorkspace.shared.frontmostApplication
+            // Probe independently of beginCaptionEdit: only environment-limited
+            // activation assertions may be skipped, never editor behavior.
+            LimitsPanelWindow.requestApplicationActivation()
+            waitFor { NSApp.isActive }
+            activationAvailable = NSApp.isActive
+            if !activationAvailable {
+                print("SKIP C5-12 activation-dependent checks: environment does not grant activation to a CLI-launched process")
+            }
+            NSApp.deactivate()
+            waitFor { !NSApp.isActive && NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+            if activationAvailable { check(!NSApp.isActive, "C5-12 inactive activation baseline (\(phase))") }
             let front = NSWorkspace.shared.frontmostApplication
-            previousApplication = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+            let previous = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? beforeProbe : front
+            previousApplication = previous?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : previous
+            // Match the view's fresh capture, including a caption saved/reset by
+            // a previous phase; a frozen bitmap frame would keep stale Team.
+            REMOTE_ACCOUNT_FRAME = captureAccountFrame(view.claude, view.codex, now: Date())
+            view.needsDisplay = true; view.displayIfNeeded()
             view.beginCaptionEdit(key)
-            waitFor { NSApp.isActive && panel.isKeyWindow && view.captionEditor?.currentEditor() != nil }
-            check(NSApp.isActive, "C5-12 app activated by edit (\(phase), actual=\(NSApp.isActive))")
-            guard let editor = view.captionEditor, let field = editor.currentEditor() as? NSTextView else {
-                check(false, "C5-12 native field editor acquired (\(phase), isKey=\(panel.isKeyWindow), editorExists=\(view.captionEditor != nil))")
-                view.finishCaptionEdit(.escape)
+            waitFor { view.captionEditor?.currentEditor() != nil && (!activationAvailable || (NSApp.isActive && panel.isKeyWindow)) }
+            if activationAvailable {
+                check(NSApp.isActive, "C5-12 app activated by edit (\(phase), actual=\(NSApp.isActive))")
+                check(panel.isKeyWindow, "C5-12 editing panel is key (\(phase), actualKey=\(panel.isKeyWindow))")
+            }
+            guard let editor = view.captionEditor else {
+                check(false, "C5-12 native caption field created (\(phase))")
                 return nil
             }
-            check(editor.isEditable && editor.isSelectable && panel.canBecomeKey && panel.isKeyWindow
-                  && (panel.firstResponder === editor || panel.firstResponder === field),
-                  "C5-12 editing panel is key and native editor is first responder (\(phase), actualKey=\(panel.isKeyWindow))")
-            return (editor, field)
+            check(editor.isEditable && editor.isSelectable && panel.canBecomeKey,
+                  "C5-12 editable/selectable field created and key eligibility enabled (\(phase))")
+            let seed = remoteCaptionEditorSeed(currentCaption)
+            check(editor.stringValue == seed.text && view.captionDraft == seed.text
+                  && view.captionCounter?.stringValue == "\(seed.count)/32",
+                  "C5-12 current L and counter populated immediately (\(phase))")
+            if let field = editor.currentEditor() {
+                check(panel.firstResponder === editor || panel.firstResponder === field,
+                      "C5-12 native editor is first responder (\(phase))")
+                check(field.selectedRange == seed.selection, "C5-12 full current L selected (\(phase))")
+            } else if activationAvailable {
+                check(false, "C5-12 native field editor acquired (\(phase))")
+            } else {
+                print("SKIP C5-12 field-editor selection/firstResponder: inactive AppKit did not provide a field editor (\(phase))")
+            }
+            check(!editor.frame.isEmpty && view.bounds.intersects(editor.frame)
+                  && view.hits.contains { $0.id == "edit:" + key },
+                  "C5-12 real Settings draw positions editor at pencil (\(phase), frame=\(editor.frame))")
+            return editor
         }
-        if let (editor, field) = start("input/Esc") {
-            field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
+        if let editor = start("input/Esc") {
+            sendKey("\u{F703}", code: 124, modifiers: [.function, .numericPad], phase: "Right arrow edits current L")
             sendKey("X", code: 7, ignoring: "x", modifiers: .shift, phase: "input X")
             waitFor { view.captionDraft == "TeamX" }
             check(editor.stringValue == "TeamX" && view.captionDraft == "TeamX"
                   && view.captionCounter?.stringValue == "5/32",
                   "C5-12 dispatched X key changes actual draft and counter")
             if let counter = view.captionCounter {
+                check(!counter.frame.isEmpty && view.bounds.contains(counter.frame)
+                      && view.captionReset.map { !counter.frame.intersects($0.frame) } == true,
+                      "C5-12 counter has real non-overlapping hit geometry (frame=\(counter.frame))")
                 sendClick(view.convert(CGPoint(x: counter.frame.midX, y: counter.frame.midY), to: nil), in: panel, phase: "counter")
                 check(view.captionEditor === editor && view.captionDraft == "TeamX", "C5-12 counter click preserves editor and draft")
             } else { check(false, "C5-12 counter exists") }
             sendKey("@", code: 19, ignoring: "2", modifiers: .shift, phase: "invalid input/error")
             waitFor { view.captionError?.isHidden == false }
             if let error = view.captionError, !error.isHidden {
+                check(!error.frame.isEmpty && view.bounds.contains(error.frame), "C5-12 validation error has visible geometry")
                 sendClick(view.convert(CGPoint(x: error.frame.midX, y: error.frame.midY), to: nil), in: panel, phase: "error line")
                 check(view.captionEditor === editor && view.captionDraft == "TeamX", "C5-12 error click preserves editor and draft")
             } else { check(false, "C5-12 validation error is visible") }
@@ -7919,6 +8027,24 @@ func runCaptionEditorAppKitSelfTests() -> Int {
                   "C5-12 Esc removes editor and key eligibility while keeping the popup open")
         }
         check(localAccountCaptions().isEmpty, "C5-12 Esc does not save the draft")
+        // A default L must be actual selected text, not merely placeholder ink.
+        var defaultAccount = account
+        defaultAccount.caption = remoteDefaultCaption(defaultAccount)
+        let defaultFrame = RemoteAccountFrame(now: now, sync: frame.sync,
+            allViews: [defaultAccount], visibleViews: [defaultAccount], displayedViews: [defaultAccount])
+        REMOTE_ACCOUNT_VIEWS_PREVIEW = [defaultAccount]
+        withRemoteRenderScene(frame: defaultFrame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+            if let editor = start("default L/replace selection", currentCaption: defaultAccount.caption) {
+                sendKey("X", code: 7, ignoring: "x", modifiers: .shift, phase: "replace selected default L")
+                waitFor { view.captionDraft == "X" }
+                check(editor.stringValue == "X" && view.captionDraft == "X" && view.captionCounter?.stringValue == "1/32",
+                      "C5-12 typing replaces selected default L and updates counter")
+                sendKey("\u{1B}", code: 53, phase: "Escape default L")
+                waitForExit("Escape default L")
+            }
+        }
+        REMOTE_ACCOUNT_VIEWS_PREVIEW = [account]
+        check(localAccountCaptions().isEmpty, "C5-12 default-label Esc does not save the replacement")
         if let _ = start("Enter") {
             sendKey("\r", code: 36, phase: "Return")
             waitForExit("Return")
@@ -7932,13 +8058,13 @@ func runCaptionEditorAppKitSelfTests() -> Int {
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
                   && localAccountCaptions()[label]?.text == "", "C5-12 Reset saves tombstone and releases key focus")
         }
-        if let _ = start("outside field") {
+        if let _ = start("outside field", currentCaption: remoteDefaultCaption(account)) {
             sendClick(NSPoint(x: 4, y: 4), in: panel, phase: "outside field")
             waitForExit("outside field")
             check(view.captionEditor == nil && !panel.isKeyWindow && panel.isVisible,
                   "C5-12 dispatched outside-field click cancels without hiding popup")
         }
-        if let _ = start("outside window/status anchor") {
+        if let _ = start("outside window/status anchor", currentCaption: remoteDefaultCaption(account)) {
             let anchor = NSWindow(contentRect: NSRect(x: 10, y: 10, width: 20, height: 20),
                 styleMask: .borderless, backing: .buffered, defer: false)
             anchor.isReleasedWhenClosed = false
@@ -7959,6 +8085,55 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         }
     }
     return failures
+}
+
+// C5-14: inspect the actual Settings draw's error text and recovery hit together.
+// No PNG count change, callbacks, credentials, processes or real preferences.
+func runGitHubKeychainRetryAppKitSelfTests(check: (Bool, String) -> Void) {
+    guard let defaults = UserDefaults.standard as? MemorySelfTestDefaults else {
+        check(false, "C5-14 memory-only preferences installed"); return
+    }
+    let saved = defaults.volatileDomain(forName: UserDefaults.argumentDomain), savedSync = SYNC_PREVIEW
+    defer { defaults.setVolatileDomain(saved, forName: UserDefaults.argumentDomain); SYNC_PREVIEW = savedSync }
+    let now = Date(timeIntervalSince1970: 1793448000)
+    for language in ["ru", "en"] {
+        for advanced in [false, true] {
+            var arguments = saved; arguments["lang"] = language; arguments["advanced"] = advanced
+            defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+            for issue in ["locked", "unreachable", "timeout", "none"] {
+                for restored in [false, true] {
+                    AppKitSelfTestWatchdog.shared.begin("C5-14 Settings \(issue) \(language) advanced=\(advanced) restored=\(restored)")
+                    var state = SyncUIState(phase: .on, authState: restored ? "healthy" : "temporarilyUnavailable",
+                        authReason: restored || issue == "none" ? nil : issue, login: "fixture-account")
+                    state.lastError = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: restored ? (language == "en" ? "ru" : "en") : language)
+                    state.lastErrorAt = now; state.keychainRetryAvailable = issue == "none"
+                    SYNC_PREVIEW = state
+                    let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+                        allViews: [], visibleViews: [], displayedViews: [])
+                    withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+                        let height = settingsTotalHeight(AboutState())
+                        guard let ctx = bitmapContext(Int(PANEL_W * 2), Int(height * 2)) else {
+                            check(false, "C5-14 bitmap allocation"); return
+                        }
+                        ctx.scaleBy(x: 2, y: 2)
+                        let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: height), about: AboutState())
+                        let errors = hits.filter { $0.id == "syncerror:github" }
+                        let retries = hits.filter { $0.id == "sync:keychain-retry" }
+                        let expected = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: language)
+                        check(errors.count == 1 && errors[0].tooltip?.contains(expected) == true,
+                              "C5-14 actual drawn error/AX text uses current-language Keychain state")
+                        check(retries.count == (issue == "none" ? 0 : 1),
+                              "C5-14 actual retry hit exists exactly when the drawn error requests it")
+                        check((errors + retries).allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height },
+                              "C5-14 shared height model keeps error and recovery action in bounds")
+                        if let error = errors.first, let retry = retries.first {
+                            check(!error.rect.intersects(retry.rect), "C5-14 wrapped error does not cover recovery action")
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct ResetSound { let id: String; let ru: String; let en: String; let file: String
@@ -10143,6 +10318,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
     }
     check(githubImages == 42, "42 isolated RU/EN GitHub auth actual Settings/main PNG fixtures")
+    runGitHubKeychainRetryAppKitSelfTests(check: check)
     SYNC_PREVIEW = SyncUIState()
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()

@@ -1,3 +1,7 @@
+> C5 D4 (перенесён изC6): V2 GitHub token read теперь через уже доверенный `/usr/bin/security`, private pipe15/120с, legacy — прежний native путь. lastError и очищенный authReason больше не расходятся с кнопкой: единый keychainIssue. C5-13/14 RED до Mac; audit — docs/c5-github-keychain-audit.md. Fix8 сохранён, Python/VPS не тронуты.
+
+> C5 / `16f7aab`: владелец подтвердил живой ввод. CLI C5-12:7920 OK/20 FAIL; исправлен capture fixture при NSView.draw, activation-only проверки имеют контрольный probe/SKIP, остальная функциональность обязательна. Новое UX9.3: текущая L сразу в поле и целиком выделена, counter заполнен. C5-02/native новые проверки RED до Mac; Python не запускался.
+
 > C5 / `1109396`: WindowServer завис в трекинге непарного mouseDown C5-12. Исправлены пары down/up, добавлены именованные фазы со сторожем30с вне главного потока (exit124) и построчный stdout/stderr. Повтор полного Mac-прогона RED; Python не запускался.
 
 > C5 поверх `d8a7e21`: принятые находки GLM fix4 F1/F2/F3/F5/F7/F8 реализованы. C5-12 проверяет inactive→active NSApp и key/mouse dispatch через sendEvent/реальный local monitor; возвращается previous app, protected clicks сохраняют draft, host mismatch отказ. C5-12 RED до Mac; ordering только запасной путь, PNG count прежний. Python/агенты/своё ревью не запускались.

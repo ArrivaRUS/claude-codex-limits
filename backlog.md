@@ -1,5 +1,9 @@
 # Бэклог
 
+- C5 D4: устойчивое V2 чтение после пересборки через system tool и восстановление пропавшей кнопки реализованы, C5-13/14 RED. Остаток — Mac-прогон и живой sync без logout/login; стабильная подпись сборок остаётся C6. См. docs/c5-github-keychain-audit.md.
+
+- C5 поверх `16f7aab`: live typing подтверждён; native fixture capture и CLI activation probe/узкий SKIP исправлены, initial L/full selection добавлены в модель и AppKit. Остаток — Mac повтор новых C5-02/12 и подпись между машинами.
+
 - C5 поверх `1109396`: исправлен hang C5-12 (queued mouseUp), AppKit watchdog30с и line-buffer stdout/stderr. Остаток — повтор полного WindowServer-прогона с журналом; RED до Mac.
 
 - C5 поверх `d8a7e21`: принятые F1/F2/F3/F5/F7/F8 fix4 реализованы; native key/mouse dispatch, activation/focus return/draft protection в C5-12 RED до Mac. Остаток — WindowServer-прогон и живая подпись/сброс между машинами.

@@ -10,6 +10,18 @@
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
 
+## 2026-10-31 — C5: D4 перенесён изC6, V2 чтение через уже доверенный system tool
+
+1. По запросу владельца D4 read continuity входит в C5: V2 читает `/usr/bin/security find-generic-password -s fixed-service -a generation -w` через приватную трубу. V2 writer уже доверяет этой утилите и helper; legacy явного ACL не задаёт. Фактическая ACL пункта владельца не проверена, существующие права не расширяются.
+2. V2 native fallback не запускаем: второй путь зависел бы от старой ad-hoc identity и потреблял ещё один deadline/interactive permit. Legacy сохраняет прежний native quiet/interactive путь. Один process fence,15с фон/120с по кнопке, TERM→KILL; missing/denial/timeout различаются, stdout ошибки не выдаётся, секретов в argv/diagnostics нет. System tool сам не предоставляет native quiet-флаг; lock/необычный старый ACL всё ещё может потребовать системного разрешения.
+3. `authReason` очищался в ready раньше `lastError`, поэтому кнопка исчезала при ещё видимой ошибке. Общий `keychainIssue` связывает action/text/height, восстанавливая только известные exact RU/EN persisted сообщения. Модели C5-13/14 до AppKit +32 actual Settings draw без изменения PNG count. RED до Mac, fix8 оставлен как завершён. Стабильная подпись сборок по-прежнему C6.
+
+## 2026-10-31 — C5: текущая L в редакторе и контроль CLI activation
+
+1. По новому решению владельца UX9.3 редактор открывается с текущей пользовательской/default L, вся строка выделена; печать заменяет, стрелка позволяет дописывать. Только начальный seed удаляет запрещённые ASCII/NFKC-разделители из машинного default, затем применяет прежние NFC/control/32; typed/pasted строка по-прежнему отвергается целиком при @/slash/backslash. Модель C5-02 проверяет text/scalar count/UTF-16 selection; UI использует тот же seed.
+2. Живой ввод `16f7aab` подтверждён владельцем; CLI C5-12 activation не является доказательством отказа installed app. Каждая фаза сначала пробует активацию тем же shared helper. При отказе среды только active/key/focus-return assertions SKIP с явным текстом; создание/значение/геометрия поля, доступный firstResponder/selection, key dispatch, валидация, записи и paired clicks обязательны. В inactive режиме key события направляются panel.sendEvent, не методам editor.
+3. Независимый дефект fixture: scoped bitmap frame не переживал реальный NSView.draw/captureAccountFrame. Native test теперь устанавливает preview views и sync на весь набор с восстановлением defer; реальные Accounts/pencil и координаты контролов проверяются. Каскад counter/error/pencil/Esc больше не тестирует клики по нулевой геометрии. Production snapshot/dismissal не менялись, watchdog и парные события сохранены. Новое покрытие RED до Mac.
+
 ## 2026-10-31 — C5: парные события и сторож AppKit после зависания `1109396`
 
 1. Синтетическое нажатие мыши в C5-12 всегда получает заранее поставленное в очередь отпускание: NSControl может синхронно ждать его внутри sendEvent(mouseDown). Непотреблённый mouseUp доставляется до следующего клика. Проверка реального local monitor сохраняется; protected-control clicks не заменяются вызовом обработчика.
