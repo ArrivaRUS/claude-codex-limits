@@ -789,10 +789,84 @@ private func c5C518(_ check: C5Check) {
     }
 }
 
+// C5-19: restart with account-bound cache, then the exact frame/presentation
+// consumed by the panel. Supplying localIds directly would hide the live bug.
+private func c5C519(_ check: C5Check) {
+    let id = "c519-codex-account", gist = "c519-fixture-gist"
+    let label = accountLabel(product: "codex", localId: id, gistId: gist)!
+    let otherLabel = accountLabel(product: "codex", localId: "c519-other-account", gistId: gist)!
+    let ownAt = C5_NOW.addingTimeInterval(-9000), peerAt = C5_NOW.addingTimeInterval(-300)
+    let reset = C5_NOW.addingTimeInterval(4 * 86400)
+    let sync = ReaderSyncState(phase: .on), zone = TimeZone(secondsFromGMT: 0)!
+    let own = LimitData(weekly: 49, weeklyReset: reset, plan: "pro", asOf: ownAt, apiFresh: true)
+    // c4CacheQuotaCompletion persists accountId beside ld2dict's values.
+    var entry = ld2dict(own); entry["accountId"] = id
+    let disk: [String: Any] = ["codex": entry]
+    let store = ReaderLocalSnapshot()
+    store.restore(cache: disk)
+    let restored = store.snapshot()
+    check(restored.local.1.fromCache && restored.local.1.asOf == ownAt && restored.ids["codex"] == id,
+          "C5-19 startup retains the cached reading's identity without a provider request")
+
+    func frame(_ peerLabel: String, local: (LimitData, LimitData)? = nil) -> RemoteAccountFrame {
+        var peer = RemoteAccount(product: "codex", label: peerLabel, status: "ok")
+        peer.machineId = "c519-vps"; peer.machineName = "vps"; peer.machineLastSeenAt = C5_NOW
+        peer.plan = "pro"; peer.asOf = peerAt; peer.attemptAt = peerAt; peer.resetCredits = 1
+        peer.windows = RemoteWindows(weekly: RemoteWindow(pct: 57, resetAt: reset))
+        peer.schedule = RemoteSchedule(mode: "fixed", interval: 900)
+        var cache = SyncRemoteCache(); cache.labelKey = accountLabelKey(gistId: gist); cache.accounts = [peer]
+        return remoteAccountFrame(local: local ?? restored.local, localIds: restored.ids, remote: cache,
+            hidden: [], menu: [:], sync: sync, now: C5_NOW,
+            localMachineName: "macbook", localMachineId: "c519-mac", localIntervals: ["codex": 1800])
+    }
+    let merged = frame(label)
+    check(merged.allViews.count == 1 && merged.visibleViews.count == 1 && merged.displayedViews.count == 1,
+          "C5-19 same account after restart produces one canonical, visible and menu card")
+    // Do not return early on a split: print the values/header failures as well.
+    if let view = merged.visibleViews.first {
+        check(view.label == label && view.isLocal && view.machines == ["macbook", "vps"],
+              "C5-19 one account retains the local login and both machine names, local first")
+        check(view.data.weekly == 57 && view.data.resetCredits == 1 && view.data.session == nil
+              && view.data.weeklyReset == reset && view.data.asOf == peerAt && view.data.source?.machineName == "vps",
+              "C5-19 V3 uses the freshest asOf for all values, including reset credits and missing session")
+        for language in ["ru", "en"] {
+            let presentation = remotePresentationCard(view, sync: sync, language: language, narrow: true,
+                now: C5_NOW, timeZone: zone)
+            check(presentation.simpleMachines == "● macbook, ● vps"
+                  && presentation.sourceHeader?.sources.map { $0.tone } == [.late, .fresh],
+                  "C5-19 \(language) panel has orange macbook and green vps dots with independent asOf")
+            let titles = merged.visibleViews.map { card in
+                remotePresentationCard(card, sync: sync, language: language, narrow: true,
+                    now: C5_NOW, timeZone: zone,
+                    productAccountCount: merged.visibleViews.filter { $0.product == card.product }.count).simpleTitle
+            }
+            check(remoteSimplePanelSubtitle(titles, paused: false, language: language) == "Codex",
+                  "C5-19 \(language) actual Simple subtitle has one Codex title after restart")
+        }
+    } else { check(false, "C5-19 merged panel card exists") }
+    let distinct = frame(otherLabel)
+    check(distinct.visibleViews.count == 2 && Set(distinct.visibleViews.compactMap { $0.label }) == Set([label, otherLabel])
+          && distinct.visibleViews.first?.machines == ["macbook"] && distinct.visibleViews.last?.machines == ["vps"],
+          "C5-19 distinct labels remain two cards even with identical plan and reset")
+
+    var tied = restored.local.1; tied.asOf = peerAt
+    let tiedFrame = frame(label, local: (restored.local.0, tied))
+    check(tiedFrame.visibleViews.count == 1 && tiedFrame.visibleViews.first?.data.weekly == 49
+          && tiedFrame.visibleViews.first?.data.source == nil,
+          "C5-19 V3 equal asOf keeps local values")
+    for badID in [nil, "bad/id", "", "tiny"] as [String?] {
+        var legacy = entry; legacy["accountId"] = badID
+        let unbound = ReaderLocalSnapshot(); unbound.restore(cache: ["codex": legacy])
+        check(unbound.snapshot().ids.isEmpty && unbound.snapshot().local.1.weekly == 49,
+              "C5-19 legacy/malformed identity stays unlabelled without discarding cached values")
+    }
+}
+
 func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C501(check); c5C501Sanitization(check); c5C502(check); c5C503(check)
     c5C504(check); c5C505(check); c5C506(check)
     c5C507(check); c5C508(check); c5C509(check); c5C510(check); c5C511(check)
     c5C513(check)
     c5C515(check); withoutActuallyEscaping(check) { c5C516($0) }; c5C517(check); c5C518(check)
+    c5C519(check)
 }

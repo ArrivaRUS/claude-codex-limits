@@ -1,5 +1,11 @@
 import Foundation
 
+func remoteSimplePanelSubtitle(_ titles: [String], paused: Bool, language: String) -> String {
+    if !titles.isEmpty { return titles.joined(separator: " · ") }
+    if paused { return language == "en" ? "monitoring paused" : "сбор выключен" }
+    return language == "en" ? "not found" : "не найдено"
+}
+
 // Per-machine observations stay separate from the winning account values.
 struct RemoteMachineReading {
     var machineId: String

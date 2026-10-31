@@ -3518,6 +3518,23 @@ final class ReaderLocalSnapshot {
     private let lock = NSLock()
     private var local = (LimitData(present: false), LimitData(present: false))
     private var ids: [String: String] = [:]
+    /// Startup uses the same in-memory model as the panel and offline selftests.
+    @discardableResult func restore(cache: [String: Any]) -> (LimitData, LimitData) {
+        let claude = (cache["claude"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
+        let codex = (cache["codex"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
+        var restoredIds: [String: String] = [:]
+        for (product, reading) in [("claude", claude), ("codex", codex)] {
+            // Only the identity saved WITH these values proves their provenance.
+            // Never infer it from today's CLI login or a foreign account's label.
+            guard quotaHasReadings(reading), let at = reading.asOf, at.timeIntervalSince1970.isFinite,
+                  let entry = cache[product] as? [String: Any], let raw = entry["accountId"] as? String else { continue }
+            let id = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard id.range(of: "^[0-9a-z-]{8,64}$", options: .regularExpression) != nil else { continue }
+            restoredIds[product] = id
+        }
+        update(local: (claude, codex), ids: restoredIds, identityProducts: ["claude", "codex"])
+        return (claude, codex)
+    }
     func update(local: (LimitData, LimitData), ids: [String: String], identityProducts: Set<String>) {
         lock.lock(); defer { lock.unlock() }
         self.local = local
@@ -5229,7 +5246,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     }
 
     // header — the app's OWN icon + subtitle of present products
-    let subtitle = prods.isEmpty ? (monitoringPaused() ? tr("сбор выключен", "monitoring paused") : tr("не найдено", "not found")) : prods.map { $0.1 }.joined(separator: " · ")
+    let subtitle = remoteSimplePanelSubtitle(prods.map { $0.1 }, paused: monitoringPaused(), language: appLang())
     if let img = loadCGImage(assetPath("appicon.png")) { ctx.draw(img, in: rectTL(pad, pad - 1, 30, 30)) }
     text(attr(tr("Лимиты", "Limits"), 15, .semibold, textHi), x: pad + 40, topY: pad - 1)
     text(fitAttr(subtitle, maxW: W - pad * 2 - 100) { attr($0, 11, .regular, textLo) }, x: pad + 40, topY: pad + 17)
@@ -8531,11 +8548,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UsageLogs.shared.load()
         if let data = try? Data(contentsOf: URL(fileURLWithPath: CACHE_PATH)),
            let cache = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            let c = (cache["claude"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
-            let x = (cache["codex"] as? [String: Any]).map(dict2ld) ?? LimitData(present: false)
-            // Legacy cache has no persisted account id. Keep it unlabelled until
-            // a fresh reading supplies a matching identity; today's CLI login may differ.
-            render(c, x)
+            let local = readerLocalSnapshot.restore(cache: cache)
+            render(local.0, local.1)
         }
         remoteManualRefresh = RemoteManualRefreshController(clock: { Date() }, read: { completion in
             GitHubSync.shared.readNow(completion: completion)
