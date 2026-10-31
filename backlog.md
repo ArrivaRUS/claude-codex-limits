@@ -1,5 +1,7 @@
 # Бэклог
 
+- C5: постоянная clone-local подпись перенесена из C6 и реализована в build.sh; `.signing/` сохранять. Shellcheck/syntax/isolated OpenSSL+mocked signing PASS; остаток — две Mac-сборки с одинаковым leaf/DR и живая проверка Связки после последнего Allow Always. S1–S5 прошлого брифа не менялись.
+
 - C5 security fix9 после `48ac3ad`: S1–S5 исправлены; C5-15…18 и64 actual Settings draw RED до Mac. Живые гейты: quiet lock/unlock, неоднозначный44 без logout, ручной пароль>15с. Fix8 сохранён, PNG counts прежние.
 
 - C5 D4: устойчивое V2 чтение после пересборки через system tool и восстановление пропавшей кнопки реализованы, C5-13/14 RED. Остаток — Mac-прогон и живой sync без logout/login; стабильная подпись сборок остаётся C6. См. docs/c5-github-keychain-audit.md.

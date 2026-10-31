@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · постоянная clone-local подпись перенесена вC5
+
+- **Бриф владельца:** после ad-hoc48ac3ad четыре запроса пароля даже с «Разрешать всегда»; designated requirement менялся с cdhash. S1–S5 завершены прошлым проходом, текущая задача не меняет Swift/Linux. Постоянная локальная подпись перенесена изC6 вC5.
+- **Код:** только build.sh/.gitignore и документация. `.signing/` автоматически хранит RSA2048 self-signed codeSigning cert10лет, key/password600, dirs700, отдельную private keychain. Explicit leaf SHA1+bundle ID DR, без runtime/system trust/login-keychain/search-list изменений; security/codesign по абсолютным путям, парольные операции после set+x с подавленным выводом. Private import доверяет /usr/bin/codesign, partition list только в собственной связке.
+- **Fallback:** setup/sign/strict/DR ошибка → одна WARNING и проверенная ad-hoc подпись; частичная/повреждённая identity не перевыпускается молча. Leaf и выбранный режим показаны в build log. Сохраняется8-проходный retry FinderInfo. Если даже ad-hoc невозможен, прежний fatal build error сохраняется.
+- **Проверки:** bash -n, shellcheck и diff whitespace PASS; isolated shell harness с настоящим OpenSSL и mocked security/codesign PASS: повторныйleaf, profile/10y/perms, private-keychain recovery, space-paths, bash-x redaction, отказcreate/unlock/import/partition/sign/strict/DR, missingopenssl, no silent rotation/symlink writes. Mac signing/live ACL smoke ещё RED. Python/агенты/своё ревью/Git-мутации не выполнялись. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · принятые S1–S5 security fix9 поверх `48ac3ad`
 
 - **Основание:** владелец принял независимое Astra-review `16f7aab..48ac3ad -- Sources`:3 major/2 minor. Работа одним агентом, без своего ревью/Python/Git-мутаций. Fix8 не меняется.

@@ -31,3 +31,9 @@ attributes-only запросом; background получает native quiet prefl
 check.120с нужно проверять через owner retry, а не только runner: quiet-first
 может оборвать ручную попытку за15с. Трубу ограничивать при чтении, не после;
 retry hit/height должны отсутствовать в awaitingCode, где обработчик отказывает.
+
+Решение владельца31.10: постоянная clone-local подпись также перенесена вC5.
+`.signing/` нельзя чистить между сборками; build log должен показывать stable
+и тот же leaf prefix. Явный identifier+leaf DR, не cdhash; fallback ad-hoc не
+считать доказательством сохранения разрешений. Mac smoke обязателен после
+однократного Allow Always для прежних пунктов. См. build section project-guide.

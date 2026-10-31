@@ -10,6 +10,12 @@
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
 
+## 2026-10-31 — C5: постоянная локальная подпись сборочного клона
+
+1. По новому решению владельца постоянная подпись сборок (D4-б) перенесена изC6 вC5: цель — сохранить Keychain identity после одного последнего разрешения для прежних пунктов. Реализация только build.sh/.gitignore/docs; S1–S5 предыдущего прохода завершены, Swift/Linux сейчас не меняются.
+2. Clone-local `.signing/` создаётся один раз: RSA2048, self-signed CN Claude Codex Limits Local Signing, digitalSignature/codeSigning,3650дней; отдельная keychain с random pass, доступом codesign и apple-tool:/apple: partition list. Explicit requirement identifier+leaf SHA1 исключает cdhash и системный trust; runtime не включаем. Частная связка не добавляется скриптом в search list, login-связка не меняется. PKCS12 wrapping использует совместимые с LibreSSL/OpenSSL3/Apple importer алгоритмы, сам cert подписан SHA256.
+3. Неполную identity не ротируем автоматически; setup/stable-sign/verify/DR failure даёт одну WARNING и прежний ad-hoc fallback с strict verification. Оба подписи-режима сохраняют FinderInfo retries. Если и ad-hoc не подписывается, прежний fatal error не превращается в успешную выдачу повреждённого app. Mac smoke ещё нужен; Linux shell mocks не подтверждают фактический codesign/доступ к Keychain.
+
 ## 2026-10-31 — C5: приняты S1–S5 независимого security-review fix9
 
 1. Решения предыдущего fix9 уточнены: SecurityTool44 не доказывает отсутствие; native exact-ref attributes query с запрещённым interaction подтверждает missing, иначе сохраняем временную ошибку/действие, не предлагаем новый вход. Background допускается к tool после native quiet preflight атрибутов и unlocked-статуса связки самого пункта. ACL не расширяется; native secret-read fallback не добавлен.

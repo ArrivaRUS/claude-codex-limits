@@ -1,6 +1,8 @@
 # build output
 dist/
 .build-tmp/
+# Clone-local private signing identity and its private keychain; keep across builds.
+/.signing/
 *.dmg
 
 # macOS

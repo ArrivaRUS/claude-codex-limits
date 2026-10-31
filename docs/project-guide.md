@@ -216,6 +216,8 @@ cleanup; повторить выход после доступности хра�
 
 macOS: `bash build.sh`, затем `./scripts/make-dmg.sh`; сверить версию `.app`, strict codesign и DMG. Linux: `sh linux/packaging/build-deb.sh` требует `dpkg-deb`. Если его нет на Mac, использовать DEB из успешного Ubuntu CI на точной принятой ревизии: проверить `headSha`, полный лог, имя, версию, архитектуру и SHA-256 скачанного `linux-deb`. Это отдельная проверка пакета, не живой ALSE smoke.
 
+`build.sh` автоматически создаёт игнорируемый Git каталог `.signing/`: ключ/сертификат на 10 лет и отдельную связку подписи (каталоги 700, ключ/пароль 600). **Не удаляйте `.signing/` между сборками**: постоянные leaf и bundle ID сохраняют идентичность для разрешений Связки ([Apple TN2206](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)); первая stable-сборка может ещё потребовать «Разрешать всегда» для старых пунктов. В двух сборках ожидается `signing: stable (leaf XXXXXXXX)` с одинаковыми 8 знаками. Login-связка, search list, системный trust и hardened runtime не меняются. При отказе stable-пути появляются `WARNING: stable signing unavailable (...), using ad-hoc` и `signing: ad-hoc`; этот запасной режим не сохраняет постоянную идентичность. Для намеренного пересоздания удалите `.signing/` и повторите `bash build.sh`: разрешения придётся выдать заново. Не включайте секреты `.signing/` в коммиты или артефакты.
+
 Для опубликованного выпуска используются macOS `v3.2.3` с `ClaudeCodexLimits-3.2.3.dmg`
 и Linux `linux-v0.4.3` с `claude-codex-limits_0.4.3_all.deb`. Пакеты этих версий собраны и проверены;
 публичные assets скачаны и совпадают с проверенными пакетами. Linux-релиз создаётся с `--latest=false`:
