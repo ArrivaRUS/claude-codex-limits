@@ -3960,6 +3960,13 @@ func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
         ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("sourceheader:") && !$0.id.hasPrefix("moneyaccount:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
 }
 
+/// Shared by the actual NSView tooltip callback and rendered-hit tests.
+func panelTooltip(at point: CGPoint, hits: [Hit]) -> String? {
+    if let header = hits.first(where: { $0.id.hasPrefix("sourceheader:") && $0.rect.contains(point) }) { return header.tooltip ?? "" }
+    if let feedback = hits.first(where: { $0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }) { return feedback.tooltip ?? "" }
+    return hits.first { $0.tooltip != nil && $0.rect.contains(point) }?.tooltip
+}
+
 let PANEL_W: CGFloat = 360
 let PANEL_H: CGFloat = 286
 
@@ -4295,6 +4302,15 @@ struct RemoteAutoActivity {
     struct Sample { var label: String; var at: Double; var readings: [String: AutoReading] }
     private var samples: [String: Sample] = [:]
     private var awakeUntil: [String: Double] = [:]
+    private var lastWakeClock: Double? = nil
+    private mutating func advanceWakeClock(_ now: Double) {
+        // Wall-clock hints must never gain lifetime when the clock moves back.
+        // Expired hints are discarded permanently, not merely skipped by apply.
+        guard now.isFinite else { awakeUntil.removeAll(); lastWakeClock = nil; return }
+        if let previous = lastWakeClock, now < previous { awakeUntil.removeAll() }
+        lastWakeClock = now
+        awakeUntil = awakeUntil.filter { now < $0.value }
+    }
     mutating func invalidate(products: Set<String>) {
         for product in products { samples.removeValue(forKey: product); awakeUntil.removeValue(forKey: product) }
     }
@@ -4306,6 +4322,7 @@ struct RemoteAutoActivity {
     @discardableResult
     mutating func observe(product: String, label: String, data: LimitData, state: inout AutoPollState,
                           now: Double, baseline: LimitData? = nil) -> Bool {
+        advanceWakeClock(now)
         guard data.present, data.apiFresh, !data.fromCache, !data.stale, data.auth == .ok,
               data.error == nil, !data.pollFailed, let at = data.asOf?.timeIntervalSince1970,
               at.isFinite, now.isFinite, at <= now, at >= now - 900 else { return false }
@@ -4333,7 +4350,8 @@ struct RemoteAutoActivity {
         // Neither lastAttempt nor the local observation/failure state belongs to a peer.
         return changed
     }
-    func apply(to states: inout [String: AutoPollState], now: Double) {
+    mutating func apply(to states: inout [String: AutoPollState], now: Double) {
+        advanceWakeClock(now)
         // C4 can save an older poll mirror after its GET callback. Retain fresh
         // activity for one window so that save cannot undo the observed wakeup.
         for (product, until) in awakeUntil where now < until && states[product] != nil {
@@ -4647,6 +4665,12 @@ private func applyingLocalCaptions(_ views: [AccountView], remote: [String: Remo
         return order == .orderedSame ? ($0.label ?? $0.historyKey) < ($1.label ?? $1.historyKey) : order == .orderedAscending
     }
 }
+/// Use the scheduler's initial Auto state for a product not persisted yet.
+func localAccountIntervals(auto: Bool, states: [String: AutoPollState], manual: TimeInterval) -> [String: TimeInterval] {
+    Dictionary(uniqueKeysWithValues: ["claude", "codex"].map { product in
+        (product, auto ? (states[product] ?? AutoPollState()).interval : normalizedPollInterval(manual))
+    })
+}
 private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: Date) -> RemoteAccountFrame {
     let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
     let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
@@ -4663,9 +4687,8 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
         sync: sync, now: now,
         localMachineName: machineTag(setting: UserDefaults.standard.string(forKey: "machineName") ?? "macbook", hostname: "mac"),
         localMachineId: isolated ? "local" : GitHubSync.shared.machineId,
-        localIntervals: autoPollEnabled() ? loadAutoPollStates().mapValues { $0.interval }
-            : ["claude": normalizedPollInterval(UserDefaults.standard.double(forKey: "interval")),
-               "codex": normalizedPollInterval(UserDefaults.standard.double(forKey: "interval"))])
+        localIntervals: localAccountIntervals(auto: autoPollEnabled(), states: loadAutoPollStates(),
+            manual: UserDefaults.standard.double(forKey: "interval")))
     var all = applyingLocalCaptions(resolved.allViews, remote: cache.captions ?? [:], now: now).map { remotePresentationView($0, sync: sync, now: now) }
     // Unlabelled usage has no quota card, but remains manageable in Settings/history.
     for product in ["claude", "codex"] {
@@ -7138,9 +7161,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint,
                        userData data: UnsafeMutableRawPointer?) -> String {
-        if let header = hits.first(where: { $0.id.hasPrefix("sourceheader:") && $0.rect.contains(point) }) { return header.tooltip ?? "" }
-        if let feedback = hits.first(where: { $0.id.hasPrefix("quotafeedback:") && $0.rect.contains(point) }) { return feedback.tooltip ?? "" }
-        if let hit = hits.first(where: { $0.tooltip != nil && $0.rect.contains(point) }) { return hit.tooltip ?? "" }
+        if let tooltip = panelTooltip(at: point, hits: hits) { return tooltip }
         return onAutoSummary?() ?? tr("Авто: 15 мин → 30 мин → 1 ч → 4 ч", "Auto: 15 min → 30 min → 1 h → 4 h")
     }
 

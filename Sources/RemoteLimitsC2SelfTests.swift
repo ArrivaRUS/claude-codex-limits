@@ -715,7 +715,14 @@ private func c2C208(_ root: String, _ fixture: String?, _ expect: C2Expect) {
     var dirtyLocal = c2Local(15, asOf: now.addingTimeInterval(-30))
     dirtyLocal.error = "Traceback /Users/alexfixture/x.py " + (sentinels.first(where: { $0.hasPrefix("sk-ant-oat") }) ?? "sk-")
     dirtyLocal.plan = sentinels.first(where: { $0 == "AlexFixture" })
-    let dirtyViews = c2Resolve(c2Cache([C2_VPS_FILE: c2JSON(obj)], now: now), claude: dirtyLocal, ids: ["claude": C2_UUID_A], now: now)
+    var dirtyViews = c2Resolve(c2Cache([C2_VPS_FILE: c2JSON(obj)], now: now), claude: dirtyLocal, ids: ["claude": C2_UUID_A], now: now)
+    // Deliberately bypass wire/input validation: reader_card_state must itself
+    // exclude private fields even when handed an unsanitized cached view.
+    guard let dirtyIndex = dirtyViews.firstIndex(where: { $0.label == C2_CODEX_B }) else {
+        expect(false, "C2-08 raw cached account exists"); return
+    }
+    dirtyViews[dirtyIndex].caption = email + " /Users/alexfixture "
+        + (sentinels.first(where: { $0.hasPrefix("sk-ant-oat") }) ?? "sk-")
     let dirtyLog = root + "/c2-08-dirty.jsonl"
     FileManager.default.createFile(atPath: dirtyLog, contents: Data(), attributes: [.posixPermissions: 0o644])
     let wrote = appendPollLog(readerCardStateEvents(dirtyViews, now: now), path: dirtyLog)

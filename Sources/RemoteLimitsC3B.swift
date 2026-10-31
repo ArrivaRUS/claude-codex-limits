@@ -10,9 +10,10 @@ struct RemoteMachineReading {
 }
 enum RemoteFreshnessTone: Equatable { case fresh, late, old, unknown }
 func remoteSourceFreshness(asOf: Date?, interval: TimeInterval?, now: Date) -> RemoteFreshnessTone {
-    guard let at = asOf, at.timeIntervalSince1970.isFinite, now.timeIntervalSince1970.isFinite,
-          at <= now else { return .unknown }
-    let age = now.timeIntervalSince(at)
+    guard let at = asOf, at.timeIntervalSince1970.isFinite, now.timeIntervalSince1970.isFinite else { return .unknown }
+    // A peer clock ahead of ours is still a reading: display its time verbatim
+    // and clamp only the age, as in the protocol's future-asOf rule.
+    let age = max(0, now.timeIntervalSince(at))
     let cadence = interval.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 14400
     // A reading older than a day is always red, even for a malformed long schedule.
     if age > 86400 { return .old }
@@ -42,7 +43,9 @@ func remoteSourceHeader(_ raw: AccountView, now: Date, language: String, timeZon
                 interval: ownsValues ? view.data.source?.interval.map(Double.init) : nil, isLocal: view.isLocal && index == 0)
         }
     }
-    var lines: [String] = []
+    // The header hit covers the title as well as the source names. Keep the
+    // complete custom caption first even when drawing truncates that title.
+    var lines: [String] = view.caption.isEmpty || view.caption == remoteDefaultCaption(view) ? [] : [view.caption]
     let sources = records.map { record -> RemoteHeaderSource in
         let cleanName = remoteSnapshotText(record.name, limit: 32)
         let name = cleanName.isEmpty ? (record.isLocal ? (en ? "this computer" : "этот компьютер") : "?") : cleanName

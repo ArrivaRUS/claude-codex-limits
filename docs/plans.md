@@ -177,6 +177,7 @@ T1: П3-а, П3-д, П7, §5 (регресс).
 Готово, когда: C5-01…11 прошли на Mac, PNG/manifest сверены, подпись мака после цикла видна на Linux и поздний сброс не восстанавливает старый текст. Политика подписи/ACL — C6.
 Валидация: Т14; `"$APP" --sync-selftest`, `"$APP" --subscriptions-selftest`; полный Python before/after, статические Swift/build проверки на Linux. Swift-тесты зарегистрированы до AppKit, локального GREEN до Mac нет.
 Продолжение поверх `988ab89` (решение владельца §3 от31.10): отдельные точки свежести источников Simple/Advanced, Simple footer−14pt и remote growth→Auto15мин без local attempt. RED C5-07…11, матрица209; независимое ревью этого продолжения заказывает владелец, внутренние агенты не используются.
+Исправления поверх `97ac2ac`: Mac build/sync PASS (C1 73/73, C4 730/730), subscriptions остановлен на C2-08 до C3/C5; приняты R1…R4 независимого ревью. Исправлены raw-input C2-08, clock rollback/expiry hint, future-asOf, full caption tooltip/AX и начальная локальная Auto cadence. RED C2-08/C5-07/08/10 + actual preview hits, повтор на Mac;209 сцен, Python не запускать.
 T1: П4-в.
 
 ## C6 — релиз и проверка гипотезы `[ ]`

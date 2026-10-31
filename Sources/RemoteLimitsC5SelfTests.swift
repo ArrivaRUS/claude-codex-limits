@@ -411,8 +411,24 @@ private func c5C507(_ check: C5Check) {
           "C5-07 selected/Auto local cadence changes only its own freshness horizon")
     check(remoteSourceFreshness(asOf: nil, interval: 900, now: now) == .unknown,
           "C5-07 no reading is grey")
-    check(remoteSourceFreshness(asOf: now.addingTimeInterval(1), interval: 900, now: now) == .unknown,
-          "C5-07 future reading cannot claim freshness")
+    for ahead in [1.0, 300, 301, 86400] {
+        let future = now.addingTimeInterval(ahead)
+        check(remoteSourceFreshness(asOf: future, interval: 900, now: now) == .fresh,
+              "C5-07 future asOf has age zero, including beyond protocol clock tolerance")
+        let header = remoteSourceHeader(c5DateView(future), now: now, language: "en", timeZone: TimeZone(secondsFromGMT: 0)!)
+        check(header.tooltip.contains(remoteCardTimestamp(future, now: now, timeZone: TimeZone(secondsFromGMT: 0)!, compactOtherDay: false))
+              && !header.tooltip.contains("no readings"), "C5-07 future tooltip keeps the actual timestamp")
+    }
+    let defaults = localAccountIntervals(auto: true, states: [:], manual: 14400)
+    check(defaults["claude"] == AutoPollState().interval && defaults["codex"] == AutoPollState().interval,
+          "C5-07 missing saved Auto states use the scheduler's initial interval")
+    let age = AutoPollState().interval + 901
+    check(remoteSourceFreshness(asOf: now.addingTimeInterval(-age), interval: defaults["codex"], now: now) == .late,
+          "C5-07 local default Auto dot does not silently fall back to four hours")
+    var saved = AutoPollState(); saved.interval = 3600
+    check(localAccountIntervals(auto: true, states: ["codex": saved], manual: 14400)["codex"] == 3600
+          && localAccountIntervals(auto: false, states: [:], manual: 900)["codex"] == 900,
+          "C5-07 saved Auto and selected manual cadence remain authoritative")
     check(remoteSourceFreshness(asOf: now.addingTimeInterval(-15300), interval: nil, now: now) == .fresh,
           "C5-07 absent schedule uses four hours plus fifteen minutes")
     check(remoteSourceFreshness(asOf: now.addingTimeInterval(-15301), interval: nil, now: now) == .late,
@@ -421,6 +437,7 @@ private func c5C507(_ check: C5Check) {
 private func c5C508(_ check: C5Check) {
     var view = c5DateView(C5_NOW.addingTimeInterval(-120))
     view.machines = ["macbook", "vps", "third"]
+    view.caption = remoteDefaultCaption(view)
     view.sourceReadings = [
         RemoteMachineReading(machineId: "mac", name: "macbook", asOf: C5_NOW.addingTimeInterval(-120), interval: 900, isLocal: true),
         RemoteMachineReading(machineId: "vps", name: "vps", asOf: C5_NOW.addingTimeInterval(-86401), interval: 1800, isLocal: false),
@@ -439,6 +456,14 @@ private func c5C508(_ check: C5Check) {
               && fitted.width <= 55 && fitted.overflow == 1,
               "C5-08 narrow fit shortens names without ever truncating either dot")
     }
+    view.caption = "Моя полная пользовательская подпись"
+    let custom = remoteSourceHeader(view, now: C5_NOW, language: "ru", timeZone: TimeZone(secondsFromGMT: 0)!)
+    let rect = CGRect(x: 0, y: 0, width: 100, height: 31)
+    let hits = [Hit(id: "open:fixture", rect: rect, tooltip: "card fallback"),
+                Hit(id: "sourceheader:claude:fixture", rect: rect, tooltip: custom.tooltip)]
+    check(panelTooltip(at: CGPoint(x: 10, y: 10), hits: hits)?.components(separatedBy: "\n").first == view.caption
+          && panelTooltip(at: CGPoint(x: 10, y: 10), hits: hits)?.contains("macbook —") == true,
+          "C5-08 real tooltip hit resolver prioritizes the complete caption followed by machine lines")
     var local = view; local.isLocal = true; local.machines = []; local.sourceReadings = []
     local.data.source = nil; local.data.asOf = C5_NOW
     let header = remoteSourceHeader(local, now: C5_NOW, language: "ru", timeZone: TimeZone(secondsFromGMT: 0)!)
@@ -485,8 +510,18 @@ private func c5C510(_ check: C5Check) {
     tracker.apply(to: &mirrors, now: start + 901)
     check(mirrors["codex"]?.interval == 900 && mirrors["codex"]?.lastAttempt == before,
           "C5-10 a late C4 poll-state save cannot undo a fresh peer wakeup")
+    var rolled = tracker
+    var rollbackMirrors = mirrors
+    rollbackMirrors["codex"]?.interval = 14400
+    rolled.apply(to: &rollbackMirrors, now: start + 900)
+    check(rollbackMirrors["codex"]?.interval == 14400,
+          "C5-10 rollback before expiry clears the wake hint rather than extending fifteen minutes")
+    rolled.apply(to: &rollbackMirrors, now: start + 1000)
+    check(rollbackMirrors["codex"]?.interval == 14400, "C5-10 cleared rollback hint cannot reappear as clocks recover")
     mirrors["codex"]?.interval = 14400; tracker.apply(to: &mirrors, now: start + 1800)
     check(mirrors["codex"]?.interval == 14400, "C5-10 wake hint expires after fifteen minutes")
+    tracker.apply(to: &mirrors, now: start - 1000)
+    check(mirrors["codex"]?.interval == 14400, "C5-10 rollback after expiry cannot resurrect a discarded wake hint")
     poll.interval = 14400
     check(!tracker.observe(product: "codex", label: C5_LABEL, data: reading(21, start + 900), state: &poll, now: start + 901)
           && poll.interval == 14400, "C5-10 duplicate cannot wake again")

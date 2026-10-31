@@ -183,6 +183,18 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             else if advanced { hits = drawAdvanced(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             else { hits = drawPanel(context, size: size, claude: empty, codex: empty, interval: 1800, updated: nil, about: AboutState()) }
             check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C3-10 actual draw hit bounds " + name)
+            if !settings {
+                for account in visible where account.data.present && !account.caption.isEmpty && account.caption != remoteDefaultCaption(account) {
+                    guard let hit = hits.first(where: { $0.id == "sourceheader:" + account.product + ":" + account.historyKey }) else {
+                        check(false, "C5-08 actual header hit exists for custom caption " + name); continue
+                    }
+                    let actual = panelTooltip(at: CGPoint(x: hit.rect.midX, y: hit.rect.midY), hits: hits) ?? ""
+                    let titleHover = panelTooltip(at: CGPoint(x: hit.rect.minX + 30, y: hit.rect.maxY - 3), hits: hits)
+                    check(actual.components(separatedBy: "\n").first == account.caption
+                          && actual.contains(" — ") && actual == hit.tooltip && titleHover == actual,
+                          "C5-08 actual Simple/Advanced hover and AX hit keep the complete caption then machine status " + name)
+                }
+            }
             if name.hasPrefix("c5-freshness-") {
                 let headerHits = hits.filter { $0.id.hasPrefix("sourceheader:") }
                 check(headerHits.count == visible.count && headerHits.allSatisfy {
