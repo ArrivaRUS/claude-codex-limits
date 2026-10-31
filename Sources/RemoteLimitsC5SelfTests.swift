@@ -703,7 +703,7 @@ private func c5C515(_ check: C5Check) {
     }
 }
 
-private func c5C516(_ check: C5Check) {
+private func c5C516(_ check: @escaping C5Check) {
     let generation = "01234567-89ab-cdef-0123-456789abcdef", ref = GitHubAuthRef(generation: "01234567-89ab-cdef-0123-456789abcdef")
     let credential = GitHubCredentialV2(epoch: generation, generation: generation, accessToken: "c5-action-token",
         obtainedAt: 1000, userID: "1001", login: "fixture")
@@ -794,5 +794,5 @@ func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C504(check); c5C505(check); c5C506(check)
     c5C507(check); c5C508(check); c5C509(check); c5C510(check); c5C511(check)
     c5C513(check)
-    c5C515(check); c5C516(check); c5C517(check); c5C518(check)
+    c5C515(check); withoutActuallyEscaping(check) { c5C516($0) }; c5C517(check); c5C518(check)
 }
