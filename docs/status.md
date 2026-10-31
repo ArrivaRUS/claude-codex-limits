@@ -1,4 +1,4 @@
-> C5 `6597268`: C1 75, C4 730, C2 33, C3 A590, C3 B818, C5 481 —0 FAIL до AppKit. В Терминале созданы209 PNG, затем stale Manual Simple-height expectation; manifest не завершён. Общая модель высот и AppKit canvas/card/footer ожидания исправлены без изменения геометрии; полный Mac/manifest ожидается. Статическая сверка — docs/c5-appkit-audit.md; Python не запускался, один агент без своего ревью.
+> C5 `739974f`: прежние модельные/AppKit bitmap проверки GREEN, но живая правка подписи не получила клавиатуру. Исправлен временный key-режим NSPanel, activate/firstResponder, снятие key на выходах и local/global dismissal. Новый C5-12 native focus RED до Mac с WindowServer; урок019 применён к старым AppKit-наборам. Python не запускался, один агент без собственного ревью.
 
 > Актуализация 2026-10-31: C1–C4 приняты, включая живую публикацию macOS 3.3.0. C5 / 3.3.1 — рабочий патч подписей и долгов D4-а/б, D5, D6; независимое Astra-ревью закрыто, Linux 806→817 tests / 0→0 failures / 25→25 sandbox errors / 50→51 skips; Mac-валидация ожидается (HEARTBEAT). Исторический блок 2026-10-12 ниже не описывает текущую веху. VPS-публикация не обновлялась.
 

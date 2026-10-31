@@ -6957,13 +6957,13 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     private var quotaButtons: [NSButton] = []
     var mainScroll: CGFloat = 0
     private var mainScroller: NSScroller?
-    private var captionEditor: NSTextField?
-    private var captionCounter: NSTextField?
+    fileprivate var captionEditor: NSTextField?
+    fileprivate var captionCounter: NSTextField?
     private var captionError: NSTextField?
-    private var captionReset: NSButton?
+    fileprivate var captionReset: NSButton?
     private var editingCaptionKey: String?
     private var editingCaptionOriginal: String?
-    private var captionDraft = ""
+    fileprivate var captionDraft = ""
     var onQuit: (() -> Void)?
     var onOpenURL: ((String) -> Void)?
     var onPreview: ((String) -> Void)?
@@ -7243,7 +7243,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         editor.isHidden = !visible; captionCounter?.isHidden = !visible; captionReset?.isHidden = !visible
         captionError?.isHidden = !visible || captionError?.stringValue.isEmpty != false
     }
-    private func beginCaptionEdit(_ key: String) {
+    fileprivate func beginCaptionEdit(_ key: String) {
         finishCaptionEdit(.escape)
         guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
         editingCaptionKey = key
@@ -7252,6 +7252,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         let editor = NSTextField(frame: .zero)
         editor.font = NSFont.systemFont(ofSize: 12.5)
         editor.stringValue = captionDraft; editor.delegate = self
+        editor.isEditable = true; editor.isSelectable = true
         editor.placeholderString = remoteDefaultCaption(view)
         editor.usesSingleLineMode = true
         editor.focusRingType = .default
@@ -7269,7 +7270,14 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         addSubview(editor); addSubview(counter); addSubview(reset); addSubview(error)
         captionEditor = editor; captionCounter = counter; captionReset = reset
         captionError = error
-        updateCaptionEditorFrame(); window?.makeFirstResponder(editor)
+        updateCaptionEditorFrame()
+        if let panel = window as? LimitsPanelWindow { panel.beginKeyboardInput(editor) }
+        else { window?.makeFirstResponder(editor) }
+    }
+    fileprivate func dismissCaptionEditorIfOutside(_ point: CGPoint) {
+        guard editingCaptionKey != nil else { return }
+        if captionEditor?.frame.contains(point) == true || captionReset?.frame.contains(point) == true { return }
+        finishCaptionEdit(.escape)
     }
     func controlTextDidChange(_ notification: Notification) {
         guard let editor = notification.object as? NSTextField, editor === captionEditor else { return }
@@ -7292,7 +7300,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         return false
     }
     @objc private func resetCaption(_ sender: NSButton) { finishCaptionEdit(.reset) }
-    private func finishCaptionEdit(_ command: RemoteCaptionCommand) {
+    fileprivate func finishCaptionEdit(_ command: RemoteCaptionCommand, keepPanelVisible: Bool = true) {
         guard let key = editingCaptionKey else { return }
         if command == .enter, captionError?.stringValue.isEmpty == false { return }
         let view = accountForSettings(key)
@@ -7315,7 +7323,10 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
             }
         }
         editingCaptionKey = nil
-        captionEditor?.delegate = nil; captionEditor?.removeFromSuperview(); captionEditor = nil
+        captionEditor?.delegate = nil
+        if let panel = window as? LimitsPanelWindow { panel.endKeyboardInput(keepVisible: keepPanelVisible) }
+        else { window?.makeFirstResponder(nil) }
+        captionEditor?.removeFromSuperview(); captionEditor = nil
         captionCounter?.removeFromSuperview(); captionCounter = nil
         captionError?.removeFromSuperview(); captionError = nil
         captionReset?.removeFromSuperview(); captionReset = nil
@@ -7348,6 +7359,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        dismissCaptionEditorIfOutside(p)
         if let h = panelHit(at: p, hits: hits) {
             if h.id == "refresh" && monitoringPaused() && !remoteRefreshAvailable(claude, codex) { return }
             switch h.id {
@@ -7497,10 +7509,39 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     }
 }
 
+/// The popup keeps its nonactivating/menu behavior except during explicit input.
+final class LimitsPanelWindow: NSPanel {
+    private(set) var keyboardInputEnabled = false
+    override var canBecomeKey: Bool { keyboardInputEnabled }
+    override var canBecomeMain: Bool { false }
+
+    func beginKeyboardInput(_ editor: NSView) {
+        keyboardInputEnabled = true
+        if #available(macOS 14.0, *) { NSApp.activate() }
+        else { NSApp.activate(ignoringOtherApps: true) }
+        makeKey()
+        makeFirstResponder(editor)
+    }
+    func endKeyboardInput(keepVisible: Bool = true) {
+        guard keyboardInputEnabled || isKeyWindow else { return }
+        makeFirstResponder(nil)
+        keyboardInputEnabled = false
+        if isKeyWindow {
+            // Let AppKit resign the key window through ordering; resignKey()
+            // is a system notification hook and must not be called directly.
+            let restore = keepVisible && isVisible
+            orderOut(nil)
+            if restore { orderFrontRegardless() }
+        }
+    }
+}
+
 final class PanelController {
-    let panel: NSPanel
+    let panel: LimitsPanelWindow
     let view: LimitsPanelView
     var monitor: Any?
+    var localMonitor: Any?
+    private weak var anchorWindow: NSWindow?
     var onInterval: ((TimeInterval) -> Void)? { didSet { view.onInterval = onInterval } }
     var onRefresh: (() -> Void)? { didSet { view.onRefresh = onRefresh } }
     var onQuit: (() -> Void)? { didSet { view.onQuit = onQuit } }
@@ -7510,12 +7551,13 @@ final class PanelController {
         let frame = NSRect(x: 0, y: 0, width: PANEL_W, height: PANEL_H)
         view = LimitsPanelView(frame: frame)
         view.wantsLayer = true
-        panel = NSPanel(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel = LimitsPanelWindow(contentRect: frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
         panel.level = .popUpMenu
         panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
         panel.contentView = view
     }
@@ -7555,19 +7597,162 @@ final class PanelController {
         panel.setFrame(NSRect(origin: origin, size: NSSize(width: PANEL_W, height: mainH)), display: false)
         view.needsDisplay = true
         panel.orderFrontRegardless()
+        installDismissMonitors(anchorWindow: button.window)
+    }
+
+    fileprivate func installDismissMonitors(anchorWindow: NSWindow?) {
+        if let m = monitor { NSEvent.removeMonitor(m) }
+        if let m = localMonitor { NSEvent.removeMonitor(m) }
+        self.anchorWindow = anchorWindow
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hide()
         }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.handleLocalPointerDown(event) ?? event
+        }
+    }
+
+    fileprivate func handleLocalPointerDown(_ event: NSEvent) -> NSEvent {
+        guard panel.isVisible else { return event }
+        if event.window === panel {
+            view.dismissCaptionEditorIfOutside(view.convert(event.locationInWindow, from: nil))
+        } else if let anchor = anchorWindow, event.window === anchor {
+            // The status-item action owns its toggle. Hiding on mouseDown here
+            // would make the later action reopen the just-hidden popup.
+        } else { hide() }
+        return event
     }
 
     func hide() {
+        view.finishCaptionEdit(.escape, keepPanelVisible: false)
+        panel.endKeyboardInput(keepVisible: false)
         panel.orderOut(nil)
         if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+        if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
+        anchorWindow = nil
         view.mode = .main; view.scroll = 0   // forget any sub-screen: next open starts on the main screen
     }
 }
 
 // MARK: - Reset sounds
+
+// C5-12: real WindowServer/field-editor checks, intentionally after AppKit.
+// MemorySelfTestDefaults and a synthetic frame keep this off credentials/network.
+func runCaptionEditorAppKitSelfTests(check: (Bool, String) -> Void) {
+    guard UserDefaults.standard is MemorySelfTestDefaults else {
+        check(false, "C5-12 memory-only preferences installed"); return
+    }
+    let defaults = UserDefaults.standard
+    let savedArguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+    let savedCaptions = defaults.object(forKey: "localAccountCaptions")
+    let policy = NSApp.activationPolicy()
+    var arguments = savedArguments
+    arguments["lang"] = "en"; arguments["advanced"] = false
+    arguments["hiddenAccounts"] = [String]()
+    arguments.removeValue(forKey: "localAccountCaptions")
+    defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+    defaults.set([String: Any](), forKey: "localAccountCaptions")
+    _ = NSApp.setActivationPolicy(.accessory)
+    let legacy = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    legacy.isReleasedWhenClosed = false
+    print("C5-12 legacy NSPanel canBecomeKey=\(legacy.canBecomeKey); activation/key request is tested on the new popup")
+    legacy.close()
+    let controller = PanelController()
+    defer {
+        controller.hide(); controller.panel.close()
+        _ = NSApp.setActivationPolicy(policy)
+        defaults.set(savedCaptions, forKey: "localAccountCaptions")
+        defaults.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
+    }
+    let now = Date(), label = "c512000000000000"
+    let account = AccountView(product: "codex", label: label, historyKey: label, caption: "Team",
+        data: LimitData(session: 20, weekly: 40, asOf: now), isLocal: false, tier: nil,
+        usageDays: [:], machines: ["vps"], state: .fresh)
+    let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+        allViews: [account], visibleViews: [account], displayedViews: [account])
+    func waitFor(_ ready: () -> Bool) {
+        let end = Date().addingTimeInterval(1)
+        while !ready() && Date() < end {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+    }
+    withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+        let view = controller.view, panel = controller.panel
+        view.setMode(.settings)
+        panel.orderFrontRegardless(); view.displayIfNeeded()
+        controller.installDismissMonitors(anchorWindow: nil)
+        check(!panel.canBecomeKey && !panel.isKeyWindow && !panel.canBecomeMain,
+              "C5-12 ordinary borderless popup remains non-key/non-main")
+        check(panel.level == .popUpMenu && !panel.hidesOnDeactivate
+              && panel.styleMask.contains(.nonactivatingPanel), "C5-12 popup presentation policy retained")
+        let key = remoteAccountID(account)
+        check(view.hits.contains { $0.id == "edit:" + key }, "C5-12 actual Settings pencil exists")
+        func start() -> (NSTextField, NSTextView)? {
+            view.beginCaptionEdit(key)
+            waitFor { panel.isKeyWindow && view.captionEditor?.currentEditor() != nil }
+            guard let editor = view.captionEditor, let field = editor.currentEditor() as? NSTextView else {
+                check(false, "C5-12 native field editor acquired"); return nil
+            }
+            check(editor.isEditable && editor.isSelectable && panel.canBecomeKey && panel.isKeyWindow
+                  && (panel.firstResponder === editor || panel.firstResponder === field),
+                  "C5-12 editing panel is key and native editor is first responder")
+            return (editor, field)
+        }
+        guard let (editor, field) = start() else { return }
+        field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
+        field.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+        waitFor { view.captionDraft == "TeamX" }
+        check(editor.stringValue == "TeamX" && view.captionDraft == "TeamX"
+              && view.captionCounter?.stringValue == "5/32",
+              "C5-12 insertText changes actual draft and counter without calling the delegate by hand")
+        field.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil && editor.superview == nil
+              && view.captionCounter == nil && panel.isVisible,
+              "C5-12 Esc removes editor and key eligibility while keeping the popup open")
+        check(localAccountCaptions().isEmpty, "C5-12 Esc does not save the draft")
+        if let (_, enterField) = start() {
+            enterField.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+            check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
+                  && localAccountCaptions()[label]?.text == "Team", "C5-12 Enter saves and releases key focus")
+        }
+        if let _ = start() {
+            view.captionReset?.performClick(nil)
+            check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
+                  && localAccountCaptions()[label]?.text == "", "C5-12 Reset saves tombstone and releases key focus")
+        }
+        if let _ = start() {
+            guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 4, y: 4),
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+                check(false, "C5-12 native in-panel mouse event"); return
+            }
+            check(controller.handleLocalPointerDown(event) === event && view.captionEditor == nil
+                  && !panel.isKeyWindow && panel.isVisible, "C5-12 click outside the field cancels without hiding popup")
+        }
+        if let _ = start() {
+            let anchor = NSWindow(contentRect: NSRect(x: 10, y: 10, width: 20, height: 20),
+                styleMask: .borderless, backing: .buffered, defer: false)
+            anchor.isReleasedWhenClosed = false
+            anchor.orderBack(nil)
+            defer { anchor.orderOut(nil); anchor.close() }
+            guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: anchor.windowNumber,
+                context: nil, eventNumber: 2, clickCount: 1, pressure: 1) else {
+                check(false, "C5-12 native outside-window mouse event"); return
+            }
+            controller.installDismissMonitors(anchorWindow: anchor)
+            check(event.window === anchor && controller.handleLocalPointerDown(event) === event
+                  && panel.isVisible && view.captionEditor != nil,
+                  "C5-12 status-item window defers dismissal to its toggle, preventing reopen")
+            controller.installDismissMonitors(anchorWindow: nil)
+            check(controller.handleLocalPointerDown(event) === event,
+                  "C5-12 outside app-window click is forwarded after dismissal")
+            check(!panel.isVisible && !panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
+                  && controller.monitor == nil && controller.localMonitor == nil,
+                  "C5-12 outside-window hide cancels edit and removes global/local monitors")
+        }
+    }
+}
 
 struct ResetSound { let id: String; let ru: String; let en: String; let file: String
     var name: String { tr(ru, en) } }
@@ -9307,6 +9492,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     let delegate = AppDelegate()
     _ = NSApplication.shared  // AppKit-only fixture panel; applicationDidFinishLaunching is never called.
     delegate.panelCtrl = PanelController()
+    check(!delegate.panelCtrl.panel.canBecomeKey && !delegate.panelCtrl.panel.isKeyWindow,
+          "ordinary popup startup does not acquire keyboard focus")
     delegate.publishAutoIntervals()
     check(delegate.panelCtrl.view.autoIntervals == ["claude": 14400, "codex": 900]
           && delegate.panelCtrl.view.needsDisplay && delegate.interval == 1800,
@@ -9738,6 +9925,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     SYNC_PREVIEW = SyncUIState()
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
+    runCaptionEditorAppKitSelfTests(check: check)
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
           "Auto selection uses provider snapshots independently of the saved fixed interval")

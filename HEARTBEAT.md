@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · живой C5 editor focus поверх `739974f`
+
+- **Дефект владельца:** на Mac 3.3.1 карандаш создаёт поле, но клавиатурного фокуса/ввода нет. Код подтверждает отсутствие activate/makeKey и собственного key-policy у обычного borderless NSPanel; значение canBecomeKey старого NSPanel здесь без Mac не измерено (диагностика добавлена в C5-12). Прежние GREEN модели/PNG не покрывали настоящий firstResponder/ввод.
+- **Исправление:** LimitsPanelWindow разрешает key только при открытом редакторе, main никогда; explicit activate (14+ activate(), 13 fallback), makeKey, makeFirstResponder. Enter/Esc/reset/outside-field отменяют/закрывают editor и key-gate; key снимается через orderOut/повторный non-key orderFront, без прямого resignKey. Hide не перепоказывает окно и снимает оба монитора. Local+global clicks покрывают собственные/чужие окна, status-item window оставлен его toggle, чтобы не было hide→reopen.
+- **Тесты/урок019:** новый C5-12 после старых AppKit-наборов до manifest: key/firstResponder/native insertText→draft+counter, Esc/Enter/reset, клики вне поля/окна, status toggle и очистка monitor tokens. Startup старого AppKit-теста дополнен non-key assertion. C3-10 bitmap/manifest, Manual, Settings, Auto, Auth и GitHub перечитаны: иных key/firstResponder ожиданий нет. Вводное поле одно; counter/error — labels. Чистого Foundation-предиката не вводили: gate — состояние NSPanel, проверяется под AppKit. Подробности в docs/c5-appkit-audit.md.
+- **Валидация:** Swift/AppKit здесь не запускаются, C5-12 RED до Mac с WindowServer; статические баланс Swift, регистрация в хвосте, bash -n build.sh и git diff --check PASS. Python не запускался, linux/ не менялся; без внутренних агентов, своего ревью и Git-мутаций. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · AppKit-геометрия поверх `6597268`
 
 - **Mac:** C1 75, C4 730, C2 33, C3 A 590, C3 B 818, C5 481 — 0 FAIL под удалёнными руками, затем ожидаемый134 на AppKit. Терминал владельца нарисовал209 C3 PNG, затем exit1 на Manual refresh UI: старая формула Simple с32pt footer; финальный manifest/следующие наборы не выполнены.
