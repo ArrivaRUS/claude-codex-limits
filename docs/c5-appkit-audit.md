@@ -106,3 +106,29 @@ check и сводку checks/failures. Policy failure не блокирует in
 ошибки mouse events также не вызывают ранний выход. Только caller после возврата
 набора и его cleanup вызывает прежний fail-fast check; manifest при failures
 по-прежнему не записывается. Ожидания key/ввода/счётчика/выходов не ослаблялись.
+
+## Принятые находки fix4 после `d8a7e21`
+
+Владелец принял F1/F2 major и F3/F5/F7/F8 minor из независимого GLM-review
+`739974f..26adc0d`. Нового собственного ревью не выполнялось.
+
+| Находка | Изменение и C5-12 |
+|---|---|
+| F1 | Каждая фаза начинает с NSApp.deactivate/inactive baseline; после begin требуется NSApp.isActive. X, Return, Escape — NSEvent.keyDown/keyUp через NSApp.sendEvent. Draft/5/32 и выходы проверяются по результату dispatch, без прямых insertText/doCommand. |
+| F2 | Проверяются оба monitor token. Клики по элементам редактора/якорю/снаружи идут NSApp.sendEvent; счётчик увеличивается внутри установленного local-monitor callback. Прямого вызова handler из теста больше нет. |
+| F3 | До активации запоминается frontmostApplication. На выходе — cooperative yield/activate14+ или fallback13, отсутствие/завершение/отказ → deactivate. Если пользователь уже выбрал другую app, её фокус не перехватывается. C5-12 проверяет inactive и прежнюю foreground app на выходах. |
+| F5 | Counter, видимая error line, Reset и карандаш того же key — части editing area. Повторный begin того же key не пересоздаёт editor и не сбрасывает draft. Реальные клики проверяют identity editor и TeamX. |
+| F7 | controller.panel.isReleasedWhenClosed=false задан до defer/close, проверяется явно; legacy/anchor сохраняют прежние false. |
+| F8 | Неверный host отклоняется assertionFailure+return до создания поля; fallback makeFirstResponder удалён. Отдельного теста нет по брифу владельца. |
+
+Фокус возвращается асинхронно. Generation не даёт старому завершению отобрать
+его у новой правки (включая переключение аккаунта). Только если после150мс
+передачи панель всё ещё key, используется orderOut/повторный non-key show;
+обычный путь больше не перепоказывает панель. Прямой resignKey остаётся
+запрещённым системным hook по Apple (ссылка выше); C5-12 печатает число ordering
+fallbacks вместо обещания, что на любой версии AppKit они никогда не нужны.
+
+По019 пересмотрены старые startup non-key assertion и C3-10/Manual/Settings/
+Auto/Auth/GitHub/manifest: они не завершают активную native-правку, их ожидания
+сохраняются. Immediate post-exit assertions самого C5-12 теперь ждут реальной
+передачи фокуса. Число PNG не меняется. Проверки остаются RED до Mac/WindowServer.

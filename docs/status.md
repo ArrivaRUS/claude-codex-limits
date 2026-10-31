@@ -1,4 +1,4 @@
-> C5 `26adc0d`: модельные GREEN; WindowServer прогон7892 OK остановлен общим policy assertion C5-12 до ввода. Shared constructor исправлен: custom popup level после floating setter; три отдельные actual/expected проверки и локальный collector дают выполнить функциональные фазы до итогового fail-fast гейта. C5-12 RED до Mac; Python не запускался, один агент без своего ревью.
+> C5 поверх `d8a7e21`: принятые находки GLM fix4 F1/F2/F3/F5/F7/F8 реализованы. C5-12 проверяет inactive→active NSApp и key/mouse dispatch через sendEvent/реальный local monitor; возвращается previous app, protected clicks сохраняют draft, host mismatch отказ. C5-12 RED до Mac; ordering только запасной путь, PNG count прежний. Python/агенты/своё ревью не запускались.
 
 > Актуализация 2026-10-31: C1–C4 приняты, включая живую публикацию macOS 3.3.0. C5 / 3.3.1 — рабочий патч подписей и долгов D4-а/б, D5, D6; независимое Astra-ревью закрыто, Linux 806→817 tests / 0→0 failures / 25→25 sandbox errors / 50→51 skips; Mac-валидация ожидается (HEARTBEAT). Исторический блок 2026-10-12 ниже не описывает текущую веху. VPS-публикация не обновлялась.
 

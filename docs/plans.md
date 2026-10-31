@@ -182,6 +182,7 @@ Mac `5a0bbcd`: C2 33/33 OK; C3 A 501/507 остановил C3 B/C5. Испра�
 Mac `6597268`: все модели GREEN (C1 75, C4 730, C2 33, C3 A590, C3 B818, C5 481). Полный AppKit после209 C3 PNG остановлен старым Manual Simple-height expectation; canvas/card/footer проверки переведены на общий layout и разложение высот без изменения геометрии. Аудит всего AppKit-хвоста — docs/c5-appkit-audit.md; повтор полного Mac/manifest требуется.
 Живой `739974f`: native editor focus не был покрыт bitmap-проверками. Временный key-режим панели, activate/makeKey/firstResponder, снятие key на выходах, local+global dismissal реализованы; C5-12 в AppKit-хвосте перед manifest RED до WindowServer. Урок019: старые startup/bitmap/Auto/Auth/GitHub/manifest проверки сверены; детали в docs/c5-appkit-audit.md.
 Mac `26adc0d`:7892 OK, C5-12 общий policy FAIL до ввода. Исправлен shared constructor floating→custom popup level; три диагностические policy-проверки, локальное накопление ошибок и независимые функциональные фазы. C5-12 RED до полного Mac-прогона; требования политики не ослаблены.
+Продолжение поверх `d8a7e21`: принятые F1/F2/F3/F5/F7/F8 GLM review fix4. Native C5-12 — inactive→active NSApp, NSEvent key/mouse dispatch и monitor callback proof, возврат previous app, protected drafts, retained test panel/host refusal. RED до Mac, ordering лишь условный fallback; старые AppKit-ожидания сверены по019.
 T1: П4-в.
 
 ## C6 — релиз и проверка гипотезы `[ ]`

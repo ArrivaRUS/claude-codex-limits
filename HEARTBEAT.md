@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · принятые F1/F2/F3/F5/F7/F8 поверх `d8a7e21`
+
+- **Основание:** владелец принял находки независимого GLM-5.3-Flash ревью fix4 (`739974f..26adc0d`); fix5 уже закоммичен владельцем в `d8a7e21`. Коду фокуса в том ревью дефектов не предъявлено; усиление покрытия выполняется по явному брифу, без собственного ревью/агентов.
+- **F1/F2:** C5-12 начинает фазы с inactive baseline, отдельно требует NSApp.isActive после begin; X/Return/Escape и запрещённый @ отправляет NSEvent.keyEvent→NSApp.sendEvent, без прямых insertText/doCommand. MouseDown также через NSApp.sendEvent, без прямого handleLocalPointerDown; nonnil local/global tokens проверяются, счётчик внутри production local-monitor callback доказывает прохождение диспетчеризации.
+- **F3/F5/F7/F8:** lease запоминает frontmost app до активации, возвращает её через cooperative activation14+/fallback13 либо deactivate; уже выбранное пользователем другое приложение не перехватывает. Перевод фокуса отложен и защищён generation при новой правке. Безусловный orderOut/orderFront убран; только если через150мс панель всё ещё key — ordering fallback (прямой resignKey запрещён Apple). Counter/error/same-account pencil защищены от отмены/пересоздания editor. Тестовый controller panel не autorelease при close. Неверный host даёт assertionFailure+отказ до создания editor, тихого fallback нет.
+- **Тест/остаток:** C5-12 проверяет native activation/key events/draft5/32, защищённые клики, возврат прежнего приложения на выходах, реальные local-monitor callbacks и cleanup. Сбор ошибок остаётся локальным до финального гейта. Старые startup/bitmap/Manual/Settings/Auto/Auth/GitHub/manifest expectations сверены по019, изменений геометрии/PNG counts нет. Swift/AppKit здесь не запускались, C5-12 RED до Mac; статические баланс/wiring/build syntax/diff checks PASS. Python/linux/Git-мутации не затронуты. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · C5-12 policy/агрегация поверх `26adc0d`
 
 - **Mac:** модельные наборы GREEN; полный WindowServer-прогон exit1 после7892 OK на общем C5-12 policy assertion, ввод ещё не выполнялся. Diagnostic подтвердил legacy NSPanel.canBecomeKey=false. Raw level/hides/mask старый assertion не печатал.

@@ -6959,7 +6959,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     private var mainScroller: NSScroller?
     fileprivate var captionEditor: NSTextField?
     fileprivate var captionCounter: NSTextField?
-    private var captionError: NSTextField?
+    fileprivate var captionError: NSTextField?
     fileprivate var captionReset: NSButton?
     private var editingCaptionKey: String?
     private var editingCaptionOriginal: String?
@@ -7244,6 +7244,14 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         captionError?.isHidden = !visible || captionError?.stringValue.isEmpty != false
     }
     fileprivate func beginCaptionEdit(_ key: String) {
+        guard let panel = window as? LimitsPanelWindow else {
+            assertionFailure("Caption editing requires LimitsPanelWindow")
+            return
+        }
+        if editingCaptionKey == key, let editor = captionEditor {
+            panel.beginKeyboardInput(editor)
+            return
+        }
         finishCaptionEdit(.escape)
         guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
         editingCaptionKey = key
@@ -7271,12 +7279,13 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         captionEditor = editor; captionCounter = counter; captionReset = reset
         captionError = error
         updateCaptionEditorFrame()
-        if let panel = window as? LimitsPanelWindow { panel.beginKeyboardInput(editor) }
-        else { window?.makeFirstResponder(editor) }
+        panel.beginKeyboardInput(editor)
     }
     fileprivate func dismissCaptionEditorIfOutside(_ point: CGPoint) {
-        guard editingCaptionKey != nil else { return }
-        if captionEditor?.frame.contains(point) == true || captionReset?.frame.contains(point) == true { return }
+        guard let key = editingCaptionKey else { return }
+        let controls: [NSView?] = [captionEditor, captionCounter, captionError, captionReset]
+        if controls.contains(where: { $0.map { !$0.isHidden && $0.frame.contains(point) } ?? false }) { return }
+        if hits.contains(where: { $0.id == "edit:" + key && $0.rect.contains(point) }) { return }
         finishCaptionEdit(.escape)
     }
     func controlTextDidChange(_ notification: Notification) {
@@ -7325,7 +7334,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         editingCaptionKey = nil
         captionEditor?.delegate = nil
         if let panel = window as? LimitsPanelWindow { panel.endKeyboardInput(keepVisible: keepPanelVisible) }
-        else { window?.makeFirstResponder(nil) }
+        else { assertionFailure("Caption editor lost its LimitsPanelWindow host") }
         captionEditor?.removeFromSuperview(); captionEditor = nil
         captionCounter?.removeFromSuperview(); captionCounter = nil
         captionError?.removeFromSuperview(); captionError = nil
@@ -7512,10 +7521,22 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
 /// The popup keeps its nonactivating/menu behavior except during explicit input.
 final class LimitsPanelWindow: NSPanel {
     private(set) var keyboardInputEnabled = false
+    private var previousApplication: NSRunningApplication?
+    private var focusGeneration = 0
+    private(set) var keyboardFocusOrderingFallbacks = 0
     override var canBecomeKey: Bool { keyboardInputEnabled }
     override var canBecomeMain: Bool { false }
 
     func beginKeyboardInput(_ editor: NSView) {
+        if !keyboardInputEnabled {
+            let previous = NSWorkspace.shared.frontmostApplication
+            if let previous = previous, previous.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                previousApplication = previous
+            } else if previousApplication?.isTerminated == true {
+                previousApplication = nil
+            }
+        }
+        focusGeneration += 1
         keyboardInputEnabled = true
         if #available(macOS 14.0, *) { NSApp.activate() }
         else { NSApp.activate(ignoringOtherApps: true) }
@@ -7526,12 +7547,41 @@ final class LimitsPanelWindow: NSPanel {
         guard keyboardInputEnabled || isKeyWindow else { return }
         makeFirstResponder(nil)
         keyboardInputEnabled = false
-        if isKeyWindow {
-            // Let AppKit resign the key window through ordering; resignKey()
-            // is a system notification hook and must not be called directly.
-            let restore = keepVisible && isVisible
-            orderOut(nil)
-            if restore { orderFrontRegardless() }
+        focusGeneration += 1
+        let generation = focusGeneration
+        // A new edit in the same click cancels this transfer and keeps the
+        // previous app, rather than bouncing focus between two account pencils.
+        DispatchQueue.main.async { [weak self] in
+            self?.restoreApplicationFocus(generation: generation, keepVisible: keepVisible)
+        }
+    }
+    private func restoreApplicationFocus(generation: Int, keepVisible: Bool) {
+        guard focusGeneration == generation, !keyboardInputEnabled else { return }
+        let previous = previousApplication
+        previousApplication = nil
+        // Do not steal focus back if the user has already clicked another app.
+        if NSApp.isActive {
+            if let previous = previous, !previous.isTerminated {
+                let accepted: Bool
+                if #available(macOS 14.0, *) {
+                    NSApp.yieldActivation(to: previous)
+                    accepted = previous.activate(from: NSRunningApplication.current, options: [])
+                } else {
+                    accepted = previous.activate(options: [.activateIgnoringOtherApps])
+                }
+                if !accepted { NSApp.deactivate() }
+            } else { NSApp.deactivate() }
+        }
+        // Activation is asynchronous. Usually it releases key status without
+        // ordering. Only a still-key nonactivating panel needs the public API
+        // fallback; resignKey() is a system hook, never a direct call.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self = self, self.focusGeneration == generation,
+                  !self.keyboardInputEnabled, self.isKeyWindow else { return }
+            let restore = keepVisible && self.isVisible
+            self.keyboardFocusOrderingFallbacks += 1
+            self.orderOut(nil)
+            if restore { self.orderFrontRegardless() }
         }
     }
 }
@@ -7541,6 +7591,7 @@ final class PanelController {
     let view: LimitsPanelView
     var monitor: Any?
     var localMonitor: Any?
+    private(set) var localPointerEventCount = 0
     private weak var anchorWindow: NSWindow?
     var onInterval: ((TimeInterval) -> Void)? { didSet { view.onInterval = onInterval } }
     var onRefresh: (() -> Void)? { didSet { view.onRefresh = onRefresh } }
@@ -7610,7 +7661,8 @@ final class PanelController {
             self?.hide()
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
-            self?.handleLocalPointerDown(event) ?? event
+            self?.localPointerEventCount += 1
+            return self?.handleLocalPointerDown(event) ?? event
         }
     }
 
@@ -7671,8 +7723,14 @@ func runCaptionEditorAppKitSelfTests() -> Int {
     print("C5-12 legacy setter order: popup level=\(legacyPopupLevel), after isFloatingPanel=true level=\(legacy.level.rawValue)")
     legacy.close()
     let controller = PanelController()
+    controller.panel.isReleasedWhenClosed = false
     defer {
-        controller.hide(); controller.panel.close()
+        controller.hide()
+        let end = Date().addingTimeInterval(1)
+        while NSApp.isActive && Date() < end {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        controller.panel.close()
         _ = NSApp.setActivationPolicy(policy)
         defaults.set(savedCaptions, forKey: "localAccountCaptions")
         defaults.setVolatileDomain(savedArguments, forName: UserDefaults.argumentDomain)
@@ -7689,6 +7747,30 @@ func runCaptionEditorAppKitSelfTests() -> Int {
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
         }
     }
+    func sendKey(_ characters: String, code: UInt16, ignoring: String? = nil,
+                 modifiers: NSEvent.ModifierFlags = [], phase: String) {
+        check(NSApp.isActive, "C5-12 key event starts in active app (\(phase), actual=\(NSApp.isActive))")
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: controller.panel.windowNumber,
+                context: nil, characters: characters, charactersIgnoringModifiers: ignoring ?? characters,
+                isARepeat: false, keyCode: code) else {
+                check(false, "C5-12 native key event allocation (\(phase))"); continue
+            }
+            NSApp.sendEvent(event)
+        }
+    }
+    func sendClick(_ point: CGPoint, in target: NSWindow, phase: String) {
+        let before = controller.localPointerEventCount
+        guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: point,
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.windowNumber,
+            context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
+            check(false, "C5-12 native mouse event allocation (\(phase))"); return
+        }
+        NSApp.sendEvent(event)
+        check(controller.localPointerEventCount > before,
+              "C5-12 NSApp.sendEvent traverses installed local monitor (\(phase), before=\(before), after=\(controller.localPointerEventCount))")
+    }
     withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
         let view = controller.view, panel = controller.panel
         let initializedLevel = panel.level.rawValue
@@ -7697,6 +7779,9 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         view.setMode(.settings)
         panel.orderFrontRegardless(); view.displayIfNeeded()
         controller.installDismissMonitors(anchorWindow: nil)
+        check(controller.localMonitor != nil && controller.monitor != nil,
+              "C5-12 local/global monitors registered")
+        check(!panel.isReleasedWhenClosed, "C5-12 test controller retains its closed panel")
         check(!panel.canBecomeKey && !panel.isKeyWindow && !panel.canBecomeMain,
               "C5-12 ordinary borderless popup remains non-key/non-main")
         check(panel.level == .popUpMenu,
@@ -7707,9 +7792,28 @@ func runCaptionEditorAppKitSelfTests() -> Int {
               "C5-12 popup nonactivatingPanel retained (initializedMask=\(initializedMask), actualMask=\(panel.styleMask.rawValue), actual=\(panel.styleMask.contains(.nonactivatingPanel)), expected=true)")
         let key = remoteAccountID(account)
         check(view.hits.contains { $0.id == "edit:" + key }, "C5-12 actual Settings pencil exists")
+        var previousApplication: NSRunningApplication?
+        func waitForExit(_ phase: String) {
+            waitFor { !panel.isKeyWindow && !NSApp.isActive }
+            check(!NSApp.isActive, "C5-12 app deactivated after edit (\(phase), actual=\(NSApp.isActive))")
+            if let previous = previousApplication, !previous.isTerminated {
+                waitFor { NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier }
+                check(NSWorkspace.shared.frontmostApplication?.processIdentifier == previous.processIdentifier,
+                      "C5-12 focus returned to previous app (\(phase))")
+            }
+            print("C5-12 key-ordering fallbacks after \(phase): \(panel.keyboardFocusOrderingFallbacks)")
+        }
         func start(_ phase: String) -> (NSTextField, NSTextView)? {
+            view.finishCaptionEdit(.escape)
+            waitFor { !panel.isKeyWindow }
+            NSApp.deactivate()
+            waitFor { !NSApp.isActive }
+            check(!NSApp.isActive, "C5-12 inactive activation baseline (\(phase))")
+            let front = NSWorkspace.shared.frontmostApplication
+            previousApplication = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
             view.beginCaptionEdit(key)
-            waitFor { panel.isKeyWindow && view.captionEditor?.currentEditor() != nil }
+            waitFor { NSApp.isActive && panel.isKeyWindow && view.captionEditor?.currentEditor() != nil }
+            check(NSApp.isActive, "C5-12 app activated by edit (\(phase), actual=\(NSApp.isActive))")
             guard let editor = view.captionEditor, let field = editor.currentEditor() as? NSTextView else {
                 check(false, "C5-12 native field editor acquired (\(phase), isKey=\(panel.isKeyWindow), editorExists=\(view.captionEditor != nil))")
                 view.finishCaptionEdit(.escape)
@@ -7722,37 +7826,49 @@ func runCaptionEditorAppKitSelfTests() -> Int {
         }
         if let (editor, field) = start("input/Esc") {
             field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
-            field.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+            sendKey("X", code: 7, ignoring: "x", modifiers: .shift, phase: "input X")
             waitFor { view.captionDraft == "TeamX" }
             check(editor.stringValue == "TeamX" && view.captionDraft == "TeamX"
                   && view.captionCounter?.stringValue == "5/32",
-                  "C5-12 insertText changes actual draft and counter without calling the delegate by hand")
-            field.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+                  "C5-12 dispatched X key changes actual draft and counter")
+            if let counter = view.captionCounter {
+                sendClick(view.convert(CGPoint(x: counter.frame.midX, y: counter.frame.midY), to: nil), in: panel, phase: "counter")
+                check(view.captionEditor === editor && view.captionDraft == "TeamX", "C5-12 counter click preserves editor and draft")
+            } else { check(false, "C5-12 counter exists") }
+            sendKey("@", code: 19, ignoring: "2", modifiers: .shift, phase: "invalid input/error")
+            waitFor { view.captionError?.isHidden == false }
+            if let error = view.captionError, !error.isHidden {
+                sendClick(view.convert(CGPoint(x: error.frame.midX, y: error.frame.midY), to: nil), in: panel, phase: "error line")
+                check(view.captionEditor === editor && view.captionDraft == "TeamX", "C5-12 error click preserves editor and draft")
+            } else { check(false, "C5-12 validation error is visible") }
+            if let pencil = view.hits.first(where: { $0.id == "edit:" + key }) {
+                sendClick(view.convert(CGPoint(x: pencil.rect.midX, y: pencil.rect.midY), to: nil), in: panel, phase: "same pencil")
+                check(view.captionEditor === editor && view.captionDraft == "TeamX", "C5-12 same-account pencil preserves editor and draft")
+            } else { check(false, "C5-12 pencil remains available") }
+            sendKey("\u{1B}", code: 53, phase: "Escape")
+            waitForExit("Escape")
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil && editor.superview == nil
                   && view.captionCounter == nil && panel.isVisible,
                   "C5-12 Esc removes editor and key eligibility while keeping the popup open")
         }
         check(localAccountCaptions().isEmpty, "C5-12 Esc does not save the draft")
-        if let (_, enterField) = start("Enter") {
-            enterField.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        if let _ = start("Enter") {
+            sendKey("\r", code: 36, phase: "Return")
+            waitForExit("Return")
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
                   && localAccountCaptions()[label]?.text == "Team", "C5-12 Enter saves and releases key focus")
         }
         if let _ = start("Reset") {
             view.captionReset?.performClick(nil)
+            waitForExit("Reset")
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
                   && localAccountCaptions()[label]?.text == "", "C5-12 Reset saves tombstone and releases key focus")
         }
         if let _ = start("outside field") {
-            if let event = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 4, y: 4),
-                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1) {
-                check(controller.handleLocalPointerDown(event) === event && view.captionEditor == nil
-                      && !panel.isKeyWindow && panel.isVisible, "C5-12 click outside the field cancels without hiding popup")
-            } else {
-                check(false, "C5-12 native in-panel mouse event")
-                view.finishCaptionEdit(.escape)
-            }
+            sendClick(NSPoint(x: 4, y: 4), in: panel, phase: "outside field")
+            waitForExit("outside field")
+            check(view.captionEditor == nil && !panel.isKeyWindow && panel.isVisible,
+                  "C5-12 dispatched outside-field click cancels without hiding popup")
         }
         if let _ = start("outside window/status anchor") {
             let anchor = NSWindow(contentRect: NSRect(x: 10, y: 10, width: 20, height: 20),
@@ -7760,22 +7876,18 @@ func runCaptionEditorAppKitSelfTests() -> Int {
             anchor.isReleasedWhenClosed = false
             anchor.orderBack(nil)
             defer { anchor.orderOut(nil); anchor.close() }
-            if let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
-                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: anchor.windowNumber,
-                context: nil, eventNumber: 2, clickCount: 1, pressure: 1) {
-                controller.installDismissMonitors(anchorWindow: anchor)
-                check(event.window === anchor && controller.handleLocalPointerDown(event) === event
-                      && panel.isVisible && view.captionEditor != nil,
-                      "C5-12 status-item window defers dismissal to its toggle, preventing reopen")
-                controller.installDismissMonitors(anchorWindow: nil)
-                check(controller.handleLocalPointerDown(event) === event,
-                      "C5-12 outside app-window click is forwarded after dismissal")
-                check(!panel.isVisible && !panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
-                      && controller.monitor == nil && controller.localMonitor == nil,
-                      "C5-12 outside-window hide cancels edit and removes global/local monitors")
-            } else {
-                check(false, "C5-12 native outside-window mouse event")
-            }
+            controller.installDismissMonitors(anchorWindow: anchor)
+            check(controller.localMonitor != nil && controller.monitor != nil, "C5-12 anchor monitors registered")
+            sendClick(.zero, in: anchor, phase: "status anchor")
+            check(panel.isVisible && view.captionEditor != nil,
+                  "C5-12 status-item window defers dismissal to its toggle, preventing reopen")
+            controller.installDismissMonitors(anchorWindow: nil)
+            check(controller.localMonitor != nil && controller.monitor != nil, "C5-12 outside monitors registered")
+            sendClick(.zero, in: anchor, phase: "outside own window")
+            waitForExit("outside own window")
+            check(!panel.isVisible && !panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
+                  && controller.monitor == nil && controller.localMonitor == nil,
+                  "C5-12 dispatched outside-window hide cancels edit and removes global/local monitors")
         }
     }
     return failures
