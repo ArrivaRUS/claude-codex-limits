@@ -169,7 +169,7 @@ T1: П4-а (мак), П5-а.
 Валидация: `"$APP" --sync-selftest` (C4-01…, `decide-vectors.json` общие с A3-01), `"$APP" --auth-selftest`; Т11, Т23–Т25 (Swift), Т31–Т32 (Swift), Т35 (`noRedirects` уже есть — регресс).
 T1: П3-а, П3-д, П7, §5 (регресс).
 
-## C5 — подписи и список аккаунтов (Should) `[~]` (реализация 3.3.1, независимое ревью завершено; Linux 806→817 / 0 новых ошибок; Swift/Mac и живой обмен ожидают проверки)
+## C5 — подписи и список аккаунтов (Should) `[~]` (2026-10-31: код, селфтесты и PNG приняты — мак `739974f`, 3.3.1: C5 481/481, полный AppKit-прогон 9467 OK / 0 FAIL, 523 PNG; decisions 2026-10-31; остаток — живая проверка подписи мак → VPS после выкладки `ccl-sync` по «да» владельца)
 
 Зависит от: C4. Файлы: `Sources/LimitsMonitor.swift`, `Sources/RemoteLimits.swift`, `Sources/RemoteLimitsC3B.swift`, `Sources/RemoteLimitsC5SelfTests.swift`, Linux accounts/читатели и общая golden-фикстура.
 Задачи: timestamped captions по метке, публикация только своих правок, merge позднего `setAt` между всеми машинами, пустой tombstone сброса; редактор по UX §9.3, NFC/≤32/Cc/Cf/newline cleaning и отказ `@`/`/` до сохранения. Caption меняет metaHash без pushHash. Linux показывает результат в status и tooltip трея.
