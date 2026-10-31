@@ -2,6 +2,13 @@
 
 > Живой статус проекта. Читается на старте каждой сессии Юрки. Обновлён: 2026-10-31.
 
+## 🔁 Точка возобновления · 2026-10-31 · C5-12 policy/агрегация поверх `26adc0d`
+
+- **Mac:** модельные наборы GREEN; полный WindowServer-прогон exit1 после7892 OK на общем C5-12 policy assertion, ввод ещё не выполнялся. Diagnostic подтвердил legacy NSPanel.canBecomeKey=false. Raw level/hides/mask старый assertion не печатал.
+- **Причина по коду/API:** shared PanelController сначала ставил popUpMenu, затем isFloatingPanel=true, который назначает NSFloatingWindowLevel; ошибочный порядок был и в боевом пути, и в тесте. hidesOnDeactivate=false задан явно, nonactivatingPanel в конструкторе и дальше не меняется; setActivationPolicy в тесте вызывается до создания контроллера. Теперь custom level назначается после floating-настроек. Точные raw значения подтвердит повтор Mac (legacy-order diagnostic + initialized/after-show snapshots).
+- **C5-12:** три независимых policy-check с actual/expected (и исходным initialized). Локальный collector печатает все OK/FAIL, возвращает failures; внешний fail-fast гейт только после завершения и cleanup набора. Policy FAIL не мешает попыткам input/Esc/Enter/Reset/outside. Нет field editor → явный FAIL конкретной фазы и cleanup, последующие независимые фазы продолжаются; guards на factory mouse event также больше не прерывают набор. Ожидания не ослаблены.
+- **Валидация:** Swift/AppKit здесь не исполняются; C5-12 RED до Mac. Баланс Swift, статическая сверка constructor order/трёх независимых checks/collector/регистрации и cleanup, bash -n build.sh, git diff --check PASS. Python не запускался, linux/ не менялся; один агент, без своего ревью и Git-мутаций. Session `01a190bb-a833-7d93-8e09-ece7adb37587`.
+
 ## 🔁 Точка возобновления · 2026-10-31 · живой C5 editor focus поверх `739974f`
 
 - **Дефект владельца:** на Mac 3.3.1 карандаш создаёт поле, но клавиатурного фокуса/ввода нет. Код подтверждает отсутствие activate/makeKey и собственного key-policy у обычного borderless NSPanel; значение canBecomeKey старого NSPanel здесь без Mac не измерено (диагностика добавлена в C5-12). Прежние GREEN модели/PNG не покрывали настоящий firstResponder/ввод.

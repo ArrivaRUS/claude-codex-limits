@@ -7555,10 +7555,12 @@ final class PanelController {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.level = .popUpMenu
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
+        // isFloatingPanel assigns the floating level. Apply our custom popup
+        // level after that setter, in the shared production/test constructor.
+        panel.level = .popUpMenu
         panel.contentView = view
     }
 
@@ -7638,9 +7640,16 @@ final class PanelController {
 
 // C5-12: real WindowServer/field-editor checks, intentionally after AppKit.
 // MemorySelfTestDefaults and a synthetic frame keep this off credentials/network.
-func runCaptionEditorAppKitSelfTests(check: (Bool, String) -> Void) {
+func runCaptionEditorAppKitSelfTests() -> Int {
+    var failures = 0, checks = 0
+    func check(_ ok: Bool, _ message: String) {
+        checks += 1
+        if !ok { failures += 1 }
+        print("\(ok ? "OK" : "FAIL") \(message)")
+    }
+    defer { print("\(failures == 0 ? "OK" : "FAIL") C5-12 native focus: \(checks) checks, \(failures) failures") }
     guard UserDefaults.standard is MemorySelfTestDefaults else {
-        check(false, "C5-12 memory-only preferences installed"); return
+        check(false, "C5-12 memory-only preferences installed"); return failures
     }
     let defaults = UserDefaults.standard
     let savedArguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
@@ -7656,6 +7665,10 @@ func runCaptionEditorAppKitSelfTests(check: (Bool, String) -> Void) {
     let legacy = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     legacy.isReleasedWhenClosed = false
     print("C5-12 legacy NSPanel canBecomeKey=\(legacy.canBecomeKey); activation/key request is tested on the new popup")
+    legacy.level = .popUpMenu
+    let legacyPopupLevel = legacy.level.rawValue
+    legacy.isFloatingPanel = true
+    print("C5-12 legacy setter order: popup level=\(legacyPopupLevel), after isFloatingPanel=true level=\(legacy.level.rawValue)")
     legacy.close()
     let controller = PanelController()
     defer {
@@ -7678,80 +7691,94 @@ func runCaptionEditorAppKitSelfTests(check: (Bool, String) -> Void) {
     }
     withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
         let view = controller.view, panel = controller.panel
+        let initializedLevel = panel.level.rawValue
+        let initializedHides = panel.hidesOnDeactivate
+        let initializedMask = panel.styleMask.rawValue
         view.setMode(.settings)
         panel.orderFrontRegardless(); view.displayIfNeeded()
         controller.installDismissMonitors(anchorWindow: nil)
         check(!panel.canBecomeKey && !panel.isKeyWindow && !panel.canBecomeMain,
               "C5-12 ordinary borderless popup remains non-key/non-main")
-        check(panel.level == .popUpMenu && !panel.hidesOnDeactivate
-              && panel.styleMask.contains(.nonactivatingPanel), "C5-12 popup presentation policy retained")
+        check(panel.level == .popUpMenu,
+              "C5-12 popup level retained (initialized=\(initializedLevel), actual=\(panel.level.rawValue), expected=\(NSWindow.Level.popUpMenu.rawValue))")
+        check(!panel.hidesOnDeactivate,
+              "C5-12 popup hidesOnDeactivate retained (initialized=\(initializedHides), actual=\(panel.hidesOnDeactivate), expected=false)")
+        check(panel.styleMask.contains(.nonactivatingPanel),
+              "C5-12 popup nonactivatingPanel retained (initializedMask=\(initializedMask), actualMask=\(panel.styleMask.rawValue), actual=\(panel.styleMask.contains(.nonactivatingPanel)), expected=true)")
         let key = remoteAccountID(account)
         check(view.hits.contains { $0.id == "edit:" + key }, "C5-12 actual Settings pencil exists")
-        func start() -> (NSTextField, NSTextView)? {
+        func start(_ phase: String) -> (NSTextField, NSTextView)? {
             view.beginCaptionEdit(key)
             waitFor { panel.isKeyWindow && view.captionEditor?.currentEditor() != nil }
             guard let editor = view.captionEditor, let field = editor.currentEditor() as? NSTextView else {
-                check(false, "C5-12 native field editor acquired"); return nil
+                check(false, "C5-12 native field editor acquired (\(phase), isKey=\(panel.isKeyWindow), editorExists=\(view.captionEditor != nil))")
+                view.finishCaptionEdit(.escape)
+                return nil
             }
             check(editor.isEditable && editor.isSelectable && panel.canBecomeKey && panel.isKeyWindow
                   && (panel.firstResponder === editor || panel.firstResponder === field),
-                  "C5-12 editing panel is key and native editor is first responder")
+                  "C5-12 editing panel is key and native editor is first responder (\(phase), actualKey=\(panel.isKeyWindow))")
             return (editor, field)
         }
-        guard let (editor, field) = start() else { return }
-        field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
-        field.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
-        waitFor { view.captionDraft == "TeamX" }
-        check(editor.stringValue == "TeamX" && view.captionDraft == "TeamX"
-              && view.captionCounter?.stringValue == "5/32",
-              "C5-12 insertText changes actual draft and counter without calling the delegate by hand")
-        field.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
-        check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil && editor.superview == nil
-              && view.captionCounter == nil && panel.isVisible,
-              "C5-12 Esc removes editor and key eligibility while keeping the popup open")
+        if let (editor, field) = start("input/Esc") {
+            field.setSelectedRange(NSRange(location: field.string.utf16.count, length: 0))
+            field.insertText("X", replacementRange: NSRange(location: NSNotFound, length: 0))
+            waitFor { view.captionDraft == "TeamX" }
+            check(editor.stringValue == "TeamX" && view.captionDraft == "TeamX"
+                  && view.captionCounter?.stringValue == "5/32",
+                  "C5-12 insertText changes actual draft and counter without calling the delegate by hand")
+            field.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+            check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil && editor.superview == nil
+                  && view.captionCounter == nil && panel.isVisible,
+                  "C5-12 Esc removes editor and key eligibility while keeping the popup open")
+        }
         check(localAccountCaptions().isEmpty, "C5-12 Esc does not save the draft")
-        if let (_, enterField) = start() {
+        if let (_, enterField) = start("Enter") {
             enterField.doCommand(by: #selector(NSResponder.insertNewline(_:)))
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
                   && localAccountCaptions()[label]?.text == "Team", "C5-12 Enter saves and releases key focus")
         }
-        if let _ = start() {
+        if let _ = start("Reset") {
             view.captionReset?.performClick(nil)
             check(!panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
                   && localAccountCaptions()[label]?.text == "", "C5-12 Reset saves tombstone and releases key focus")
         }
-        if let _ = start() {
-            guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 4, y: 4),
+        if let _ = start("outside field") {
+            if let event = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 4, y: 4),
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
-                context: nil, eventNumber: 1, clickCount: 1, pressure: 1) else {
-                check(false, "C5-12 native in-panel mouse event"); return
+                context: nil, eventNumber: 1, clickCount: 1, pressure: 1) {
+                check(controller.handleLocalPointerDown(event) === event && view.captionEditor == nil
+                      && !panel.isKeyWindow && panel.isVisible, "C5-12 click outside the field cancels without hiding popup")
+            } else {
+                check(false, "C5-12 native in-panel mouse event")
+                view.finishCaptionEdit(.escape)
             }
-            check(controller.handleLocalPointerDown(event) === event && view.captionEditor == nil
-                  && !panel.isKeyWindow && panel.isVisible, "C5-12 click outside the field cancels without hiding popup")
         }
-        if let _ = start() {
+        if let _ = start("outside window/status anchor") {
             let anchor = NSWindow(contentRect: NSRect(x: 10, y: 10, width: 20, height: 20),
                 styleMask: .borderless, backing: .buffered, defer: false)
             anchor.isReleasedWhenClosed = false
             anchor.orderBack(nil)
             defer { anchor.orderOut(nil); anchor.close() }
-            guard let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
+            if let event = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero,
                 modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: anchor.windowNumber,
-                context: nil, eventNumber: 2, clickCount: 1, pressure: 1) else {
-                check(false, "C5-12 native outside-window mouse event"); return
+                context: nil, eventNumber: 2, clickCount: 1, pressure: 1) {
+                controller.installDismissMonitors(anchorWindow: anchor)
+                check(event.window === anchor && controller.handleLocalPointerDown(event) === event
+                      && panel.isVisible && view.captionEditor != nil,
+                      "C5-12 status-item window defers dismissal to its toggle, preventing reopen")
+                controller.installDismissMonitors(anchorWindow: nil)
+                check(controller.handleLocalPointerDown(event) === event,
+                      "C5-12 outside app-window click is forwarded after dismissal")
+                check(!panel.isVisible && !panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
+                      && controller.monitor == nil && controller.localMonitor == nil,
+                      "C5-12 outside-window hide cancels edit and removes global/local monitors")
+            } else {
+                check(false, "C5-12 native outside-window mouse event")
             }
-            controller.installDismissMonitors(anchorWindow: anchor)
-            check(event.window === anchor && controller.handleLocalPointerDown(event) === event
-                  && panel.isVisible && view.captionEditor != nil,
-                  "C5-12 status-item window defers dismissal to its toggle, preventing reopen")
-            controller.installDismissMonitors(anchorWindow: nil)
-            check(controller.handleLocalPointerDown(event) === event,
-                  "C5-12 outside app-window click is forwarded after dismissal")
-            check(!panel.isVisible && !panel.isKeyWindow && !panel.canBecomeKey && view.captionEditor == nil
-                  && controller.monitor == nil && controller.localMonitor == nil,
-                  "C5-12 outside-window hide cancels edit and removes global/local monitors")
         }
     }
+    return failures
 }
 
 struct ResetSound { let id: String; let ru: String; let en: String; let file: String
@@ -9925,7 +9952,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     SYNC_PREVIEW = SyncUIState()
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
-    runCaptionEditorAppKitSelfTests(check: check)
+    let captionFocusFailures = runCaptionEditorAppKitSelfTests()
+    check(captionFocusFailures == 0, "C5-12 native focus suite (\(captionFocusFailures) failures; all independent checks completed)")
     try! fm.removeItem(atPath: root)
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
           "Auto selection uses provider snapshots independently of the saved fixed interval")

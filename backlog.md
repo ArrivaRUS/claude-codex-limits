@@ -1,6 +1,6 @@
 # Бэклог
 
-- C5 `739974f`: live editor focus исправлен (temporary key, activation, firstResponder, dismissal); C5-12 native typing RED до Mac. Старые AppKit-наборы сверены по уроку019; остаток — полный Mac-прогон и живая подпись/сброс между машинами.
+- C5 `26adc0d`: до ввода C5-12 падала policy; исправлены shared constructor floating→popup level, три actual/expected assertions и агрегация без раннего exit. Остаток — Mac C5-12 с WindowServer и живая подпись/сброс между машинами.
 
 - В работе, C5 / macOS 3.3.1: подписи аккаунтов между машинами; долги C4 D4-а/б, D5, D6. Тесты C5-01…06 и Mac/native проверка — [план](docs/plans.md#c5--подписи-и-список-аккаунтов-should--), [тест-план](docs/test-plan-remote-limits.md). Стабильная подпись/ACL Связки ключей остаются в C6.
 

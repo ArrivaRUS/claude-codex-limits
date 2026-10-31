@@ -1,4 +1,4 @@
-> C5 `739974f`: прежние модельные/AppKit bitmap проверки GREEN, но живая правка подписи не получила клавиатуру. Исправлен временный key-режим NSPanel, activate/firstResponder, снятие key на выходах и local/global dismissal. Новый C5-12 native focus RED до Mac с WindowServer; урок019 применён к старым AppKit-наборам. Python не запускался, один агент без собственного ревью.
+> C5 `26adc0d`: модельные GREEN; WindowServer прогон7892 OK остановлен общим policy assertion C5-12 до ввода. Shared constructor исправлен: custom popup level после floating setter; три отдельные actual/expected проверки и локальный collector дают выполнить функциональные фазы до итогового fail-fast гейта. C5-12 RED до Mac; Python не запускался, один агент без своего ревью.
 
 > Актуализация 2026-10-31: C1–C4 приняты, включая живую публикацию macOS 3.3.0. C5 / 3.3.1 — рабочий патч подписей и долгов D4-а/б, D5, D6; независимое Astra-ревью закрыто, Linux 806→817 tests / 0→0 failures / 25→25 sandbox errors / 50→51 skips; Mac-валидация ожидается (HEARTBEAT). Исторический блок 2026-10-12 ниже не описывает текущую веху. VPS-публикация не обновлялась.
 

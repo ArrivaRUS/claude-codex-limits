@@ -83,3 +83,26 @@ Enter сохраняет, Reset пишет tombstone, выходы снимаю�
 также local click вне поля/окна, status anchor и очистка monitor tokens.
 Отдельного чистого предиката до AppKit нет: gate — AppKit-состояние панели.
 Тест требует нового полного прогона владельца с WindowServer (RED).
+
+## Policy assertion после Mac `26adc0d`
+
+Прогон остановился после7892 OK до ввода C5-12. Измерено legacy canBecomeKey=false;
+три policy-значения старый общий FAIL не раскрывал. По shared constructor найден
+конфликт уровня: level=popUpMenu выполнялся перед isFloatingPanel=true, который
+назначает floating level (Apple NSPanel Class Reference, setFloatingPanel).
+Теперь custom level задаётся последним после floating-настроек и в production,
+и в тесте. hidesOnDeactivate=false задан явно, styleMask не меняется после init;
+setActivationPolicy в тесте выполняется ещё до создания контроллера.
+
+Три отдельных assertions сохраняют исходные требования: level==popUpMenu,
+hidesOnDeactivate==false и nonactivatingPanel==true. Каждый выводит actual и
+expected, плюс initialized значение до scene setup/orderFront. Legacy diagnostic
+также печатает level до/после прежнего setter order для проверки на самом Mac.
+
+`runCaptionEditorAppKitSelfTests() -> Int` теперь имеет локальный нефатальный
+check и сводку checks/failures. Policy failure не блокирует input/Esc/Enter/Reset
+и outside-фазы. Если field editor недоступен, проверка этой предпосылки падает
+с названием фазы, редактор очищается, остальные фазы пробуются дальше. Factory
+ошибки mouse events также не вызывают ранний выход. Только caller после возврата
+набора и его cleanup вызывает прежний fail-fast check; manifest при failures
+по-прежнему не записывается. Ожидания key/ввода/счётчика/выходов не ослаблялись.

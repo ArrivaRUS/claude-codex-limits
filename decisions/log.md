@@ -10,6 +10,11 @@
 
 > Что решили и ПОЧЕМУ. Новые записи сверху. Заведён 2026-09-29 (раньше решения жили в коммитах и README).
 
+## 2026-10-31 — C5-12: порядок floating/level и полный диагностический прогон
+
+1. На Mac `26adc0d` общий policy assertion прервал C5-12 до ввода (7892 OK); legacy canBecomeKey=false подтверждено. По shared constructor и контракту setFloatingPanel найден конфликт: custom popUpMenu устанавливался до floating=true, который назначает floating level. Исправлен боевой порядок, тест использует тот же конструктор; hides=false и nonactivating mask сохраняются без ослабления требований.
+2. Три policy assertions теперь печатают initialized/actual/expected и не прерывают набор. C5-12 накапливает failures сам, функциональные фазы пытаются выполниться независимо от policy; внешний exit1 только после возврата/cleanup. Недоступный native editor отмечается FAIL с именем фазы, последующие независимые фазы не скрываются ранним return. Новая диагностика воспроизводит прежний setter order на legacy panel. Mac повтор ещё нужен; Python/агенты/своё ревью/Git-мутации не выполняются.
+
 ## 2026-10-31 — C5: native focus редактора подписи на `739974f`
 
 1. По живому дефекту владельца панель получает key-право только на время редактирования: обычный popup не перехватывает клавиатуру. Nonactivating style, popUpMenu level и hidesOnDeactivate=false сохранены; явно активируем приложение и назначаем key/firstResponder. Других editable-полей в панели нет.
