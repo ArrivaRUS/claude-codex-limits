@@ -47,7 +47,7 @@ bash build.sh && APP="dist/Claude Codex Limits.app/Contents/MacOS/ClaudeCodexLim
 | C2 | macOS: настройки N1–N3, деньги U3, история по `acct` | C1 | [x] 2026-10-21 |
 | C3 | macOS: UI карточек, состояния V5, строка меню, тег, превью 7 состояний | C2, UX | [x] код+PNG 2026-10-28; живой прогон §11 — с C4 |
 | C4 | macOS: издатель мака, B2 через `syncNow(completion)`, `credentialWrite: never`, poll-log | C3, A5 | [ ] |
-| C5 | Подписи `captions` и список N1 (Should) | C4 | [ ] |
+| C5 | Подписи `captions` и список N1 (Should) | C4 | [x] |
 | C6 | Релиз: документация, changelog, T3, 14-дневный замер G1–G4 | C4 (C5 по готовности) | [ ] |
 
 Stop-and-Fix: падение валидации любой вехи останавливает переход к следующей; баг, вернувшийся > 2 раз, — долг процесса (CLAUDE.md HQ, правило 2), урок в `.patches/`.
@@ -169,7 +169,7 @@ T1: П4-а (мак), П5-а.
 Валидация: `"$APP" --sync-selftest` (C4-01…, `decide-vectors.json` общие с A3-01), `"$APP" --auth-selftest`; Т11, Т23–Т25 (Swift), Т31–Т32 (Swift), Т35 (`noRedirects` уже есть — регресс).
 T1: П3-а, П3-д, П7, §5 (регресс).
 
-## C5 — подписи и список аккаунтов (Should) `[~]` (2026-10-31: код, селфтесты и PNG приняты — мак `739974f`, 3.3.1: C5 481/481, полный AppKit-прогон 9467 OK / 0 FAIL, 523 PNG; decisions 2026-10-31; остаток — живая проверка подписи мак → VPS после выкладки `ccl-sync` по «да» владельца)
+## C5 — подписи и список аккаунтов (Should) `[x]` (2026-10-31: закрыта — мак `5af6029`, 3.3.1: C5-01…18 GREEN, AppKit-прогон владельца 9828 OK / 0 FAIL, 523 PNG; живой caption мак → VPS; постоянная подпись `D61C619C` — пересборка без окон Связки; decisions 2026-10-31 «C5 закрыта»)
 
 Зависит от: C4. Файлы: `Sources/LimitsMonitor.swift`, `Sources/RemoteLimits.swift`, `Sources/RemoteLimitsC3B.swift`, `Sources/RemoteLimitsC5SelfTests.swift`, Linux accounts/читатели и общая golden-фикстура.
 Задачи: timestamped captions по метке, публикация только своих правок, merge позднего `setAt` между всеми машинами, пустой tombstone сброса; редактор по UX §9.3, NFC/≤32/Cc/Cf/newline cleaning и отказ `@`/`/` до сохранения. Caption меняет metaHash без pushHash. Linux показывает результат в status и tooltip трея.
