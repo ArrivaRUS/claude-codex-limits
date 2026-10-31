@@ -7,16 +7,30 @@ APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
 VERSION="3.3.1"
-APP="$DIR/dist/$APP_NAME.app"
+DIST_APP="$DIR/dist/$APP_NAME.app"
+
+# Recover an interrupted publication before starting another build. Once the
+# destination exists, any remaining backups belong to completed publications.
+for old_app in "$DIST_APP".old.*; do
+    [ -e "$old_app" ] || [ -L "$old_app" ] || continue
+    if [ -e "$DIST_APP" ] || [ -L "$DIST_APP" ]; then
+        rm -rf "$old_app"
+    elif ! mv "$old_app" "$DIST_APP" 2>/dev/null; then
+        echo 'ERROR: recovering previous dist app failed' >&2
+        exit 1
+    fi
+done
 
 echo "==> building $APP_NAME.app"
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-
 CCL_BUILD_TMP="${CCL_BUILD_TMP:-$DIR/.build-tmp}"
 mkdir -p "$CCL_BUILD_TMP"
 BUILD_SOURCE_DIR="$(mktemp -d "$CCL_BUILD_TMP/ccl-swift-build.XXXXXX")"
-trap 'rm -rf "$BUILD_SOURCE_DIR"' EXIT
+KEEP_BUILD_SOURCE=0
+trap 'if [ "$KEEP_BUILD_SOURCE" = 0 ]; then rm -rf "$BUILD_SOURCE_DIR"; fi' EXIT
+# Publish only a successfully signed bundle. A failed strict build cannot erase
+# the owner's previously signed dist app, even when compilation itself fails.
+APP="$BUILD_SOURCE_DIR/$APP_NAME.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 CODESIGN_LOG="$BUILD_SOURCE_DIR/codesign.err"
 cp "$DIR/Sources/LimitsMonitor.swift" "$BUILD_SOURCE_DIR/main.swift"
 # Match Info.plist's macOS 13.0 minimum for the current build architecture.
@@ -49,19 +63,122 @@ PLIST
 # Never trace passwords, including when build.sh was invoked with bash -x.
 set +x
 SIGNING_REASON="$BUILD_SOURCE_DIR/signing.reason"
+SIGNING_ERR="$BUILD_SOURCE_DIR/signing.err"
+SIGNING_SEARCH_STATUS="$BUILD_SOURCE_DIR/signing.search-status"
+SIGNING_RESTORE_FAILED="$BUILD_SOURCE_DIR/signing.restore-failed"
+SIGNING_INTERRUPTED="$BUILD_SOURCE_DIR/signing.interrupted"
+: > "$SIGNING_ERR"
 printf '%s\n' 'setup failed' > "$SIGNING_REASON"
 signing_unavailable() {
     printf '%s\n' "$1" > "$SIGNING_REASON"
     return 1
 }
+signing_display_path() {
+    local text="$1" home_prefix="${HOME:-}"
+    # Replace the longer prefix first, including when HOME is inside the clone.
+    if [ "${#DIR}" -ge "${#home_prefix}" ]; then
+        text="${text//"$DIR"/.}"
+        if [ -n "$home_prefix" ]; then text="${text//"$home_prefix"/\~}"; fi
+    else
+        text="${text//"$home_prefix"/\~}"
+        text="${text//"$DIR"/.}"
+    fi
+    printf '%s\n' "$text"
+}
+# Keep tool diagnostics, never command lines or passwords. Security normally
+# does not echo passwords; redact defensively before writing even the private log.
+signing_record_error() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [ -n "${pass:-}" ]; then line="${line//"$pass"/[REDACTED]}"; fi
+        signing_display_path "$line" >> "$SIGNING_ERR"
+    done < "$1"
+}
+signing_command() {
+    local result=0
+    "$@" 2> "$BUILD_SOURCE_DIR/signing-command.err" || result=$?
+    if [ "$result" != 0 ]; then signing_record_error "$BUILD_SOURCE_DIR/signing-command.err"; fi
+    rm -f "$BUILD_SOURCE_DIR/signing-command.err"
+    return "$result"
+}
+# security list-keychains emits one double-quoted path per line. Decode it as
+# data (including escaped quotes/backslashes), never eval user-controlled paths.
+# These arrays are scoped to stable_sign_app; the functions are also mockable.
+signing_snapshot_search_list() {
+    local line encoded path char escaped index
+    signing_command /usr/bin/security list-keychains -d user > "$work/search-list" || return 1
+    search_paths=()
+    search_count=0
+    search_removed=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [ -n "$line" ] || continue
+        [[ "$line" == \"*\" ]] || return 1
+        encoded="${line:1:${#line}-2}"
+        path='' escaped=0
+        for ((index=0; index<${#encoded}; index++)); do
+            char="${encoded:index:1}"
+            if [ "$escaped" = 1 ]; then
+                [[ "$char" == '"' || "$char" == "\\" ]] || return 1
+                path+="$char"; escaped=0
+            elif [ "$char" = "\\" ]; then
+                escaped=1
+            elif [ "$char" = '"' ]; then
+                return 1
+            else
+                path+="$char"
+            fi
+        done
+        [ "$escaped" = 0 ] && [ -n "$path" ] || return 1
+        if [ "$path" = "$keychain" ] || [ "$path" = "${keychain%-db}" ] || [ "$path" -ef "$keychain" ]; then
+            search_removed=1
+        else
+            search_paths[search_count]="$path"
+            search_count=$((search_count + 1))
+        fi
+    done < "$work/search-list"
+}
+signing_restore_search_list() {
+    if [ "$search_count" = 0 ]; then
+        signing_command /usr/bin/security list-keychains -d user -s >/dev/null
+    else
+        signing_command /usr/bin/security list-keychains -d user -s "${search_paths[@]}" >/dev/null
+    fi
+}
+signing_add_search_keychain() {
+    search_dirty=1
+    if [ "$search_count" = 0 ]; then
+        signing_command /usr/bin/security list-keychains -d user -s "$keychain" >/dev/null
+    else
+        signing_command /usr/bin/security list-keychains -d user -s "${search_paths[@]}" "$keychain" >/dev/null
+    fi
+}
+signing_cleanup() {
+    local result=$?
+    trap '' HUP INT TERM
+    trap - EXIT
+    if [ "$search_dirty" = 1 ]; then
+        if signing_restore_search_list; then
+            printf '%s\n' 'removed from search list' > "$SIGNING_SEARCH_STATUS"
+        else
+            # Never publish/fall back while our keychain might remain searchable.
+            : > "$SIGNING_RESTORE_FAILED"
+            rm -f "$SIGNING_SEARCH_STATUS"
+            signing_unavailable 'restoring user keychain search list' || true
+            result=1
+        fi
+    fi
+    rm -rf "$work"
+    exit "$result"
+}
 stable_sign_app() (
     umask 077
     local signing_dir="$DIR/.signing" identity_dir="$DIR/.signing/identity"
     local keychain="$DIR/.signing/ccl-signing.keychain-db" password_file="$DIR/.signing/keychain-pass"
-    local work pass leaf identities requirement attempt
-    command -v openssl >/dev/null 2>&1 || { signing_unavailable 'openssl missing'; return 1; }
+    local work pass leaf identities requirement attempt search_count search_removed search_dirty=0 codesign_failed
+    local -a search_paths
     command -v /usr/bin/security >/dev/null 2>&1 || { signing_unavailable 'security missing'; return 1; }
-    command -v /usr/bin/codesign >/dev/null 2>&1 || { signing_unavailable 'codesign missing'; return 1; }
     [ ! -L "$signing_dir" ] && [ ! -L "$identity_dir" ] \
         || { signing_unavailable 'signing directory is a symlink'; return 1; }
     if ! mkdir -p "$signing_dir" || ! chmod 700 "$signing_dir"; then
@@ -72,7 +189,21 @@ stable_sign_app() (
     done
     work="$(mktemp -d "$signing_dir/.setup.XXXXXX")" \
         || { signing_unavailable 'signing temporary directory'; return 1; }
-    trap 'rm -rf "$work"' EXIT
+    trap signing_cleanup EXIT
+    trap 'printf "129\n" > "$SIGNING_INTERRUPTED"; exit 129' HUP
+    trap 'printf "130\n" > "$SIGNING_INTERRUPTED"; exit 130' INT
+    trap 'printf "143\n" > "$SIGNING_INTERRUPTED"; exit 143' TERM
+    signing_snapshot_search_list || { signing_unavailable 'reading user keychain search list'; return 1; }
+    if [ "$search_removed" = 1 ]; then
+        search_dirty=1
+        signing_restore_search_list || { signing_unavailable 'removing signing keychain from search list'; return 1; }
+        search_dirty=0
+        printf '%s\n' 'removed from search list' > "$SIGNING_SEARCH_STATUS"
+    else
+        printf '%s\n' 'not in search list' > "$SIGNING_SEARCH_STATUS"
+    fi
+    command -v openssl >/dev/null 2>&1 || { signing_unavailable 'openssl missing'; return 1; }
+    command -v /usr/bin/codesign >/dev/null 2>&1 || { signing_unavailable 'codesign missing'; return 1; }
     if [ ! -f "$password_file" ]; then
         [ ! -e "$keychain" ] || { signing_unavailable 'signing keychain password missing'; return 1; }
         if ! openssl rand -hex 32 > "$work/pass" 2>/dev/null || ! mv "$work/pass" "$password_file"; then
@@ -116,13 +247,18 @@ SIGNING_CONFIG
         || { signing_unavailable 'certificate fingerprint'; return 1; }
     [[ "$leaf" =~ ^[0-9A-F]{40}$ ]] || { signing_unavailable 'certificate fingerprint invalid'; return 1; }
     if [ ! -e "$keychain" ]; then
-        /usr/bin/security create-keychain -p "$pass" "$keychain" >/dev/null 2>&1 \
+        # Creation may modify the search list even if the command later fails.
+        search_dirty=1
+        signing_command /usr/bin/security create-keychain -p "$pass" "$keychain" >/dev/null \
             || { signing_unavailable 'signing keychain creation'; return 1; }
+        signing_restore_search_list || { signing_unavailable 'restoring user keychain search list'; return 1; }
+        search_dirty=0
+        printf '%s\n' 'removed from search list' > "$SIGNING_SEARCH_STATUS"
     fi
     chmod 600 "$keychain" || { signing_unavailable 'signing keychain permissions'; return 1; }
-    /usr/bin/security unlock-keychain -p "$pass" "$keychain" >/dev/null 2>&1 \
+    signing_command /usr/bin/security unlock-keychain -p "$pass" "$keychain" >/dev/null \
         || { signing_unavailable 'signing keychain unlock'; return 1; }
-    identities="$(/usr/bin/security find-identity "$keychain" 2>/dev/null)" \
+    identities="$(signing_command /usr/bin/security find-identity "$keychain")" \
         || { signing_unavailable 'signing identity lookup'; return 1; }
     if [[ "$identities" != *"$leaf"* ]]; then
         # Explicit PKCS#12 algorithms work with both system LibreSSL and OpenSSL3
@@ -133,46 +269,86 @@ SIGNING_CONFIG
             || ! mv "$work/identity.p12" "$identity_dir/identity.p12"; then
             signing_unavailable 'PKCS12 export'; return 1
         fi
-        /usr/bin/security import "$identity_dir/identity.p12" -k "$keychain" -P "$pass" -T /usr/bin/codesign >/dev/null 2>&1 \
+        signing_command /usr/bin/security import "$identity_dir/identity.p12" -k "$keychain" -P "$pass" -T /usr/bin/codesign >/dev/null \
             || { signing_unavailable 'signing identity import'; return 1; }
     fi
-    /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null 2>&1 \
+    signing_command /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$pass" "$keychain" >/dev/null \
         || { signing_unavailable 'signing key partition access'; return 1; }
     # Pin the leaf explicitly: self-signed certificates need no system trust,
     # and this DR stays identical when a rebuild changes the executable cdhash.
     requirement="designated => identifier \"$BUNDLE_ID\" and certificate leaf = H\"$leaf\""
     for attempt in 1 2 3 4 5 6 7 8; do
-        /usr/bin/security unlock-keychain -p "$pass" "$keychain" >/dev/null 2>&1 \
+        signing_command /usr/bin/security unlock-keychain -p "$pass" "$keychain" >/dev/null \
             || { signing_unavailable 'signing keychain unlock'; return 1; }
-        if xattr -cr "$APP" 2>"$CODESIGN_LOG" \
-            && /usr/bin/codesign --force --deep --sign "$leaf" --keychain "$keychain" \
-                --identifier "$BUNDLE_ID" --requirements "=$requirement" --timestamp=none "$APP" 2>>"$CODESIGN_LOG" \
-            && /usr/bin/codesign --verify --strict "$APP" 2>>"$CODESIGN_LOG" \
-            && /usr/bin/codesign -dr - "$APP" >"$work/requirement" 2>&1 \
+        codesign_failed=0
+        if signing_command xattr -cr "$APP" >/dev/null; then
+            if ! signing_command /usr/bin/codesign --force --deep --sign "$leaf" --keychain "$keychain" \
+                --identifier "$BUNDLE_ID" --requirements "=$requirement" --timestamp=none "$APP" >/dev/null; then
+                codesign_failed=1
+            fi
+        else
+            continue
+        fi
+        if [ "$codesign_failed" = 0 ] \
+            && signing_command /usr/bin/codesign --verify --strict "$APP" >/dev/null \
+            && signing_read_requirement "$work/requirement" \
             && grep '^designated =>' "$work/requirement" >"$work/dr" \
             && grep -Fqi "certificate leaf = H\"$leaf\"" "$work/dr" \
             && ! grep -q 'cdhash' "$work/dr"; then
             printf '%s\n' "$leaf"
             return 0
         fi
+        # First try only the explicit --keychain. Some macOS versions also need
+        # it in the search list; append once, restore on every exit/signal.
+        if [ "$codesign_failed" = 1 ] && [ "$search_dirty" = 0 ]; then
+            signing_add_search_keychain || { signing_unavailable 'temporary signing keychain search list'; return 1; }
+        fi
     done
     signing_unavailable 'stable codesign or requirement verification'
 )
+signing_read_requirement() {
+    if /usr/bin/codesign -dr - "$APP" >"$1" 2>&1; then return 0; fi
+    signing_record_error "$1"
+    return 1
+}
 
 # Clear extended attributes first. Files copied from Resources carry FinderInfo /
 # resource forks; without this codesign aborts with "resource fork, Finder
 # information, or similar detritus not allowed".
 #
-# When dist/ lives on a cloud file-provider volume (iCloud Drive / Dropbox / etc.,
+# When the build directory lives on a cloud file-provider volume (iCloud Drive / Dropbox / etc.,
 # marked by a com.apple.fileprovider.fpfs xattr) the provider ASYNCHRONOUSLY
 # re-injects com.apple.FinderInfo onto the freshly-created .app bundle root a
 # moment after we clear it — so a single clear+sign can lose the race and fail
 # intermittently with the "detritus not allowed" error. Retry the clear+sign+verify
 # until codesign wins on a settled tree (it converges within a couple of attempts).
-if STABLE_LEAF="$(stable_sign_app 2>/dev/null)"; then
+stable_ok=0
+if STABLE_LEAF="$(stable_sign_app 2>/dev/null)"; then stable_ok=1; fi
+if [ -f "$SIGNING_SEARCH_STATUS" ]; then
+    echo "signing keychain: $(cat "$SIGNING_SEARCH_STATUS")"
+fi
+if [ -f "$SIGNING_RESTORE_FAILED" ]; then
+    KEEP_BUILD_SOURCE=1
+    echo 'ERROR: could not restore keychain search list; ccl-signing may still be listed — rerun build.sh to clean up' >&2
+    exit 1
+fi
+if [ -f "$SIGNING_INTERRUPTED" ]; then
+    echo 'ERROR: signing interrupted; dist unchanged' >&2
+    exit "$(cat "$SIGNING_INTERRUPTED")"
+fi
+if [ "$stable_ok" = 1 ]; then
     echo "signing: stable (leaf ${STABLE_LEAF:0:8})"
 else
     signing_reason="$(cat "$SIGNING_REASON" 2>/dev/null)" || signing_reason='setup failed'
+    signing_detail="$(awk 'NF { last=$0 } END { print substr(last,1,160) }' "$SIGNING_ERR")"
+    signing_detail="$(signing_display_path "$signing_detail")"
+    if [ -n "$signing_detail" ]; then signing_reason="$signing_reason: $signing_detail"; fi
+    if [ "${CCL_REQUIRE_STABLE_SIGNING:-0}" = 1 ]; then
+        KEEP_BUILD_SOURCE=1
+        echo "ERROR: stable signing unavailable ($signing_reason); dist unchanged" >&2
+        echo "Build retained: $(signing_display_path "$BUILD_SOURCE_DIR")" >&2
+        exit 1
+    fi
     echo "WARNING: stable signing unavailable ($signing_reason), using ad-hoc" >&2
     signed=0
     for attempt in 1 2 3 4 5 6 7 8; do
@@ -192,4 +368,24 @@ else
 fi
 echo "==> signed & verified"
 
-echo "==> built: $APP"
+mkdir -p "$DIR/dist"
+old_app="$DIST_APP.old.$$"
+if [ -e "$DIST_APP" ] || [ -L "$DIST_APP" ]; then
+    if ! mv "$DIST_APP" "$old_app" 2>/dev/null; then
+        echo 'ERROR: publishing to dist failed; previous app restored' >&2
+        exit 1
+    fi
+fi
+if ! mv "$APP" "$DIST_APP" 2>/dev/null; then
+    rm -rf "$DIST_APP"
+    if [ -e "$old_app" ] || [ -L "$old_app" ]; then
+        if ! mv "$old_app" "$DIST_APP" 2>/dev/null; then
+            echo 'ERROR: publishing to dist failed; previous app remains in .old backup' >&2
+            exit 1
+        fi
+    fi
+    echo 'ERROR: publishing to dist failed; previous app restored' >&2
+    exit 1
+fi
+rm -rf "$old_app"
+echo "==> built: $(signing_display_path "$DIST_APP")"
