@@ -1380,8 +1380,6 @@ struct AdvancedProduct {
     let legend: [String]                   // models by 7-day spend, "other" last when present
     let calendar: [DayUsage]               // last 42 calendar days, oldest first
     let calendarMax: Double
-    let money: MoneySummary
-    let firstSample: Date?                 // when utilization sampling began (nil = never)
 }
 
 func advancedProduct(_ d: LimitData, product: String, index: UsageIndex, acct: String? = nil) -> AdvancedProduct {
@@ -1406,11 +1404,9 @@ func advancedProduct(_ d: LimitData, product: String, index: UsageIndex, acct: S
         return StackedDay(day: dd.day, weekday: wd == 1 ? 7 : wd - 1, usd: dd.usd, turns: dd.turns,
                           parts: parts.map { (model: $0.0, usd: $0.1) }, isToday: dd.day == todayKey)
     }
-    let first = REMOTE_RENDER_ISOLATED ? nil : UsageHistory.shared.samples(product, acct: acct ?? localHistoryKey(product), since: Date(timeIntervalSince1970: 0)).first.map { Date(timeIntervalSince1970: $0.t) }
     return AdvancedProduct(product: product, limits: pacedLimits(d, product: product, acct: acct), resetCredits: d.resetCredits,
                            days7: stacked, legend: top + (hasOther ? ["other"] : []),
-                           calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0,
-                           money: moneySummary(product, plan: d.plan, index: index), firstSample: first)
+                           calendar: days, calendarMax: days.map { $0.usd }.max() ?? 0)
 }
 
 /// Calendar cell brightness 0…1 on a square-root scale, so a couple of heavy days don't
@@ -3476,42 +3472,8 @@ final class GitHubSync {
 }
 
 /// Local index plus every other machine's days from the gist — what the history draws from.
-func mergedUsageIndex(_ sync: GitHubSync = .shared, hidden: Set<String> = hiddenAccounts()) -> UsageIndex {
-    var ix = UsageLogs.shared.snapshot()
-    let remote = sync.remoteSnapshot()
-    let localIds = readerLocalSnapshot.snapshot().ids
-    let labelKey = remote.labelKey ?? remote.gistId.flatMap { accountLabelKey(gistId: $0) }
-    // Reuse the same local partition as account segments: hiding one subscription
-    // cannot erase another account's days or leave its old unlabelled days visible.
-    let localViews = localIds.map { product, id in
-        AccountView(product: product, label: labelKey.flatMap { accountLabel(product: product, localId: id, labelKey: $0) },
-            historyKey: "l:" + product, caption: "", data: LimitData(present: false), isLocal: true,
-            tier: nil, usageDays: [:], machines: [], state: .fresh)
-    }
-    let partitions = remoteApplyingLocalUsage(localViews, local: ix, localIds: localIds, labelKey: labelKey)
-    ix.days = [:]
-    for view in partitions where !remoteAccountIsHidden(view, hidden: hidden) {
-        for (day, models) in view.localUsageDays ?? [:] {
-            for (model, usage) in models { ix.add(view.product, day, model, usage) }
-        }
-    }
-    let remoteDays: RemoteProductDays
-    if let accounts = remote.accounts {
-        var days = remote.unattributedDays ?? [:]
-        for account in accounts {
-            guard let label = account.label, !hidden.contains(label) else { continue }
-            for (day, models) in account.days { for (model, usage) in models {
-                var current = days[account.product, default: [:]][day, default: [:]][model, default: DayModelUsage()]
-                current.add(usage)
-                days[account.product, default: [:]][day, default: [:]][model] = current
-            } }
-        }
-        remoteDays = days
-    } else { remoteDays = remote.days } // v1 cache: all days are unattributed.
-    for (product, byDay) in remoteDays {
-        for (day, models) in byDay { for (model, usage) in models { ix.add(product, day, model, usage) } }
-    }
-    return ix
+func mergedUsageIndex(_ sync: GitHubSync = .shared) -> UsageIndex {
+    historyUsageIndex(local: UsageLogs.shared.snapshot(), remote: sync.remoteSnapshot())
 }
 
 /// Select data and its identity together, including the second selection against disk cache.
@@ -3964,7 +3926,7 @@ func renderStrip(_ products: [(LimitData, String)], dark: Bool, s: CGFloat = 2, 
         language: appLang(), dark: dark, now: $0.now, timeZone: remoteRenderTimeZone(), metrics: trayMetrics().map { $0.rawValue }) }
     let products = frame.map { scene in
         ["claude", "codex"].compactMap { product -> (LimitData, String)? in
-            guard let view = menuAccount(product, views: scene.visibleViews.filter { !$0.historyKey.hasPrefix("u:") }, selected: menuAccountSelection()) else { return nil }
+            guard let view = menuAccount(product, views: scene.visibleViews, selected: menuAccountSelection()) else { return nil }
             return (view.data, product + "_128.png")
         }
     } ?? products
@@ -4156,7 +4118,7 @@ func isQuotaAction(_ id: String) -> Bool {
 /// Inline actions precede their enclosing card; passive feedback never consumes a click.
 func panelHit(at point: CGPoint, hits: [Hit]) -> Hit? {
     hits.first { isQuotaAction($0.id) && $0.rect.contains(point) }
-        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("sourceheader:") && !$0.id.hasPrefix("moneyaccount:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
+        ?? hits.first { !$0.id.hasPrefix("quotafeedback:") && !$0.id.hasPrefix("sourceheader:") && !$0.id.hasPrefix("moneysubscription:") && !$0.id.hasPrefix("syncerror:") && $0.rect.contains(point) }
 }
 
 /// Shared by the actual NSView tooltip callback and rendered-hit tests.
@@ -4381,7 +4343,7 @@ private func accountSettingsLayout() -> AccountSettingsLayout {
     let tc = top, tt = tc + SET_CAP_H, th = SET_TRAY_H + CGFloat(model.menuProducts.count) * SET_ROW_H
     top = tt + th + SET_GAP
     let sc = top, st = sc + SET_CAP_H
-    let sh = CGFloat(views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }.count) * SET_ROW_H
+    let sh = CGFloat(views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) }.count) * SET_ROW_H
     if advancedEnabled(), sh > 0 { top = st + sh + SET_GAP }
     let yc = top, yt = yc + SET_CAP_H
     if model.showsGitHub { top = yt + remoteSyncCardHeight() + SET_GAP }
@@ -4833,12 +4795,14 @@ func withRemoteRenderScene<T>(frame: RemoteAccountFrame, timeZone: TimeZone,
     }
     return body()
 }
-private func renderedUsageIndex() -> UsageIndex {
-    REMOTE_RENDER_ISOLATED ? UsageIndex() : UsageLogs.shared.snapshot()
-}
-private func renderedHasHistory(_ view: AccountView?) -> Bool {
-    guard !REMOTE_RENDER_ISOLATED, let view = view else { return false }
-    return !UsageHistory.shared.samples(view.product, acct: view.historyKey, since: Date(timeIntervalSince1970: 0)).isEmpty
+private func renderedHasHistory(_ subscription: HistorySubscription?) -> Bool {
+    guard let subscription = subscription else { return false }
+    if dailyUsage(subscription.product, days: 35, index: subscription.index, now: remoteRenderNow())
+        .contains(where: { $0.tokens > 0 || $0.turns > 0 }) { return true }
+    guard !REMOTE_RENDER_ISOLATED else { return false }
+    return subscription.accounts.contains {
+        !UsageHistory.shared.samples(subscription.product, acct: $0.historyKey, since: Date(timeIntervalSince1970: 0)).isEmpty
+    }
 }
 /// Explicit account prices use the same product-scoped identity as history selection.
 func accountSubscriptionPrice(_ view: AccountView, overrides: [String: Double], localFallback: (usd: Double, estimated: Bool)) -> (usd: Double, estimated: Bool) {
@@ -4856,27 +4820,29 @@ private func renderedSubscriptionPrice(_ view: AccountView) -> (usd: Double, est
     }
     return accountSubscriptionPrice(view, overrides: overrides, localFallback: fallback)
 }
-func accountMoneySummary(_ view: AccountView, usage: MoneySummary,
-                         price: (usd: Double, estimated: Bool)) -> MoneySummary {
-    // Without plan/tier only a confirmed owner price can enable subscription columns.
-    let available = !view.historyKey.hasPrefix("u:") && (usage.hasSubscriptionPrice || !price.estimated)
-    return MoneySummary(days: usage.days, activeDays: usage.activeDays, usdApi: usage.usdApi,
-        perCalendarDay: usage.perCalendarDay, perActiveDay: usage.perActiveDay,
-        subMonthly: available ? price.usd : 0, subEstimated: available && price.estimated,
-        hasSubscriptionPrice: available)
+func historySubscriptionPrice(_ subscription: HistorySubscription, overrides: [String: Double],
+                              fallback: (usd: Double, estimated: Bool), allAccounts: [AccountView]? = nil) -> (usd: Double, estimated: Bool) {
+    let all = allAccounts ?? subscription.accounts
+    for account in subscription.accounts {
+        let keys = [remoteAccountID(account)] + (all.filter { $0.historyKey == account.historyKey }.count == 1 ? [account.historyKey] : [])
+        for key in keys {
+            if let price = overrides[key], price.isFinite, price >= 0 { return (price, false) }
+        }
+    }
+    return subscription.representative.map { accountSubscriptionPrice($0, overrides: [:], localFallback: fallback) } ?? fallback
 }
-private func renderedMoneySummary(_ view: AccountView, local: UsageIndex, now: Date) -> MoneySummary {
-    let value = moneySummary(view, local: local, now: now)
-    guard !view.historyKey.hasPrefix("u:") else { return value }
-    return accountMoneySummary(view, usage: value, price: renderedSubscriptionPrice(view))
-}
-
-private func historyMoneyRows(_ views: [AccountView]) -> [RemoteMoneyRow] {
-    let local = renderedUsageIndex(), now = remoteRenderNow()
-    return views.map { remoteMoneyRow($0, summary: renderedMoneySummary($0, local: local, now: now), language: appLang()) }
+private func historyMoneyRows(_ subscriptions: [HistorySubscription]) -> [RemoteMoneyRow] {
+    let overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
+    return subscriptions.map { subscription in
+        let fallback = subscription.representative.map {
+            subscriptionUSD($0.product, plan: $0.data.plan?.lowercased(), tier: $0.tier, isLocal: $0.isLocal)
+        } ?? (usd: 0, estimated: true)
+        let price = historySubscriptionPrice(subscription, overrides: overrides, fallback: fallback, allAccounts: subscriptions.flatMap { $0.accounts })
+        return remoteMoneyRow(subscription, summary: subscriptionMoneySummary(subscription, price: price, now: remoteRenderNow()), language: appLang())
+    }
 }
 private func historyMoneyNotes(_ rows: [RemoteMoneyRow]) -> [String] {
-    remoteMoneyNoteLines(rows.compactMap { $0.activeNote }, language: appLang(), width: Double(ADV_IW)) {
+    remoteMoneyNoteLines(rows, language: appLang(), width: Double(ADV_IW)) {
         Double(lineWidth(CTLineCreateWithAttributedString(ctAttr($0, ctFont(9.5, .regular), cg(gray(1, 0.5))))))
     }
 }
@@ -4902,13 +4868,6 @@ private func applyingLocalCaptions(_ views: [AccountView], remote: [String: Remo
         return order == .orderedSame ? ($0.label ?? $0.historyKey) < ($1.label ?? $1.historyKey) : order == .orderedAscending
     }
 }
-/// Complete the account set before applying L, including historical accounts added by local usage.
-func applyingLocalUsageAndCaptions(_ views: [AccountView], local: UsageIndex, localIds: [String: String],
-                                  labelKey: String?, remoteCaptions: [String: RemoteCaption], now: Date,
-                                  localCaptions: [String: RemoteCaption]? = nil) -> [AccountView] {
-    let complete = remoteApplyingLocalUsage(views, local: local, localIds: localIds, labelKey: labelKey)
-    return applyingLocalCaptions(complete, remote: remoteCaptions, now: now, local: localCaptions)
-}
 /// Use the scheduler's initial Auto state for a product not persisted yet.
 func localAccountIntervals(auto: Bool, states: [String: AutoPollState], manual: TimeInterval) -> [String: TimeInterval] {
     Dictionary(uniqueKeysWithValues: ["claude", "codex"].map { product in
@@ -4922,8 +4881,10 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
     let hidden = hiddenAccounts(), menu = menuAccountSelection()
     if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
         let all = applyingLocalCaptions(all, now: now).map { remotePresentationView($0, sync: sync, now: now) }
-        let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
-        return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
+        let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) }
+        var frame = RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
+        frame.subscriptions = historySubscriptions(views: all, index: historyPreviewIndex(all), now: now, language: appLang())
+        return frame
     }
     let cache = isolated ? SyncRemoteCache() : GitHubSync.shared.remoteSnapshot()
     let resolved = remoteAccountFrame(local: (selectedLimits(claude, product: "claude"), selectedLimits(codex, product: "codex")),
@@ -4933,22 +4894,14 @@ private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: D
         localMachineId: isolated ? "local" : GitHubSync.shared.machineId,
         localIntervals: localAccountIntervals(auto: autoPollEnabled(), states: loadAutoPollStates(),
             manual: UserDefaults.standard.double(forKey: "interval")))
-    var all = resolved.allViews
-    // Unlabelled usage has no quota card, but remains manageable in Settings/history.
-    for product in ["claude", "codex"] {
-        let days = cache.unattributedDays?[product] ?? (cache.accounts == nil ? cache.days[product] : nil) ?? [:]
-        if !days.isEmpty {
-            all.append(AccountView(product: product, label: nil, historyKey: "u:" + product, caption: "",
-                data: LimitData(present: false), isLocal: false, tier: nil, usageDays: days,
-                machines: cache.machines.map { $0.name }, state: .fresh))
-        }
-    }
-    all = applyingLocalUsageAndCaptions(all, local: isolated ? UsageIndex() : UsageLogs.shared.snapshot(),
-        localIds: isolated ? [:] : readerLocalSnapshot.snapshot().ids,
-        labelKey: cache.labelKey ?? cache.gistId.flatMap { accountLabelKey(gistId: $0) },
-        remoteCaptions: cache.captions ?? [:], now: now).map { remotePresentationView($0, sync: sync, now: now) }
-    let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
-    return RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
+    let all = applyingLocalCaptions(resolved.allViews, remote: cache.captions ?? [:], now: now)
+        .map { remotePresentationView($0, sync: sync, now: now) }
+    let visible = all.filter { !remoteAccountIsHidden($0, hidden: hidden) }
+    var frame = RemoteAccountFrame(now: now, sync: sync, allViews: all, visibleViews: visible, displayedViews: visible)
+    frame.subscriptions = historySubscriptions(views: all,
+        index: historyUsageIndex(local: isolated ? UsageIndex() : UsageLogs.shared.snapshot(), remote: cache), now: now, language: appLang(),
+        remoteAccounts: cache.accounts ?? [])
+    return frame
 }
 func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date(), includeHidden: Bool = false) -> [AccountView] {
     // Auto describes polling, which continues when a card is hidden (N1).
@@ -4959,13 +4912,12 @@ func displayAccountViews(_ claude: LimitData, _ codex: LimitData, now: Date = Da
 func displayedCardViews(_ claude: LimitData, _ codex: LimitData, now: Date = Date()) -> [AccountView] {
     let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: now)
     return remoteSortedPresentationViews(views: frame.visibleViews.map { remotePresentationView($0, sync: frame.sync, now: frame.now) }, language: appLang())
-        .filter { !$0.historyKey.hasPrefix("u:") }
 }
 func remoteMissingSetupProduct(visible: [AccountView], all: [AccountView], polling: [String: Bool]) -> String? {
     guard visible.count == 1, let only = visible.first, only.isLocal, only.data.source == nil else { return nil }
     let missing = only.product == "claude" ? "codex" : "claude"
     guard polling[missing] == true,
-          !all.contains(where: { $0.product == missing && $0.data.present && !$0.historyKey.hasPrefix("u:") }) else { return nil }
+          !all.contains(where: { $0.product == missing && $0.data.present }) else { return nil }
     return missing
 }
 /// Preserve the original two local slots, including the enabled product's setup card.
@@ -4995,7 +4947,7 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date(),
     let manualPhase = REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE
         : (view.product == "codex" && view.isLocal ? (c4ManualPhase(c4CodexManualPhase, startedAt: c4CodexManualStartedAt, now: at) ?? readerPhase ?? REMOTE_MANUAL_PHASE) : (readerPhase ?? REMOTE_MANUAL_PHASE))
     let productCount = productAccountCount ?? (REMOTE_ACCOUNT_FRAME?.visibleViews ?? []).filter {
-        $0.product == view.product && !$0.historyKey.hasPrefix("u:")
+        $0.product == view.product
     }.count
     return remotePresentationCard(view, sync: sync, language: appLang(), narrow: narrow, now: at,
         timeZone: remoteRenderTimeZone(), manual: manualPhase, productAccountCount: max(1, productCount),
@@ -5140,14 +5092,23 @@ func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, ti
     }
     return remoteFittedLineEnd(shortest, availableWidth: width, measure: measure)
 }
+func quotaCardFooterText(_ view: AccountView, now: Date) -> String {
+    let model = cardPresentation(view, narrow: false, now: now)
+    if !view.isLocal || (view.data.source != nil && !model.statusLine.isEmpty) { return model.statusLine }
+    return quotaCompactAction(simpleCardStatus(view, now: now).feedback, data: view.data, now: now.timeIntervalSince1970)
+}
 /// Both panel modes keep only the status/action row; provenance stays in header tooltip/AX.
 func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
                          view: AccountView? = nil) -> [Hit] {
     let now = (REMOTE_ACCOUNT_FRAME?.now ?? Date()).timeIntervalSince1970
     let feedback = view.map { simpleCardStatus($0, now: Date(timeIntervalSince1970: now)).feedback }
         ?? quotaFeedback(data, now: now)
+    let status = view.map { quotaCardFooterText($0, now: Date(timeIntervalSince1970: now)) }
+        ?? quotaCompactAction(feedback, data: data, now: now)
+    let footerHeight = remoteQuotaFooterHeight(advanced: advanced, statusLine: status)
+    guard footerHeight > 0 else { return [] }
     let inset: CGFloat = advanced ? 11 : 14
-    let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: CGFloat(remoteQuotaFooterHeight(advanced: advanced)))
+    let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: CGFloat(footerHeight))
     let error = !data.refreshInFlight && (data.auth != .ok || data.pollFailed || data.error != nil || (data.serverRetryAt ?? 0) > now)
     let ink = error ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1) : gray(1, 0.5)
     func line(_ value: String, rect: CGRect, weight: NSFont.Weight, color: NSColor, truncate: Bool = true) {
@@ -5158,18 +5119,6 @@ func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, produc
         CTLineDraw(fitted, ctx)
     }
     let model = view.map { cardPresentation($0, narrow: !advanced && card.width < 300, now: Date(timeIntervalSince1970: now)) }
-    var sourceLine = data.source != nil || view?.isLocal == false ? (model?.sourceLine ?? quotaCompactStatus(data, now: now)) : quotaCompactStatus(data, now: now)
-    if advanced, (data.source != nil || view?.isLocal == false), let view = view {
-        sourceLine = remoteFittedSourceLine(view, language: appLang(), now: Date(timeIntervalSince1970: now),
-            timeZone: remoteRenderTimeZone(), narrow: false, availableWidth: Double(footer.width)) { value in
-                Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10, .regular), cg(gray(1, 0.5))))))
-            }
-    }
-    let visibleSource = remoteVisibleSourceLine(sourceLine, advanced: advanced)
-    if !visibleSource.isEmpty {
-        line(visibleSource, rect: CGRect(x: footer.minX, y: footer.minY + 18, width: footer.width, height: 12), weight: .regular,
-             color: data.source == nil ? ink : gray(1, 0.5), truncate: data.source == nil && view?.isLocal != false)
-    }
     let tooltip = view?.isLocal == false ? (model?.tooltip ?? "")
         : [quotaTooltip(data, now: now), data.source != nil ? model?.tooltip ?? "" : ""].filter { !$0.isEmpty }.joined(separator: "\n")
     let duplicate = REMOTE_ACCOUNT_FRAME?.visibleViews.filter { $0.product == product }.count ?? 0
@@ -5555,7 +5504,7 @@ let ADV_CX: CGFloat = 15, ADV_CW: CGFloat = 330          // card x / width
 let ADV_IX: CGFloat = 26, ADV_IW: CGFloat = 308          // card content x / width
 let ADV_ROW_FULL: CGFloat = 62, ADV_ROW_SHORT: CGFloat = 50, ADV_ROW_CREDITS: CGFloat = 24
 let ADV_NOTICE: CGFloat = 19, ADV_PLACEHOLDER: CGFloat = 40
-let ADV_HIST_EXPANDED: CGFloat = 187, ADV_HIST_COLLAPSED: CGFloat = 35, ADV_HIST_EMPTY_EXTRA: CGFloat = 44
+let ADV_HIST_EMPTY_EXTRA: CGFloat = 44
 
 let ADV_SESSION = NSColor(srgbRed: 0.22, green: 0.55, blue: 1.00, alpha: 1)      // #388CFF
 let ADV_WEEK    = NSColor(srgbRed: 0.78, green: 0.42, blue: 0.98, alpha: 1)      // #C76BFA
@@ -5685,7 +5634,13 @@ struct AdvCard {
         if let account = account { return ADV_NOTICE * CGFloat(remoteAdvancedNoticeLines(account, now: remoteRenderNow())) }
         return ADV_NOTICE * ((limitSnapshotNotice(data, now: remoteRenderNow()).isEmpty ? 0 : 1) + (limitCanFix(product: product, auth: data.auth) ? 1 : 0))
     }
-    var height: CGFloat { 38 + rows.reduce(0) { $0 + $1.height } + CGFloat(max(0, rows.count - 1)) + noticeHeight + CGFloat(remoteQuotaFooterHeight(advanced: true)) }
+    var footerHeight: CGFloat {
+        let text = account.map { quotaCardFooterText($0, now: remoteRenderNow()) }
+            ?? quotaCompactAction(quotaFeedback(data), data: data, now: remoteRenderNow().timeIntervalSince1970)
+        return CGFloat(remoteQuotaFooterHeight(advanced: true, statusLine: text))
+    }
+    var height: CGFloat { CGFloat(remoteAdvancedCardHeight(rowHeights: rows.map { Double($0.height) },
+        noticeHeight: Double(noticeHeight), footerHeight: Double(footerHeight))) }
 }
 
 func advCards(_ claude: LimitData, _ codex: LimitData) -> [AdvCard] {
@@ -5726,52 +5681,53 @@ private func measuredTextHeight(_ text: String, width: CGFloat, size: CGFloat) -
 private func historyEmptyHeight() -> CGFloat {
     max(ADV_HIST_EMPTY_EXTRA, measuredTextHeight(remoteHistoryEmptyMessage(), width: ADV_IW - 16, size: 10.5) + 16)
 }
-func historySelectorLayout(_ accounts: [AccountView], language: String? = nil, expanded: Bool? = nil) -> HistorySelectorLayout {
-    let titles = accounts.map { remoteHistorySelectorTitle($0, language: language ?? appLang()) }
-    let widths = titles.map { title in
-        ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr(title, ctFont(10.5, .semibold), cg(gray(1, 0.95))))))
-    }
+func historyPreviewIndex(_ views: [AccountView]) -> UsageIndex {
+    var index = UsageIndex()
+    for view in views { for (day, models) in view.usageDays {
+        for (model, usage) in models { index.add(view.product, day, model, usage) }
+    } }
+    return index
+}
+func historySelectorLayout(_ subscriptions: [HistorySubscription], language: String? = nil, expanded: Bool? = nil) -> HistorySelectorLayout {
+    let titles = subscriptions.map { $0.title }
+    let widths = titles.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr($0, ctFont(10.5, .semibold), cg(gray(1, 0.95)))))) }
     let heading = NSMutableAttributedString(attributedString: ctAttr(
         remoteHistoryHeading(language: language ?? appLang()).uppercased(), ctFont(9.5, .semibold), cg(gray(1, 0.5))))
-    // Same tracking as caps() in the draw pass, so a near-boundary fit cannot overlap the title.
     heading.addAttribute(NSAttributedString.Key(kCTKernAttributeName as String), value: 9.5 * 0.06,
                          range: NSRange(location: 0, length: heading.length))
-    let headingWidth = ceil(lineWidth(CTLineCreateWithAttributedString(heading)))
-    return remoteHistorySelectorLayout(titles: titles, measuredWidths: widths, headingWidth: headingWidth,
-        availableWidth: ADV_IW, expanded: expanded ?? advHistExpanded())
+    return remoteHistorySelectorLayout(titles: titles, measuredWidths: widths,
+        headingWidth: ceil(lineWidth(CTLineCreateWithAttributedString(heading))), availableWidth: ADV_IW, expanded: expanded ?? advHistExpanded())
 }
-
-func advHistoryHeight(_ cards: [AdvCard]) -> CGFloat {
-    let warn: CGFloat = renderedSyncWarning() != nil ? ADV_NOTICE : 0
-    guard advHistExpanded() else { return ADV_HIST_COLLAPSED + warn }
-    let items = historyAccounts(cards), selector = historySelectorLayout(items)
-    let noHistory = !renderedHasHistory(selectedHistoryAccount(items))
-    // Account caption and monthly price occupy a full-width line; daily figures follow.
-    let notes = historyMoneyNotes(historyMoneyRows(items))
-    return ADV_HIST_EXPANDED + (noHistory ? historyEmptyHeight() : 0) + warn + selector.extraHeight
-        + CGFloat(remoteHistoryMoneyExtraHeight(rowCount: items.count, noteLines: notes))
+func selectedHistorySubscription(_ subscriptions: [HistorySubscription], product: String) -> HistorySubscription? {
+    subscriptions.first { $0.product == product } ?? subscriptions.first
 }
-
-private func historyAccounts(_ cards: [AdvCard]) -> [AccountView] {
-    let actual = cards.compactMap { $0.account }
-    let snapshot = readerLocalSnapshot.snapshot()
-    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(snapshot.local.0, snapshot.local.1, now: remoteRenderNow())
-    let unassigned = frame.allViews.filter {
-        $0.historyKey.hasPrefix("u:") && !remoteAccountIsHidden($0, hidden: hiddenAccounts())
-    }
-    return remoteSortedPresentationViews(views: actual + unassigned, language: appLang())
+struct AdvancedSceneLayout {
+    var cards: [AdvCard]
+    var subscriptions: [HistorySubscription]
+    var selected: HistorySubscription?
+    var money: [RemoteMoneyRow]
+    var notes: [String]
+    var selector: HistorySelectorLayout
+    var history: RemoteHistoryLayout
+    var window: RemoteAdvancedLayout
+    var emptyHeight: Double
+    var expanded: Bool
 }
-func selectedHistoryAccount(views: [AccountView], selectedID: String?, product: String) -> AccountView? {
-    if let selected = selectedID {
-        if let view = views.first(where: { remoteAccountID($0) == selected }) { return view }
-        let legacy = views.filter { $0.historyKey == selected }
-        if legacy.count == 1 { return legacy[0] }
-    }
-    return views.first { $0.product == product } ?? views.first
-}
-private func selectedHistoryAccount(_ accounts: [AccountView]) -> AccountView? {
-    selectedHistoryAccount(views: accounts, selectedID: UserDefaults.standard.string(forKey: "advHistAccount"),
-                           product: advHistProduct(accounts.map { $0.product }))
+func advancedSceneLayout(_ claude: LimitData, _ codex: LimitData) -> AdvancedSceneLayout {
+    let cards = advCards(claude, codex)
+    let frame = REMOTE_ACCOUNT_FRAME ?? captureAccountFrame(claude, codex, now: remoteRenderNow())
+    let subscriptions = frame.subscriptions ?? historySubscriptions(views: frame.allViews,
+        index: historyPreviewIndex(frame.allViews), now: frame.now, language: appLang())
+    let selected = selectedHistorySubscription(subscriptions, product: advHistProduct(subscriptions.map { $0.product }))
+    let expanded = advHistExpanded(), selector = historySelectorLayout(subscriptions)
+    let money = historyMoneyRows(subscriptions), notes = historyMoneyNotes(money)
+    let empty = expanded && !renderedHasHistory(selected) ? Double(historyEmptyHeight()) : 0
+    let history = remoteHistoryLayout(rowCount: subscriptions.count, selectorExtra: Double(selector.extraHeight), noteLines: notes,
+        expanded: expanded, warningHeight: renderedSyncWarning() == nil ? 0 : Double(ADV_NOTICE), emptyHeight: empty)
+    let window = remoteAdvancedLayout(cardHeights: cards.map { Double($0.height) }, historyHeight: history.height,
+        placeholderHeight: showMissingProduct(cards, allViews: frame.allViews) ? Double(ADV_PLACEHOLDER) : 0)
+    return AdvancedSceneLayout(cards: cards, subscriptions: subscriptions, selected: selected, money: money, notes: notes,
+        selector: selector, history: history, window: window, emptyHeight: empty, expanded: expanded)
 }
 
 func showMissingProduct(_ cards: [AdvCard], allViews: [AccountView]? = nil) -> Bool {
@@ -5783,16 +5739,10 @@ func showMissingProduct(_ cards: [AdvCard], allViews: [AccountView]? = nil) -> B
 }
 
 func advancedHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
-    let cards = advCards(claude, codex)
-    if cards.isEmpty && historyAccounts(cards).isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
-    let cardHeight = cards.reduce(CGFloat(0)) { $0 + $1.height + 5 }
-    return 58 + cardHeight + advHistoryHeight(cards) + 6 + 59
-        + (showMissingProduct(cards, allViews: displayAccountViews(claude, codex, includeHidden: true)) ? 5 + ADV_PLACEHOLDER : 0)
+    let scene = advancedSceneLayout(claude, codex)
+    if scene.cards.isEmpty && scene.subscriptions.isEmpty { return panelMainHeight(LimitData(present: false), LimitData(present: false)) }
+    return CGFloat(scene.window.height)
 }
-/// Credit line under the footer (author · version · GitHub), same as in the Simple view —
-/// the first Advanced build dropped it and the repo link went missing (Alex, 2026-09-27).
-let ADV_CREDIT_H: CGFloat = 24
-
 /// Main-panel height for whichever view is on.
 func mainPanelHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     advancedEnabled() ? advancedHeight(claude, codex) : panelMainHeight(claude, codex)
@@ -5844,7 +5794,8 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 @discardableResult
 private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
-    if historyAccounts(advCards(claude, codex)).isEmpty {
+    let scene = advancedSceneLayout(claude, codex)
+    if scene.subscriptions.isEmpty && scene.cards.isEmpty {
         return drawPanelBody(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
                          interval: interval, updated: updated, about: about, autoIntervals: autoIntervals)
     }
@@ -5957,7 +5908,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     }
 
     // ---- product cards ----
-    let cards = advCards(claude, codex)
+    let cards = scene.cards
     var y: CGFloat = 58
 
     func drawRow(_ row: AdvRow, topY yr: CGFloat, dimmed: Bool, rowData: LimitData, remoteBody: Bool = false, remoteEmpty: Bool = false) {
@@ -6048,9 +5999,8 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         if dimmed && !remoteBody { ctx.restoreGState() }
     }
 
-    let cardLayout = remotePanelLayout(views: cards.compactMap { $0.account }, style: .advanced, now: remoteRenderNow())
     for (index, c) in cards.enumerated() {
-        let slot = cardLayout.cards[index]
+        let slot = scene.window.cards[index]
         y = slot.minY
         let ch = slot.height
         let card = rectTL(slot.minX, y, slot.width, ch)
@@ -6154,49 +6104,49 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     }
 
     // ---- history & money ----
-    let historyViews = historyAccounts(cards)
-    let selectedAccount = selectedHistoryAccount(historyViews)
-    let hp = selectedAccount?.product ?? "claude"
-    let expanded = advHistExpanded()
-    let hh = advHistoryHeight(cards)
+    let subscriptions = scene.subscriptions
+    let selected = scene.selected
+    let hp = selected?.product ?? "claude"
+    let expanded = scene.expanded
+    y = scene.window.history.minY
+    let hh = CGFloat(scene.history.height)
     let hcard = rectTL(ADV_CX, y, ADV_CW, hh)
     roundFill(hcard, 14, gray(1, 0.04)); roundStroke(hcard.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
     let hy = y + 8                                  // border 1 + padding 7
     drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
-    let selector = historySelectorLayout(historyViews)
+    let selector = scene.selector
     let selectorExtra = selector.extraHeight
     let baseHistCap = remoteHistoryHeading(language: appLang())
     textC(caps(baseHistCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
+    if let container = selector.container {
+        roundFill(rectTL(ADV_IX + container.minX, hy + container.minY, container.width, container.height), 9, gray(1, 0.07))
+    }
     for (i, slot) in selector.rects.enumerated() {
-        let account = historyViews[i], title = selector.titles[i]
+        let subscription = subscriptions[i], title = selector.titles[i]
         let r = rectTL(ADV_IX + slot.minX, hy + slot.minY, slot.width, slot.height)
-        let on = selectedAccount.map { remoteAccountID($0) } == remoteAccountID(account)
-        roundFill(r, 7, gray(1, on ? 0.18 : 0.07))
-        // A single long custom caption can use a smaller face, never an ellipsis.
-        let naturalWidth = width(attr(title, 10.5, .semibold, textHi))
-        let size = min(10.5, 10.5 * max(1, slot.width - 10) / max(1, naturalWidth))
-        textC(attr(title, size, on ? .semibold : .medium, on ? textHi : textMid),
-              x: r.midX, topY: hy + slot.minY, h: slot.height, align: 1)
-        hits.append(Hit(id: "histaccount:" + remoteAccountID(account), rect: r, tooltip: title))
+        let on = selected?.product == subscription.product
+        if on { roundFill(r, 7, gray(1, 0.18)) }
+        let weight: NSFont.Weight = on ? .semibold : .medium
+        let fitted = remoteHistoryFittedTitle(title, width: Double(slot.width - 10)) {
+            Double(width(attr($0, selector.fontSize, weight, textHi)))
+        }
+        textC(attr(fitted, selector.fontSize, weight, on ? textHi : textMid), x: r.midX, topY: hy + slot.minY, h: slot.height, align: 1)
+        hits.append(Hit(id: "histsubscription:" + subscription.product, rect: r, tooltip: title))
     }
     let toggleWidth = selector.ownRow || selector.rects.isEmpty ? ADV_CW : max(28, (selector.rects.first?.minX ?? 200) - 4)
     hits.append(Hit(id: "hist:toggle", rect: rectTL(ADV_CX, y, toggleWidth,
         selector.ownRow || renderedSyncWarning() != nil ? 26 : 35)))
     // Sync stalled / revoked: one orange line under the header, in both collapsed and expanded
     // states — the totals below silently miss the other computers otherwise. Tap → Settings.
-    var warnH: CGFloat = 0
     if let w = renderedSyncWarning() {
         let a = fitAttr(w, maxW: ADV_IW) { attr($0, 10.5, .regular, ADV_WARN) }
         textC(a, x: ADV_IX, topY: hy + 18 + selectorExtra + (selector.ownRow ? 4 : 0) + 1, h: ADV_NOTICE - 2)
         hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, hy + 18 + selectorExtra + (selector.ownRow ? 4 : 0), ADV_IW, ADV_NOTICE)))
-        warnH = ADV_NOTICE
     }
     if expanded {
-        let ix = REMOTE_RENDER_ISOLATED ? UsageIndex() : mergedUsageIndex()
-        let d = selectedAccount?.data ?? (hp == "claude" ? claude : codex)
-        let historyIndex = selectedAccount.map { accountUsageIndex($0, local: renderedUsageIndex()) } ?? ix
-        let ap = advancedProduct(d, product: hp, index: historyIndex, acct: selectedAccount?.historyKey)
-        let by = hy + 18 + 4 + warnH + selectorExtra                // body top
+        let d = selected?.representative?.data ?? (hp == "claude" ? claude : codex)
+        let ap = advancedProduct(d, product: hp, index: selected?.index ?? UsageIndex())
+        let by = y + CGFloat(scene.history.bodyTop)                // body top
         // -- 7-day stacked bars (x 26…216) --
         let cx0 = ADV_IX, cy0 = by
         textC(caps(tr("7 дней · $ по API", "7 days · $ at API"), 8.5, textLo), x: cx0, topY: cy0, h: 12)
@@ -6288,9 +6238,9 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         }
         // -- money table --
         var my = by + 82
-        if ap.firstSample == nil {
+        if scene.emptyHeight > 0 {
             // first day: no sampled history yet — say so instead of showing empty charts as data
-            let noteHeight = historyEmptyHeight()
+            let noteHeight = CGFloat(scene.emptyHeight)
             let bx = rectTL(ADV_IX, my + 2, ADV_IW, noteHeight - 6)
             roundFill(bx, 8, gray(1, 0.04))
             let msg = remoteHistoryEmptyMessage()
@@ -6303,43 +6253,37 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             ctx.restoreGState()
             my += noteHeight
         }
+        my = y + CGFloat(scene.history.tableTop)
         hline(ADV_IX, ADV_IX + ADV_IW, my + 4, gray(1, 0.06))
-        let colX: [CGFloat] = [ADV_IX, ADV_IX + 90, ADV_IX + 177, ADV_IX + ADV_IW]
-        textC(caps(tr("подписка", "subscription"), 8.5, textLo), x: colX[1], topY: my + 10, h: 11)
-        textC(caps(tr("по API было бы", "at API price"), 8.5, textLo), x: colX[2], topY: my + 10, h: 11)
-        textC(caps(remoteMoneyValueHeading(language: appLang()), 8.5, textLo), x: colX[3], topY: my + 10, h: 11, align: 2)
-        var ry = my + 23
-        let moneyRows = historyMoneyRows(historyViews)
-        for (account, row) in zip(historyViews, moneyRows) {
-            let label = row.title
-            let price = attr(row.monthly.isEmpty ? "" : " · " + row.monthly, 10.5, .regular, textMid)
-            let pencilWidth: CGFloat = row.editable ? 12 : 0
-            let labelWidth = max(20, ADV_IW - width(price) - pencilWidth)
-            let natural = width(attr(label, 10.5, .semibold, textHi))
-            let labelSize = min(10.5, 10.5 * labelWidth / max(1, natural))
-            let title = attr(label, labelSize, .semibold, textHi)
-            textC(title, x: colX[0], topY: ry, h: 13)
-            textC(price, x: colX[0] + width(title), topY: ry, h: 13)
-            hits.append(Hit(id: "moneyaccount:" + remoteAccountID(account),
-                rect: rectTL(colX[0], ry, ADV_IW, 13), tooltip: label + price.string))
+        let columns = scene.history.columnRightEdges.map { CGFloat($0) }
+        textC(caps(tr("по подписке", "subscription"), 8.5, textLo), x: columns[0], topY: my + 10, h: 11, align: 2)
+        textC(caps(tr("по API было бы", "at API price"), 8.5, textLo), x: columns[1], topY: my + 10, h: 11, align: 2)
+        textC(caps(remoteMoneyValueHeading(language: appLang()), 8.5, textLo), x: columns[2], topY: my + 10, h: 11, align: 2)
+        for (i, row) in scene.money.enumerated() {
+            let ry = y + CGFloat(scene.history.rowTops[i])
+            let price = attr(row.monthly, 10.5, .regular, textHi)
+            let pencilWidth: CGFloat = row.editable ? 13 : 0
+            let labelWidth = max(0, columns[0] - width(price) - pencilWidth - 8 - ADV_IX)
+            let title = remoteHistoryFittedTitle(row.title, width: Double(labelWidth)) { Double(width(attr($0, 10.5, .semibold, textHi))) }
+            textC(attr(title, 10.5, .semibold, textHi), x: ADV_IX, topY: ry, h: 13)
+            textC(price, x: columns[0], topY: ry, h: 13, align: 2)
+            hits.append(Hit(id: "moneysubscription:" + row.product, rect: rectTL(ADV_IX, ry, ADV_IW, 13),
+                tooltip: row.title + (row.monthly.isEmpty ? "" : " · " + row.monthly)))
             if row.editable {
-                let pencilX = colX[0] + width(title) + width(price) + 2
-                drawSF(ctx, "pencil", in: rectTL(pencilX, ry + 1.5, 10, 10), ADV_LINK)
-                hits.append(Hit(id: "settings", rect: rectTL(colX[0], ry - 1, ADV_IW, 15)))
+                drawSF(ctx, "pencil", in: rectTL(columns[0] - width(price) - 13, ry + 1.5, 10, 10), ADV_LINK)
+                hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, ry - 1, columns[0] - ADV_IX, 15)))
             }
-            textC(attr(row.subscriptionDaily, 10.5, .regular, textHi), x: colX[1], topY: ry + 17, h: 13)
-            textC(attr(row.apiDaily, 10.5, .regular, textHi), x: colX[2], topY: ry + 17, h: 13)
-            textC(attr(row.value, 10.5, .regular, textHi), x: colX[3], topY: ry + 17, h: 13, align: 2)
-            ry += 38
+            textC(attr(row.apiDaily, 10.5, .regular, row.activeAmount == nil ? textLo : textHi), x: columns[1], topY: ry, h: 13, align: 2)
+            textC(attr(row.value, 10.5, .regular, textHi), x: columns[2], topY: ry, h: 13, align: 2)
         }
-        for (i, note) in historyMoneyNotes(moneyRows).enumerated() {
-            textC(attr(note, 9.5, .regular, textLo), x: colX[0], topY: ry + 3 + CGFloat(i) * 12, h: 12)
+        for (i, note) in scene.notes.enumerated() {
+            textC(attr(note, 9.5, .regular, textLo), x: ADV_IX, topY: y + CGFloat(scene.history.notesTop) + CGFloat(i) * 12, h: 11)
         }
     }
     y += hh + 6
 
     // ---- footer ----
-    let footTop = H - 35 - ADV_CREDIT_H
+    let footTop = scene.window.footer.minY
     hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated,
                            autoIntervals: autoIntervals, advanced: true, views: displayAccountViews(claude, codex, includeHidden: true))
     // credit line: author · version · GitHub
@@ -6629,7 +6573,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         let top = SET_TRAY_TOP + 44 + CGFloat(i) * SET_ROW_H
         hdiv(cardX + 14, cardX + cardW, top)
         text(attr(product == "claude" ? "Claude" : "Codex", 12.5, .regular, textHi), x: cardX + 14, topY: top + 10)
-        let visible = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }
+        let visible = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) }
         let chosen = menuAccount(product, views: visible, selected: menuAccountSelection())
         let title = chosen?.caption ?? tr("По умолчанию", "Default")
         let capsule = rectTL(cardX + cardW - 214, top + 6, 200, 24)
@@ -6663,7 +6607,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
                 x += widths[j] + 4
             }
         }
-        let priced = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) && !$0.historyKey.hasPrefix("u:") }
+        let priced = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) }
         for (i, view) in priced.enumerated() {
             subRow(i, view, view.product == "claude" ? [20, 100, 200] : [8, 20, 100, 200])
             if i + 1 < priced.count { hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + CGFloat(i + 1) * SET_ROW_H) }
@@ -7351,7 +7295,8 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         }
         if mode == .main {
             var accessibleChildren: [Any] = subviews.filter { !$0.isHidden }
-            for hit in hits where hit.id.hasPrefix("quotafeedback:") || hit.id.hasPrefix("sourceheader:") {
+            for hit in hits where hit.id.hasPrefix("quotafeedback:") || hit.id.hasPrefix("sourceheader:")
+                || hit.id.hasPrefix("histsubscription:") || hit.id.hasPrefix("moneysubscription:") {
                 let visible = hit.rect.intersection(bounds)
                 guard !visible.isNull && !visible.isEmpty else { continue }
                 let screenRect = window.map { $0.convertToScreen(convert(visible, to: nil)) } ?? visible
@@ -7362,7 +7307,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                 let account = displayedCardViews(claude, codex).first {
                     $0.product == product && (parts.count < 3 || $0.historyKey == parts[2])
                 }
-                element.setAccessibilityLabel(hit.id.hasPrefix("sourceheader:") ? (hit.tooltip ?? "")
+                element.setAccessibilityLabel((hit.id.hasPrefix("sourceheader:") || hit.id.hasPrefix("histsubscription:") || hit.id.hasPrefix("moneysubscription:")) ? (hit.tooltip ?? "")
                     : (account?.caption ?? (product == "claude" ? "Claude Code" : "Codex")))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityValue(hit.tooltip ?? "")
@@ -7487,7 +7432,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
             return
         }
         finishCaptionEdit(.escape)
-        guard let view = accountForSettings(key), view.label != nil, !view.historyKey.hasPrefix("u:") else { return }
+        guard let view = accountForSettings(key), view.label != nil else { return }
         editingCaptionKey = key
         editingCaptionOriginal = view.caption == remoteDefaultCaption(view) ? nil : view.caption
         let seed = remoteCaptionEditorSeed(view.caption.isEmpty ? remoteDefaultCaption(view) : view.caption)
@@ -7580,7 +7525,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
         needsDisplay = true
     }
     private func chooseMenuAccount(_ product: String, at point: CGPoint) {
-        let views = displayAccountViews(claude, codex).filter { $0.product == product && !$0.historyKey.hasPrefix("u:") }
+        let views = displayAccountViews(claude, codex).filter { $0.product == product }
         let stored = menuAccountSelection()[product]
         let selected = stored.flatMap { label in views.contains(where: { $0.label == label }) ? label : nil }
         let menu = NSMenu()
@@ -7650,8 +7595,8 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                     chooseMenuAccount(String(h.id.dropFirst(12)), at: CGPoint(x: h.rect.minX, y: h.rect.minY))
                 } else if h.id == "accounts:github" {
                     showGitHubSettings()
-                } else if h.id.hasPrefix("histaccount:") {
-                    UserDefaults.standard.set(String(h.id.dropFirst(12)), forKey: "advHistAccount")
+                } else if h.id.hasPrefix("histsubscription:") {
+                    UserDefaults.standard.set(String(h.id.dropFirst(17)), forKey: "advHistProduct")
                     resizeToContent()
                 } else if h.id.hasPrefix("accountsub:") {
                     let value = String(h.id.dropFirst(11))
@@ -9895,7 +9840,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     for card in advCards(cl, cx) {
                         let baseline = 38 + card.rows.reduce(CGFloat(0)) { $0 + $1.height }
                             + CGFloat(max(0, card.rows.count - 1)) + card.noticeHeight
-                        manualCheck(card.height == baseline + CGFloat(remoteQuotaFooterHeight(advanced: true)),
+                        manualCheck(card.height == baseline + card.footerHeight,
                                     label + " Advanced card adds only the shared status/action footer")
                         cardRects[card.product] = CGRect(x: 15, y: height - top - card.height, width: 330, height: card.height)
                         top += card.height + 5
@@ -9921,11 +9866,12 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     }
                 }
                 let footerHits = hits.filter { $0.id.hasPrefix("quotafeedback:") }
-                manualCheck(footerHits.count == presentProducts.count, label + " feedback only in present provider cards")
+                let expectedFeedback = usesAdvanced ? advCards(cl, cx).filter { $0.footerHeight > 0 }.count : presentProducts.count
+                manualCheck(footerHits.count == expectedFeedback, label + " feedback only in cards with a visible style-specific footer")
                 for footer in footerHits {
                     let product = String(footer.id.dropFirst(14))
                     manualCheck(cardRects[product]?.contains(footer.rect) == true
-                                && footer.rect.height == CGFloat(remoteQuotaFooterHeight(advanced: usesAdvanced)),
+                                && footer.rect.height == (usesAdvanced ? advCards(cl, cx).first { $0.product == product }?.footerHeight : CGFloat(remoteQuotaFooterHeight(advanced: false))),
                                 label + " style-specific footer contained by own card")
                 }
                 for action in quotaActions {

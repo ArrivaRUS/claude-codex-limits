@@ -157,7 +157,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
     }
     func render(_ name: String, language: String, view: String, accounts: [AccountView], sync: ReaderSyncState,
                 now: Date = C3_PREVIEW_NOW, phase: RemoteManualPhase = .idle, readerManual: RemoteManualPhase? = nil, settings: Bool = false,
-                hidden: Set<String> = [], expanded: Bool = false, settingsState: SyncUIState? = nil) {
+                hidden: Set<String> = [], expanded: Bool = false, settingsState: SyncUIState? = nil,
+                subscriptions: [HistorySubscription]? = nil) {
         watchdog.begin("C3-10 scene " + name)
         let advanced = view == "advanced"
         let accounts = remoteSortedPresentationViews(views: accounts.map {
@@ -165,14 +166,15 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         }, language: language)
         configure(language, advanced: advanced, views: accounts, sync: sync, hidden: hidden, expanded: expanded)
         if let settingsState = settingsState { SYNC_PREVIEW = settingsState }
-        let visible = accounts.filter { !remoteAccountIsHidden($0, hidden: hidden) && !$0.historyKey.hasPrefix("u:") }
+        let visible = accounts.filter { !remoteAccountIsHidden($0, hidden: hidden) }
         if sync.phase != .on || sync.warning != nil {
-            check(accounts.filter { !$0.isLocal && !$0.historyKey.hasPrefix("u:") }.allSatisfy {
+            check(accounts.filter { !$0.isLocal }.allSatisfy {
                 sync.phase == .on ? $0.state == .syncStalled
                     : ($0.state == .signedOut && $0.data.session == nil && $0.data.weekly == nil && $0.data.scoped == nil)
             }, "C3-10 reader state governs every foreign account " + name)
         }
-        let frame = RemoteAccountFrame(now: now, sync: sync, allViews: accounts, visibleViews: visible, displayedViews: visible)
+        var frame = RemoteAccountFrame(now: now, sync: sync, allViews: accounts, visibleViews: visible, displayedViews: visible)
+        frame.subscriptions = subscriptions ?? historySubscriptions(views: accounts, index: historyPreviewIndex(accounts), now: now, language: language)
         withRemoteRenderScene(frame: frame, timeZone: C3_PREVIEW_ZONE, manual: phase, readerManual: readerManual) {
             let empty = LimitData(present: false)
             let height = settings ? settingsTotalHeight(AboutState()) : mainPanelHeight(empty, empty)
@@ -304,7 +306,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                     }
                 }
                 let toggles = hits.filter { $0.id == "hist:toggle" }
-                let accounts = hits.filter { $0.id.hasPrefix("histaccount:") }
+                let accounts = hits.filter { $0.id.hasPrefix("histsubscription:") }
                 check(toggles.allSatisfy { toggle in accounts.allSatisfy { !toggle.rect.intersects($0.rect) } },
                       "C3-10 actual history toggle does not intercept account selection " + name)
                 var separateAccounts = true
@@ -315,31 +317,24 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 }
                 check(separateAccounts, "C3-10 actual history account selection hits do not overlap " + name)
                 if name.hasPrefix("c3-history-two-codex-"), expanded {
-                    let expected = ["Codex · mac", "Codex · vps"]
-                    let titles = frame.allViews.map { remoteHistorySelectorTitle($0, language: language) }
-                    check(titles == expected && accounts.compactMap { $0.tooltip } == expected
-                          && Set(accounts.compactMap { $0.tooltip }).count == 2,
-                          "C3-10 actual history selector text and tooltip distinguish both Codex accounts " + name)
-                    check(accounts.count == expected.count && zip(expected, accounts).allSatisfy { pair in
-                        textWidth(pair.0, 10.5, .semibold) <= Double(pair.1.rect.width - 10)
-                    }, "C3-10 complete Codex machine titles fit their rendered history segments " + name)
+                    let expected = ["Codex Pro"]
+                    check(accounts.compactMap { $0.tooltip } == expected && accounts.count == 1,
+                          "C3-10 both Codex account cards share one product history tab " + name)
                 }
                 if name.hasPrefix("c3-long-names-"), expanded {
                     let caption = frame.allViews.first?.caption ?? ""
                     check(caption.unicodeScalars.count == 32 && accounts.count == 1
                           && accounts.first?.tooltip == caption,
                           "C3-10 expanded long-caption history exposes the complete 32-scalar selector label " + name)
-                    let captionWidth = lineWidth(CTLineCreateWithAttributedString(ctAttr(caption, ctFont(10.5, .semibold), cg(.white))))
                     check(accounts.first.map { $0.rect.width <= 308 && $0.rect.height > 0
-                          && captionWidth <= $0.rect.width - 10 } == true,
-                          "C3-10 complete long-caption selector text fits its measured native hit width " + name)
+                          && !remoteHistoryFittedTitle(caption, width: Double($0.rect.width - 10), measure: { textWidth($0, 10.5, .semibold) }).isEmpty } == true,
+                          "C3-10 fixed-size long-caption selector uses measured ellipsis and full tooltip " + name)
                 }
-                if expanded && visible.isEmpty && frame.allViews.contains(where: { $0.historyKey == "u:codex" }) {
-                    check(!toggles.isEmpty && hits.contains { $0.id == "moneyaccount:codex|u:codex" }
+                if expanded && visible.isEmpty && frame.subscriptions?.isEmpty == false {
+                    check(!toggles.isEmpty && hits.contains { $0.id == "moneysubscription:codex" }
                           && !hits.contains { $0.id.hasPrefix("quotafeedback:") }
-                          && accounts.count == 1
-                          && accounts.first?.tooltip == (language == "ru" ? "Codex · не указан" : "Codex · unlabelled"),
-                          "C3-10 unlabelled-only group renders its distinct localized history title/money without quota cards " + name)
+                          && accounts.count == 1 && accounts.first?.tooltip == "Codex",
+                          "C3-10 usage-only product has one history tab and no synthetic quota card " + name)
                 }
             }
             save(context.makeImage(), name)
@@ -447,17 +442,11 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 accounts: accounts, sync: ReaderSyncState(phase: .on), expanded: true)
         }
     }
-    let onlyUnassigned = AccountView(product: "codex", label: nil, historyKey: "u:codex", caption: "",
-        data: LimitData(present: false), isLocal: false, tier: nil,
-        usageDays: ["2026-10-12": ["gpt-5": DayModelUsage(input: 10000, output: 2000, turns: 3)]],
-        machines: ["desktop"], state: .fresh)
-    let onlyUnassignedLayout = remotePanelLayout(views: [onlyUnassigned], style: .advanced,
-        now: C3_PREVIEW_NOW, historyHeight: 231)
-    check(onlyUnassignedLayout.cards.isEmpty && onlyUnassignedLayout.moneyRows.count == 1,
-          "C3-10 unlabelled-only group has history money row and no quota card")
+    let usageOnly = HistorySubscription(product: "codex", title: "Codex",
+        usageDays: ["2026-10-12": ["gpt-6.1-sol": DayModelUsage(input: 10000, output: 2000, turns: 3)]], accounts: [])
     for language in ["ru", "en"] {
-        render("c3-history-only-unassigned-\(language)-advanced.png", language: language, view: "advanced",
-            accounts: [onlyUnassigned], sync: ReaderSyncState(phase: .on), expanded: true)
+        render("c5-history-only-product-\(language)-advanced.png", language: language, view: "advanced",
+            accounts: [], sync: ReaderSyncState(phase: .on), expanded: true, subscriptions: [usageOnly])
         let accounts = [c3PreviewView(state: .syncStalled, product: "codex", identity: 11),
                         c3PreviewView(state: .syncStalled, product: "codex", identity: 12, machines: ["desktop"])]
         let sync = ReaderSyncState(phase: .on, warning: language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.")
@@ -608,16 +597,13 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on), expanded: view == "advanced")
         }
         let hiddenClaude = c3PreviewView()
-        let unassigned = AccountView(product: "codex", label: nil, historyKey: "u:codex", caption: "",
-            data: LimitData(present: false), isLocal: false, tier: nil, usageDays: [:], machines: ["desktop"], state: .fresh)
-        let accounts = [hiddenClaude, localCodex, remoteCodex, unassigned]
+        let accounts = [hiddenClaude, localCodex, remoteCodex]
         let hidden: Set<String> = [hiddenClaude.historyKey]
         for view in ["simple", "advanced"] {
             let model = remoteSettingsModel(views: accounts, hidden: hidden, polling: ["claude": false, "codex": true],
                 sync: ReaderSyncState(phase: .on), advanced: view == "advanced", language: language)
             check(model.accounts.contains { $0.historyKey == hiddenClaude.historyKey && !$0.visible }
-                  && model.accounts.contains { $0.historyKey == "u:codex" && !$0.editable }
-                  && model.menuProducts.contains("codex"), "C3-10 settings hidden/unlabelled/chooser fixture")
+                  && model.menuProducts.contains("codex"), "C3-10 settings hidden accounts and chooser fixture")
             render("c3-settings-accounts-\(language)-\(view).png", language: language, view: view,
                 accounts: accounts, sync: ReaderSyncState(phase: .on), settings: true, hidden: hidden)
         }
@@ -721,7 +707,7 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         expected.insert("c3-settings-long-error-\(language)-simple.png")
         for view in views { expected.insert("c3-long-names-\(language)-\(view).png") }
         for view in ["simple", "advanced"] { expected.insert("c3-settings-accounts-\(language)-\(view).png") }
-        expected.insert("c3-history-only-unassigned-\(language)-advanced.png")
+        expected.insert("c5-history-only-product-\(language)-advanced.png")
         for view in ["simple", "advanced"] { expected.insert("c3-actions-two-codex-\(language)-\(view).png") }
     }
     expected.insert("c5-freshness-solo-ru-simple-wide.png")

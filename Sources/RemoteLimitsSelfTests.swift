@@ -757,7 +757,7 @@ private func rlC105(_ fx: RLFixtures, _ expect: RLExpect) {
     let root = cache.days["codex"] ?? [:]
     c.add("history totals keep the 0.4.5 usage", root["2026-10-11"]?["gpt-x"]?.input == 500)
     c.add("history totals keep the null-label usage", root["2026-10-11"]?["gpt-y"]?.input == 300)
-    expect(c.failed.isEmpty, "C1-05 old 0.4.5 / null-label Codex usage → group «аккаунт не указан» without a card; known accounts unchanged (RL-17)" + c.suffix)
+    expect(c.failed.isEmpty, "C1-05 old 0.4.5 / null-label Codex usage stays in product totals without a synthetic account card; wire accounts unchanged" + c.suffix)
 }
 
 // MARK: C1-06 V5 states with injected now

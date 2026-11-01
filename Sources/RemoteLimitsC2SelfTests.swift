@@ -53,7 +53,7 @@ import Foundation
 //   func menuAccountSelection(defaults: UserDefaults = .standard) -> [String: String]
 //   func menuAccount(_ product: String, views: [AccountView], selected: [String: String]) -> AccountView?
 //       // selected label present among `views` → it; else the local view of the product; else its first view in V2 order; else nil
-//   func mergedUsageIndex(_ sync: GitHubSync = .shared, hidden: Set<String> = hiddenAccounts()) -> UsageIndex
+//   func mergedUsageIndex(_ sync: GitHubSync = .shared) -> UsageIndex
 //       // remote part = Σ accounts[].days of labels not in `hidden` + unattributedDays (V7); NOT filtered by productEnabled (U2)
 //
 //   // Money (U1, U3)
@@ -61,10 +61,10 @@ import Foundation
 //       // local: today's rules (subClaude/subCodex, then claudeTier); remote: tier/plan of the snapshot only — local claudeTier
 //       // and subClaude/subCodex never apply; nothing known → fallback with estimated = true. The 2-arg overload = local.
 //   func dailyUsage(_ product: String, days: Int, index: UsageIndex, now: Date = Date()) -> [DayUsage]   // `now` replaces Date()
-//   func accountUsageIndex(_ view: AccountView, local: UsageIndex) -> UsageIndex
+//   historyUsageIndex(local:remote:) sums each product across machines (C5-24).
 //       // days[view.product] = view.usageDays (+ local.days[view.product] when view.isLocal); nothing of other accounts
-//   func moneySummary(_ view: AccountView, local: UsageIndex, days: Int = 35, now: Date) -> MoneySummary
-//       // usage = accountUsageIndex; price = subscriptionUSD(view.product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal)
+//   subscriptionMoneySummary(_:price:now:) uses product totals.
+//       // Account-bound money selection was retired by the owner on 2026-11-01.
 //
 //   // Reader journal (PRD §5, G3/G4). One JSON object per line, keys exactly ev, ts, product, label, state, age:
 //   //   {"ev":"reader_card_state","ts":"<ISO-8601 UTC of now>","product":"claude|codex","label":"<16 hex>"|null,
@@ -394,7 +394,8 @@ private func c2C202(_ fixture: String?, _ defaults: MemorySelfTestDefaults, _ se
     if let v = claude {
         let price = subscriptionUSD(v.product, plan: v.data.plan, tier: v.tier, isLocal: v.isLocal)
         a.add("max_20x from vps → $200 without estimate (got \(price))", same(price, 200, false))
-        let money = moneySummary(v, local: UsageIndex(), now: now)
+        let subscription = HistorySubscription(product: v.product, title: "Claude Max", usageDays: v.usageDays, accounts: [v])
+        let money = subscriptionMoneySummary(subscription, price: price, now: now)
         a.add("money table: $200, not estimated (got \(money.subMonthly), \(money.subEstimated))",
               abs(money.subMonthly - 200) < 0.001 && !money.subEstimated)
     }
@@ -427,46 +428,20 @@ private func c2C203(_ fixture: String?, _ expect: C2Expect) {
     guard let a = views.first(where: { $0.label == C2_CODEX_A }), let b = views.first(where: { $0.label == C2_CODEX_B }) else {
         expect(false, "C2-03 precondition: two remote Codex cards (got \(views.map { c2Key($0) }))"); return
     }
-    let ia = accountUsageIndex(a, local: UsageIndex()), ib = accountUsageIndex(b, local: UsageIndex())
+    // UI history no longer splits one product into account tabs; wire account records stay separate.
     var c = C2Checks()
-    c.add("A index = A days only", c2Canon(ia.days["codex"] ?? [:]) == c2Canon(aDays))
-    c.add("B index = B days only", c2Canon(ib.days["codex"] ?? [:]) == c2Canon(bDays))
-    c.add("no other product leaks in", ia.days["claude"] == nil && ib.days["claude"] == nil)
-    let weekA = dailyUsage("codex", days: 7, index: ia, now: now), weekB = dailyUsage("codex", days: 7, index: ib, now: now)
-    let turnsA = weekA.reduce(0) { $0 + $1.turns }, turnsB = weekB.reduce(0) { $0 + $1.turns }
-    c.add("7-day bars A = 3 turns (got \(turnsA))", turnsA == 3)
-    c.add("7-day bars B = 5 turns (got \(turnsB))", turnsB == 5)
-    let calA = dailyUsage("codex", days: 35, index: ia, now: now).filter { $0.turns > 0 }.map { $0.day }
-    let calB = dailyUsage("codex", days: 35, index: ib, now: now).filter { $0.turns > 0 }.map { $0.day }
-    c.add("calendar A = [2026-10-10] (got \(calA))", calA == ["2026-10-10"])
-    c.add("calendar B = [2026-10-11] (got \(calB))", calB == ["2026-10-11"])
-    let ma = moneySummary(a, local: UsageIndex(), now: now), mb = moneySummary(b, local: UsageIndex(), now: now)
-    let total = c2Cost(aDays) + c2Cost(bDays) + c2Cost(cDays)
-    c.add("money A = cost of A days (got \(ma.usdApi), want \(c2Cost(aDays)))", abs(ma.usdApi - c2Cost(aDays)) < 1e-9)
-    c.add("money B = cost of B days (got \(mb.usdApi), want \(c2Cost(bDays)))", abs(mb.usdApi - c2Cost(bDays)) < 1e-9)
-    c.add("the product total is not shown as one account", abs(ma.usdApi - total) > 1e-6 && abs(mb.usdApi - total) > 1e-6)
-    c.add("active days 1 / 1", ma.activeDays == 1 && mb.activeDays == 1)
-    c.add("price per account from its plan (Codex table → estimated)",
-          ma.subEstimated == subscriptionUSD("codex", plan: "pro", tier: nil, isLocal: false).estimated
-          && abs(mb.subMonthly - subscriptionUSD("codex", plan: "plus", tier: nil, isLocal: false).usd) < 0.001)
-    expect(c.failed.isEmpty, "C2-03 two Codex accounts → separate days, calendar and money; the sum is never one account's (U1)" + c.suffix)
-
-    // The local account = its remote days + this Mac's own logs; another account's days never join it.
-    var localIx = UsageIndex()
-    localIx.add("codex", "2026-10-12", "gpt-6-sol", DayModelUsage(input: 10, output: 1, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, turns: 2))
-    let withLocal = c2Resolve(c2Cache([C2_VPS_FILE: file], now: now), codex: c2Local(10, asOf: now.addingTimeInterval(-60)),
-                              ids: ["codex": C2_UUID_C], now: now)
-    var l = C2Checks()
-    if let mine = withLocal.first(where: { $0.product == "codex" && $0.isLocal }) {
-        let ix = accountUsageIndex(mine, local: localIx)
-        l.add("local logs included", c2Turns(ix, "codex", "2026-10-12", "gpt-6-sol") == 2)
-        l.add("its vps days included", c2Turns(ix, "codex", "2026-10-10", "gpt-6-astra") == 3)
-        l.add("account B days excluded", c2Turns(ix, "codex", "2026-10-11", "gpt-6-astra") == 0)
-        if let other = withLocal.first(where: { $0.label == C2_CODEX_B }) {
-            l.add("B index has no local logs", c2Turns(accountUsageIndex(other, local: localIx), "codex", "2026-10-12", "gpt-6-sol") == 0)
-        } else { l.add("B card present", false) }
-    } else { l.add("local Codex card present (got \(withLocal.map { c2Key($0) }))", false) }
-    expect(l.failed.isEmpty, "C2-03 local Codex account = its vps days + local logs; account B stays apart" + l.suffix)
+    c.add("wire A days remain account-bound", c2Canon(a.usageDays) == c2Canon(aDays))
+    c.add("wire B days remain account-bound", c2Canon(b.usageDays) == c2Canon(bDays))
+    let cache = c2Cache([C2_VPS_FILE: file], now: now)
+    let index = historyUsageIndex(local: UsageIndex(), remote: cache)
+    let subscriptions = historySubscriptions(views: views, index: index, now: now, language: "en")
+    if let codex = subscriptions.first(where: { $0.product == "codex" }) {
+        let total = c2Cost(aDays) + c2Cost(bDays) + c2Cost(cDays)
+        let money = subscriptionMoneySummary(codex, price: (200, false), now: now)
+        c.add("all Codex account spending contributes once to one subscription", abs(money.usdApi - total) < 1e-6)
+        c.add("one Codex tab", subscriptions.filter { $0.product == "codex" }.count == 1)
+    } else { c.add("Codex subscription exists", false) }
+    expect(c.failed.isEmpty, "C2-03 wire identities stay separate; UI history and money aggregate by product (C5-24)" + c.suffix)
 }
 
 // MARK: C2-04 history file: legacy lines, dedup (acct, t), local key survives a gist change
@@ -587,9 +562,11 @@ private func c2C206(_ root: String, _ fixture: String?, _ defaults: MemorySelfTe
                           remotePath: root + "/c2-06-remote.json", machineId: C2_MAC)
     sync.setRemoteForPreview(cache)
     select(true, false)                                                   // Codex local poll off: U2 must not matter
-    let shown = mergedUsageIndex(sync, hidden: [])
-    let hiddenIx = mergedUsageIndex(sync, hidden: hidden)
-    let viaDefaults = mergedUsageIndex(sync)                               // default argument reads hiddenAccounts()
+    defaults.set([String](), forKey: "hiddenAccounts")
+    let shown = mergedUsageIndex(sync)
+    defaults.set(hidden.sorted(), forKey: "hiddenAccounts")
+    let hiddenIx = mergedUsageIndex(sync)
+    let viaDefaults = mergedUsageIndex(sync)                               // card visibility never filters product spending
     select(true, true)
     let delta = c2Turns(shown, "codex", "2026-10-11", "gpt-6-sol") - c2Turns(hiddenIx, "codex", "2026-10-11", "gpt-6-sol")
     var c = C2Checks()
@@ -597,11 +574,11 @@ private func c2C206(_ root: String, _ fixture: String?, _ defaults: MemorySelfTe
     c.add("menu bar never selects it (got \(c2Key(menu)))", menu != nil && menu?.label != C2_CODEX_C)
     c.add("visible: its 7 turns counted even with the Codex poll off (got \(c2Turns(shown, "codex", "2026-10-11", "gpt-6-sol")))",
           c2Turns(shown, "codex", "2026-10-11", "gpt-6-sol") >= 7)
-    c.add("hidden: its 7 turns removed (delta \(delta))", delta == 7)
+    c.add("hidden quota card does not subtract product spending (delta \(delta))", delta == 0)
     c.add("other accounts stay (B 5 turns)", c2Turns(hiddenIx, "codex", "2026-10-11", "gpt-6-astra") == c2Turns(shown, "codex", "2026-10-11", "gpt-6-astra")
           && c2Turns(hiddenIx, "codex", "2026-10-11", "gpt-6-astra") >= 5)
     c.add("default argument = the setting", c2Turns(viaDefaults, "codex", "2026-10-11", "gpt-6-sol") == c2Turns(hiddenIx, "codex", "2026-10-11", "gpt-6-sol"))
-    expect(c.failed.isEmpty, "C2-06 N1: a hidden account leaves the cards, the menu bar and the usage on this Mac" + c.suffix)
+    expect(c.failed.isEmpty, "C2-06: hidden accounts leave cards/menu; product history still sums all machines" + c.suffix)
 
     // Gist and other machines unaffected: the body this Mac PATCHes is the same with and without the hidden label.
     let plain = c2SyncOnce(root: root, files: [C2_VPS_FILE: file], now: now)

@@ -504,8 +504,9 @@ private func c5C509(_ check: C5Check) {
         check(layout.cards.allSatisfy { $0.height == 183 }
               && layout.windowHeight == (count <= 2 ? 317 : 512),
               "C5-09 Simple \(count) cards remove one 14pt source row per grid row")
-        check(remoteQuotaFooterHeight(advanced: false) == 18 && remoteQuotaFooterHeight(advanced: true) == remoteQuotaFooterHeight(advanced: false),
-              "C5-09 shared footer geometry retains only the action row in both modes")
+        check(remoteQuotaFooterHeight(advanced: false) == 18 && remoteQuotaFooterHeight(advanced: true) == 0
+              && remoteQuotaFooterHeight(advanced: true, statusLine: "status") == 18,
+              "C5-09 shared footer geometry reserves Advanced space only for a status row")
     }
     let view = c5DateView(C5_NOW.addingTimeInterval(-86400))
     for narrow in [true, false] {
@@ -970,7 +971,7 @@ private func c5C521(_ check: C5Check) {
             let p = remotePresentationCard(view, sync: sync, language: language, narrow: false,
                 now: C5_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
             check(remoteVisibleSourceLine(p, advanced: true).isEmpty && remoteVisibleSourceLine(p, advanced: false).isEmpty
-                  && remoteQuotaFooterHeight(advanced: true) == remoteQuotaFooterHeight(advanced: false)
+                  && remoteQuotaFooterHeight(advanced: true, statusLine: p.statusLine) == remoteQuotaFooterHeight(advanced: false)
                   && p.sourceHeader?.tooltip.isEmpty == false && !p.statusLine.isEmpty && !p.advancedBadge.isEmpty,
                   "C5-21 \(language): both modes hide source ink, retaining source tooltip/AX model")
             if let row = cards.first?.rows.first(where: { $0.limit?.id == "session" }) {
@@ -1010,161 +1011,20 @@ private func c5C522(_ check: C5Check) {
               + (cache.unattributedDays?["codex"]?[day]?[model]?.input ?? 0) == 1_000_000,
               "C5-22 reader projection conserves usage without root double counting")
     }
-    var local = UsageIndex(); local.days["codex"] = days
-    var view = c5DateView(C5_NOW); view.product = "codex"; view.label = label
-    view.caption = ""; view.data.plan = "pro"; view.isLocal = true; view.usageDays = days
-    let bound = remoteApplyingLocalUsage([view], local: local, localIds: ["codex": id], labelKey: key)
-    check(!bound.contains { $0.historyKey == "u:codex" }
-          && accountUsageIndex(bound[0], local: local).days["codex"]?[day]?[model]?.input == 2_000_000,
-          "C5-22 own singleton: old unlabelled + prior subscription usage exactly once")
-    var previousSubscription = view; previousSubscription.isLocal = false
-    let oldSubscription = moneySummary(previousSubscription, local: UsageIndex(), now: C5_NOW).usdApi
-    let newSubscription = moneySummary(bound[0], local: local, now: C5_NOW).usdApi
-    check(newSubscription == oldSubscription + (apiCost(model, u) ?? 0),
-          "C5-22 singleton subscription money equals previous subscription plus own unlabelled money")
-    let replay = remoteApplyingLocalUsage(bound, local: local, localIds: ["codex": id], labelKey: key)
-    check(moneySummary(replay[0], local: local, now: C5_NOW).usdApi == newSubscription,
-          "C5-22 local attribution replay does not double-count days/models")
-    local.accountByDay = ["codex": ["2026-10-29": "c522-other-codex"]]
-    let ambiguous = remoteApplyingLocalUsage([view], local: local, localIds: ["codex": id], labelKey: key)
-    check(ambiguous.contains { $0.historyKey == "u:codex" }, "C5-22 own two known accounts preserve unlabelled days")
-    var switched = local
-    var twice = u; twice.input = 2_000_000
-    var thrice = u; thrice.input = 3_000_000
-    switched.days["codex"]?["2026-10-31"] = [model: twice]
-    switched.days["codex"]?["2026-10-29"] = [model: thrice]
-    switched.accountByDay = ["codex": ["2026-10-31": id, "2026-10-29": "c522-other-codex"]]
-    let split = remoteApplyingLocalUsage([view], local: switched, localIds: ["codex": id], labelKey: key)
-    let historicalLabel = accountLabel(product: "codex", localId: "c522-other-codex", labelKey: key)!
-    func inputs(_ label: String?, unlabelled: Bool = false) -> Int {
-        split.filter { unlabelled ? $0.historyKey == "u:codex" : $0.label == label }.reduce(0) { sum, account in
-            sum + (account.localUsageDays ?? [:]).values.reduce(0) { $0 + ($1[model]?.input ?? 0) }
-        }
-    }
-    check(inputs(label) == 2_000_000 && inputs(historicalLabel) == 3_000_000 && inputs(nil, unlabelled: true) == 1_000_000,
-          "C5-22 U1: explicit own/current/historical days never move between subscriptions")
-    let historicalOnly = remoteApplyingLocalUsage([], local: local, localIds: [:], labelKey: key)
-    check(historicalOnly.count == 1 && historicalOnly.first?.label == historicalLabel
-          && historicalOnly.first?.localUsageDays?[day]?[model]?.input == 1_000_000,
-          "C5-22 own singleton historical ID receives old days even without a current login")
-    let withoutGist = remoteApplyingLocalUsage([], local: local, localIds: [:], labelKey: nil)
-    check(withoutGist.count == 1 && withoutGist.first?.historyKey.hasPrefix("l:") == true
-          && withoutGist.first?.localUsageDays?[day]?[model]?.input == 1_000_000,
-          "C5-22 singleton own historical identity stays a subscription without GitHub/HMAC key")
-    for language in ["ru", "en"] {
-        let title = remoteHistorySelectorTitle(bound[0], language: language)
-        check(title == "Codex Pro", "C5-22 \(language): subscription title omits machines")
-        var unassigned = view; unassigned.historyKey = "u:codex"; unassigned.isLocal = false
-        let summary = moneySummary(unassigned, local: UsageIndex(), now: C5_NOW)
-        let row = remoteMoneyRow(unassigned, summary: summary, language: language)
-        check(summary.subMonthly == 0 && !summary.subEstimated
-              && row.monthly.isEmpty && row.subscriptionDaily.isEmpty && row.value.isEmpty && !row.editable,
-              "C5-22 \(language): unlabelled history has no subscription price, pencil or value")
-        var custom = bound[0]; custom.caption = "Work subscription"
-        check(remoteHistorySelectorTitle(custom, language: language) == "Work subscription",
-              "C5-22 \(language): user L takes precedence over product/plan")
-        custom.caption = remoteDefaultCaption(custom); custom.customCaption = custom.caption
-        check(remoteHistorySelectorTitle(custom, language: language) == custom.caption,
-              "C5-22 \(language): explicit L is preserved even when it equals generated card caption")
-        var planless = bound[0]; planless.data.plan = nil
-        check(remoteHistorySelectorTitle(planless, language: language) == "Codex",
-              "C5-22 \(language): missing plan leaves only product")
-        let titles = [bound[0], unassigned].map { remoteHistorySelectorTitle($0, language: language) }
-        let layout = remoteHistorySelectorLayout(titles: titles, measuredWidths: [70, 120], headingWidth: 140,
-            availableWidth: 308, expanded: true)
-        check(layout.ownRow && layout.rects.count == 2 && !layout.titles.contains { $0.contains("macbook") },
-              "C5-22 \(language): measured selector moves below header without truncating segments")
-        let compact = remoteHistorySelectorLayout(titles: ["Codex Pro"], measuredWidths: [70], headingWidth: 140,
-            availableWidth: 308, expanded: true)
-        check(!compact.ownRow && compact.rects.count == 1,
-              "C5-22 \(language): selector stays beside header only with measured space")
-        let many = remoteHistorySelectorLayout(titles: ["A", "B", "C"], measuredWidths: [200, 200, 200],
-            headingWidth: 140, availableWidth: 308, expanded: true)
-        check(many.ownRow && many.rects.count == 3 && many.extraHeight == 66
-              && many.rects.allSatisfy { $0.width == 216 },
-              "C5-22 \(language): long segments wrap intact into measured rows with shared height")
-    }
+    // Account-split history/F3 tests retired: the product model is covered by C5-24.
+    // Publisher R4 remains part of the wire contract and is intentionally unchanged.
     let wireDays: [String: Any] = ["codex": [day: [model: ["input": 1_000_000, "turns": 1]]]]
-    for attribution in [[:], ["codex": ["2026-10-29": "c522-other-codex"]]] as [[String: [String: String]]] {
-        let file = c4MachineFile(days: wireDays, accountByDay: attribution, localId: id, codex: view.data,
-            poll: AutoPollState(), gistId: "c522-gist", machineId: "mac", machineName: "macbook", osName: "fixture", now: C5_NOW)
-        let other = (file["unattributedDays"] as? [String: Any])?["codex"]
-        check((other == nil) == attribution.isEmpty, "C5-22 publisher uses all known IDs before singleton fallback")
-    }
-    // F1: the pre-account index migration records "", not a missing dictionary key.
-    let otherId = "c522-other-codex"
-    let vectors: [(String, String?, String?, String, String?)] = [
-        ("empty/zero", nil, nil, "", nil),
-        ("empty/current-empty", "", nil, "", nil),
-        ("empty/one", id, nil, "", id),
-        ("empty/two", id, otherId, "", nil),
-        ("empty/historical-only", nil, otherId, "", otherId),
-        ("explicit/other-wins", id, nil, otherId, otherId)
-    ]
-    for (name, current, historical, marker, expectedId) in vectors {
-        var marked = UsageIndex(); marked.days["codex"] = days
-        var attribution = [day: marker]
-        if let historical = historical { attribution["2026-10-01"] = historical }
-        marked.accountByDay = ["codex": attribution]
-        let currentIds = current.map { ["codex": $0] } ?? [:]
-        let ownViews = current == id ? [view] : []
-        let assigned = remoteApplyingLocalUsage(ownViews, local: marked, localIds: currentIds, labelKey: key)
-        let expectedLabel = expectedId.flatMap { accountLabel(product: "codex", localId: $0, labelKey: key) }
-        let owner = assigned.first { ($0.localUsageDays?[day]?[model]?.input ?? 0) > 0 }
-        check(owner?.localUsageDays?[day]?[model]?.input == 1_000_000
-              && (expectedId == nil ? owner?.historyKey == "u:codex" : owner?.label == expectedLabel)
-              && marked.accountByDay?["codex"] == attribution,
-              "C5-22 F1 \(name): own empty marker uses only singleton fallback; explicit ID wins, index unchanged")
-        let file = c4MachineFile(days: wireDays, accountByDay: ["codex": attribution], localId: current,
-            codex: view.data, poll: AutoPollState(), gistId: "c522-gist", machineId: "mac",
+    for count in [0, 1, 2] {
+        var attribution = [day: ""]
+        if count == 2 { attribution["2026-10-01"] = "c522-other-codex" }
+        let file = c4MachineFile(days: wireDays, accountByDay: ["codex": attribution], localId: count == 0 ? nil : id,
+            codex: LimitData(plan: "pro"), poll: AutoPollState(), gistId: "c522-gist", machineId: "mac",
             machineName: "macbook", osName: "fixture", now: C5_NOW)
         let records = file["accounts"] as? [[String: Any]] ?? []
-        let accountDays = records.first { $0["label"] as? String == expectedLabel }?["days"] as? [String: Any]
-        let otherDays = (file["unattributedDays"] as? [String: Any])?["codex"] as? [String: Any]
-        check(expectedId == nil ? otherDays?[day] != nil
-              : accountDays?[day] != nil && otherDays?[day] == nil,
-              "C5-22 F1 \(name): actual publisher file agrees with own history attribution")
-    }
-    // F3: A is added by history after switching the current login to B.
-    for captionIsLocal in [true, false] {
-        let captions = [historicalLabel: RemoteCaption(text: "Работа", setAt: C5_NOW)]
-        let complete = applyingLocalUsageAndCaptions([view], local: switched, localIds: ["codex": id],
-            labelKey: key, remoteCaptions: captionIsLocal ? [:] : captions, now: C5_NOW,
-            localCaptions: captionIsLocal ? captions : [:])
-        guard let historical = complete.first(where: { $0.label == historicalLabel }),
-              let current = complete.first(where: { $0.label == label }) else {
-            check(false, "C5-22 F3 switch A→B retains historical and current accounts"); continue
-        }
-        for language in ["ru", "en"] {
-            let unknown = moneySummary(historical, local: switched, now: C5_NOW)
-            let unknownPrice = accountSubscriptionPrice(historical, overrides: [:], localFallback: (100, true))
-            let historicalMoney = accountMoneySummary(historical, usage: unknown, price: unknownPrice)
-            let row = remoteMoneyRow(historical, summary: historicalMoney, language: language)
-            check(historical.customCaption == "Работа" && historical.caption == "Работа"
-                  && remoteHistorySelectorTitle(historical, language: language) == "Работа" && row.title == "Работа",
-                  "C5-22 F3 \(language)/local=\(captionIsLocal): saved A caption reaches segment and money after switching to B")
-            check(!unknown.hasSubscriptionPrice && unknown.subMonthly == 0
-                  && !historicalMoney.hasSubscriptionPrice && historicalMoney.subMonthly == 0
-                  && row.monthly.isEmpty && row.subscriptionDaily.isEmpty && row.value.isEmpty && !row.editable
-                  && historicalMoney.usdApi > 0 && row.apiDaily.hasPrefix("≈ ") && row.activeNote != nil,
-                  "C5-22 F5 \(language): planless historical Codex retains API spending without subscription columns or pencil")
-            let usage = moneySummary(current, local: switched, now: C5_NOW)
-            let price = accountSubscriptionPrice(current, overrides: [:], localFallback: (200, true))
-            let currentMoney = accountMoneySummary(current, usage: usage, price: price)
-            let currentRow = remoteMoneyRow(current, summary: currentMoney, language: language)
-            check(currentMoney.hasSubscriptionPrice && currentMoney.subMonthly == 200
-                  && !currentRow.monthly.isEmpty && !currentRow.subscriptionDaily.isEmpty && !currentRow.value.isEmpty
-                  && !currentRow.editable, "C5-22 F5 \(language): current Codex Pro money remains unchanged")
-            for ownerPrice in [0.0, 150.0] {
-                let explicit = accountSubscriptionPrice(historical,
-                    overrides: [remoteAccountID(historical): ownerPrice], localFallback: (100, true))
-                let priced = accountMoneySummary(historical, usage: unknown, price: explicit)
-                let pricedRow = remoteMoneyRow(historical, summary: priced, language: language)
-                check(priced.hasSubscriptionPrice && priced.subMonthly == ownerPrice && !pricedRow.monthly.isEmpty
-                      && !pricedRow.subscriptionDaily.isEmpty && !pricedRow.editable,
-                      "C5-22 F5 \(language): explicit owner price (including zero) enables known subscription columns")
-            }
-        }
+        let byDay = records.first { $0["label"] as? String == label }?["days"] as? [String: Any]
+        let other = (file["unattributedDays"] as? [String: Any])?["codex"] as? [String: Any]
+        check(count == 1 ? byDay?[day] != nil && other?[day] == nil : other?[day] != nil,
+              "C5-22 publisher R4 empty marker, \(count) known IDs: wire attribution remains unchanged")
     }
 
 }
@@ -1184,18 +1044,152 @@ private func c5C523(_ check: C5Check) {
               && remoteMoneyValue(29.7, language: language) == (language == "ru" ? "×29,7" : "×29.7")
               && remoteMoneyValue(16, language: language) == (language == "ru" ? "×16,0" : "×16.0")
               && remoteMoneyValue(101.2, language: language) == "×101", "C5-23 \(language): daily money and value precision")
-        let notes = ["Claude Max - VPS ≈ $347", "Codex Pro ≈ $185", "Codex · unlabelled ≈ $45"]
-        let lines = remoteMoneyNoteLines(notes, language: language, width: 70, measure: { Double($0.count) })
-        check(lines.count > 1 && !lines.joined().contains("…") && lines.allSatisfy { $0.count <= 70 },
-              "C5-23 \(language): active-day notes wrap by subscription, never ellipsize")
         check(remoteModelLegend(product: "codex", language: language) == ["Astra", "Sol", language == "ru" ? "прочие" : "other"]
-              && remoteMoneyValueHeading(language: language) == (language == "ru" ? "ВЫГОДА" : "VALUE")
-              && !remoteHistoryHeading(language: language).contains(" · "),
+              && remoteMoneyValueHeading(language: language) == (language == "ru" ? "ВЫГОДА" : "VALUE"),
               "C5-23 \(language): actual legend/heading omit old Sol versions and machine count")
-        check(remoteHistoryMoneyExtraHeight(rowCount: 3, noteLines: lines)
-              > remoteHistoryMoneyExtraHeight(rowCount: 3, noteLines: ["one"])
-              && remoteMoneyNotesHeight(lines) > remoteMoneyNotesHeight(["one"]),
-              "C5-23 \(language): shared history height grows with wrapped notes")
+        // Note wrapping and section geometry now follow the accepted C5-26 model.
+
+    }
+}
+
+private func c5C524Fixture() -> (UsageIndex, SyncRemoteCache, [AccountView]) {
+    let day = "2026-10-30", stamp = ISO8601DateFormatter().string(from: C5_NOW)
+    let codexLabel = accountLabel(product: "codex", localId: "c524-own-codex", gistId: "c524-gist")!
+    let claudeLabel = accountLabel(product: "claude", localId: "c524-vps-claude", gistId: "c524-gist")!
+    func days(_ product: String, _ count: Int) -> [String: Any] {
+        [day: [product == "codex" ? "gpt-6.1-sol" : "claude-opus": ["input": count * 1_000_000, "turns": 1]]]
+    }
+    func file(_ id: String, _ body: [String: Any]) -> String {
+        var object = body; object["schema"] = 1; object["machine"] = ["id": id, "name": id]; object["updated"] = stamp
+        return String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+    let weekly: [String: Any] = ["pct": 40, "resetAt": ISO8601DateFormatter().string(from: C5_NOW.addingTimeInterval(100 * 3600))]
+    func record(_ product: String, _ label: String, _ plan: String, _ count: Int) -> [String: Any] {
+        ["product": product, "label": label, "status": "ok", "plan": plan, "asOf": stamp,
+         "windows": ["weekly": weekly], "days": days(product, count)]
+    }
+    let macAccounts: [[String: Any]] = [record("codex", codexLabel, "pro", 1)]
+    let vpsAccounts: [[String: Any]] = [record("claude", claudeLabel, "max", 2), record("codex", codexLabel, "pro", 3)]
+    let mac = file("mac", ["days": ["codex": days("codex", 1)], "accounts": macAccounts])
+    let vps = file("vps", ["days": ["claude": days("claude", 2), "codex": days("codex", 3)], "accounts": vpsAccounts])
+    let thinkpad = file("thinkpad", ["days": ["claude": days("claude", 4), "codex": days("codex", 5)]])
+    var cache = mergeV11(["machine-mac.json": mac, "machine-vps.json": vps, "machine-thinkpad.json": thinkpad], excluding: "mac", now: C5_NOW)
+    cache.labelKey = accountLabelKey(gistId: "c524-gist")
+    var local = UsageIndex(); var usage = DayModelUsage(); usage.input = 1_000_000; usage.turns = 1
+    local.add("codex", day, "gpt-6.1-sol", usage); local.accountByDay = ["codex": [day: ""]]
+    let views = resolveAccounts(local: (LimitData(present: false), LimitData(plan: "pro", asOf: C5_NOW)),
+        localIds: ["codex": "c524-own-codex"], remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: C5_NOW)
+    return (local, cache, views)
+}
+private func c5C524(_ check: C5Check) {
+    let (local, cache, views) = c5C524Fixture()
+    let index = historyUsageIndex(local: local, remote: cache)
+    for language in ["ru", "en"] {
+        let subscriptions = historySubscriptions(views: views, index: index, now: C5_NOW, language: language)
+        check(subscriptions.map { $0.title } == ["Claude Max", "Codex Pro"] && subscriptions.count == 2,
+              "C5-24 \(language): three machines, empty old marker and legacy file produce exactly two product tabs")
+        check(subscriptions.allSatisfy { !$0.title.contains("mac") && !$0.title.contains("vps") && !$0.title.contains("thinkpad") },
+              "C5-24 \(language): subscription names never include machine names")
+        for subscription in subscriptions {
+            let summary = subscriptionMoneySummary(subscription, price: (200, false), now: C5_NOW)
+            check(summary.usdApi == (subscription.product == "codex" ? 18 : 30),
+                  "C5-24 \(language)/\(subscription.product): sum root totals of peers plus own history once, excluding own gist file")
+        }
+        let codex = historySubscriptions(views: views.filter { $0.product == "codex" }, index: local, now: C5_NOW, language: language)
+        check(codex.count == 1 && codex[0].title == "Codex Pro", "C5-24 \(language): Codex-only has one tab")
+        let usageOnly = historySubscriptions(views: [], index: local, now: C5_NOW, language: language)
+        let unknown = subscriptionMoneySummary(usageOnly[0], price: (100, true), now: C5_NOW)
+        let row = remoteMoneyRow(usageOnly[0], summary: unknown, language: language)
+        check(usageOnly.count == 1 && row.title == "Codex" && row.monthly.isEmpty && row.value.isEmpty && !row.editable && unknown.usdApi == 2,
+              "C5-24 \(language): usage without plan keeps API spending, without subscription price/pencil/value")
+        let explicit = historySubscriptionPrice(codex[0], overrides: [remoteAccountID(codex[0].accounts[0]): 150], fallback: (200, true))
+        check(explicit.usd == 150 && !explicit.estimated, "C5-24 \(language): owner subscription price takes precedence")
+        var named = views.first { $0.product == "codex" }!; named.customCaption = "Работа"; named.isLocal = true
+        var peer = named; peer.historyKey = "c524-peer"; peer.isLocal = false; peer.customCaption = "Personal"
+        let tied = historySubscriptions(views: [peer, named], index: local, now: C5_NOW, language: language)
+        check(tied.first?.title == "Работа", "C5-24 \(language): L wins over plan, own L wins equal asOf")
+        peer.data.asOf = C5_NOW.addingTimeInterval(1)
+        check(historySubscriptions(views: [named, peer], index: local, now: C5_NOW, language: language).first?.title == "Personal",
+              "C5-24 \(language): freshest asOf selects between historical captions")
+        let accountOnly = historySubscriptions(views: views.filter { $0.product == "codex" }, index: UsageIndex(), now: C5_NOW, language: language)
+        check(accountOnly.count == 1, "C5-24 \(language): an account without recent spending still has its tab")
+        var metadataOnly = views.first { $0.product == "codex" }!; metadataOnly.data.plan = nil
+        metadataOnly.caption = remoteDefaultCaption(metadataOnly)
+        var record = RemoteAccount(product: "codex", label: metadataOnly.label, status: "signed_out")
+        record.plan = "pro"; record.asOf = C5_NOW
+        let planned = historySubscriptions(views: [metadataOnly], index: UsageIndex(), now: C5_NOW,
+            language: language, remoteAccounts: [record])
+        check(planned.first?.title == "Codex Pro" && metadataOnly.data.plan == nil,
+              "C5-24 \(language): account plan metadata without quota windows names the subscription without changing a limit card")
+        let empty = historySubscriptions(views: [], index: UsageIndex(), now: C5_NOW, language: language)
+        check(empty.isEmpty, "C5-24 \(language): no account and no recent usage means no tab")
+    }
+}
+private func c5C525Views() -> [AccountView] {
+    var claude = c5DateView(C5_NOW, state: .fresh); claude.isLocal = true; claude.data.source = nil
+    claude.caption = ""; claude.data.plan = "max"; claude.data.sessionReset = C5_NOW.addingTimeInterval(4 * 3600)
+    claude.data.weeklyReset = C5_NOW.addingTimeInterval(100 * 3600)
+    claude.data.scoped = ScopedLimit(name: "Fable", percent: 43, reset: C5_NOW.addingTimeInterval(100 * 3600), severity: nil)
+    var codex = claude; codex.product = "codex"; codex.historyKey = "c525-codex"; codex.data.plan = "pro"
+    codex.data.session = nil; codex.data.sessionReset = nil; codex.data.scoped = nil; codex.data.resetCredits = 1
+    return [claude, codex]
+}
+private func c5C525(_ check: C5Check) {
+    for language in ["ru", "en"] {
+        let views = c5C525Views()
+        let frame = RemoteAccountFrame(now: C5_NOW, sync: ReaderSyncState(phase: .on), allViews: views, visibleViews: views, displayedViews: views)
+        withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+            let cards = advCards(views[0].data, views[1].data)
+            check(cards.map { $0.height } == [226, 176] && cards.allSatisfy { $0.footerHeight == 0 },
+                  "C5-25 \(language): real cards match mockup 226/176 without a blank footer")
+        }
+        var offline = views
+        for i in offline.indices {
+            offline[i].isLocal = false; offline[i].state = .offline
+            var source = RemoteSource(machineId: "c525-vps", machineName: "vps")
+            source.asOf = C5_NOW; source.lastSeenAt = C5_NOW.addingTimeInterval(-3600); source.freshUntil = C5_NOW.addingTimeInterval(3600)
+            offline[i].data.source = source
+        }
+        let failed = RemoteAccountFrame(now: C5_NOW, sync: ReaderSyncState(phase: .on), allViews: offline, visibleViews: offline, displayedViews: offline)
+        withRemoteRenderScene(frame: failed, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
+            check(advCards(offline[0].data, offline[1].data).map { $0.height } == [244, 194],
+                  "C5-25 \(language): nonempty state line adds exactly 18pt to each real card")
+        }
+    }
+}
+private func c5C526(_ check: C5Check) {
+    for language in ["ru", "en"] {
+        let rows = [RemoteMoneyRow(product: "claude", title: "Claude Max", monthly: "$200", apiDaily: "$200", value: "×30", editable: false, activeAmount: "$350"),
+                    RemoteMoneyRow(product: "codex", title: "Codex Pro", monthly: "$200", apiDaily: "$179", value: "×26", editable: false, activeAmount: "$190")]
+        let selector = remoteHistorySelectorLayout(titles: rows.map { $0.title }, measuredWidths: [57, 52], headingWidth: 130,
+            availableWidth: 308, expanded: true)
+        let notes = remoteMoneyNoteLines(rows, language: language, width: 308, measure: { Double($0.count) * 3.5 })
+        let history = remoteHistoryLayout(rowCount: 2, selectorExtra: Double(selector.extraHeight), noteLines: notes, expanded: true)
+        let window = remoteAdvancedLayout(cardHeights: [226, 176], historyHeight: history.height)
+        check(!selector.ownRow && selector.container?.minY == 0 && notes.count == 1 && notes[0].contains("Claude Max") && notes[0].contains("Codex Pro"),
+              "C5-26 \(language): selector top is hy; active-day line retains full subscription names")
+        check(history.height == 187 && window.height == 722 && window.footer.maxY <= window.height && window.credit.maxY <= window.height,
+              "C5-26 \(language): shared draw/window geometry is history 187 and window 722, including complete footer")
+        check(history.columnRightEdges == [190, 283, 334] && history.rowTops[1] - history.rowTops[0] == 15,
+              "C5-26 \(language): real table model has right edges 190/283/334 and 15pt rows")
+        check(remoteHistoryLayout(rowCount: 1, selectorExtra: 0, noteLines: ["one"], expanded: true).height == 172,
+              "C5-26 \(language): one subscription history is 172pt")
+        let long = rows.map { row -> RemoteMoneyRow in var row = row; row.title = String(repeating: "Ж", count: 32); return row }
+        let own = remoteHistorySelectorLayout(titles: long.map { $0.title }, measuredWidths: [256, 256], headingWidth: 130,
+            availableWidth: 308, expanded: true)
+        let fitted = remoteHistoryFittedTitle(long[0].title, width: Double(own.rects[0].width - 10), measure: { Double($0.count) * 8 })
+        let short = remoteMoneyNoteLines(long, language: language, width: 308, measure: { Double($0.count) * 5 })
+        check(own.ownRow && own.extraHeight == 22 && own.fontSize == 10.5 && Set(own.rects.map { $0.minY }).count == 1 && fitted.hasSuffix("…")
+              && own.titles[0].count == 32, "C5-26 \(language): long labels use one extra selector row, ellipsis and full tooltip title")
+        check(short.joined().contains("Claude ≈") && short.joined().contains("Codex ≈") && !short.joined().contains("Ж") && !short.joined().contains("…"),
+              "C5-26 \(language): long L shortens to product names before wrapping")
+        let wrapped = remoteMoneyNoteLines(long, language: language, width: 170, measure: { Double($0.count) * 5 })
+        check(wrapped.count > 1 && wrapped.contains { $0.contains("Codex ≈ $190") },
+              "C5-26 \(language): final compression moves complete items at the middle-dot separator")
+        let grown = remoteHistoryLayout(rowCount: 2, selectorExtra: 22, noteLines: wrapped, expanded: true)
+        let enlarged = remoteAdvancedLayout(cardHeights: [226, 176], historyHeight: grown.height)
+        check(enlarged.height == 722 + 22 + Double(wrapped.count - 1) * 12 && enlarged.credit.maxY <= enlarged.height,
+              "C5-26 \(language): selector and note rows grow window with its footer through the shared draw model")
     }
 }
 
@@ -1208,4 +1202,5 @@ func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C519(check)
     c5C520(check)
     c5C521(check); c5C522(check); c5C523(check)
+    c5C524(check); c5C525(check); c5C526(check)
 }

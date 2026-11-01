@@ -253,7 +253,8 @@ private func c3C303(_ root: String, _ expect: C3Expect) {
     v.usageDays = ["2026-10-12": ["claude-fable-5-1": DayModelUsage(input: 2000, output: 500, cacheRead: 100000, cacheWrite5m: 0, cacheWrite1h: 0, turns: 12)]]
     let p = c3Presentation(v)
     expect(p.simpleTitle == "Claude · vps" && p.advancedTitle == "Claude Code" && p.planBadge == "Max 20x" && p.machineSuffix == "· vps" && p.sourceLine == "Данные с vps от 15:50", "C3-03 remote Claude header/source/plan exactly")
-    let money = moneySummary(v, local: UsageIndex(), now: C3_NOW)
+    let subscription = HistorySubscription(product: v.product, title: "Claude Max 20x", usageDays: v.usageDays, accounts: [v])
+    let money = subscriptionMoneySummary(subscription, price: (200, false), now: C3_NOW)
     expect(money.subMonthly == 200 && !money.subEstimated && money.usdApi > 0, "C3-03 existing account money seam: $200 without estimate and positive usage")
     let history = UsageHistory(path: root + "/c3-history.jsonl")
     let t1 = C3_NOW.addingTimeInterval(-1500), t2 = v.data.asOf!

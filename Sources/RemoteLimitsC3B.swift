@@ -112,7 +112,7 @@ func remoteSourceHeaderLayout(_ header: RemoteSourceHeader, availableWidth: Doub
     if header.overflow > 0 { x += measure(" +\(header.overflow)") }
     return RemoteSourceHeaderLayout(runs: runs, width: x, overflow: header.overflow, overflowX: overflowX)
 }
-func remoteQuotaFooterHeight(advanced: Bool) -> Double { 18 }
+func remoteQuotaFooterHeight(advanced: Bool, statusLine: String = "") -> Double { advanced && statusLine.isEmpty ? 0 : 18 }
 func remoteVisibleSourceLine(_ text: String, advanced: Bool) -> String { "" }
 func remoteVisibleSourceLine(_ card: RemoteCardPresentation, advanced: Bool) -> String {
     remoteVisibleSourceLine(card.sourceLine, advanced: advanced)
@@ -139,7 +139,7 @@ struct RemoteSimplePanelHeights {
     var windowHeight: Double { windowBaselineHeight + headerExtra + footerHeight }
 }
 func remoteSimplePanelHeights(views: [AccountView], now: Date) -> RemoteSimplePanelHeights {
-    let visible = views.filter { !$0.historyKey.hasPrefix("u:") }
+    let visible = views
     return RemoteSimplePanelHeights(rows: (visible.count + 1) / 2,
         scopedExtra: visible.contains { remoteSimpleShowsScopedRow($0, now: now) } ? 15 : 0,
         headerExtra: visible.isEmpty ? 0 : REMOTE_SIMPLE_HEADER_EXTRA,
@@ -156,7 +156,7 @@ struct RemotePanelLayout {
 
 func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
                        historyHeight: Double = 35) -> RemotePanelLayout {
-    let visible = views.filter { !$0.historyKey.hasPrefix("u:") }
+    let visible = views
     if style == .simple {
         let heights = remoteSimplePanelHeights(views: visible, now: now)
         if visible.isEmpty {
@@ -179,28 +179,31 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
         let metrics = remoteAdvancedMetrics(view)
         let heights = metrics.map { remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: $0, now: now)) }
             + (view.product == "codex" ? [24.0] : [])
-        let height = 38 + heights.reduce(0, +) + Double(max(0, heights.count - 1))
-            + Double(remoteAdvancedNoticeLines(view, now: now)) * 19 + remoteQuotaFooterHeight(advanced: true)
+        let height = remoteAdvancedCardHeight(rowHeights: heights,
+            noticeHeight: Double(remoteAdvancedNoticeLines(view, now: now)) * 19, footerHeight: remoteAdvancedFooterHeight(view, now: now))
         let rect = CGRect(x: 15, y: top, width: 330, height: height)
         top += height + 5
         return rect
     }
-    // Unassigned usage has no quota card, but keeps its history segment and money
-    // row (UX §10). Callers have already removed hidden history accounts.
-    let historyVisible = views
-    let expanded = historyHeight >= 187
-    let selector = expanded && historyVisible.count >= 3 ? CGRect(x: 26, y: top + 28, width: 308, height: 22) : nil
-    let selectorExtra = expanded && historyVisible.count >= 3 ? 22.0 : 0
-    // historyHeight is the base history height (187 + optional 44pt empty note).
-    let historyH = historyHeight + selectorExtra + (expanded ? Double(max(0, historyVisible.count - 2)) * 19 : 0)
-    let emptyExtra = historyHeight >= 231 ? 44.0 : 0
-    let moneyTop = top + 8 + 18 + 4 + selectorExtra + 82 + emptyExtra + 23
-    let money = expanded ? historyVisible.indices.map { CGRect(x: 26, y: moneyTop + Double($0) * 19, width: 308, height: 13) } : []
-    let interval = CGRect(x: 16, y: top + historyH + 6, width: 328, height: 24)
-    let author = CGRect(x: 16, y: interval.minY + 37, width: 328, height: 12)
-    return RemotePanelLayout(cards: cards, intervalRect: interval, authorRect: author,
-        windowHeight: Double(interval.minY) + 59, historySelectorRect: selector, moneyRows: money)
+    let products = ["claude", "codex"].filter { p in views.contains { $0.product == p } }
+    let expanded = historyHeight >= 172
+    let history = remoteHistoryLayout(rowCount: products.count, selectorExtra: 0,
+        noteLines: expanded ? ["active day"] : [], expanded: expanded,
+        emptyHeight: max(0, historyHeight - 187))
+    let layout = remoteAdvancedLayout(cardHeights: cards.map { Double($0.height) }, historyHeight: history.height)
+    let money = history.rowTops.map { CGRect(x: 26, y: Double(layout.history.minY) + $0, width: 308, height: 13) }
+    return RemotePanelLayout(cards: layout.cards, intervalRect: layout.footer, authorRect: layout.credit,
+        windowHeight: layout.height, historySelectorRect: nil, moneyRows: money)
 
+}
+
+func remoteAdvancedCardHeight(rowHeights: [Double], noticeHeight: Double, footerHeight: Double) -> Double {
+    38 + rowHeights.reduce(0, +) + Double(max(0, rowHeights.count - 1)) + noticeHeight + footerHeight
+}
+func remoteAdvancedFooterHeight(_ view: AccountView, now: Date, statusLine: String? = nil) -> Double {
+    let line = statusLine ?? remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: "en",
+        narrow: false, now: now, timeZone: TimeZone(secondsFromGMT: 0)!).statusLine
+    return remoteQuotaFooterHeight(advanced: true, statusLine: line)
 }
 
 // Shared by the Foundation-only geometry and the real Advanced rows. History can
@@ -266,7 +269,7 @@ struct RemoteMenuPresentation { var lines: [RemoteMenuLine]; var tooltip: String
 
 func remoteMenuPresentation(views: [AccountView], selected: [String: String], language: String,
                             dark: Bool, now: Date, timeZone: TimeZone, metrics: [String] = ["session", "weekly", "model"]) -> RemoteMenuPresentation {
-    let accounts = views.map(remoteSanitizedView).filter { !$0.historyKey.hasPrefix("u:") }
+    let accounts = views.map(remoteSanitizedView)
     let lines = ["claude", "codex"].compactMap { product -> RemoteMenuLine? in
         guard let view = menuAccount(product, views: accounts, selected: selected) else { return nil }
         var data = view.data
@@ -307,16 +310,14 @@ func remoteSettingsModel(views: [AccountView], hidden: Set<String>, polling: [St
     let en = language == "en"
     let views = views.map(remoteSanitizedView)
     let accounts = views.map { view -> RemoteSettingsAccount in
-        let unassigned = view.historyKey.hasPrefix("u:")
         let plan = view.tier?.contains("20x") == true ? "Max 20x" : view.tier?.contains("5x") == true ? "Max 5x" : view.data.plan?.capitalized ?? ""
-        let title = unassigned ? (view.product == "claude" ? "Claude" : "Codex") + (en ? " · unlabelled account" : " · аккаунт не указан") : view.caption
-        let detail = unassigned ? view.machines.joined(separator: ", ")
-            : ([plan, view.machines.joined(separator: ", "), view.isLocal ? (en ? "signed in here" : "вход здесь") : (en ? "not signed in here" : "без входа здесь")].filter { !$0.isEmpty }.joined(separator: " · "))
+        let title = view.caption
+        let detail = ([plan, view.machines.joined(separator: ", "), view.isLocal ? (en ? "signed in here" : "вход здесь") : (en ? "not signed in here" : "без входа здесь")].filter { !$0.isEmpty }.joined(separator: " · "))
         return RemoteSettingsAccount(historyKey: view.historyKey, title: title, subtitle: detail,
-            visible: !remoteAccountIsHidden(view, hidden: hidden), editable: !unassigned && view.label != nil)
+            visible: !remoteAccountIsHidden(view, hidden: hidden), editable: view.label != nil)
     }
     let products = ["claude", "codex"].filter { product in
-        views.filter { $0.product == product && $0.label != nil && !$0.historyKey.hasPrefix("u:") && !remoteAccountIsHidden($0, hidden: hidden) }.count >= 2
+        views.filter { $0.product == product && $0.label != nil && !remoteAccountIsHidden($0, hidden: hidden) }.count >= 2
     }
     return RemoteSettingsModel(pollingTitle: en ? "POLL ON THIS COMPUTER" : "ОПРАШИВАТЬ НА ЭТОМ КОМПЬЮТЕРЕ",
         pollingEnabled: polling, accounts: accounts, menuProducts: products,
@@ -337,9 +338,6 @@ func remoteDefaultCaption(_ rawView: AccountView) -> String {
 // The same title is drawn in its segment and exposed as the segment tooltip.
 func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String {
     let view = remoteSanitizedView(raw), product = view.product == "claude" ? "Claude" : "Codex"
-    if view.historyKey.hasPrefix("u:") {
-        return product + (language == "en" ? " · unlabelled" : " · не указан")
-    }
     if let custom = view.customCaption, !custom.isEmpty { return custom }
     if !view.caption.isEmpty && view.caption != remoteDefaultCaption(view) { return view.caption }
     var subscription = view; subscription.machines = []
@@ -351,34 +349,83 @@ func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String 
 }
 
 struct HistorySelectorLayout {
+    var fontSize: CGFloat { 10.5 }
     var titles: [String]
-    var rects: [CGRect] // top-left coordinates, relative to the history header
+    var rects: [CGRect] // segments, relative to hy
+    var container: CGRect?
     var ownRow: Bool
     var extraHeight: CGFloat
 }
-/// Production supplies CoreText widths; pre-AppKit tests supply deterministic measurements.
 func remoteHistorySelectorLayout(titles: [String], measuredWidths: [CGFloat], headingWidth: CGFloat,
                                  availableWidth: CGFloat, expanded: Bool) -> HistorySelectorLayout {
-    guard expanded else { return HistorySelectorLayout(titles: titles, rects: [], ownRow: false, extraHeight: 0) }
-    let widths = measuredWidths.map { min(availableWidth - 4, $0 + 16) }
-    let total = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) + 4
-    let ownRow = titles.count >= 3 || total + headingWidth + 22 > availableWidth
-    if !ownRow {
-        var x = availableWidth - total + 2
-        let rects = widths.map { width -> CGRect in
-            defer { x += width + 1 }
-            return CGRect(x: x, y: 2, width: width, height: 14)
+    guard expanded, !titles.isEmpty else {
+        return HistorySelectorLayout(titles: titles, rects: [], container: nil, ownRow: false, extraHeight: 0)
+    }
+    let natural = measuredWidths.map { $0 + 16 }, count = natural.count
+    let total = natural.reduce(0, +) + CGFloat(count - 1) + 4
+    let own = total + headingWidth + 22 > availableWidth
+    var widths = natural
+    if own {
+        let available = availableWidth - 4 - CGFloat(count - 1), equal = available / CGFloat(count)
+        if natural.allSatisfy({ $0 <= equal }) { widths = natural.map { _ in equal } }
+        else if natural.reduce(0, +) <= available {
+            let extra = (available - natural.reduce(0, +)) / CGFloat(count); widths = natural.map { $0 + extra }
+        } else {
+            let cap = max(equal, available - (natural.min() ?? 0))
+            widths = natural.map { min($0, cap) }
+            let extra = (available - widths.reduce(0, +)) / CGFloat(count); widths = widths.map { $0 + extra }
         }
-        return HistorySelectorLayout(titles: titles, rects: rects, ownRow: false, extraHeight: 0)
     }
-    var x: CGFloat = 2, row = 0
-    var rects: [CGRect] = []
-    for width in widths {
-        if x > 2 && x + width > availableWidth - 2 { row += 1; x = 2 }
-        rects.append(CGRect(x: x, y: 22 + CGFloat(row) * 22, width: width, height: 18))
-        x += width + 1
+    let container = CGRect(x: own ? 0 : availableWidth - total, y: own ? 22 : 0,
+                           width: own ? availableWidth : total, height: 18)
+    var x = container.minX + 2
+    let rects = widths.map { width -> CGRect in
+        defer { x += width + 1 }
+        return CGRect(x: x, y: container.minY + 2, width: width, height: 14)
     }
-    return HistorySelectorLayout(titles: titles, rects: rects, ownRow: true, extraHeight: CGFloat(row + 1) * 22)
+    return HistorySelectorLayout(titles: titles, rects: rects, container: container, ownRow: own, extraHeight: own ? 22 : 0)
+}
+func remoteHistoryFittedTitle(_ title: String, width: Double, measure: (String) -> Double) -> String {
+    if measure(title) <= width { return title }
+    var value = title
+    while !value.isEmpty && measure(value.trimmingCharacters(in: .whitespaces) + "…") > width { value.removeLast() }
+    return value.trimmingCharacters(in: .whitespaces) + "…"
+}
+struct RemoteHistoryLayout {
+    var height: Double
+    var bodyTop: Double
+    var tableTop: Double
+    var rowTops: [Double]
+    var notesTop: Double
+    var columnRightEdges: [Double] { [190, 283, 334] }
+}
+func remoteHistoryLayout(rowCount: Int, selectorExtra: Double, noteLines: [String], expanded: Bool,
+                         warningHeight: Double = 0, emptyHeight: Double = 0) -> RemoteHistoryLayout {
+    let body = 8 + 22 + selectorExtra + warningHeight, table = body + 82 + emptyHeight
+    let notes = table + 23 + 15 * Double(rowCount) + 2
+    let height = expanded ? notes + remoteMoneyNotesHeight(noteLines) - 1 + 9 : 35 + warningHeight
+    return RemoteHistoryLayout(height: height, bodyTop: body, tableTop: table,
+        rowTops: expanded ? (0..<rowCount).map { table + 23 + 15 * Double($0) } : [], notesTop: notes)
+}
+struct RemoteAdvancedLayout {
+    var cards: [CGRect]
+    var history: CGRect
+    var footer: CGRect
+    var credit: CGRect
+    var height: Double
+}
+func remoteAdvancedLayout(cardHeights: [Double], historyHeight: Double, placeholderHeight: Double = 0) -> RemoteAdvancedLayout {
+    var top = 58.0
+    let cards = cardHeights.map { height -> CGRect in
+        defer { top += height + 5 }
+        return CGRect(x: 15, y: top, width: 330, height: height)
+    }
+    if placeholderHeight > 0 { top += placeholderHeight + 5 }
+    let history = CGRect(x: 15, y: top, width: 330, height: historyHeight)
+    let height = top + historyHeight + 6 + 59
+    return RemoteAdvancedLayout(cards: cards, history: history,
+        footer: CGRect(x: 16, y: height - 59, width: 328, height: 24),
+        credit: CGRect(x: 16, y: height - 22, width: 328, height: 12), height: height)
 }
 
 enum RemoteCaptionCommand { case enter, escape, reset }
@@ -756,7 +803,7 @@ func remoteMenuRefreshDeadline(views: [AccountView], now: Date) -> Date? {
         let boundary = after ? date.addingTimeInterval(0.001) : date
         if boundary > now { dates.append(boundary) }
     }
-    for view in views where !view.historyKey.hasPrefix("u:") {
+    for view in views {
         let data = view.data
         if let at = data.asOf {
             add(at.addingTimeInterval(snapshotHorizon(data)), after: true)

@@ -63,7 +63,7 @@ import Foundation
 // Review repairs R1/R2, RED before implementation:
 // func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String
 // Actual historySelectorLayout.titles and segment tooltips share this helper;
-// default short product + machines, custom L unchanged, u: localized.
+// Product/plan subscription title and custom L, without generated machine names.
 // func remoteFittedStatusLine(_ view: AccountView, presentation: RemoteCardPresentation,
 //   language: String, narrow: Bool = true, now: Date, timeZone: TimeZone,
 //   availableWidth: Double, measure: (String) -> Double) -> String
@@ -160,17 +160,11 @@ private func c3bC306(_ expect: C3BExpect) {
         for i in layout.cards.indices.dropFirst() {
             expect(layout.cards[i].minY - layout.cards[i - 1].maxY == 5, "C3-06 Advanced: 5pt inter-card gap")
         }
-        expect(layout.moneyRows.count == count, "C3-06 Advanced: separate money row per account")
-        if count >= 3 {
-            expect(layout.historySelectorRect?.width == 308 && layout.historySelectorRect?.height == 22,
-                   "C3-06 Advanced: three/four accounts get own 308pt selector row")
-            if let selector = layout.historySelectorRect, let firstMoney = layout.moneyRows.first {
-                expect(!selector.intersects(firstMoney), "C3-06 Advanced: selector and money rows do not overlap")
-            }
-        }
+        expect(layout.moneyRows.count == min(count, 2), "C3-06 Advanced: one money row per product")
+        expect(layout.historySelectorRect == nil, "C3-06 Advanced: account count does not add a subscription selector row")
         for i in layout.moneyRows.indices.dropFirst() {
-            expect(layout.moneyRows[i].minY - layout.moneyRows[i - 1].minY == 19,
-                   "C3-06 Advanced: 19pt per additional money row")
+            expect(layout.moneyRows[i].minY - layout.moneyRows[i - 1].minY == 15,
+                   "C3-06 Advanced: 15pt per subscription row")
         }
         c3bValidRects(layout, expect, "Advanced \(count)")
     }
@@ -179,10 +173,10 @@ private func c3bC306(_ expect: C3BExpect) {
     let threeLayout = remotePanelLayout(views: Array(four.prefix(3)), style: .advanced, now: c3bNow(), historyHeight: 231)
     let fourLayout = remotePanelLayout(views: four, style: .advanced, now: c3bNow(), historyHeight: 231)
     if threeLayout.cards.count == 3 && fourLayout.cards.count == 4 {
-        expect(threeLayout.windowHeight - twoLayout.windowHeight == Double(threeLayout.cards[2].height) + 5 + 22 + 19,
-               "C3-06 Advanced: third account grows window by card + gap + selector row + money row")
-        expect(fourLayout.windowHeight - threeLayout.windowHeight == Double(fourLayout.cards[3].height) + 5 + 19,
-               "C3-06 Advanced: fourth account adds card + gap + money row without second selector row")
+        expect(threeLayout.windowHeight - twoLayout.windowHeight == Double(threeLayout.cards[2].height) + 5,
+               "C3-06 Advanced: third account grows quota stack only; history remains two products")
+        expect(fourLayout.windowHeight - threeLayout.windowHeight == Double(fourLayout.cards[3].height) + 5,
+               "C3-06 Advanced: fourth account adds quota card and gap without another subscription")
     } else { expect(false, "C3-06 Advanced: three/four card layouts available for growth checks") }
 }
 
@@ -204,7 +198,7 @@ private func c3bC306Edges(_ expect: C3BExpect) {
            "C3-06 edge: week row is 62pt in model and real AdvRow")
     expect(remotePanelLayout(views: [onlyWeek], style: .advanced, now: now).cards.first?.height
            == CGFloat(38 + remoteAdvancedRowHeight(.inactive) + remoteAdvancedRowHeight(weekKind)
-                      + remoteAdvancedRowHeight(.credits) + 2 + remoteQuotaFooterHeight(advanced: true)),
+                      + remoteAdvancedRowHeight(.credits) + 2 + remoteAdvancedFooterHeight(onlyWeek, now: now)),
            "C3-06 edge: Codex card includes empty session, week, credits and shared footer height")
 
     // Each expected card includes the unaffected 62pt weekly row. For missing or
@@ -242,7 +236,7 @@ private func c3bC306Edges(_ expect: C3BExpect) {
             expect(remoteAdvancedNoticeLines(view, now: now) == noticeLines,
                    "C3-06 edge \(name): expected paused notice count \(noticeLines)")
             let weekHeight = remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: "weekly", now: now))
-            let cardHeight = 38 + rowHeight + weekHeight + 1 + Double(noticeLines) * 19 + remoteQuotaFooterHeight(advanced: true)
+            let cardHeight = 38 + rowHeight + weekHeight + 1 + Double(noticeLines) * 19 + remoteAdvancedFooterHeight(view, now: now)
             expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height == CGFloat(cardHeight),
                    "C3-06 edge \(name)/local=\(view.isLocal): card derives footer height from shared model")
         }
@@ -319,9 +313,7 @@ private func c3bSettings(_ views: [AccountView], hidden: Set<String> = [], phase
 
 private func c3bC309(_ expect: C3BExpect) {
     let remote = c3bView(), a = c3bView(1, product: "codex", local: true), b = c3bView(2, product: "codex")
-    var unassigned = c3bView(3, product: "codex")
-    unassigned.label = nil; unassigned.historyKey = "u:codex"; unassigned.caption = ""; unassigned.machines = ["vps", "old"]
-    let views = [remote, a, b, unassigned]
+    let views = [remote, a, b]
     for language in ["ru", "en"] {
         for advanced in [false, true] {
             let model = c3bSettings(views, advanced: advanced, language: language)
@@ -329,20 +321,15 @@ private func c3bC309(_ expect: C3BExpect) {
                    "C3-09: N2 exact polling heading")
             expect(model.pollingEnabled == ["claude": false, "codex": true] && model.accounts.first?.visible == true,
                    "C3-09: N3 disabled local polling preserves visible remote Claude, no implicit migration hide")
-            expect(model.showsAccounts && model.showsGitHub && !model.showsV10 && model.accounts.count == 4,
+            expect(model.showsAccounts && model.showsGitHub && !model.showsV10 && model.accounts.count == 3,
                    "C3-09 \(language)/advanced=\(advanced): accounts and GitHub available in both views")
             expect(model.menuProducts == ["codex"], "C3-09: N4 chooser only for product with at least two visible labelled accounts")
-            let unknown = model.accounts.first { $0.historyKey == unassigned.historyKey }
-            expect(unknown?.editable == false && unknown?.visible == true
-                   && unknown?.title == (language == "en" ? "Codex · unlabelled account" : "Codex · аккаунт не указан")
-                   && unknown?.subtitle.contains("vps") == true && unknown?.subtitle.contains("old") == true,
-                   "C3-09: unassigned group has machines/visibility, no caption editor")
             expect(model.accounts.first?.editable == true
                    && model.accounts.first?.subtitle.contains(language == "en" ? "not signed in here" : "без входа здесь") == true,
                    "C3-09: labelled remote row provides editor and sign-in location")
         }
-        let hidden = c3bSettings(views, hidden: [b.historyKey, unassigned.historyKey], language: language)
-        expect(hidden.accounts.count == 4 && hidden.accounts.first { $0.historyKey == b.historyKey }?.visible == false
+        let hidden = c3bSettings(views, hidden: [b.historyKey], language: language)
+        expect(hidden.accounts.count == 3 && hidden.accounts.first { $0.historyKey == b.historyKey }?.visible == false
                && !hidden.menuProducts.contains("codex"), "C3-09: N1 hidden rows remain manageable and leave menu choices")
         let newAccount = c3bSettings(views + [c3bView(4)], hidden: [b.historyKey])
         expect(newAccount.accounts.last?.visible == true, "C3-09: N1 newly discovered account defaults visible")
@@ -418,11 +405,9 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
            "C3-16/A2: product-scoped l:legacy IDs select independent cached local accounts")
     expect(pricesByID[claudeID] == 200 && pricesByID[codexID] == 20,
            "C3-16/A2: legacy products do not share subscription price overrides")
-    let legacyViews = [legacyClaude, legacyCodex]
-    expect(selectedHistoryAccount(views: legacyViews, selectedID: codexID, product: "claude")?.product == "codex",
-           "C3-16/A2: live history selection adapter resolves compound Codex legacy ID")
-    expect(selectedHistoryAccount(views: legacyViews, selectedID: "l:legacy", product: "codex")?.product == "codex",
-           "C3-16/A2: ambiguous persisted legacy selection falls back within selected product")
+    let subscriptions = historySubscriptions(views: [legacyClaude, legacyCodex], index: UsageIndex(), now: c3bNow(), language: "en")
+    expect(selectedHistorySubscription(subscriptions, product: "codex")?.product == "codex",
+           "C3-16/A2: history selection is product-scoped; account price identities remain independent")
     let claudePrice = accountSubscriptionPrice(legacyClaude, overrides: pricesByID, localFallback: (999, true))
     let codexPrice = accountSubscriptionPrice(legacyCodex, overrides: pricesByID, localFallback: (999, true))
     expect(claudePrice.usd == 200 && codexPrice.usd == 20 && !claudePrice.estimated && !codexPrice.estimated,
@@ -482,16 +467,10 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteSanitizedView(safe).caption == safe.caption && remoteSanitizedView(safe).machines == safe.machines,
            "C3-18/D1: sanitizing presentation strings twice is stable")
 
-    var unknown = c3bView(8, product: "codex")
-    unknown.label = nil; unknown.historyKey = "u:codex"; unknown.data = LimitData(present: false)
     let two = [c3bView(), c3bView(1, product: "codex")]
-    let base = remotePanelLayout(views: two, style: .advanced, now: now)
-    let withUnknown = remotePanelLayout(views: two + [unknown], style: .advanced, now: now)
-    expect(withUnknown.cards == base.cards && withUnknown.windowHeight == base.windowHeight && withUnknown.historySelectorRect == nil,
-           "C3-19/D2: unassigned group adds no quota card or collapsed history space")
-    let unknownOnly = remotePanelLayout(views: [unknown], style: .advanced, now: now, historyHeight: 231)
-    expect(unknownOnly.cards.isEmpty && unknownOnly.moneyRows.count == 1,
-           "C3-19/D2/V10: unassigned group retains required expanded history money row")
+    let subscriptionsOnly = remoteAdvancedLayout(cardHeights: [], historyHeight: 172)
+    expect(subscriptionsOnly.cards.isEmpty && subscriptionsOnly.history.height == 172,
+           "C3-19/D2: usage-only product history needs no synthetic quota/account group")
     for count in [3, 4] {
         let views = (0..<count).map { c3bView($0) }
         let collapsed = remotePanelLayout(views: views, style: .advanced, now: now, historyHeight: 35)
@@ -537,9 +516,6 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteAccountIsHidden(legacyClaude, hidden: [claudeID])
            && !remoteAccountIsHidden(legacyCodex, hidden: [claudeID]),
            "C3-24/A2: hiding product-scoped legacy Claude leaves legacy Codex visible")
-    expect(remoteAccountIsHidden(unknown, hidden: ["codex|u:codex"])
-           && !remoteAccountIsHidden(unknown, hidden: ["claude|u:codex"]),
-           "C3-24/A2: unassigned group honors product-scoped hidden identity")
     var noTime = c3bView(local: true); noTime.data.asOf = nil
     expect(remoteAdvancedNoticeLines(noTime, now: now) == 1 && !limitSnapshotNotice(noTime.data, now: now).isEmpty,
            "C3-25/D7: local nil asOf preserves existing paused notice, with no fabricated timestamp")
@@ -780,10 +756,9 @@ private func c3bC329(_ expect: C3BExpect) {
         expect(named.simpleTitle == custom.caption && named.machineSuffix == "· ● mac"
                && remoteHistorySelectorTitle(custom, language: language) == custom.caption,
                "C3-29/R1: explicit account caption remains intact in Simple and history selector without duplicate machines")
-        var unlabelled = other; unlabelled.historyKey = "u:codex"; unlabelled.label = nil
-        expect(remoteHistorySelectorTitle(unlabelled, language: language)
-               == (language == "ru" ? "Codex · не указан" : "Codex · unlabelled"),
-               "C3-29/R1: unlabelled history segment keeps its localized distinct title")
+        let subscriptions = historySubscriptions(views: [local, other], index: UsageIndex(), now: now, language: language)
+        expect(subscriptions.count == 1 && subscriptions.first?.title == "Codex Pro",
+               "C3-29/R1: multiple account cards of Codex share one product subscription tab")
     }
 }
 
@@ -793,14 +768,15 @@ private func c3bC330(_ expect: C3BExpect) {
     healthy.data.weekly = 39
     healthy.data.weeklyReset = healthy.data.asOf!.addingTimeInterval(84 * 3600)
     let freshHeight = remotePanelLayout(views: [healthy], style: .advanced, now: now).cards.first?.height
-    expect(freshHeight == CGFloat(38 + 3 * remoteAdvancedRowHeight(.full) + 2 + remoteQuotaFooterHeight(advanced: true)), "C3-30/N3: baseline full three-window Claude uses shared footer geometry")
+    expect(freshHeight == CGFloat(38 + 3 * remoteAdvancedRowHeight(.full) + 2 + remoteAdvancedFooterHeight(healthy, now: now)), "C3-30/N3: baseline full three-window Claude uses shared footer geometry")
     for state in [RemoteCardState.signInRequired, .offline, .syncStalled, .serviceWait] {
         var view = healthy; view.state = state
         let kinds = remoteAdvancedMetrics(view).map { remoteAdvancedRowKind(view, metric: $0, now: now) }
         expect(kinds.allSatisfy { $0 == .full } && kinds.allSatisfy { remoteAdvancedRowHeight($0) == 62 },
                "C3-30/N3: in-horizon \(state.rawValue) keeps complete 62pt forecast and metadata rows")
-        expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height == freshHeight,
-               "C3-30/N3: in-horizon \(state.rawValue) card has exactly the fresh card height")
+        expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height
+               == (freshHeight ?? 0) + CGFloat(remoteAdvancedFooterHeight(view, now: now) - remoteAdvancedFooterHeight(healthy, now: now)),
+               "C3-30/N3: in-horizon \(state.rawValue) keeps row geometry and adds only its status footer")
         let pace = snapshotWindowPace(used: view.data.weekly, reset: view.data.weeklyReset,
             windowH: 168, asOf: view.data.asOf, now: now)
         let row = AdvRow(limit: PacedLimit(id: "weekly", name: "", pace: pace, color: 0, used: 39), kind: kinds.last!, credits: nil)
@@ -943,7 +919,7 @@ private func c3bC334(_ expect: C3BExpect) {
     expect(empty.cards.isEmpty && empty.windowHeight == 286,
            "C3-34/D2: empty Simple panel does not reserve a nonexistent header")
     let local = c3bView(local: true)
-    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == CGFloat(38 + 2 * remoteAdvancedRowHeight(.full) + 1 + remoteQuotaFooterHeight(advanced: true)),
+    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == CGFloat(38 + 2 * remoteAdvancedRowHeight(.full) + 1 + remoteAdvancedFooterHeight(local, now: now)),
            "C3-34/D2: Advanced card uses its shared footer and no Simple header increment")
 }
 
