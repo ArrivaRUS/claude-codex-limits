@@ -10,7 +10,7 @@
 - **Без двойных запросов.** Если один аккаунт Codex вошёл и на маке, и на сервере, машины не опрашивают его дважды за 15 минут, а паузу, о которой попросил провайдер, соблюдают все. Мак сам публикует лимиты своего аккаунта Codex для других машин.
 - **«История и деньги» по подпискам.** В расширенном виде — одна закладка и одна строка таблицы на подписку Claude и Codex; расход со всех машин складывается в одну сумму. Переключатель подписок стоит в строке заголовка, таблица показывает «по подписке / по API / выгода». Цена подписки — заданная вами в настройках, иначе по опубликованному плану; оценочная помечена `≈`.
 - Расход текущей модели Codex в «Истории и деньгах» больше не считается за $0: добавлена её цена по API.
-- **Постоянная подпись приложения.** Разрешение «Разрешать всегда» в Связке ключей переживает следующие обновления: окна Связки больше не возвращаются с каждой новой версией. Повторный доступ к Связке ждёт до 2 минут, кнопка «Повторить» видна только при ошибке.
+- **Постоянная подпись приложения.** Разрешение «Разрешать всегда» в Связке ключей переживает следующие обновления: окна Связки больше не возвращаются с каждой новой версией. Повторный доступ к Связке ждёт до 2 минут, кнопка «Повторить» видна только при ошибке. При первом запуске после обновления с 3.2.x macOS может один раз спросить доступ к Связке ключей — нажмите «Разрешать всегда».
 
 **Токены CLI — только чтение.** По умолчанию приложение больше не продлевает токены Claude Code и Codex и не переписывает их файлы входа: эти файлы делит живой CLI. Если вход истёк, продлите его в самом CLI.
 
@@ -36,7 +36,7 @@ DMG SHA-256: `<заполнить после сборки DMG>`.
 - **No double polling.** When one Codex account is signed in on both the Mac and a server, the machines do not poll it twice within 15 minutes, and all of them honour a provider’s retry request. The Mac publishes its own Codex account’s limits for other machines.
 - **History & money by subscription.** Advanced view has one tab and one table row per Claude and Codex subscription; usage from all machines adds up to one sum. The subscription switcher sits in the header row, and the table shows subscription / API / value. The subscription price is the one you set in Settings, otherwise the published plan price; an estimate is marked `≈`.
 - Usage of the current Codex model is no longer counted as $0 in History & money: its API price has been added.
-- **Stable app signature.** “Always Allow” in Keychain now survives later updates, so Keychain prompts no longer return with every new version. A Keychain retry waits up to 2 minutes, and **Retry** appears only when there is an error.
+- **Stable app signature.** “Always Allow” in Keychain now survives later updates, so Keychain prompts no longer return with every new version. A Keychain retry waits up to 2 minutes, and **Retry** appears only when there is an error. On the first launch after updating from 3.2.x, macOS may ask for Keychain access once — choose “Always Allow”.
 
 **CLI tokens are read-only.** By default the app no longer refreshes Claude Code and Codex tokens or rewrites their sign-in files, which the live CLI shares. If a sign-in expires, renew it in the CLI itself.
 
