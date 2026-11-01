@@ -87,6 +87,23 @@ let KC_SERVICE = "Claude Code-credentials"
 let BUNDLE_ID  = "com.arrivarus.claudecodexlimits"
 let AGENT_PLIST = HOME + "/Library/LaunchAgents/\(BUNDLE_ID).plist"
 
+// The directory protects all local usage/account files, including existing 0644 files.
+func ensurePrivateDataDirectory(_ path: String) throws {
+    let fm = FileManager.default
+    try fm.createDirectory(atPath: path, withIntermediateDirectories: true,
+                           attributes: [.posixPermissions: 0o700])
+    try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: path)
+}
+
+// Run before any data writer or single-instance lock. Selftests use temporary paths.
+if !CommandLine.arguments.contains(where: { $0.hasSuffix("-selftest") }) {
+    do { try ensurePrivateDataDirectory(DATA_DIR) }
+    catch {
+        fputs("Cannot secure the application data directory (0700).\n", stderr)
+        exit(1)
+    }
+}
+
 // Set only by an isolated selftest before drawing; nil preserves production I/O.
 private var isolatedSelfTestAssets: String? = nil
 
@@ -4395,7 +4412,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     return CGFloat(remoteSimplePanelLayout(views: views, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.3.1"
+let APP_VERSION = "3.4.0"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -9314,16 +9331,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 // MARK: - Single instance (flock) + launch
 
-// Ensure the data directory exists before ANY code path touches it. The lock
-// file (LOCK_PATH), the cache (CACHE_PATH) and downloaded assets all live under
-// DATA_DIR. Without this, on a clean Mac open(LOCK_PATH, O_CREAT, …) returns -1
-// because the parent dir is missing → the app mistakes it for "another instance
-// already running" and silently exit(0)'s. A single mkdir up front fixes both
-// the silent-exit bug and the (previously failing) cache persistence.
-if !CommandLine.arguments.contains("--sync-selftest") && !CommandLine.arguments.contains("--subscriptions-selftest") {
-    try? FileManager.default.createDirectory(atPath: DATA_DIR, withIntermediateDirectories: true)
-}
-
 if CommandLine.arguments.contains("--preview") {
     var c = fetchClaude(); var x = fetchCodex(live: false); applyCache(&c, &x)
     let cP = (c, "claude_128.png"), xP = (x, "codex_128.png")
@@ -9564,6 +9571,26 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             check(false, label + " bitmap allocation"); return nil
         }
         return context
+    }
+    // C6 m7: exercise creation and migration without touching the real home.
+    do {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("ccl-data-permissions-" + UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        for existing in [false, true] {
+            let path = root.appendingPathComponent(existing ? "existing" : "new").path
+            if existing {
+                try fm.createDirectory(atPath: path, withIntermediateDirectories: true)
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
+            }
+            try ensurePrivateDataDirectory(path)
+            let attributes = try fm.attributesOfItem(atPath: path)
+            let mode = (attributes[.posixPermissions] as? NSNumber)?.intValue
+            check(mode == 0o700, "C6 m7: \(existing ? "existing 0755" : "new") data directory becomes 0700")
+        }
+    } catch {
+        check(false, "C6 m7: temporary data directory permissions: " + error.localizedDescription)
     }
     func reading(_ value: Double, _ at: Double, reset: Double = 1000000) -> LimitData {
         var d = LimitData(session: value, sessionReset: Date(timeIntervalSince1970: reset), asOf: Date(timeIntervalSince1970: at))

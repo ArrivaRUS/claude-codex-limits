@@ -480,7 +480,10 @@ def cmd_status(_args):
     _say(common.tr("Автосинхронизация: ", "Auto sync: ") + _timer_status())
     gid = st.get("gistId")
     if gid:
-        _say("Gist: https://gist.github.com/%s  (%s)" % (gid, common.tr("секретный", "secret")))
+        if getattr(_args, "show_gist", False):
+            _say("Gist: https://gist.github.com/%s  (%s)" % (gid, common.tr("секретный", "secret")))
+        else:
+            _say("Gist: " + common.tr("есть (секретный)", "yes (secret)"))
     _say(common.tr("Последняя отправка: ", "Last upload: ") + _fmt_time(st.get("pushedAt"))
          + " · " + common.tr("чтение: ", "read: ") + _fmt_time(sync.last_ok_at(st)))
     _say(common.tr("Последняя попытка: ", "Last attempt: ") + _fmt_time(st.get("lastAttemptAt")))
@@ -650,7 +653,9 @@ def main(argv=None):
     p.add_argument("--no-browser", action="store_true", help=common.tr("не открывать браузер", "don't open a browser"))
     p.add_argument("--force", action="store_true", help=common.tr("войти заново", "sign in again"))
     sub.add_parser("logout", help=common.tr("выйти из GitHub", "sign out of GitHub"))
-    sub.add_parser("status", help=common.tr("состояние синхронизации", "sync status"))
+    p = sub.add_parser("status", help=common.tr("состояние синхронизации", "sync status"))
+    p.add_argument("--show-gist", action="store_true", help=common.tr(
+        "показать секретную ссылку на gist (ключ на чтение)", "show the secret gist URL (read access key)"))
     p = sub.add_parser("credentials", help=common.tr("политика записи токенов", "token write policy"))
     p.add_argument("--write", choices=["never", "guarded"], required=True,
                    help=common.tr("разрешить или запретить запись токенов", "allow or forbid token writes"))

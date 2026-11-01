@@ -12,12 +12,16 @@ Linux-порт macOS-приложения из этого репозитория
 | **`claude-codex-limits`** | значок в трее Fly/KDE с процентами лимитов; по клику открывается панель, как на Mac: простой вид или расширенный (темп, столбики за 7 дней, календарь за 35 дней, деньги) | `python3-pyqt5` из репозитория ОС |
 
 Предыдущие версии порта проверены на Astra Linux SE 1.8.5 (Python 3.11, PyQt5 5.15, KDE Plasma / Fly).
-Для 0.4.5 CI и QA пакета пройдены; живая проверка ALSE/ThinkPad не подтверждена. Код совместим
+Для предыдущей 0.4.5 CI и QA пакета пройдены; живая проверка ALSE/ThinkPad не подтверждена. Код совместим
 с Python 3.7, который стоит в Astra 1.7. Никаких `pip install` не требуется.
 
-## Linux 0.4.5
+## Linux 0.5.0
 
-**Опубликована / Published:** [linux-v0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, независимые ревью и QA пакета — PASS / CI, independent reviews and package QA passed: [приёмка / verification](../docs/linux-compact-refresh-verification.md). Linux не Latest; Latest остаётся macOS 3.2.7.
+Издатель передаёт лимиты и расход с других компьютеров через секретный gist GitHub; Mac показывает расход по подпискам в «Истории и деньгах». [Заметки выпуска RU/EN](../docs/releases/linux-0.5.0.md). Linux выпускается без пометки Latest.
+
+## История выпусков — Linux 0.4.5
+
+**Опубликована / Published:** [linux-v0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, независимые ревью и QA пакета — PASS / CI, independent reviews and package QA passed: [приёмка / verification](../docs/linux-compact-refresh-verification.md). Linux не Latest; Latest в то время оставалась macOS 3.2.7.
 
 **RU:** Войдите в нужный CLI и включите подписки в Настройках. В простом или расширенном виде нажмите небольшую иконку обновления рядом с Настройками в прежней шапке. Статус запроса и время данных компактно показаны внутри карточки сервиса; подробности — в подсказке. Выбор **15м / 30м / 1ч / 4ч** включает фиксированный режим (4ч сохраняются как 14400 секунд); старые 1/5 минут заменяются на 30 минут. **«А»** включает Auto: подсвечиваются «А» и фактические интервалы только включённых сервисов, при разных интервалах — оба сегмента. При выключенных подписках интервалы не подсвечены; «А» может оставаться выбранной в Auto. Отдельной частоты и строки «Темп по снимку от…» нет; прогнозы и нужные сообщения о проблемах сохраняются.
 
@@ -27,16 +31,16 @@ Linux-порт macOS-приложения из этого репозитория
 
 **Manual refresh:** bypass the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, with retry for just the failed provider. Respect actual Retry-After deadlines. An unchanged live answer is a success; fallback keeps the old data timestamp. Show guidance for the affected CLI without automatic login or permission prompts; Linux does not use macOS Keychain permits. [RU/EN release notes and installation](../docs/linux-compact-refresh-release.md).
 
-## Установка 0.4.5
+## Установка 0.5.0
 
 ### Пакет .deb (рекомендуется)
 
-1. Скачайте `claude-codex-limits_0.4.5_all.deb` из
-   [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5).
+1. Скачайте `claude-codex-limits_0.5.0_all.deb` из
+   [Linux 0.5.0](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.0).
 2. Откройте файл двойным щелчком и нажмите «Установить» (нужен пароль администратора) или
    поставьте из терминала:
    ```sh
-   sudo apt install ./claude-codex-limits_0.4.5_all.deb
+   sudo apt install ./claude-codex-limits_0.5.0_all.deb
    ```
    Зависимости `python3-pyqt5` и `python3-dbus` apt возьмёт из репозитория ОС.
 3. Запустите **Claude Codex Limits** из меню приложений. При первом запуске значок включает себе
@@ -76,6 +80,9 @@ sh linux/install.sh
 самих скриптах не нужен.
 
 ### Режим издателя (сервер без трея)
+
+Ссылку на gist никому не давать: это ключ на чтение. `ccl-sync status` скрывает её; полную ссылку показывает только `ccl-sync status --show-gist`.
+На машине с другими пользователями закройте `~/.codex` (`chmod 700 ~/.codex`), потому что там полные транскрипты сессий.
 
 **Зачем.** Есть машины без рабочего стола, например VPS, где работают Claude Code и Codex CLI. Издатель сам
 опрашивает лимиты их аккаунтов и публикует остатки и расход в тот же gist. Другие машины читают их оттуда, и своя
@@ -173,7 +180,7 @@ Linux 0.4.3 опубликован; код, DEB и публичный скача
 
 ## Выбор подписок и интервал обновления
 
-Инструкция для **0.4.5**. В настройках есть блок **«Собирать и показывать»** с отдельными
+Инструкция для **0.5.0**. В настройках есть блок **«Собирать и показывать»** с отдельными
 переключателями Claude Code и Codex. Чтобы оставить только Codex, выключите Claude Code.
 Выбор сохраняется на этом компьютере и действует для простого и расширенного вида, трея,
 уведомлений и фонового сборщика `ccl-sync`. Можно выключить обе подписки; настройки останутся
@@ -230,10 +237,14 @@ Linux 0.4.3 опубликован; код, DEB и публичный скача
   - Codex: `GET chatgpt.com/backend-api/wham/usage` с токеном из `~/.codex/auth.json`, а при
     ошибке — из последних rollout-файлов.
 
-  Токен Claude обновляется, только когда до его истечения осталось меньше 2 минут. Новая пара
-  атомарно записывается обратно, остальные поля файла сохраняются. Если сам CLI успел обновить
-  токен раньше, записанное им не перезаписывается. Отказанный refresh-токен повторно не
-  отправляется.
+  С версии 0.5.0 значок и `ccl-sync` по умолчанию токены CLI только читают (`credential_write:
+  never`): не продлевают их и не переписывают файлы входа. Истёкший вход продлевает сам CLI, а
+  карточка до тех пор показывает последние значения с их временем. Прежнее поведение значка
+  включается командой `ccl-sync credentials --write guarded`. Тогда токен Claude обновляется,
+  только когда до его истечения осталось меньше 2 минут. Новая пара атомарно записывается обратно,
+  остальные поля файла сохраняются. Если сам CLI успел обновить токен раньше, записанное им не
+  перезаписывается. Отказанный refresh-токен повторно не отправляется. На издателе `guarded` не
+  действует: там всегда `never`.
 - **Расход по дням и моделям** берётся из логов этой машины: `~/.claude/projects/**.jsonl`
   (включая `subagents/agent-*.jsonl`, каждое сообщение считается один раз в день) и
   `~/.codex/sessions/**/rollout-*.jsonl` (события `token_count`). Индекс инкрементальный: при

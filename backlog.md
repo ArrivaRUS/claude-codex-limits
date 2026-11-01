@@ -1,5 +1,6 @@
 # Бэклог
 
+- C6: локально подготовлены macOS 3.4.0 / Linux 0.5.0, T3 m6/m7/m8/m10 и П6-б; RU/EN заметки — `docs/releases/`. Остаток — Mac build/selftest/strict signing и выпуск после релизных гейтов. Текущий бриф запрещает Git-мутации и агентов.
 - C5: постоянная clone-local подпись перенесена из C6 и реализована в build.sh; `.signing/` сохранять. Shellcheck/syntax/isolated OpenSSL+mocked signing PASS; остаток — две Mac-сборки с одинаковым leaf/DR и живая проверка Связки после последнего Allow Always. S1–S5 прошлого брифа не менялись.
 
 - C5 security fix9 после `48ac3ad`: S1–S5 исправлены; C5-15…18 и64 actual Settings draw RED до Mac. Живые гейты: quiet lock/unlock, неоднозначный44 без logout, ручной пароль>15с. Fix8 сохранён, PNG counts прежние.

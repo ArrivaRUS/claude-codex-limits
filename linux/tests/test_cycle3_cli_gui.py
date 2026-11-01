@@ -87,6 +87,38 @@ class TestCLI(env.SyncEnv):
             code = command(args)
         return code, out.getvalue()
 
+    def test_status_hides_gist_unless_explicitly_requested(self):
+        self.sign_in()
+        for lang, hidden, secret in (("ru", "есть (секретный)", "секретный"),
+                                     ("en", "yes (secret)", "secret")):
+            common.settings().set("lang", lang)
+            for argv, expected in ((["status"], "Gist: " + hidden),
+                                   (["status", "--show-gist"],
+                                    "Gist: https://gist.github.com/%s  (%s)" % (env.GIST, secret))):
+                with self.subTest(lang=lang, argv=argv):
+                    self.gh.on("GET", "/gists/" + env.GIST, self.ok_gist())
+                    code, out = self.capture(cli.main, argv)
+                    self.assertEqual(code, 0)
+                    self.assertIn(expected, out.splitlines())
+                    if "--show-gist" not in argv:
+                        self.assertNotIn(env.GIST, out)
+                        self.assertNotIn("https://gist.github.com/", out)
+            # Direct callers without argparse flags keep the safe default too.
+            for args in (None, argparse.Namespace()):
+                self.gh.on("GET", "/gists/" + env.GIST, self.ok_gist())
+                code, out = self.capture(cli.cmd_status, args)
+                self.assertEqual(code, 0)
+                self.assertIn("Gist: " + hidden, out.splitlines())
+                self.assertNotIn(env.GIST, out)
+
+    def test_status_without_gist_does_not_invent_one(self):
+        self.sign_in(gist=None)
+        for argv in (["status"], ["status", "--show-gist"]):
+            with self.subTest(argv=argv):
+                code, out = self.capture(cli.main, argv)
+                self.assertEqual(code, 0)
+                self.assertNotIn("Gist:", out)
+
     def test_status_stall_does_not_require_attempt_in_cli_process(self):
         self.sign_in(gist=None)
         now = time.time()

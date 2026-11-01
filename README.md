@@ -85,7 +85,9 @@ The subscription price is the one you set in Settings; otherwise it follows the 
 - **Your account labels** (captions), and machine metadata: a random machine ID, the short tag, OS and app version, time zone.
 - **Never:** prompts, tokens or their fingerprints, e-mail, names, raw account or organization IDs, file paths, project names, full hostnames, error texts.
 
-A secret gist is unlisted, not encrypted: anyone with its URL can read it. `ccl-sync status` prints that URL — do not paste it into chats or reports. Old gist revisions may retain earlier machine names. Field-level contract: [sync protocol v1.1](docs/sync-protocol.md#usage-sync-protocol-v11--account-limits-additive).
+A secret gist is unlisted, not encrypted: anyone with its URL can read it. Never share the gist URL: it is a read access key. `ccl-sync status` hides it by default; only `ccl-sync status --show-gist` prints the full URL. Old gist revisions may retain earlier machine names. Field-level contract: [sync protocol v1.1](docs/sync-protocol.md#usage-sync-protocol-v11--account-limits-additive).
+
+Programs running as your user can read the GitHub token; it grants access to all your gists.
 
 ### Turn it off and delete the data
 
@@ -220,8 +222,7 @@ Refresh and interval instructions cover macOS 3.4.0 and **Linux 0.5.0**.
 ## How it works
 
 **Claude Code** (subscription limits). The app reads your existing Claude Code OAuth
-credentials from the macOS Keychain (`Claude Code-credentials`), refreshing the access
-token the same way the Claude Code CLI does when it expires, and calls Anthropic's
+credentials from the macOS Keychain (`Claude Code-credentials`) and calls Anthropic's
 usage endpoint `GET /api/oauth/usage`. **This does not consume any of your quota** — it
 only reads `five_hour.utilization` (session) and `seven_day.utilization` (weekly), plus the
 structured `limits[]` array for per‑model weekly allowances (`kind: "weekly_scoped"`, named
@@ -230,10 +231,14 @@ now come back `null`, so `limits[]` is the only source for those.
 
 **Codex** (OpenAI). The app fetches **live** usage from the same backend the Codex CLI
 uses — `GET /backend-api/wham/usage` — when a refresh is admitted by the
-polling rules (see Auto and manual refresh above), authenticated with your local `~/.codex/auth.json` token (auto‑refreshed
-via OpenAI's token endpoint when expired). `primary_window` = 5‑hour, `secondary_window`
+polling rules (see Auto and manual refresh above), authenticated with your local `~/.codex/auth.json` token. `primary_window` = 5‑hour, `secondary_window`
 = 7‑day. If a live call fails it falls back to the most recent local session log
 (`~/.codex/sessions/**/rollout-*.jsonl`).
+
+**CLI sign-ins are read-only.** Since macOS 3.4.0 the app only reads the Claude Code and Codex
+credentials: it does not refresh their tokens or write them back. When an access token has
+expired, the card says the CLI needs to renew its sign-in and keeps the last values with their
+time; the next CLI use renews it. On Linux the tray behaves the same by default.
 
 **Advanced view.** The pace math needs only the current reading and the window's reset time.
 The bars, calendar and money come from the CLIs' own local transcripts — `~/.claude/projects/*/*.jsonl`
