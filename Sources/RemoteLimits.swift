@@ -728,6 +728,15 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                     values = RemoteLimitsWire.limitData(best, onto: values)
                 }
             }
+            // V3: a merged card's local failure belongs to its attempt, not to
+            // newer successful values from any machine. Keep the polling state
+            // untouched; local-only and foreign-only cards retain their behavior.
+            if isLocal, !snapshots.isEmpty, own.pollFailed, let attempt = own.pollAttemptAt,
+               let success = values.asOf,
+               success.timeIntervalSince1970.isFinite,
+               attempt <= success {
+                values.pollFailed = false; values.error = nil; values.nextPollAt = nil
+            }
             // Status is the newest attempt, separate from the winning values.
             let normallyDated = ordered.filter { ($0.attemptAt ?? $0.asOf).map { $0 <= now.addingTimeInterval(300) } ?? true }
             let statuses = normallyDated.isEmpty ? ordered : normallyDated

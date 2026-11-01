@@ -862,6 +862,94 @@ private func c5C519(_ check: C5Check) {
     }
 }
 
+// C5-20: the production Simple views/body/footer must not attach an old local
+// failure to a newer successful peer reading. Written before the V3 status fix.
+private func c5C520(_ check: C5Check) {
+    let id = "c520-codex-account", gist = "c520-fixture-gist"
+    let label = accountLabel(product: "codex", localId: id, gistId: gist)!
+    let ownAt = C5_NOW.addingTimeInterval(-4 * 3600), peerAt = C5_NOW.addingTimeInterval(-360)
+    let reset = C5_NOW.addingTimeInterval(4 * 86400)
+    let sync = ReaderSyncState(phase: .on), zone = TimeZone(secondsFromGMT: 0)!
+    let own = LimitData(weekly: 65, weeklyReset: reset, plan: "pro", asOf: ownAt, apiFresh: true)
+    var entry = ld2dict(own); entry["accountId"] = id
+    let store = ReaderLocalSnapshot(); store.restore(cache: ["codex": entry])
+    let restored = store.snapshot()
+    let savedFrame = REMOTE_ACCOUNT_FRAME
+    defer { REMOTE_ACCOUNT_FRAME = savedFrame }
+
+    func frame(attempt: Date?, peer: Bool = true, local: Bool = true,
+               hasPoll: Bool = true, failed: Bool = true) -> RemoteAccountFrame {
+        var poll = AutoPollState(); poll.lastAttempt = attempt?.timeIntervalSince1970 ?? 0; poll.failed = failed
+        // Same Codable round trip as autoPollState; no real defaults or disk.
+        let restoredPoll = try! JSONDecoder().decode(AutoPollState.self, from: JSONEncoder().encode(poll))
+        var data = withPollStatus(restored.local.1, state: hasPoll ? restoredPoll : nil, next: C5_NOW)
+        data.error = "synthetic local failure"
+        var account = RemoteAccount(product: "codex", label: label, status: "ok")
+        account.machineId = "c520-vps"; account.machineName = "vps"; account.machineLastSeenAt = C5_NOW
+        account.asOf = peerAt; account.attemptAt = peerAt; account.resetCredits = 1
+        account.windows = RemoteWindows(weekly: RemoteWindow(pct: 65, resetAt: reset))
+        account.schedule = RemoteSchedule(mode: "fixed", interval: 900)
+        var cache = SyncRemoteCache(); cache.labelKey = accountLabelKey(gistId: gist)
+        cache.accounts = peer ? [account] : []
+        return remoteAccountFrame(local: (LimitData(present: false), local ? data : LimitData(present: false)),
+            localIds: local ? restored.ids : [:], remote: cache, hidden: [], menu: [:], sync: sync, now: C5_NOW,
+            localMachineName: "macbook", localMachineId: "c520-mac", localIntervals: ["codex": 14400])
+    }
+    for language in ["ru", "en"] {
+        for (name, attempt, peer, failure) in [
+            ("older failure", C5_NOW.addingTimeInterval(-2.7 * 3600), true, false),
+            ("newer failure", C5_NOW.addingTimeInterval(-60), true, true),
+            ("equal attempt", peerAt, true, false),
+            ("local only", C5_NOW.addingTimeInterval(-2.7 * 3600), false, true)
+        ] {
+            REMOTE_ACCOUNT_FRAME = frame(attempt: attempt, peer: peer)
+            // This is the very projection drawPanelSimple uses, not raw resolver output.
+            let views = simpleCardViews(restored.local.0, restored.local.1)
+            check(views.count == 1, "C5-20 \(language)/\(name): one Simple account card")
+            guard let view = views.first else { continue }
+            let presentation = remotePresentationCard(view, sync: sync, language: language, narrow: true,
+                now: C5_NOW, timeZone: zone)
+            let status = simpleCardStatus(view, now: C5_NOW, language: language)
+            check(limitPollFailed(view.data) == failure && (view.data.error != nil) == failure,
+                  "C5-20 \(language)/\(name): Simple data compares the known failed attempt with the selected success")
+            check(status.showsSnapshotWarning == failure && status.showsResetRows == !failure,
+                  "C5-20 \(language)/\(name): actual Simple body decision preserves reset rows after newer success")
+            check(status.feedback.action == (failure ? .retry : .none)
+                  && status.feedback.actionTitle == (failure ? (language == "en" ? "Retry" : "Повторить") : ""),
+                  "C5-20 \(language)/\(name): actual quota footer decision and localized Retry")
+            check(view.data.asOf == (peer ? peerAt : ownAt) && view.data.weeklyReset == reset
+                  && view.data.weekly == 65 && view.data.session == nil
+                  && presentation.simpleMachines == (peer ? "● macbook, ● vps" : "● macbook"),
+                  "C5-20 \(language)/\(name): selected reading/reset and source header remain intact")
+        }
+        for (name, attempt, hasPoll, failed) in [
+            ("missing Auto", nil as Date?, false, false),
+            ("zero attempt", nil as Date?, true, true),
+            ("error without pollFailed", C5_NOW.addingTimeInterval(-2.7 * 3600) as Date?, true, false)
+        ] {
+            REMOTE_ACCOUNT_FRAME = frame(attempt: attempt, hasPoll: hasPoll, failed: failed)
+            let views = simpleCardViews(restored.local.0, restored.local.1)
+            check(views.count == 1, "C5-20 \(language)/\(name): one merged Simple card")
+            guard let view = views.first else { continue }
+            let status = simpleCardStatus(view, now: C5_NOW, language: language)
+            check(view.data.error != nil && view.data.pollFailed == failed && limitPollFailed(view.data)
+                  && view.data.asOf == peerAt
+                  && (attempt == nil ? view.data.pollAttemptAt == nil : view.data.pollAttemptAt == attempt),
+                  "C5-20 \(language)/\(name): fresh VPS cannot clear an error without a known failed attempt")
+            check(status.showsSnapshotWarning && !status.showsResetRows
+                  && status.feedback.action == .retry
+                  && status.feedback.actionTitle == (language == "en" ? "Retry" : "Повторить"),
+                  "C5-20 \(language)/\(name): actual Simple body/footer retain warning and localized Retry")
+        }
+        REMOTE_ACCOUNT_FRAME = frame(attempt: C5_NOW, local: false)
+        let foreign = simpleCardViews(LimitData(present: false), LimitData(present: false))
+        check(foreign.count == 1 && foreign.first?.isLocal == false
+              && foreign.first.map { !limitPollFailed($0.data)
+                  && !simpleCardStatus($0, now: C5_NOW, language: language).showsSnapshotWarning } == true,
+              "C5-20 \(language): card without a local login keeps its existing state")
+    }
+}
+
 func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C501(check); c5C501Sanitization(check); c5C502(check); c5C503(check)
     c5C504(check); c5C505(check); c5C506(check)
@@ -869,4 +957,5 @@ func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C513(check)
     c5C515(check); withoutActuallyEscaping(check) { c5C516($0) }; c5C517(check); c5C518(check)
     c5C519(check)
+    c5C520(check)
 }

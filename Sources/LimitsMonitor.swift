@@ -4992,12 +4992,23 @@ func remoteRefreshAvailable(_ claude: LimitData, _ codex: LimitData) -> Bool {
 func hasQuotaCards(_ claude: LimitData, _ codex: LimitData) -> Bool {
     !displayedCardViews(claude, codex).isEmpty
 }
-func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970) -> QuotaRefreshFeedback {
+func quotaFeedback(_ d: LimitData, now: Double = Date().timeIntervalSince1970, language: String? = nil) -> QuotaRefreshFeedback {
     let now = REMOTE_ACCOUNT_FRAME?.now.timeIntervalSince1970 ?? now
     return quotaRefreshFeedback(inFlight: d.refreshInFlight, serverUntil: d.serverRetryAt, localUntil: d.localRetryAt,
         failed: d.pollFailed || d.error != nil, authenticationRequired: d.auth != .ok,
         dataAt: d.asOf?.timeIntervalSince1970, nextAutomaticAt: d.nextPollAt?.timeIntervalSince1970,
-        now: now, english: appLang() == "en", credentialIssue: d.credentialIssue, permissionPending: d.permissionRequestInFlight)
+        now: now, english: (language ?? appLang()) == "en", credentialIssue: d.credentialIssue, permissionPending: d.permissionRequestInFlight)
+}
+/// Shared by Simple's body and the quota footer, including their pre-AppKit tests.
+struct SimpleCardStatus {
+    let showsSnapshotWarning: Bool
+    let feedback: QuotaRefreshFeedback
+    var showsResetRows: Bool { !showsSnapshotWarning }
+}
+func simpleCardStatus(_ view: AccountView, now: Date, language: String? = nil) -> SimpleCardStatus {
+    SimpleCardStatus(showsSnapshotWarning: view.isLocal && (limitCanFix(remote: view)
+        || isStale(view.data, now) || limitPollFailed(view.data)),
+        feedback: quotaFeedback(view.data, now: now.timeIntervalSince1970, language: language))
 }
 func quotaTimestamp(_ value: Double?) -> String {
     guard let value = value, value.isFinite, value >= 0, value < 253402300800 else { return "—" }
@@ -5083,7 +5094,8 @@ func remoteFittedSourceLine(_ view: AccountView, language: String, now: Date, ti
 func drawQuotaCardFooter(_ ctx: CGContext, card: CGRect, data: LimitData, product: String, advanced: Bool = false,
                          view: AccountView? = nil) -> [Hit] {
     let now = (REMOTE_ACCOUNT_FRAME?.now ?? Date()).timeIntervalSince1970
-    let feedback = quotaFeedback(data, now: now)
+    let feedback = view.map { simpleCardStatus($0, now: Date(timeIntervalSince1970: now)).feedback }
+        ?? quotaFeedback(data, now: now)
     let inset: CGFloat = advanced ? 11 : 14
     let footer = CGRect(x: card.minX + inset, y: card.minY, width: card.width - inset * 2, height: CGFloat(remoteQuotaFooterHeight(advanced: advanced)))
     let error = !data.refreshInFlight && (data.auth != .ok || data.pollFailed || data.error != nil || (data.serverRetryAt ?? 0) > now)
@@ -5388,7 +5400,8 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = bodyTop + 124, l2 = bodyTop + 139
-        if !remote && (canFix || stale || limitPollFailed(d)) {
+        let status = view.map { simpleCardStatus($0, now: now) }
+        if status?.showsSnapshotWarning ?? (!remote && (canFix || stale || limitPollFailed(d))) {
             // Keep the last good read distinct from the CLI's sign-in state.
             let copy = limitSimpleStaleCopy(d, product: product)
             let msg1 = copy.snapshot
@@ -5591,6 +5604,8 @@ func limitRetryNotice(_ d: LimitData, compact: Bool = false) -> String {
 func withPollStatus(_ data: LimitData, state: AutoPollState?, next: Date?) -> LimitData {
     var data = data
     data.pollFailed = state?.failed == true
+    data.pollAttemptAt = state.flatMap { $0.lastAttempt.isFinite && $0.lastAttempt > 0
+        ? Date(timeIntervalSince1970: $0.lastAttempt) : nil }
     data.nextPollAt = data.pollFailed ? next : nil
     return data
 }

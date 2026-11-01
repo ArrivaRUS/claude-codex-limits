@@ -36,6 +36,7 @@ struct LimitData {
     var present = true         // false → product not set up on this Mac (hide its row/card)
     // Transient presentation state of the last request, never serialized with a snapshot.
     var pollFailed = false
+    var pollAttemptAt: Date? // supplied from persisted AutoPollState, not the successful snapshot's asOf
     var nextPollAt: Date?
     var serverRetryAt: Double?
     var refreshInFlight = false
