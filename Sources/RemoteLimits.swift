@@ -205,6 +205,9 @@ struct AccountView {
     var machines: [String]
     var state: RemoteCardState
     var sourceReadings: [RemoteMachineReading] = []
+    // nil is legacy/fallback; a non-nil partition is added exactly once even for historical accounts.
+    var localUsageDays: RemoteDays? = nil
+    var customCaption: String? = nil
 }
 
 func accountLabelKey(gistId: String) -> String? {
@@ -627,8 +630,11 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
             result.days[product] = merged
         }
         var accounts: [RemoteAccount] = []
-        for raw in ((obj["accounts"] as? [Any]) ?? []).prefix(64) {
+        let rawAccounts = (obj["accounts"] as? [Any]) ?? []
+        var productAccountKeys: [String: Set<String>] = [:]
+        for raw in rawAccounts.prefix(64) {
             guard var a = RemoteLimitsWire.account(raw) else { continue }
+            productAccountKeys[a.product, default: []].insert(a.label ?? "unlabelled")
             a.machineId = id; a.machineName = machineName
             a.machineLastSeenAt = displayLastSeen ?? displayUpdated
             if a.machineLastSeenAt == nil && (lastSeen != nil || updated != nil) {
@@ -659,6 +665,15 @@ func mergeV11(_ contents: [String: String], excluding myId: String, now: Date) -
             if !days.isEmpty { other[a.product] = days }
         }
         for i in accounts.indices where accounts[i].label == nil { accounts[i].days = [:] }
+        // R4: this machine's complete account set (all statuses), never a gist-wide guess.
+        for product in Array(other.keys) {
+            let slots = accounts.indices.filter { accounts[$0].product == product }
+            if rawAccounts.count <= 64, productAccountKeys[product]?.count == 1,
+               slots.count == 1, let slot = slots.first, accounts[slot].label != nil {
+                RemoteLimitsWire.add(other[product] ?? [:], to: &accounts[slot].days)
+                other.removeValue(forKey: product)
+            }
+        }
         records.append(contentsOf: accounts)
         for (product, days) in other {
             var merged = unattributed[product] ?? [:]
@@ -774,16 +789,16 @@ func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], 
                 sourceReadings.append(RemoteMachineReading(machineId: account.machineId, name: account.machineName,
                     asOf: account.asOf, interval: account.schedule.map { Double($0.interval) }, isLocal: false))
             }
-            return AccountView(product: product, label: label, historyKey: historyKey,
-                caption: label.flatMap { key -> String? in
+            let customCaption = label.flatMap { key -> String? in
                     guard enabled, let caption = remote.captions?[key],
                           caption.setAt.map({ $0 <= now.addingTimeInterval(60) }) ?? true else { return nil }
                     let input = remoteCaptionValidatedInput(caption.text)
                     return input.error == nil && !input.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? input.value : nil
                 }
-                    ?? RemoteLimitsWire.caption(product: product, plan: values.plan, tier: tier, machines: machines),
+            return AccountView(product: product, label: label, historyKey: historyKey,
+                caption: customCaption ?? RemoteLimitsWire.caption(product: product, plan: values.plan, tier: tier, machines: machines),
                 data: values, isLocal: isLocal, tier: tier,
-                usageDays: usage, machines: machines, state: state, sourceReadings: sourceReadings)
+                usageDays: usage, machines: machines, state: state, sourceReadings: sourceReadings, customCaption: customCaption)
         }
         if hasLocal && (localLabel == nil || !hidden.contains(localLabel!)) {
             views.append(make(localLabel, accounts: localLabel.flatMap { groups[$0] } ?? [], isLocal: true))
@@ -878,11 +893,112 @@ func menuAccount(_ product: String, views: [AccountView], selected: [String: Str
     return accounts.first(where: { $0.isLocal }) ?? accounts.first
 }
 
+/// Partition own history with the same singleton rule as the wire reader/writer.
+/// Explicit day identities always win; missing days stay unlabelled with 0 or >=2 known IDs.
+func remoteApplyingLocalUsage(_ original: [AccountView], local: UsageIndex, localIds: [String: String],
+                              labelKey: String?) -> [AccountView] {
+    var views = original
+    for i in views.indices { views[i].localUsageDays = [:] }
+    for product in ["claude", "codex"] {
+        let attribution = local.accountByDay?[product] ?? [:]
+        let ids = Set(attribution.values.filter { !$0.isEmpty }).union(localIds[product].map { $0.isEmpty ? Set<String>() : Set([$0]) } ?? [])
+        var assigned: [String: RemoteDays] = [:], other: RemoteDays = [:]
+        for (day, models) in local.days[product] ?? [:] {
+            // The indexer's empty marker means attribution was not recorded yet.
+            let explicitId = attribution[day].flatMap { $0.isEmpty ? nil : $0 }
+            if let id = explicitId ?? (ids.count == 1 ? ids.first : nil) {
+                assigned[id, default: [:]][day] = models
+            } else { other[day] = models }
+        }
+        for (id, days) in assigned {
+            let label = labelKey.flatMap { accountLabel(product: product, localId: id, labelKey: $0) }
+            let localKey = "l:" + SHA256.hash(data: Data((product + "|" + id.lowercased()).utf8))
+                .prefix(8).map { String(format: "%02x", $0) }.joined()
+            let slot = views.firstIndex { $0.product == product && !$0.historyKey.hasPrefix("u:")
+                && ((label != nil && $0.label == label) || $0.historyKey == localKey || ($0.isLocal && localIds[product] == id)) }
+            if let slot = slot { views[slot].localUsageDays = days }
+            else {
+                views.append(AccountView(product: product, label: label, historyKey: label ?? localKey, caption: "",
+                    data: LimitData(present: false), isLocal: false, tier: nil, usageDays: [:], machines: [],
+                    state: .signedOut, localUsageDays: days))
+            }
+        }
+        if !other.isEmpty {
+            if let slot = views.firstIndex(where: { $0.historyKey == "u:" + product }) {
+                views[slot].localUsageDays = other
+            } else {
+                views.append(AccountView(product: product, label: nil, historyKey: "u:" + product, caption: "",
+                    data: LimitData(present: false), isLocal: false, tier: nil, usageDays: [:], machines: [],
+                    state: .fresh, localUsageDays: other))
+            }
+        }
+    }
+    return remoteSortedPresentationViews(views: views, language: appLang())
+}
+
+struct RemoteMoneyRow {
+    var title, monthly, subscriptionDaily, apiDaily, value: String
+    var editable: Bool
+    var activeNote: String?
+}
+func remoteMoneyDaily(_ usd: Double, language: String) -> String {
+    let number = String(format: usd >= 10 ? "%.0f" : "%.2f", usd)
+    return "$" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
+}
+func remoteMoneyValue(_ ratio: Double, language: String) -> String {
+    guard ratio.isFinite else { return "—" }
+    let number = String(format: ratio >= 100 ? "%.0f" : "%.1f", ratio)
+    return "×" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
+}
+func remoteMoneyRow(_ view: AccountView, summary m: MoneySummary, language: String) -> RemoteMoneyRow {
+    let en = language == "en", subscription = !view.historyKey.hasPrefix("u:") && m.hasSubscriptionPrice
+    let title = remoteHistorySelectorTitle(view, language: language), suffix = en ? "/day" : "/день"
+    return RemoteMoneyRow(title: title,
+        monthly: subscription ? (m.subEstimated ? "≈" : "") + "$" + String(Int(m.subMonthly)) + (en ? "/mo" : "/мес") : "",
+        subscriptionDaily: subscription ? "≈ " + remoteMoneyDaily(m.subPerDay, language: language) + suffix : "",
+        apiDaily: m.usdApi > 0 ? "≈ " + remoteMoneyDaily(m.perCalendarDay, language: language) + suffix : (en ? "none yet" : "пока нет"),
+        value: subscription ? (m.usdApi > 0 ? remoteMoneyValue(m.ratio, language: language) : "—") : "",
+        editable: subscription && m.subEstimated,
+        activeNote: m.usdApi > 0 ? title + " ≈ " + remoteMoneyDaily(m.perActiveDay, language: language) : nil)
+}
+func remoteHistoryMoneyExtraHeight(rowCount: Int, noteLines: [String]) -> Double {
+    max(0, Double(rowCount - 1) * 38) + max(0, remoteMoneyNotesHeight(noteLines) - 11)
+}
+func remoteHistoryHeading(language: String) -> String { language == "en" ? "History & money" : "История и деньги" }
+func remoteMoneyValueHeading(language: String) -> String { language == "en" ? "VALUE" : "ВЫГОДА" }
+func remoteModelLegend(product: String, language: String) -> [String] {
+    (product == "claude" ? ["Fable", "Opus"] : ["Astra", "Sol"]) + [language == "en" ? "other" : "прочие"]
+}
+func remoteMoneyNotesHeight(_ lines: [String]) -> Double { Double(lines.count) * 12 }
+func remoteMoneyNoteLines(_ notes: [String], language: String, width: Double,
+                          measure: (String) -> Double) -> [String] {
+    guard !notes.isEmpty else { return [] }
+    let prefix = language == "en" ? "on an active day at API price: " : "в активный день по API: "
+    var lines: [String] = [], line = prefix
+    for note in notes {
+        let candidate = line + (line == prefix || line.isEmpty ? "" : " · ") + note
+        if measure(candidate) <= width { line = candidate; continue }
+        if !line.isEmpty { lines.append(line.trimmingCharacters(in: .whitespaces)); line = "" }
+        // A complete subscription moves together when it fits, otherwise wrap its words.
+        for word in note.split(separator: " ").map(String.init) {
+            let candidate = line.isEmpty ? word : line + " " + word
+            if measure(candidate) <= width { line = candidate; continue }
+            if !line.isEmpty { lines.append(line); line = "" }
+            for char in word {
+                if !line.isEmpty && measure(line + String(char)) > width { lines.append(line); line = "" }
+                line.append(char)
+            }
+        }
+    }
+    if !line.isEmpty { lines.append(line) }
+    return lines
+}
+
 func accountUsageIndex(_ view: AccountView, local: UsageIndex) -> UsageIndex {
     var index = UsageIndex()
     index.days[view.product] = view.usageDays
-    if view.isLocal {
-        for (day, models) in local.days[view.product] ?? [:] {
+    if view.isLocal || view.localUsageDays != nil {
+        for (day, models) in view.localUsageDays ?? local.days[view.product] ?? [:] {
             for (model, usage) in models { index.add(view.product, day, model, usage) }
         }
     }
@@ -893,11 +1009,14 @@ func moneySummary(_ view: AccountView, local: UsageIndex, days: Int = 35, now: D
     let rows = dailyUsage(view.product, days: days, index: accountUsageIndex(view, local: local), now: now)
     let active = rows.filter { $0.turns > 0 }
     let total = rows.reduce(0) { $0 + $1.usd }
-    let price = subscriptionUSD(view.product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal)
+    let hasPrice = !view.historyKey.hasPrefix("u:")
+        && [view.data.plan, view.tier].contains { !($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    let price: (usd: Double, estimated: Bool) = hasPrice
+        ? subscriptionUSD(view.product, plan: view.data.plan, tier: view.tier, isLocal: view.isLocal) : (0, false)
     return MoneySummary(days: days, activeDays: active.count, usdApi: total,
                         perCalendarDay: days > 0 ? total / Double(days) : 0,
                         perActiveDay: active.isEmpty ? 0 : total / Double(active.count),
-                        subMonthly: price.usd, subEstimated: price.estimated)
+                        subMonthly: price.usd, subEstimated: price.estimated, hasSubscriptionPrice: hasPrice)
 }
 
 func readerCardStateEvents(_ views: [AccountView], now: Date) -> [[String: Any]] {

@@ -372,8 +372,10 @@ private func rlC102Hostile(_ fx: RLFixtures, _ expect: RLExpect) {
     for a in accounts { rlAdd(&split, a.product, a.days) }
     for (p, d) in r.unattributedDays ?? [:] { rlAdd(&split, p, d) }
     c.add("T19 Σ accounts[].days + unattributedDays == root, per product", rlCanon(split) == rlCanon(root))
-    c.add("T19 projection mismatch → whole root usage «не указан», account days not added",
-          accounts.allSatisfy { $0.days.isEmpty } && rlCanon(r.unattributedDays ?? [:]) == rlCanon(root))
+    c.add("T19 projection mismatch keeps root once; singleton Claude owns it, ambiguous Codex stays unlabelled",
+          rlCanon(["claude": accounts.first(where: { $0.product == "claude" })?.days ?? [:]]) == rlCanon(["claude": root["claude"] ?? [:]])
+          && accounts.filter { $0.product == "codex" }.allSatisfy { $0.days.isEmpty }
+          && rlCanon(r.unattributedDays ?? [:]) == rlCanon(["codex": root["codex"] ?? [:]]))
     c.add("root days intact (v1 rules)", rlCanon(r.days) == rlCanon(root))
     expect(c.failed.isEmpty, "C1-02(a,b,d) hostile v1.1 block validated record by record (C7, T15, T19, П5-е)" + c.suffix)
     // The dirty caption is outside the full fixture's 64-record budget. Test

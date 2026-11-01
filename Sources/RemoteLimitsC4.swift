@@ -201,12 +201,16 @@ func c4MachineFile(days: [String: Any], accountByDay: [String: [String: String]]
     accounts.append(record)
     var historyIndices: [String: Int] = [:]
     if let id = localId, label != nil { historyIndices[id] = 0 }
+    let knownCodexIds = Set((accountByDay["codex"] ?? [:]).values.filter { !$0.isEmpty })
+        .union(localId.map { $0.isEmpty ? Set<String>() : Set([$0]) } ?? [])
     for product in days.keys.sorted() {
         guard let productDays = days[product] as? [String: Any] else { continue }
         var missing: [String: Any] = [:]
         for day in productDays.keys.sorted() {
             let value = productDays[day]!
-            guard product == "codex", let id = accountByDay[product]?[day], !id.isEmpty,
+            let recordedId = accountByDay[product]?[day]
+            let explicitId = recordedId.flatMap { $0.isEmpty ? nil : $0 }
+            guard product == "codex", let id = explicitId ?? (knownCodexIds.count == 1 ? knownCodexIds.first : nil),
                   let key = key, let historicalLabel = accountLabel(product: "codex", localId: id, labelKey: key) else { missing[day] = value; continue }
             var slot = historyIndices[id]
             if slot == nil, accounts.count < 8 {

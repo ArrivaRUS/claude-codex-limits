@@ -36,8 +36,8 @@ also stops showing a warning and Retry; a newer failure or one with an unknown t
 keeps them.
 
 In Simple view, machine names sit below the title, with a freshness dot for each
-source. Advanced shows the dots beside the machine names after the plan badge and
-keeps the source/time line. Each dot uses **that machine's own reading time**:
+source. Advanced shows the dots beside the machine names after the plan badge.
+Both views keep source times in the header tooltip and accessibility labels; the source/time footer line is hidden. Each dot uses **that machine's own reading time**:
 
 - **Green:** no older than its polling interval plus 15 minutes, including the boundary.
 - **Amber:** beyond that allowance, but no older than 24 hours.
@@ -50,6 +50,8 @@ and freshness in words. An amber `macbook` beside a green `vps` is normal: while
 machine polls the same account freshly, coordination can postpone this Mac's own poll.
 The card still uses the freshest successful values. Machine connectivity and sync
 warnings are separate from these dots.
+
+**History & money** groups spending by subscription, using its label or product and plan, without machine names. Old unlabelled days join the machine's sole account for that product; ambiguous usage keeps its history segment with no subscription price or value ratio.
 
 Settings → **Accounts** lets you hide accounts and edit a label with the pencil.
 The editor starts with the current label selected. Labels allow up to **32 Unicode

@@ -187,36 +187,38 @@ private func c3bC306(_ expect: C3BExpect) {
 }
 
 // Edge vectors use literal expected row/card sizes from UX and the existing
-// Advanced contract: Claude 2 quota rows; Codex may have week only + 24pt credits.
+// Advanced contract: Claude 2 quota rows; Codex keeps session/week + 24pt credits.
 // No AdvCard instance: its notice clock is runtime-owned. AdvRow.height itself is
 // a pure value property, so these checks also cover the real draw row adapter.
 private func c3bC306Edges(_ expect: C3BExpect) {
     let now = c3bNow()
     var onlyWeek = c3bView(product: "codex")
     onlyWeek.data.session = nil; onlyWeek.data.sessionReset = nil
-    expect(remoteAdvancedMetrics(onlyWeek) == ["weekly"],
-           "C3-06 edge: Codex week-only has no blank session metric")
+    expect(remoteAdvancedMetrics(onlyWeek) == ["session", "weekly"],
+           "C3-06 edge: Codex week-only retains a blank session metric in both modes")
     let weekKind = remoteAdvancedRowKind(onlyWeek, metric: "weekly", now: now)
     if case .full = weekKind { expect(true, "C3-06 edge: Codex reported week is a full row") }
     else { expect(false, "C3-06 edge: Codex reported week is a full row") }
     expect(remoteAdvancedRowHeight(weekKind) == 62
            && Double(AdvRow(limit: nil, kind: weekKind, credits: nil).height) == 62,
            "C3-06 edge: week row is 62pt in model and real AdvRow")
-    expect(remotePanelLayout(views: [onlyWeek], style: .advanced, now: now).cards.first?.height == 157,
-           "C3-06 edge: week-only Codex card 157pt including 24pt credits, no blank row")
+    expect(remotePanelLayout(views: [onlyWeek], style: .advanced, now: now).cards.first?.height
+           == CGFloat(38 + remoteAdvancedRowHeight(.inactive) + remoteAdvancedRowHeight(weekKind)
+                      + remoteAdvancedRowHeight(.credits) + 2 + remoteQuotaFooterHeight(advanced: true)),
+           "C3-06 edge: Codex card includes empty session, week, credits and shared footer height")
 
     // Each expected card includes the unaffected 62pt weekly row. For missing or
     // future asOf both quota rows are 50pt and the 19pt paused notice is present.
-    let vectors: [(String, Double, Double?, Date?, Double, Int, Double)] = [
-        ("used1", 1, nil, now.addingTimeInterval(-600), 62, 0, 195),
-        ("used100", 100, nil, now.addingTimeInterval(-600), 62, 0, 195),
-        ("elapsed9min", 20, 5 * 3600 - 9 * 60, now.addingTimeInterval(-600), 62, 0, 195),
-        ("elapsed10min", 20, 5 * 3600 - 10 * 60, now.addingTimeInterval(-600), 62, 0, 195),
-        ("resetCrossed", 20, nil, now.addingTimeInterval(-600), 50, 0, 183),
-        ("missingAsOf", 20, nil, nil, 50, 1, 190),
-        ("futureAsOf", 20, nil, now.addingTimeInterval(301), 50, 1, 190)
+    let vectors: [(String, Double, Double?, Date?, Double, Int)] = [
+        ("used1", 1, nil, now.addingTimeInterval(-600), 62, 0),
+        ("used100", 100, nil, now.addingTimeInterval(-600), 62, 0),
+        ("elapsed9min", 20, 5 * 3600 - 9 * 60, now.addingTimeInterval(-600), 62, 0),
+        ("elapsed10min", 20, 5 * 3600 - 10 * 60, now.addingTimeInterval(-600), 62, 0),
+        ("resetCrossed", 20, nil, now.addingTimeInterval(-600), 50, 0),
+        ("missingAsOf", 20, nil, nil, 50, 1),
+        ("futureAsOf", 20, nil, now.addingTimeInterval(301), 50, 1)
     ]
-    for (name, used, resetAfterSnapshot, asOf, rowHeight, noticeLines, cardHeight) in vectors {
+    for (name, used, resetAfterSnapshot, asOf, rowHeight, noticeLines) in vectors {
         var remote = c3bView()
         remote.data.session = used; remote.data.asOf = asOf; remote.data.source?.asOf = asOf
         if let interval = resetAfterSnapshot, let asOf = asOf { remote.data.sessionReset = asOf.addingTimeInterval(interval) }
@@ -239,8 +241,10 @@ private func c3bC306Edges(_ expect: C3BExpect) {
                    "C3-06 edge \(name): expected \(rowHeight)pt row in model and actual AdvRow")
             expect(remoteAdvancedNoticeLines(view, now: now) == noticeLines,
                    "C3-06 edge \(name): expected paused notice count \(noticeLines)")
+            let weekHeight = remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: "weekly", now: now))
+            let cardHeight = 38 + rowHeight + weekHeight + 1 + Double(noticeLines) * 19 + remoteQuotaFooterHeight(advanced: true)
             expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height == CGFloat(cardHeight),
-                   "C3-06 edge \(name)/local=\(view.isLocal): exact \(cardHeight)pt card")
+                   "C3-06 edge \(name)/local=\(view.isLocal): card derives footer height from shared model")
         }
         let a = remotePanelLayout(views: [local], style: .advanced, now: now)
         let b = remotePanelLayout(views: [remote], style: .advanced, now: now)
@@ -768,8 +772,8 @@ private func c3bC329(_ expect: C3BExpect) {
                && [multiple.simpleMachines, remote.simpleMachines] == ["● mac", "● vps"],
                "C3-29/N2: second header lines distinguish both Codex accounts")
         let selectorTitles = [local, other].map { remoteHistorySelectorTitle($0, language: language) }
-        expect(selectorTitles == ["Codex · mac", "Codex · vps"] && Set(selectorTitles).count == 2,
-               "C3-29/R1: actual history selector titles and their tooltip strings distinguish both Codex accounts")
+        expect(selectorTitles == ["Codex Pro", "Codex Pro"],
+               "C3-29/R1: history titles use subscription plan; custom L can distinguish equal plans")
         var custom = local; custom.caption = "Work Codex"
         let named = remotePresentationCard(custom, sync: sync, language: language, narrow: true,
             now: now, timeZone: zone, productAccountCount: 2)
@@ -789,7 +793,7 @@ private func c3bC330(_ expect: C3BExpect) {
     healthy.data.weekly = 39
     healthy.data.weeklyReset = healthy.data.asOf!.addingTimeInterval(84 * 3600)
     let freshHeight = remotePanelLayout(views: [healthy], style: .advanced, now: now).cards.first?.height
-    expect(freshHeight == 258, "C3-30/N3: baseline full three-window Claude card retains existing 258pt model geometry")
+    expect(freshHeight == CGFloat(38 + 3 * remoteAdvancedRowHeight(.full) + 2 + remoteQuotaFooterHeight(advanced: true)), "C3-30/N3: baseline full three-window Claude uses shared footer geometry")
     for state in [RemoteCardState.signInRequired, .offline, .syncStalled, .serviceWait] {
         var view = healthy; view.state = state
         let kinds = remoteAdvancedMetrics(view).map { remoteAdvancedRowKind(view, metric: $0, now: now) }
@@ -939,8 +943,8 @@ private func c3bC334(_ expect: C3BExpect) {
     expect(empty.cards.isEmpty && empty.windowHeight == 286,
            "C3-34/D2: empty Simple panel does not reserve a nonexistent header")
     let local = c3bView(local: true)
-    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == 195,
-           "C3-34/D2: 13pt Simple header does not enlarge Advanced cards")
+    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == CGFloat(38 + 2 * remoteAdvancedRowHeight(.full) + 1 + remoteQuotaFooterHeight(advanced: true)),
+           "C3-34/D2: Advanced card uses its shared footer and no Simple header increment")
 }
 
 private func c3bC335(_ expect: C3BExpect) {

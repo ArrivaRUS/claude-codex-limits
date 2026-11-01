@@ -205,8 +205,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 }, "C5-08 actual header hit/AX exposes per-machine times and status " + name)
                 for account in visible {
                     let p = cardPresentation(account, narrow: !advanced && visible.count > 1)
-                    check(remoteVisibleSourceLine(p, advanced: advanced).isEmpty == !advanced,
-                          "C5-09 source/time row appears only in Advanced " + name)
+                    check(remoteVisibleSourceLine(p, advanced: advanced).isEmpty,
+                          "C5-09 source/time row is absent in both panel modes " + name)
                     if !advanced, let header = p.sourceHeader {
                         let budget = visible.count > 1 ? 94.0 : 264.0
                         let font = NSFont.systemFont(ofSize: 10.5, weight: .regular, width: .condensed)

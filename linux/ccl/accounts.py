@@ -329,7 +329,7 @@ def parse_block(machine_obj):
     """
     if not isinstance(machine_obj, dict):
         machine_obj = {}
-    unique = {}
+    unique, product_keys = {}, {}
     entries = machine_obj.get("accounts")
     if isinstance(entries, list):
         for raw in entries[:64]:
@@ -337,6 +337,7 @@ def parse_block(machine_obj):
             if entry is None:
                 continue
             key = (entry["product"], entry["label"])
+            product_keys.setdefault(entry["product"], set()).add(entry["label"])
             previous = unique.get(key)
             if previous is None:
                 # Equivalent to capping after dedup: retain the first eight
@@ -364,6 +365,13 @@ def parse_block(machine_obj):
             for entry in accounts:
                 if entry["product"] == product:
                     entry["days"] = {}
+    # R4: only this machine's singleton product account can own old unlabelled days.
+    # Count every status; never pick between two accounts or infer from another machine.
+    for product in list(unattributed):
+        candidates = [entry for entry in accounts if entry["product"] == product]
+        if (isinstance(entries, list) and len(entries) <= 64 and len(product_keys.get(product, ())) == 1
+                and len(candidates) == 1 and candidates[0]["label"] is not None):
+            _sum_days(candidates[0]["days"], unattributed.pop(product))
     return {"accounts": accounts, "captions": _captions(machine_obj.get("captions")),
             "unattributedDays": unattributed, "lastSeenAt": _epoch(machine_obj.get("lastSeenAt"))}
 

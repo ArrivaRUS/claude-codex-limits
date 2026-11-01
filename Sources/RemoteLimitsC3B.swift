@@ -112,8 +112,8 @@ func remoteSourceHeaderLayout(_ header: RemoteSourceHeader, availableWidth: Doub
     if header.overflow > 0 { x += measure(" +\(header.overflow)") }
     return RemoteSourceHeaderLayout(runs: runs, width: x, overflow: header.overflow, overflowX: overflowX)
 }
-func remoteQuotaFooterHeight(advanced: Bool) -> Double { advanced ? 32 : 18 }
-func remoteVisibleSourceLine(_ text: String, advanced: Bool) -> String { advanced ? text : "" }
+func remoteQuotaFooterHeight(advanced: Bool) -> Double { 18 }
+func remoteVisibleSourceLine(_ text: String, advanced: Bool) -> String { "" }
 func remoteVisibleSourceLine(_ card: RemoteCardPresentation, advanced: Bool) -> String {
     remoteVisibleSourceLine(card.sourceLine, advanced: advanced)
 }
@@ -180,7 +180,7 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
         let heights = metrics.map { remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: $0, now: now)) }
             + (view.product == "codex" ? [24.0] : [])
         let height = 38 + heights.reduce(0, +) + Double(max(0, heights.count - 1))
-            + Double(remoteAdvancedNoticeLines(view, now: now)) * 19 + 32
+            + Double(remoteAdvancedNoticeLines(view, now: now)) * 19 + remoteQuotaFooterHeight(advanced: true)
         let rect = CGRect(x: 15, y: top, width: 330, height: height)
         top += height + 5
         return rect
@@ -206,7 +206,7 @@ func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
 // Shared by the Foundation-only geometry and the real Advanced rows. History can
 // change recent-rate text, but cannot change the row kind or its measured height.
 func remoteAdvancedMetrics(_ view: AccountView) -> [String] {
-    (view.product == "claude" || view.data.session != nil ? ["session"] : [])
+    ["session"]
         + (view.data.scoped != nil ? ["scoped"] : []) + ["weekly"]
 }
 func remoteAdvancedRowHeight(_ kind: AdvRowKind) -> Double {
@@ -340,10 +340,45 @@ func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String 
     if view.historyKey.hasPrefix("u:") {
         return product + (language == "en" ? " · unlabelled" : " · не указан")
     }
+    if let custom = view.customCaption, !custom.isEmpty { return custom }
     if !view.caption.isEmpty && view.caption != remoteDefaultCaption(view) { return view.caption }
-    let machines = view.machines.prefix(2).joined(separator: ", ")
-        + (view.machines.count > 2 ? " +\(view.machines.count - 2)" : "")
-    return product + (machines.isEmpty ? "" : " · " + machines)
+    var subscription = view; subscription.machines = []
+    if subscription.tier == nil {
+        if subscription.data.plan?.lowercased() == "max_20x" { subscription.tier = "max_20x" }
+        if subscription.data.plan?.lowercased() == "max_5x" { subscription.tier = "max_5x" }
+    }
+    return remoteDefaultCaption(subscription)
+}
+
+struct HistorySelectorLayout {
+    var titles: [String]
+    var rects: [CGRect] // top-left coordinates, relative to the history header
+    var ownRow: Bool
+    var extraHeight: CGFloat
+}
+/// Production supplies CoreText widths; pre-AppKit tests supply deterministic measurements.
+func remoteHistorySelectorLayout(titles: [String], measuredWidths: [CGFloat], headingWidth: CGFloat,
+                                 availableWidth: CGFloat, expanded: Bool) -> HistorySelectorLayout {
+    guard expanded else { return HistorySelectorLayout(titles: titles, rects: [], ownRow: false, extraHeight: 0) }
+    let widths = measuredWidths.map { min(availableWidth - 4, $0 + 16) }
+    let total = widths.reduce(0, +) + CGFloat(max(0, widths.count - 1)) + 4
+    let ownRow = titles.count >= 3 || total + headingWidth + 22 > availableWidth
+    if !ownRow {
+        var x = availableWidth - total + 2
+        let rects = widths.map { width -> CGRect in
+            defer { x += width + 1 }
+            return CGRect(x: x, y: 2, width: width, height: 14)
+        }
+        return HistorySelectorLayout(titles: titles, rects: rects, ownRow: false, extraHeight: 0)
+    }
+    var x: CGFloat = 2, row = 0
+    var rects: [CGRect] = []
+    for width in widths {
+        if x > 2 && x + width > availableWidth - 2 { row += 1; x = 2 }
+        rects.append(CGRect(x: x, y: 22 + CGFloat(row) * 22, width: width, height: 18))
+        x += width + 1
+    }
+    return HistorySelectorLayout(titles: titles, rects: rects, ownRow: true, extraHeight: CGFloat(row + 1) * 22)
 }
 
 enum RemoteCaptionCommand { case enter, escape, reset }
@@ -395,6 +430,7 @@ func remoteSnapshotText(_ raw: String, limit: Int) -> String {
 func remoteSanitizedView(_ raw: AccountView) -> AccountView {
     var view = raw
     view.caption = remoteSnapshotText(raw.caption, limit: 128)
+    view.customCaption = raw.customCaption.map { remoteSnapshotText($0, limit: 128) }
     view.machines = Array(raw.machines.prefix(32)).map { remoteSnapshotText($0, limit: 16) }
     view.sourceReadings = Array(raw.sourceReadings.prefix(64)).map { record in
         var copy = record; copy.name = remoteSnapshotText(record.name, limit: 32); return copy
@@ -640,6 +676,8 @@ func remoteAdvancedVerdict(_ row: AdvRow, data: LimitData, now: Date, language: 
     let en = language == "en"
     func t(_ ru: String, _ english: String) -> String { en ? english : ru }
     func moment(_ at: Date) -> String { remoteCardTimestamp(at, now: now, timeZone: timeZone) }
+    // A missing foreign window is unknown; do not instruct the reader to open it.
+    if row.limit?.used == nil && row.limit?.pace == nil { return "—" }
     guard remotePaceTimeValid(data, now: now) else { return t("Нет свежих данных · темп не считаем", "No fresh data · pace paused") }
     func percent(_ value: Double) -> String { String(Int(value.rounded())) + "%" }
     if let at = data.asOf, now.timeIntervalSince(at) > snapshotHorizon(data) {

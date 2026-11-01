@@ -397,6 +397,9 @@ MODEL_PRICES = [
     ("gpt-6-astra", (10, 50, 1.0, 12.5)),
     ("gpt-6-luna", (1, 5, 0.1, 1.25)),
     ("gpt-5.6", (4, 20, 0.4, 5.0)),
+    # Owner-approved rates, from OpenAI announcement retellings; official page not verified.
+    # https://codersera.com/blog/gpt-6-1-sol-complete-guide-2026/
+    ("gpt-6.1-sol", (2, 10, 0.10, 2.50)),
     ("gpt-6-sol", (4, 20, 0.4, 5.0)),
     ("gpt-reserve", (4, 20, 0.4, 5.0)),
     ("codex-auto-review", (4, 20, 0.4, 5.0)),

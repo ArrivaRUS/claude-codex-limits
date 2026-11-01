@@ -295,10 +295,10 @@ private func c4C401(_ root: String, _ expect: C4Expect) {
     let unbound = c4MachineFile(days: h.days, accountByDay: [:], localId: C4_ID, codex: h.codex, poll: h.saved.poll,
         gistId: C4_GIST, machineId: C4_MACHINE, machineName: "macbook", osName: "fixture", now: C4_NOW)
     let unboundRecord = (unbound["accounts"] as? [[String: Any]])?.first
-    expect((unboundRecord?["days"] as? [String: Any])?.isEmpty == true,
-           "C4-01 historical unbound days never attributed to current account")
-    expect(c4Canon((unbound["unattributedDays"] as? [String: Any])?["codex"]) == c4Canon(h.days["codex"]),
-           "C4-01 unbound days go to unattributed projection")
+    expect(c4Canon(unboundRecord?["days"]) == c4Canon(h.days["codex"]),
+           "C4-01 historical unbound days belong to the sole known Codex account")
+    expect((unbound["unattributedDays"] as? [String: Any])?["codex"] == nil,
+           "C4-01 singleton fallback removes unlabelled projection without duplicating root")
     let changedId = "cccccccc-1111-4222-8333-444455556666"
     let cacheBefore = C4FileStamp(cachePath)
     let switched = c4CacheQuotaCompletion(product: "codex", response: LimitData(error: "synthetic failure"), previous: c4Fresh(),
