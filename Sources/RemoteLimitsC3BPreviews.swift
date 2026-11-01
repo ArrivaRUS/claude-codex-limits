@@ -968,8 +968,13 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
             allViews: accounts, visibleViews: accounts, displayedViews: accounts)
         frame.subscriptions = historySubscriptions(views: accounts, index: historyPreviewIndex(accounts), now: now, language: language)
         withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) {
-            migrateProductSubscriptionPrices(frame.subscriptions!)
-            let row = historyMoneyRows(frame.subscriptions!)[0]
+            guard let subscriptions = frame.subscriptions else {
+                check(false, "C5-24 P1 product subscriptions exist for settings/price checks"); return
+            }
+            migrateProductSubscriptionPrices(subscriptions)
+            guard let row = historyMoneyRows(subscriptions).first else {
+                check(false, "C5-24 P1 product subscription row exists for settings/price checks"); return
+            }
             let height = settingsTotalHeight(AboutState())
             guard let ctx = bitmapContext(720, Int(ceil(height * 2))) else { check(false, "C5-24 settings bitmap"); return }
             ctx.scaleBy(x: 2, y: 2)
@@ -982,7 +987,7 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
             check(row.monthly.contains("$100") && hits.allSatisfy { ($0.tooltip ?? "").contains("$200") },
                   "C5-24 P1 migrated price wins and retained conflicting price is disclosed")
             setProductSubscriptionPrice("codex", usd: 200)
-            check(historyMoneyRows(frame.subscriptions!)[0].monthly.contains("$200"), "C5-24 P1 settings selection immediately changes history")
+            check(historyMoneyRows(subscriptions).first?.monthly.contains("$200") == true, "C5-24 P1 settings selection immediately changes history")
         }
     }
     check(written == 4, "C5-26 four actual Advanced @2x PNGs saved")

@@ -7944,14 +7944,15 @@ final class PanelController {
 
 // C5-12: real WindowServer/field-editor checks, intentionally after AppKit.
 // MemorySelfTestDefaults and a synthetic frame keep this off credentials/network.
-func runCaptionEditorAppKitSelfTests() -> Int {
+func runCaptionEditorAppKitSelfTests(report: ((Bool, String) -> Void)? = nil) -> Int {
     let watchdog = AppKitSelfTestWatchdog.shared
     watchdog.begin("C5-12 setup/presentation policy")
     var failures = 0, checks = 0
     func check(_ ok: Bool, _ message: String) {
         checks += 1
         if !ok { failures += 1 }
-        print("\(ok ? "OK" : "FAIL") \(message)")
+        if let report = report { report(ok, message) }
+        else { print("\(ok ? "OK" : "FAIL") \(message)") }
     }
     defer { print("\(failures == 0 ? "OK" : "FAIL") C5-12 native focus: \(checks) checks, \(failures) failures") }
     guard UserDefaults.standard is MemorySelfTestDefaults else {
@@ -9550,9 +9551,19 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         prefs["monitor_claude"] = claude; prefs["monitor_codex"] = codex
         defaults.setVolatileDomain(prefs, forName: UserDefaults.argumentDomain)
     }
+    var appKitTailStarted = false, appKitOK = 0, appKitFailures = 0
     func check(_ ok: Bool, _ message: String) {
-        if !ok { print("FAIL " + message); exit(1) }
-        print("OK " + message)
+        print("\(ok ? "OK" : "FAIL") " + message)
+        if appKitTailStarted {
+            if ok { appKitOK += 1 } else { appKitFailures += 1 }
+        } else if !ok { exit(1) } // Foundation setup still has dependent fixture unwraps.
+    }
+    func appKitBitmap(_ width: CGFloat, _ height: CGFloat, _ label: String) -> CGContext? {
+        guard width.isFinite, height.isFinite, width > 0, height > 0,
+              let context = bitmapContext(Int(width), Int(height)) else {
+            check(false, label + " bitmap allocation"); return nil
+        }
+        return context
     }
     func reading(_ value: Double, _ at: Double, reset: Double = 1000000) -> LimitData {
         var d = LimitData(session: value, sessionReset: Date(timeIntervalSince1970: reset), asOf: Date(timeIntervalSince1970: at))
@@ -9750,11 +9761,16 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     // launch callback, event loop, refresh or recovery action is invoked here.
     let watchdog = AppKitSelfTestWatchdog.shared
     watchdog.begin("AppKit initialization / C3-10 preview directory")
+    appKitTailStarted = true
     _ = NSApplication.shared
     _ = ctFont(11, .regular); _ = ctMono(11, .regular)
     let previewDir: URL
     do { previewDir = try c3PreviewDirectory() }
-    catch { check(false, "C3-10 preview directory: " + error.localizedDescription); exit(1) }
+    catch {
+        check(false, "C3-10 preview directory: " + error.localizedDescription)
+        print("AppKit tail: \(appKitOK) OK / \(appKitFailures) FAIL")
+        exit(1) // No output directory: dependent preview/manifest checks cannot run.
+    }
     var previewFiles: [String] = []
     func save(_ context: CGContext, _ path: String) {
         let name = URL(fileURLWithPath: path).lastPathComponent
@@ -9878,7 +9894,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                 && feedback.action == .restoreAccess, label + " server wait retains restore action")
                 }
                 let height = mainPanelHeight(cl, cx)
-                let image = bitmapContext(Int(PANEL_W * 2), Int(height * 2))!; image.scaleBy(x: 2, y: 2)
+                guard let image = appKitBitmap(PANEL_W * 2, height * 2, label) else { continue }
+                image.scaleBy(x: 2, y: 2)
                 let size = CGSize(width: PANEL_W, height: height)
                 let hits = advanced
                     ? drawAdvanced(image, size: size, claude: cl, codex: cx, interval: 1800, updated: success.asOf, about: AboutState())
@@ -9897,8 +9914,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let expectedRefresh = CGRect(x: usesAdvanced ? 324 : 320, y: height - (usesAdvanced ? 45 : 38), width: 24, height: 24)
                 manualCheck(refreshHits.count == 1 && refreshHits[0].rect == expectedRefresh,
                             label + " one 24x24 refresh in original header")
-                let gear = hits.first { $0.id == "settings" }!
-                manualCheck(gear.rect.width == 24 && gear.rect.height == 24 && gear.rect.maxX < refreshHits[0].rect.minX,
+                guard let refresh = refreshHits.first, let gear = hits.first(where: { $0.id == "settings" }) else {
+                    manualCheck(false, label + " header controls exist for dependent geometry checks"); continue
+                }
+                manualCheck(gear.rect.width == 24 && gear.rect.height == 24 && gear.rect.maxX < refresh.rect.minX,
                             label + " refresh right of settings without overlap")
                 manualCheck(hits.allSatisfy { $0.rect.minX.isFinite && $0.rect.minY.isFinite
                     && $0.rect.minX >= 0 && $0.rect.maxX <= PANEL_W && $0.rect.minY >= 0 && $0.rect.maxY <= height },
@@ -9961,7 +9980,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     manualCheck(!quotaActions.contains { $0.id != action.id && $0.rect.intersects(action.rect) },
                                 label + " provider actions do not overlap")
                 }
-                manualCheck(!hits.contains { $0.id != "refresh" && !$0.id.hasPrefix("quotafeedback:") && $0.rect.intersects(refreshHits[0].rect) },
+                manualCheck(!hits.contains { $0.id != "refresh" && !$0.id.hasPrefix("quotafeedback:") && $0.rect.intersects(refresh.rect) },
                             label + " header refresh clears other controls")
                 manualCheck(!hits.contains { !claudeOn && ($0.id.hasSuffix(":claude") || $0.id == "claudefix")
                     || !codexOn && $0.id.hasSuffix(":codex") }, label + " disabled provider has no quota action")
@@ -9995,7 +10014,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             watchdog.begin("Subscription Settings \(lang) advanced=\(advanced)")
             prefs["advanced"] = advanced; select(false, true)
             let h = settingsTotalHeight(AboutState())
-            let ctx = bitmapContext(Int(PANEL_W * 2), Int(h * 2))!; ctx.scaleBy(x: 2, y: 2)
+            guard let ctx = appKitBitmap(PANEL_W * 2, h * 2, "Subscription Settings \(lang)") else { continue }
+            ctx.scaleBy(x: 2, y: 2)
             let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: h), about: AboutState())
             let toggles = hits.filter { $0.id.hasPrefix("monitor:") }
             check(toggles.count == 2 && !toggles[0].rect.intersects(toggles[1].rect)
@@ -10008,7 +10028,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 select(false, !bothOff)
                 let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
                 let ph = mainPanelHeight(cl, cx)
-                let pc = bitmapContext(Int(PANEL_W * 2), Int(ph * 2))!; pc.scaleBy(x: 2, y: 2)
+                guard let pc = appKitBitmap(PANEL_W * 2, ph * 2, "Subscription panel \(lang)") else { continue }
+                pc.scaleBy(x: 2, y: 2)
                 let phits = advanced
                     ? drawAdvanced(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
                     : drawPanel(pc, size: CGSize(width: PANEL_W, height: ph), claude: cl, codex: cx, interval: POLL_DEFAULT, updated: nil, about: AboutState())
@@ -10039,31 +10060,33 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(delegate.panelCtrl.view.autoIntervals == ["claude": 14400, "codex": 900]
           && delegate.panelCtrl.view.needsDisplay && delegate.interval == 1800,
           "startup restored states publish a repaint independently of manual interval")
-    let oldCodex = delegate.autoStates["codex"]!
-    delegate.panelCtrl.view.needsDisplay = false
-    var activeClaude = delegate.autoStates["claude"]!
-    check(activeClaude.localActivity([runtimeNow - 300, runtimeNow - 200, runtimeNow - 100], now: runtimeNow),
-          "local fixture activity changes sleeping Claude")
-    delegate.autoStates["claude"] = activeClaude
-    delegate.publishAutoIntervals()
-    var dueClaude = delegate.autoStates["claude"]!, dueCodex = delegate.autoStates["codex"]!
-    check(!dueClaude.due(runtimeNow) && !dueCodex.due(runtimeNow),
-          "synthetic local activity remains not-due at the fixed fixture clock")
-    check(delegate.panelCtrl.view.autoIntervals == ["claude": 900, "codex": 900]
-          && delegate.panelCtrl.view.needsDisplay && !delegate.fetchingLimits
-          && delegate.autoStates["codex"]!.interval == oldCodex.interval,
-          "local activity publishes a repaint without invoking any refresh path")
-    // Swift not-due wiring is reviewed statically only: doRefresh uses the real clock
-    // and could fetch after a long pause/clock jump. The observe->save and scanActivity
-    // callbacks use persistent defaults/real logs. Linux tests mock the real runtime paths.
-    var failedClaude = delegate.autoStates["claude"]!
-    failedClaude.begin(runtimeNow)
-    var badReading = reading(50, runtimeNow); badReading.apiFresh = false
-    failedClaude.observe(badReading, now: runtimeNow)
-    delegate.autoStates["claude"] = failedClaude
-    delegate.publishAutoIntervals()
-    check(delegate.panelCtrl.view.autoIntervals == ["claude": 1800, "codex": 900],
-          "observed backoff publishes its own interval while Codex stays unchanged")
+    if let oldCodex = delegate.autoStates["codex"], var activeClaude = delegate.autoStates["claude"] {
+        delegate.panelCtrl.view.needsDisplay = false
+        check(activeClaude.localActivity([runtimeNow - 300, runtimeNow - 200, runtimeNow - 100], now: runtimeNow),
+              "local fixture activity changes sleeping Claude")
+        delegate.autoStates["claude"] = activeClaude
+        delegate.publishAutoIntervals()
+        if var dueClaude = delegate.autoStates["claude"], var dueCodex = delegate.autoStates["codex"] {
+            check(!dueClaude.due(runtimeNow) && !dueCodex.due(runtimeNow),
+                  "synthetic local activity remains not-due at the fixed fixture clock")
+        } else { check(false, "published Auto states exist for due checks") }
+        check(delegate.panelCtrl.view.autoIntervals == ["claude": 900, "codex": 900]
+              && delegate.panelCtrl.view.needsDisplay && !delegate.fetchingLimits
+              && delegate.autoStates["codex"]?.interval == oldCodex.interval,
+              "local activity publishes a repaint without invoking any refresh path")
+        // Swift not-due wiring is reviewed statically only: doRefresh uses the real clock
+        // and could fetch after a long pause/clock jump. The observe->save and scanActivity
+        // callbacks use persistent defaults/real logs. Linux tests mock the real runtime paths.
+        if var failedClaude = delegate.autoStates["claude"] {
+            failedClaude.begin(runtimeNow)
+            var badReading = reading(50, runtimeNow); badReading.apiFresh = false
+            failedClaude.observe(badReading, now: runtimeNow)
+            delegate.autoStates["claude"] = failedClaude
+            delegate.publishAutoIntervals()
+            check(delegate.panelCtrl.view.autoIntervals == ["claude": 1800, "codex": 900],
+                  "observed backoff publishes its own interval while Codex stays unchanged")
+        } else { check(false, "published Claude state exists for backoff checks") }
+    } else { check(false, "startup Auto states exist for activity/backoff fixtures") }
     let fixtureUpdated = Date(timeIntervalSince1970: 100000)
     watchdog.begin("Auto footer/model checks")
     var autoImages = 0
@@ -10084,32 +10107,32 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         select(true, true)
         for advanced in [false, true] {
             watchdog.begin("Auto footer/tooltip \(lang) advanced=\(advanced)")
-            func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400], manual: TimeInterval = 3600) -> (Data, [Hit]) {
+            func footer(_ updated: Date?, intervals: [String: TimeInterval] = ["claude": 900, "codex": 14400], manual: TimeInterval = 3600) -> (Data, [Hit])? {
                 let preferencesBefore = defaults.dictionaryRepresentation() as NSDictionary
-                let ctx = bitmapContext(360, 40)!
+                guard let ctx = appKitBitmap(360, 40, "Auto footer \(lang)") else { return nil }
                 ctx.clear(CGRect(x: 0, y: 0, width: 360, height: 40))
                 let hits = drawPollFooter(ctx, size: CGSize(width: 360, height: 40), top: 8,
                                           interval: manual, updated: updated,
                                           autoIntervals: intervals, advanced: advanced)
                 check(preferencesBefore.isEqual(defaults.dictionaryRepresentation() as NSDictionary),
                       "\(lang) advanced=\(advanced): footer repaint preserves Auto and saved interval")
-                return (Data(bytes: ctx.data!, count: ctx.bytesPerRow * ctx.height), hits)
+                guard let bytes = ctx.data else { check(false, "Auto footer pixel storage exists"); return nil }
+                return (Data(bytes: bytes, count: ctx.bytesPerRow * ctx.height), hits)
             }
-            let (withTime, hits) = footer(fixtureUpdated)
-            let (withoutTime, _) = footer(nil)
+            guard let (withTime, hits) = footer(fixtureUpdated), let (withoutTime, _) = footer(nil) else { continue }
             check(withTime == withoutTime, "\(lang) advanced=\(advanced): actual Auto footer has no timestamp ink")
             for (id, x, w) in [("iv900", 16.0, 40.0), ("iv1800", 56, 40), ("iv3600", 96, 40), ("iv14400", 136, 40), ("iv0", 176, 40), ("quit", 320, 24)] {
                 check(hits.contains { $0.id == id && $0.rect == CGRect(x: x, y: 8, width: w, height: 24) },
                       "\(lang) advanced=\(advanced): \(id) footer hit geometry")
             }
-            check(!hits.first { $0.id == "iv0" }!.rect.intersects(hits.first { $0.id == "quit" }!.rect),
-                  "\(lang) advanced=\(advanced): Auto and power never overlap")
+            if let auto = hits.first(where: { $0.id == "iv0" }), let power = hits.first(where: { $0.id == "quit" }) {
+                check(!auto.rect.intersects(power.rect), "\(lang) advanced=\(advanced): Auto and power never overlap")
+            } else { check(false, "Auto/power hits exist for overlap checks") }
             prefs["autoPoll"] = false; select(true, true)
-            let (manualTime, _) = footer(fixtureUpdated)
-            let (manualNoTime, _) = footer(nil)
+            guard let (manualTime, _) = footer(fixtureUpdated), let (manualNoTime, _) = footer(nil) else { continue }
             check(manualTime == manualNoTime && pollSelected(3600, manual: 3600) && !pollSelected(0, manual: 3600),
                   "\(lang) advanced=\(advanced): manual footer keeps selected interval without a global timestamp")
-            let (fourHour, _) = footer(nil, manual: 14400)
+            guard let (fourHour, _) = footer(nil, manual: 14400) else { continue }
             check(fourHour != manualNoTime && pollSelected(14400, manual: 14400)
                   && !pollSelected(0, manual: 14400) && !pollSelected(3600, manual: 14400),
                   "\(lang) advanced=\(advanced): fixed four-hour slot is highlighted alone")
@@ -10150,8 +10173,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                       "\(lang) advanced=\(advanced) \(fixture): exact Auto plus effective or fixed selection")
                 let cl = selectedLimits(c, product: "claude"), cx = selectedLimits(x, product: "codex")
                 let height = mainPanelHeight(cl, cx)
-                func panelImage(_ intervals: [String: TimeInterval]) -> (CGContext, [Hit]) {
-                    let ctx = bitmapContext(720, Int(height * 2))!; ctx.scaleBy(x: 2, y: 2)
+                func panelImage(_ intervals: [String: TimeInterval]) -> (CGContext, [Hit])? {
+                    guard let ctx = appKitBitmap(720, height * 2, "Auto panel \(fixture) \(lang)") else { return nil }
+                    ctx.scaleBy(x: 2, y: 2)
                     let size = CGSize(width: PANEL_W, height: height)
                     let hits = advanced
                         ? drawAdvanced(ctx, size: size, claude: cl, codex: cx, interval: manual,
@@ -10160,8 +10184,12 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                     updated: fixtureUpdated, about: AboutState(), autoIntervals: intervals)
                     return (ctx, hits)
                 }
-                let (image, panelHits) = panelImage(["claude": ci, "codex": xi])
-                let autoTooltip = panelHits.first { $0.id == "iv0" }!.tooltip ?? ""
+                guard let (image, panelHits) = panelImage(["claude": ci, "codex": xi]),
+                      let auto = panelHits.first(where: { $0.id == "iv0" }),
+                      let power = panelHits.first(where: { $0.id == "quit" }) else {
+                    check(false, "Auto/power panel controls exist for \(fixture) \(lang)"); continue
+                }
+                let autoTooltip = auto.tooltip ?? ""
                 if !claudeOn && !codexOn {
                     check(panelHits.filter { $0.id.hasPrefix("iv") }.allSatisfy {
                         $0.tooltip == (lang == "ru" ? "Нет включённых подписок" : "No subscriptions enabled")
@@ -10171,7 +10199,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         check(autoTooltip.contains(name + " → " + pollAccessibleTitle(value)) == enabled,
                               "\(lang) advanced=\(advanced) \(fixture): Auto tooltip maps only enabled \(name)")
                         for segment in POLL_CHOICES {
-                            let tooltip = panelHits.first { $0.id == "iv\(Int(segment.sec))" }!.tooltip ?? ""
+                            guard let hit = panelHits.first(where: { $0.id == "iv\(Int(segment.sec))" }) else {
+                                check(false, "Auto panel fixed segment \(Int(segment.sec)) exists"); continue
+                            }
+                            let tooltip = hit.tooltip ?? ""
                             check(tooltip.contains(name) == (enabled && segment.sec == value),
                                   "\(lang) advanced=\(advanced) \(fixture): \(name) appears only on its effective segment")
                         }
@@ -10179,14 +10210,13 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 }
                 // Full cards include live countdown/pace calculations. Compare the actual
                 // shared footer in isolation; keep the full-panel image for visual QA.
-                let (bytes, _) = footer(fixtureUpdated, intervals: snapshot, manual: manual)
+                guard let (bytes, _) = footer(fixtureUpdated, intervals: snapshot, manual: manual) else { continue }
                 let nextFixtureInterval: [TimeInterval: TimeInterval] = [900: 1800, 1800: 3600, 3600: 14400, 14400: 900]
-                let (changedBytes, _) = footer(fixtureUpdated, intervals: ["claude": nextFixtureInterval[ci]!,
-                                                                         "codex": nextFixtureInterval[xi]!], manual: manual)
+                guard let (changedBytes, _) = footer(fixtureUpdated, intervals: ["claude": nextFixtureInterval[ci]!,
+                                                                               "codex": nextFixtureInterval[xi]!], manual: manual) else { continue }
                 check(autoOn && (claudeOn || codexOn) ? bytes != changedBytes : bytes == changedBytes,
                       "\(lang) advanced=\(advanced) \(fixture): shared footer consumes only enabled Auto snapshot")
-                let autoHit = panelHits.first { $0.id == "iv0" }!.rect
-                let powerHit = panelHits.first { $0.id == "quit" }!.rect
+                let autoHit = auto.rect, powerHit = power.rect
                 check(autoHit.minX == 176 && autoHit.width == 40 && powerHit.minX == 320
                       && !autoHit.intersects(powerHit) && autoHit.minY >= 0 && autoHit.maxY <= height,
                       "\(lang) advanced=\(advanced) \(fixture): full-panel footer bounds and fallback")
@@ -10292,7 +10322,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     let cx = selectedLimits(product == "codex" ? sample : authReading("fresh"), product: "codex")
                     let cachedBeforeDraw = [String(reflecting: cl), String(reflecting: cx)]
                     let cards = advCards(cl, cx)
-                    let card = cards.first { $0.product == product }!
+                    guard let card = cards.first(where: { $0.product == product }) else {
+                        authCheck(false, "\(lang) \(product)/\(fixture): quota card exists"); continue
+                    }
                     let recover = product == "claude" && (fixture == "expired" || fixture == "logout")
                     let label = "\(lang) advanced=\(advanced) both=\(both) \(product)/\(fixture)"
                     let failedFresh = fixture == "network" || fixture == "poll-failed"
@@ -10301,11 +10333,14 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     authCheck(card.paused == !snapshotFresh && card.noticeHeight == expectedNoticeHeight,
                               label + " only necessary missing/auth notices retain their height")
                     if failedFresh {
-                        authCheck(card.rows.filter { $0.limit != nil }.allSatisfy { $0.kind == .full },
-                                  label + " fresh failed fetch retains snapshot pace rows")
+                        authCheck(card.rows.filter { $0.limit != nil }.allSatisfy {
+                            $0.kind == ($0.limit?.used == nil ? .inactive : .full)
+                        }, label + " fresh failed fetch retains full reported windows and an inactive empty session")
                     }
                     if ["weekly-only", "historical", "session-reset", "poll-failed"].contains(fixture) {
-                        let weeklyRow = card.rows.first { $0.limit?.id == "weekly" }!
+                        guard let weeklyRow = card.rows.first(where: { $0.limit?.id == "weekly" }) else {
+                            authCheck(false, label + " weekly row exists for forecast checks"); continue
+                        }
                         let pace = weeklyRow.limit?.pace
                         authCheck(weeklyRow.kind == .full && pace?.used == 41 && pace?.planPct == 50
                                   && pace?.projectedPct == 82 && pace?.elapsedH == 84,
@@ -10319,8 +10354,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                       && !metricIsStale(sample, metric: "weekly", now: authNow),
                                       label + " 100% ended session is muted without muting the week")
                         } else {
-                            authCheck(card.rows.allSatisfy { $0.limit?.id != "session" } && sample.session == nil,
-                                      label + " missing session never blocks weekly forecast")
+                            authCheck(card.rows.contains { $0.limit?.id == "session" && $0.limit?.used == nil }
+                                      && sample.session == nil,
+                                      label + " empty session row never blocks weekly forecast")
                         }
                     }
                     let nextClock = DateFormatter(); nextClock.dateFormat = "HH:mm"
@@ -10356,12 +10392,15 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                   label + " Codex freshness/failure never invents expired auth")
                     }
                     let height = mainPanelHeight(cl, cx)
-                    let image = bitmapContext(720, Int(height * 2))!; image.scaleBy(x: 2, y: 2)
+                    guard let image = appKitBitmap(720, height * 2, label) else { continue }
+                    image.scaleBy(x: 2, y: 2)
                     let size = CGSize(width: PANEL_W, height: height)
                     let hits = advanced
                         ? drawAdvanced(image, size: size, claude: cl, codex: cx, interval: 1800, updated: nil, about: AboutState())
                         : drawPanel(image, size: size, claude: cl, codex: cx, interval: 1800, updated: nil, about: AboutState())
-                    let afterDraw = advCards(cl, cx).first { $0.product == product }!
+                    guard let afterDraw = advCards(cl, cx).first(where: { $0.product == product }) else {
+                        authCheck(false, label + " quota card remains after draw"); continue
+                    }
                     authCheck([String(reflecting: cl), String(reflecting: cx)] == cachedBeforeDraw
                               && afterDraw.data.session == sample.session && afterDraw.data.weekly == sample.weekly
                               && afterDraw.data.asOf == sample.asOf && afterDraw.data.auth == sample.auth,
@@ -10375,11 +10414,14 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                         authCheck(hits.contains { $0.id == claudeTarget }, label + " ordinary Claude URL retained")
                     }
                     if combined {
-                        let fixRect = hits.first { $0.id == "claudefix" }!.rect
-                        let codexRect = hits.first { $0.id == codexTarget }!.rect
+                        guard let fix = hits.first(where: { $0.id == "claudefix" }),
+                              let codex = hits.first(where: { $0.id == codexTarget }),
+                              let claudeCard = cards.first(where: { $0.product == "claude" }),
+                              let codexCard = cards.first(where: { $0.product == "codex" }) else {
+                            authCheck(false, label + " recovery controls and both cards exist"); continue
+                        }
+                        let fixRect = fix.rect, codexRect = codex.rect
                         if advanced {
-                            let claudeCard = cards.first { $0.product == "claude" }!
-                            let codexCard = cards.first { $0.product == "codex" }!
                             // Cards start at y=58 in the unified panel, without the former 38pt wrapper.
                             let claudeBounds = CGRect(x: 15, y: height - 58 - claudeCard.height,
                                                       width: 330, height: claudeCard.height)
@@ -10446,7 +10488,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let beforePreferences = defaults.dictionaryRepresentation() as NSDictionary
                 let beforeIndex = try! cachedIndexEncoder.encode(UsageLogs.shared.snapshot())
                 let size = CGSize(width: PANEL_W, height: mainPanelHeight(c, x))
-                let image = bitmapContext(Int(size.width * 2), Int(size.height * 2))!; image.scaleBy(x: 2, y: 2)
+                guard let image = appKitBitmap(size.width * 2, size.height * 2, "GitHub main \(name) \(lang)") else { continue }
+                image.scaleBy(x: 2, y: 2)
                 let hits = advanced
                     ? drawAdvanced(image, size: size, claude: c, codex: x, interval: 1800, updated: nil, about: AboutState())
                     : drawPanel(image, size: size, claude: c, codex: x, interval: 1800, updated: nil, about: AboutState())
@@ -10454,7 +10497,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                       "GitHub \(lang) \(name) actual main controls fit and Settings reachable")
                 if advanced {
                     let sh = settingsTotalHeight(AboutState())
-                    let settingsImage = bitmapContext(Int(PANEL_W * 2), Int(sh * 2))!; settingsImage.scaleBy(x: 2, y: 2)
+                    guard let settingsImage = appKitBitmap(PANEL_W * 2, sh * 2, "GitHub Settings \(name) \(lang)") else { continue }
+                    settingsImage.scaleBy(x: 2, y: 2)
                     let settingsHits = drawSettings(settingsImage, size: CGSize(width: PANEL_W, height: sh), about: AboutState())
                     let expectLogin = state.phase == .off || state.phase == .revoked
                     check(settingsHits.filter { $0.id == "sync:login" }.count == (expectLogin ? 1 : 0),
@@ -10474,10 +10518,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     SYNC_PREVIEW = SyncUIState()
     prefs["autoPoll"] = true; select(true, true)
     delegate.panelCtrl.panel.close()
-    let captionFocusFailures = runCaptionEditorAppKitSelfTests()
+    let captionFocusFailures = runCaptionEditorAppKitSelfTests(report: check)
     check(captionFocusFailures == 0, "C5-12 native focus suite (\(captionFocusFailures) failures; all independent checks completed)")
     watchdog.begin("AppKit final cleanup / Auto selection")
-    try! fm.removeItem(atPath: root)
+    do { try fm.removeItem(atPath: root) }
+    catch { check(false, "AppKit fixture cleanup: " + error.localizedDescription) }
     check(pollSelected(0, manual: 1800) && !pollSelected(1800, manual: 1800, autoIntervals: ["claude": 900, "codex": 14400]),
           "Auto selection uses provider snapshots independently of the saved fixed interval")
     do {
@@ -10487,9 +10532,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
               "C3-10 final preview manifest")
         print("OK C3-10 \(count) previews → \(previewDir.path)")
     } catch { check(false, "C3-10 manifest: " + error.localizedDescription) }
-    print("Subscription selection and adaptive polling selftest passed")
+    if appKitFailures == 0 { print("Subscription selection and adaptive polling selftest passed") }
+    print("AppKit tail: \(appKitOK) OK / \(appKitFailures) FAIL")
     watchdog.stop()
-    exit(0)
+    exit(appKitFailures > 0 ? 1 : 0)
 }
 
 if CommandLine.arguments.contains("--sync-selftest") {
