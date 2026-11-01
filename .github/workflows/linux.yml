@@ -5,6 +5,7 @@ on:
       - 'linux/**'
       - 'Resources/**'
       - 'fixtures/**'
+      - 'docs/sync-protocol.md'
       - '.github/workflows/linux.yml'
   workflow_dispatch:
 permissions:
@@ -24,6 +25,8 @@ jobs:
           trap 'rm -rf "$ci_context"' EXIT
           # Copy only suite/package inputs: no .git, runner home, secrets or host sockets.
           cp -R linux Resources fixtures LICENSE "$ci_context/"
+          mkdir -p "$ci_context/docs"
+          cp docs/sync-protocol.md "$ci_context/docs/"
           cat > "$ci_context/Dockerfile" <<'DOCKERFILE'
           FROM ubuntu:22.04
           RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 python3-pyqt5 python3-dbus kde-style-breeze fonts-dejavu-core dpkg xz-utils util-linux passwd ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -31,6 +34,7 @@ jobs:
           COPY --chown=10001:10001 linux /work/linux
           COPY --chown=10001:10001 Resources /work/Resources
           COPY --chown=10001:10001 fixtures /work/fixtures
+          COPY --chown=10001:10001 docs/sync-protocol.md /work/docs/sync-protocol.md
           COPY --chown=10001:10001 LICENSE /work/LICENSE
           # Login derives HOME from passwd; the runner's environment is never forwarded.
           CMD ["su", "--login", "--shell", "/bin/sh", "ccltest", "--command", "cd /work && QT_QPA_PLATFORM=offscreen CCL_PREVIEW_DIR=/tmp/ccl-previews PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 linux/tests/_ci_offline.py"]

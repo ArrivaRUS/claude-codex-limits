@@ -8,7 +8,7 @@ to 4 h). Pair = two consecutive requests for one account (any machines) closer t
 
 Grid (test plan A3-20): I ∈ {15 min, 4 h} × visibility delay × skew; phase of machine 2 = 137 s (seeded, fixed).
 A 5-min visibility delay is outside the tolerance (Юрка Q1: synth §D assumes a consistent gist API read; a visibility
-delay is an event, not a steady state) — skipped with that reason; delay 30 s + skew ±59 s holds only at the fixed phase.
+delay is an event, not a steady state) — excluded from the steady-state grid; delay 30 s + skew ±59 s holds only at the fixed phase.
 Gist outage (d): «≤ 1 pair per 15 min of outage» = «≤ 1 extra request of the cut-off machine per 15 min» (Юрка Q2, synth §D).
 Run: cd linux && python3 -m unittest tests.test_rl_sim -v
 """
@@ -68,11 +68,10 @@ class TestA320aSteadyState(SimBase):
             self.assertTrue(s.requests(p), "%s: аккаунт вообще опрашивается" % p)
         self.assert_budget(s, mode)
 
-    @unittest.skip("решение Юрки Q1 (2026-10-15): синтез §D предполагает согласованное чтение API gist; задержка "
-                   "видимости — событие, не установившийся режим; вне допуска")
-    def test_delay_5min(self):
-        for mode in ("active", "idle"):
-            self.steady(mode, 300, 0)
+# No permanent 5-min visibility-delay cell: Q1 (2026-10-15), decisions/log.md,
+# «REMOTE-LIMITS A3: уточнения к тестам», item 3, excludes it from the 0-pair tolerance.
+# docs/plans.md §Допущения, item 1, keeps ≤ 1 pair per convergence event;
+# those events are checked separately by TestA320dEvents below.
 
 
 # Phase 137 s is fixed: with delay 30 s + |skew| 59 s the outcome depends on the phase (pairs when the other machine's

@@ -13,7 +13,7 @@ else:
 import os
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from ccl import common, quota_refresh, sync, usage
 
@@ -65,7 +65,7 @@ class TestGitHubAuthQt(PipelineCase):
         return SimpleNamespace(model=model, logout_busy=False, logout_error=None, login_state=None,
                                login_code=None, login_error=None, login_uri=None,
                                start_login=lambda: callbacks.append("login"), logout=lambda: callbacks.append("logout"),
-                               callbacks=callbacks)
+                               callbacks=callbacks, update_tray=Mock())
 
     def settings(self, fixture, filename):
         holder = QWidget()
@@ -209,9 +209,12 @@ class TestGitHubAuthQt(PipelineCase):
         fixture.update_sync_warning = lambda st: app.TrayApp.update_sync_warning(fixture, st)
         app.TrayApp.apply_days(fixture, {}, previous)
         self.assertTrue(fixture.model.days)
+        fixture.update_tray.assert_called_once_with()
+        fixture.update_tray.reset_mock()
         self.login(user_id="2002", login="account-b")
         self.http.fail_read = True
         self.assertFalse(sync.sync_cycle({}, allow_push=False).ok)
         app.TrayApp.apply_days(fixture, {}, previous)
         self.assertEqual(fixture.model.days, {})
         self.assertEqual(fixture.model.other_machines, 0)
+        fixture.update_tray.assert_called_once_with()

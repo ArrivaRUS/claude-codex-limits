@@ -144,12 +144,13 @@ class TestSubscriptions(unittest.TestCase):
     @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
     def test_remote_history_filtered_in_gui(self):
         self.select(False, True)
-        fake = SimpleNamespace(model=panel.Model(), update_sync_warning=Mock())
+        fake = SimpleNamespace(model=panel.Model(), update_sync_warning=Mock(), update_tray=Mock())
         with patch.object(app.sync, "sync_state", return_value=common.Store(os.path.join(self.root, "sync.json"), {"login": "test"})):
             app.TrayApp.apply_days(fake, {"claude": {}, "codex": {common.day_key(time.time()): {"model": usage.empty_usage()}}},
                                   {"machines": [{}], "days": {"claude": {}}})
         self.assertEqual(set(fake.model.days), {"codex"})
         self.assertIn("claude", fake.model.local_days)
+        fake.update_tray.assert_called_once_with()
 
     @unittest.skipUnless(HAVE_QT, "PyQt5 not installed")
     def test_panels_all_selections_and_intervals(self):
