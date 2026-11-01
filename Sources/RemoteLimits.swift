@@ -941,15 +941,6 @@ struct RemoteMoneyRow {
     var editable: Bool
     var activeNote: String?
 }
-func remoteMoneyDaily(_ usd: Double, language: String) -> String {
-    let number = String(format: usd >= 10 ? "%.0f" : "%.2f", usd)
-    return "$" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
-}
-func remoteMoneyValue(_ ratio: Double, language: String) -> String {
-    guard ratio.isFinite else { return "—" }
-    let number = String(format: ratio >= 100 ? "%.0f" : "%.1f", ratio)
-    return "×" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
-}
 func remoteMoneyRow(_ view: AccountView, summary m: MoneySummary, language: String) -> RemoteMoneyRow {
     let en = language == "en", subscription = !view.historyKey.hasPrefix("u:") && m.hasSubscriptionPrice
     let title = remoteHistorySelectorTitle(view, language: language), suffix = en ? "/day" : "/день"

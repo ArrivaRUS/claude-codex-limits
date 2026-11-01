@@ -1298,6 +1298,16 @@ func fmtUSD(_ v: Double) -> String {
     return "$" + fmtNum(v, decimals: 2)
 }
 
+func remoteMoneyDaily(_ usd: Double, language: String) -> String {
+    let number = String(format: usd >= 10 ? "%.0f" : "%.2f", usd)
+    return "$" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
+}
+func remoteMoneyValue(_ ratio: Double, language: String) -> String {
+    guard ratio.isFinite else { return "—" }
+    let number = String(format: ratio >= 100 ? "%.0f" : "%.1f", ratio)
+    return "×" + (language == "ru" ? number.replacingOccurrences(of: ".", with: ",") : number)
+}
+
 /// "2 ч 13 мин" / "3,7 дня" / "45 мин" — the way you'd say a remaining span out loud.
 func fmtSpan(_ hours: Double) -> String {
     if hours >= 24 {
