@@ -1,18 +1,19 @@
 # Usage sync protocol (v1 · v1.1)
 
-How copies of Claude Codex Limits on different computers share **local usage** through one
+How copies of Claude Codex Limits on different computers share **local usage and account limits** through one
 secret GitHub gist. This file is the contract for the macOS app (`Sources/LimitsMonitor.swift`)
 and the Linux port (`linux/`), including the platform differences below. Incompatible changes
 to the shared file format require bumping `schema` and updating both sides.
 
 ## What is shared and what is not
 
-- Limit **percentages and reset times** are already account‑wide: they come from the Anthropic /
-  OpenAI servers. They are **not** synced.
+- Limit **percentages and reset times** are account-wide: they come from the Anthropic /
+  OpenAI servers. v1 shared usage only; v1.1 also publishes successful limit readings so a Mac
+  can display an account without a local CLI sign-in.
 - **Local usage** — tokens per day per model, read from the CLIs' own transcripts — exists only on
   the machine where the CLI ran. That is what this protocol shares, so the bars, calendar and
   money in the Advanced view can cover every computer.
-- Only aggregates travel: counts per product → day → model. No prompts, no file paths, no project
+- Usage travels as aggregates: counts per product → day → model. No prompts, no file paths, no project
   names, no session ids.
 - Since v1.1 a machine may also publish limit snapshots of its own signed-in accounts — see v1.1 below.
 
@@ -31,7 +32,7 @@ to the shared file format require bumping `schema` and updating both sides.
 - **Token boundary.** Bearer authentication is allowed only on `https://api.github.com`:
   validate the scheme, ASCII host, port (absent or `443`) and absence of userinfo. Requests with
   Authorization do not follow redirects; `3xx` ends the cycle as an error. A truncated file's
-  `raw_url` is fetched **without Authorization**, under the *raw rule* (both ports; macOS adopts it in C1):
+  `raw_url` is fetched **without Authorization**, under the *raw rule* (both current ports):
   - `raw_url` is accepted only if it starts with exactly `https://gist.githubusercontent.com/` (ASCII, no
     spaces/control characters, no fragment); any other value is refused **before** a request;
   - redirects: at most **3** hops, each only to `https://gist.githubusercontent.com/`, GET/HEAD only; a 4th hop,
@@ -135,18 +136,20 @@ to the shared file format require bumping `schema` and updating both sides.
 
 ## Write
 
-- `PATCH /gists/{id}` with `{"files": {"machine-<id>.json": {"content": "<json>"}}}` — only when
+- **v1 usage writes:** `PATCH /gists/{id}` with `{"files": {"machine-<id>.json": {"content": "<json>"}}}` — only when
   the usage snapshot changed since the last successful write (compare a hash), or a forced sync
   was requested. Linux also rewrites a missing own file and, in automatic mode, limits changed
   snapshots to roughly one write per 10 minutes (with 30 seconds of tolerance); forced or missing
   files bypass that interval. macOS has no separate write interval/missing-file rule. An unchanged
-  snapshot normally skips the write, never the read.
+  snapshot normally skips the write, never the read. This is the v1 usage rule; v1.1 also writes
+  changed metadata (including captions) and heartbeat, independently, as described under *Write rules*.
 
 ## Read and merge
 
 - `GET /gists/{id}` **every cycle**; for a file with `"truncated": true`, fetch its `raw_url`.
-- Take every `machine-*.json` **except this machine's own id** (own data always comes from the local
-  index, never from the gist). Require `schema` equal to integer `1`, never boolean `true`:
+- Read the selected `machine-*.json` files. Exclude **this machine's own id** from usage, remote account records
+  and machine rows (own usage comes from the local index). v1.1 captions are the exception: merge them from
+  the own file too, under *Captions*. Require `schema` equal to integer `1`, never boolean `true`:
   Linux requires `type(schema) is int`; macOS uses `syncCount`, accepting numbers that bridge
   exactly to Swift `Int` (including `1.0`) and rejecting CFBoolean.
   Skip other schemas and unparsable JSON, including excessive nesting: Linux catches
@@ -349,17 +352,25 @@ is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secre
 
 ## Usage sync protocol v1.1 — account limits (additive)
 
+Current source contract, reconciled through C5-19/C5-20 on 2026-11-01. REMOTE-LIMITS has
+not been publicly released. macOS is a reader and a publisher of its own Codex account;
+Linux headless publishers publish Claude/Codex. Linux tray account cards and publish-only
+mode remain a second queue, not capabilities of the released Linux 0.4.5 tray.
+
 **Why.** Only a machine signed in to an account can read its limits; v1.1 lets it publish them and attributes usage to accounts.
 
 ### Compatibility
 
 - `schema` stays the integer `1`; the manifest is unchanged. Every v1.1 key is optional. Raising `schema` is
   forbidden: v1 readers (macOS ≤ 3.2.7, Linux ≤ 0.4.5) would drop the whole file and lose its usage.
-- Linux `sync.merge()` (`linux/ccl/sync.py` 355–402) reads only `schema`, `machine.{id,name,os,app}`, `updated`, `tz`, `days`.
-- macOS `GitHubSync.merge` (`Sources/LimitsMonitor.swift` 2740–2775) reads the same keys via `as?`; others are never looked up.
+- The **released v1 readers** in Linux 0.4.5 (`sync.merge`) and macOS 3.2.7 (`GitHubSync.merge`)
+  read the v1 envelope and root `days`; they ignore the added keys. The current source readers
+  also parse the v1.1 block. Old readers keep usage totals but gain neither remote limit cards
+  nor caption editing from a newer writer's file.
 - The root `days` stays the whole machine's usage: per product it **equals** Σ `accounts[*].days` of that product +
   `unattributedDays[product]`, a projection for v1 readers. A v1.1 reader sums **either** that split **or** the root.
 - Both ports test it: a v1.1 fixture through the **old** merge gives the same result as that fixture without v1.1 keys.
+  This is format compatibility; the A5 plan still records the live macOS 3.2.7 reader screenshot as pending.
 
 ### File shape
 
@@ -402,7 +413,7 @@ is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secre
 | `lastSeenAt` | time | heartbeat, see *Write rules* | v1.1 writers: yes |
 | `accounts` | array of records | ≤ 8 records | no |
 | `unattributedDays` | object, root `days` shape | v1 counters | no |
-| `captions` | object `label → {text, setAt}` | ≤ 64 keys, key = 16 hex, `text` ≤ 32 chars | no (Should) |
+| `captions` | object `label → {text, setAt}` | ≤ 64 keys, key = 16 lowercase hex, `text` ≤ 32 Unicode scalars; empty text is a reset | no |
 | `product` | string | `claude` · `codex` | yes |
 | `label` | string or `null` | 16 lowercase hex | yes (`null` allowed) |
 | `labelReason` | string | `no_login` · `no_account_uuid` · `unreadable` · `no_gist` | when `label` is `null` |
@@ -415,7 +426,7 @@ is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secre
 | `windows.session`, `windows.weekly` | `{pct, resetAt}` | `pct` finite number 0…100, not boolean | no, each |
 | `models` | array of `{name, pct, resetAt}` | ≤ 8; `name` ≤ 48 chars | no |
 | `resetCredits` | integer | 0…1000 (Codex) | no |
-| `schedule` | `{mode, interval, nextAt, backoff}` | `mode` `auto`·`fixed`; `interval` 900·1800·3600·14400 s; `backoff` boolean; `nextAt` = own last attempt + `interval` — the writer's cadence only, **never** its provider deadline (that goes only to `retryUntil`) | no |
+| `schedule` | `{mode, interval, nextAt, backoff}` | `mode` `auto`·`fixed`; `interval` 900·1800·3600·14400 s; optional `backoff` boolean; optional `nextAt` = own last attempt + `interval`, absent before an attempt — the writer's cadence only, **never** its provider deadline (that goes only to `retryUntil`) | no |
 | `retryUntil` | time or `null` | the provider's deadline (429 / Retry-After) | no |
 | `days` (record) | day → model → counters | v1 counters | yes, may be `{}` |
 
@@ -445,14 +456,53 @@ UTC; strings are shown only as plain text.
   next build after its own discovery — up to 24 h apart, so duplicate cards may appear for ≤ 1 day. Reader settings
   keyed by label (hidden accounts, `captions`, menu account) fall back to defaults. Rare by design.
 
+### Captions
+
+`label` is the account identity key; a caption is editable display text and never changes account grouping.
+The optional root `captions` object maps that key to `{"text": "Team", "setAt": "<ISO-8601 UTC>"}`.
+
+- **Edit/reset (macOS).** Settings → Accounts → pencil opens the current caption selected, with a scalar counter.
+  Enter saves; Esc cancels. An empty edit or Reset writes `{"text": "", "setAt": "<new time>"}` — a retained
+  tombstone selecting the default caption. Do not delete the key to reset it: an older peer edit could return.
+  Local creation trims surrounding whitespace. The editor timestamps a new edit to millisecond precision, at
+  least 1 ms after the winning prior edit, so a rapid reset can supersede it.
+- **Writer and reader cleaning.** Inspect the whole input for `@`, `/` or `\`, including their NFKC equivalents,
+  before truncation; if found, refuse that caption whole. Remove line breaks, U+2028/U+2029 and control/format
+  characters (`Cc`/`Cf`); NFC-normalize and truncate to **32 Unicode scalars**. Unencodable surrogate text is
+  refused. NFKC is only the separator check; the caption itself keeps its other characters in NFC. This policy
+  is implemented by Swift `remoteCaptionValidatedInput` and Linux `accounts._caption_clean`/`_writer_name`.
+- **Merge.** Read captions from all selected valid machine files, **including this machine's own file**, even
+  though own usage/account records are excluded from the remote merge. Include locally authored edits when
+  resolving the Mac display. For each label, the latest valid `setAt` wins; missing or broken times rank below
+  any valid timestamp. An edit dated later than `now + 60 s` is ignored. Equal times choose the lexicographically
+  greater cleaned NFC text by Unicode scalar value, including the empty reset text in the same comparison.
+  The winning tombstone prevents older captions from reappearing. Each file accepts at most 64 valid caption
+  entries; the merged result can contain more than 64 across files.
+- **Publication ownership.** The Mac retains and publishes only its locally authored edits, including resets;
+  it does not copy peer captions into its next snapshot. Its wire writer sorts keys, takes at most 64 and emits
+  only records with a valid `setAt` no later than `now + 60 s`. Legacy local string overrides are migrated with
+  an epoch timestamp, below current dated edits. Linux's generic `accounts.build` cleans/caps supplied captions
+  but can emit one without a valid `setAt` or with a future timestamp; `merge_captions` handles those as above.
+  The current headless publisher supplies `captions: {}`: it reads/displays captions but has no caption editor.
+  Linux `ccl-sync status` and tray tooltips display the resolved text.
+- **Change detection.** Captions are included in `metaHash` together with account metadata without `days`.
+  A caption-only edit can therefore cause a whole-file PATCH without waiting for the usage floor; root `days`
+  and its `pushHash` remain unchanged. The next successful read distributes that edit to peers.
+
 ### Write rules
 
-- A machine publishes only fresh API readings of **its own** accounts; other machines' records are never republished.
-- **Three fingerprints** (`sync-state.json`), each decides independently; if none is due, no PATCH:
+- A machine publishes readings of **its own** accounts, including retained last-success values after a failed
+  attempt with their original `asOf`; other machines' readings are never republished.
+- **Three independent write triggers** (Linux `sync-state.json`; macOS UserDefaults keys
+  `syncPushHash`, `syncMetaHash`, `syncPushedAt`, `syncHeartbeatAt`); if none is due, no PATCH:
   1. `pushHash` = sha1(root `days`) — usage: on change and `now − pushedAt ≥ 570 s` (the v1 floor);
   2. `metaHash` = sha1(`accounts` without `days` + `captions`) — attempt, result, schedule, `retryUntil`, status, label,
      caption: on change, **no floor**;
   3. `heartbeatAt` — `lastSeenAt`: when `now − heartbeatAt ≥ 600 s` in automatic mode.
+- Linux forced writes and a missing own file bypass the usage floor; non-auto Linux writes also have no
+  usage floor. macOS checks the 570 s usage floor and 600 s heartbeat on each write continuation,
+  independently of the provider's fixed/Auto mode. These hashes are local change detectors, not wire
+  fields or security signatures. A caption-only edit changes `metaHash`, not `pushHash`.
 - Any PATCH writes the whole file (current `days`, `accounts`, `captions`, `lastSeenAt = updated = now`) and updates all
   three. `lastSeenAt` is part of the snapshot but of no fingerprint. A heartbeat moves only `lastSeenAt` and `updated`:
   never `asOf`, the attempt or the schedule; two non-due ticks within 600 s give 0 PATCH. `updated` moves on **every**
@@ -492,18 +542,14 @@ UTC; strings are shown only as plain text.
     i.e. not encodable as UTF-8) is dropped **whole** (never cleaned); a string over its limit is dropped.
     Caption text is the C5 exception (П4-в): writer and reader first refuse `@`, `/`, `\`
     and their NFKC equivalents in the whole input, then remove line breaks and `Cc`/`Cf`,
-    NFC-normalize and truncate to 32 Unicode scalars. A lone surrogate is refused.
+    NFC-normalize and truncate to 32 Unicode scalars. Line/paragraph separators U+2028/U+2029
+    are removed too. A lone surrogate is refused.
     Other string fields retain the whole-field rejection rule above.
   - The same rule covers the v1 envelope: `machine.id` → file skipped; `machine.name/os/app` → field dropped
     (`os`/`app` over 64 are dropped, `machine.name` is checked, then truncated to 16); `tz` → dropped, also over 64;
     a product, day or model key of the root `days` → that entry skipped.
-  - Duplicate `(product, label)` in one file → the record with the latest `asOf`. `captions`: the latest `setAt` wins.
-  - Captions merge across all machines by label, including locally authored captions. A reset is a retained
-    `{"text": "", "setAt": "<new UTC timestamp>"}` record: the empty text selects the default caption and
-    prevents an older nonempty caption from returning. Writers retain their own records, including resets,
-    and never republish a peer's caption. A missing legacy `setAt` ranks below a valid timestamp; equal
-    timestamps use the lexicographically greater NFC text by Unicode scalar value for deterministic convergence.
-    Caption-only edits change `metaHash`, leaving root-days `pushHash` unchanged.
+  - Duplicate `(product, label)` in one file → the record with the latest `asOf`.
+  - Caption validation and conflict resolution follow [Captions](#captions).
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
 - **Read deadline (60 s per read phase).** Linux: the read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
   every `raw_url` body) shares one deadline of **60 s**. Once it is spent the remaining raw files are skipped without a
@@ -531,20 +577,48 @@ UTC; strings are shown only as plain text.
     exceeding 8 MiB is stored as the first 16 hex chars of sha256(URL) → refusal time (epoch s). While the entry is
     present that file is skipped without a download (visible error as above). Entries live 24 h; at most 64 (the
     oldest is evicted). The URL itself is never stored. On disk, because each headless tick is a new process.
-  - Known limitation (Linux; fix planned in A3): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
+  - Known limitation (Linux): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
     whole cycle, not one file.
-- Grouping: one card per `(product, label)` across machines, own included; the latest successful `asOf` wins (a tie →
-  local). The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
+- **Grouping and value selection (macOS, V3).** One card per `(product, label)` across machines, own included;
+  the latest successful `asOf` with usable window/model values wins (a tie → local). A record whose current status
+  is `error` can still carry its last successful values: `attemptAt` is not their reading time. A failed attempt
+  never replaces newer successful values or advances their `asOf`. Among equally dated remote candidates the
+  first by `machine.id` wins. Normally dated readings take precedence over readings more than 5 minutes in the
+  future; a future-only account remains visible but has no pace/forecast.
+  Status is resolved separately from values, using the latest remote `attemptAt` (or `asOf` if absent).
+  On a merged local card with a remote reading, the display clears a local `pollFailed`/error and its retry action
+  only when its attempt time is known and `attemptAt ≤` the selected successful `asOf` (C5-20). A newer local
+  failure, unknown attempt time, error without `pollFailed`, or local-only card keeps its previous warning/retry
+  behavior. This changes the display copy, not the saved polling state or coordination. Source dots retain each
+  machine's own reading time, including after restart from an account-bound local cache (C5-19).
+  The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
   product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the whole root usage of that product
   goes to «account not specified» and that product's account `days` are **not** added — no double count.
-- **Card freshness (display, reader).** A remote card's source machine is offline when its `lastSeenAt` is older than
+- **Source-dot freshness (macOS display).** Each machine has its own `asOf` and interval; the winning card values
+  do not overwrite its peers' observations. Age = `max(0, now − asOf)`. Green: age ≤ interval + **900 s**;
+  amber: above that threshold through **86400 s inclusive**; red: age > 86400 s (always, even with an invalidly
+  long interval); grey: absent/nonfinite reading time. Use this Mac's current fixed/Auto interval for its own dot,
+  the peer account's published `schedule.interval` for a remote dot, or **14400 s** if unavailable/invalid.
+  Simple shows dots beside the machines below the title; Advanced keeps its source/time line and shows dots
+  after the plan badge. Header tooltip and accessibility text give each source's time and freshness in words.
+  An amber own source beside a green peer is compatible with B2: a peer's attempt younger than 960 s, or its
+  successful reading younger than my interval + 60 s, can keep postponing my automatic provider request.
+- **Card freshness (display, reader)** is separate from the dot. For the selected remote snapshot, the reader
+  uses `schedule.nextAt + 1200 s`; if `nextAt` is absent/invalid, it uses `asOf + interval + 1200 s`.
+  It ignores `nextAt > now + interval + 60 s`; the current card-state fallback interval without a schedule is
+  **900 s**, whereas the source-dot fallback is 14400 s. A remote card's source machine is offline when its `lastSeenAt` is older than
   30 min. If `lastSeenAt` is absent, unparsable or later than `now + 60` (S3), the reader uses the file's `updated`
   instead — this covers v1 files from 3.2.7 / 0.4.5, which never write `lastSeenAt` (synth §F, decision 2026-10-18 m7).
 - **Coordination liveness is a separate rule** (B2, *Liveness* below): there a missing or unparsable `lastSeenAt` makes
   the record **not alive**, with no fallback to `updated`. It governs only poll suppression and the tie-break (§decide),
   never how a card is shown.
   Links on remote cards are product constants, never taken from the file.
-- **Trust in other machines' fields** — they may only **postpone** my polling, never make it more frequent than my Auto.
+- **Coordination trust boundary:** the B2 decision may only **postpone** my polling relative to my current
+  Auto/fixed schedule. macOS separately uses fresh successful peer readings of the same account to detect Auto
+  activity: only a fresh read, `status = ok`, and `now − 900 s ≤ asOf ≤ now` with comparable values qualify.
+  Growth of at least 1 percentage point per 15 minutes restores the 900 s interval; the first sample establishes
+  a baseline and reset windows do not count as growth. It does not rewrite my last attempt/failure state or bypass
+  B2 and Retry-After. This display/Auto path is not a new B2 permission to poll.
   Coordination runs only when my own schedule is due; it considers other machines' records for my `(product, label)`.
   Below, `now` is local time, `I` my interval, `I′` the other record's `schedule.interval` if it is one of 900 · 1800 ·
   3600 · 14400, otherwise 14400. All bounds are in seconds.
@@ -632,7 +706,7 @@ the new record included, so the result is **≤ 512 KiB**. Compaction then does 
   other than `machine.id`; prompts, paths, project names, full hostnames; error texts (only the enumerated status).
 - `machine.name` is a sanitized tag (NFKD → ASCII, lowercase, `[a-z0-9-]`, ≤ 16; empty → `mac`/`linux`); the publisher
   sets it explicitly (`--name vps`). `tz` stays (v1).
-- Writer, captions and `models[].name`: a string containing `@`, `/` or `\` is dropped **whole** before truncation
+- Writer captions and `models[].name`: a string containing `@`, `/` or `\` is dropped **whole** before truncation
   (never cleaned). The check runs after NFKC, so fullwidth `＠`/`／`/`＼` are refused too. The published text drops
   `Cc`/`Cf` and is NFC-normalized.
 - A scan test checks published files and publisher logs by values with an allow-list of keys and enum values (so

@@ -19,6 +19,75 @@ Click the tray icon for a detailed popover.
   <img src="docs/panel-en.png?v=314" width="320" alt="Popover">
 </p>
 
+## Limits from other computers
+
+Available in the **`remote-limits` source branch**, including the fixes verified on
+2026-11-01; there is no public release of this feature yet. The Mac reads and publishes
+through the same secret GitHub gist used for [usage history](#features). Linux machines
+such as a VPS or ALSE can publish their accounts without a desktop app.
+
+The Mac shows those accounts in both Simple and Advanced view, even if their CLI is
+not signed in on the Mac. **One account on several machines means one card** — for
+example, `Codex · macbook, vps`; different accounts get separate cards. Values come
+from the most recent successful reading on any machine; equal reading times favour
+this Mac. A failed local poll does not hide a newer successful reading from another
+machine. An older local failure with a known attempt time no later than that success
+also stops showing a warning and Retry; a newer failure or one with an unknown time
+keeps them.
+
+In Simple view, machine names sit below the title, with a freshness dot for each
+source. Advanced shows the dots beside the machine names after the plan badge and
+keeps the source/time line. Each dot uses **that machine's own reading time**:
+
+- **Green:** no older than its polling interval plus 15 minutes, including the boundary.
+- **Amber:** beyond that allowance, but no older than 24 hours.
+- **Red:** older than 24 hours.
+- **Grey:** no reading yet.
+
+The interval is this Mac's current fixed/Auto interval or the other machine's published
+schedule; if unavailable, it is 4 hours. Hover over the header for each source's time
+and freshness in words. An amber `macbook` beside a green `vps` is normal: while another
+machine polls the same account freshly, coordination can postpone this Mac's own poll.
+The card still uses the freshest successful values. Machine connectivity and sync
+warnings are separate from these dots.
+
+Settings → **Accounts** lets you hide accounts and edit a label with the pencil.
+The editor starts with the current label selected. Labels allow up to **32 Unicode
+scalars**, without `@`, `/` or `\` (including their fullwidth forms); line breaks and
+control characters are removed. Enter saves, Esc cancels; an empty label or **Reset**
+restores the default. Labels sync between machines, with the latest edit winning.
+In **Auto**, fresh successful readings of the same account from another machine can
+restore the 15-minute interval when comparable usage grows by at least 1 percentage
+point per 15 minutes. This does not bypass coordination or a server retry deadline.
+
+To enable it:
+
+1. Run the source version on the Mac and sign in to the **same GitHub account** on each
+   machine. On the Mac, use Settings → **Other computers · via GitHub**, available in
+   both panel views. Enable **Poll on this computer** only for products to poll locally;
+   turning it off does not hide remote accounts.
+2. On each Linux publisher, sign in to the required Claude Code / Codex CLI, then run
+   from the source checkout (choose a short machine tag, e.g. `vps` or `alse`):
+   ```sh
+   sh linux/install.sh --publisher --name vps
+   ccl-sync login
+   ccl-sync status
+   ```
+   Tags use lowercase ASCII letters, digits and hyphens, 1–16 characters, without a
+   leading/trailing hyphen. Add `--no-tray` on a headless server. The installer refuses
+   while this user's old tray app is running. The publisher checks every 5 minutes;
+   actual provider requests follow Auto/fixed polling and coordination. Its default
+   token policy is read-only: an expired CLI sign-in waits for the CLI to renew it.
+   See the [Linux publisher guide](linux/README.md#режим-издателя-сервер-без-трея).
+
+Alongside daily usage totals, the gist receives account labels derived with HMAC,
+percentages, reset times, plan, reset credits, successful-reading and attempt times,
+status, polling schedule, heartbeat and custom captions. Machine metadata includes a
+short tag, OS/app version and time zone. Tokens and their fingerprints, email, raw
+account/organization IDs, prompts, paths, project names, full hostnames and error text
+never belong in the snapshot. Old gist revisions may retain earlier machine names.
+See the [v1.1 contract](docs/sync-protocol.md#usage-sync-protocol-v11--account-limits-additive).
+
 ## Linux 0.4.5: compact refresh
 
 **Published:** [Linux 0.4.5](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.4.5), source `19440ee112f164b411bf4715d6fa65077a272c48`. CI, independent reviews and package QA passed; see the [verification report](docs/linux-compact-refresh-verification.md). macOS **3.2.7 remains Latest**. Earlier release sections below retain their historical behavior.
@@ -111,7 +180,7 @@ Refresh and interval instructions cover macOS 3.2.7 and **Linux 0.4.5**.
 - **Honest about stale data** — an old reading or a network error does not prove that sign-in expired. A timestamped reading remains valid by age through 4 hours inclusive; a failed fetch alone does not invalidate it. Pace uses the reading time and checks each window separately. Expired readings keep cached percentages and suggest refreshing data. If no reading time is available, the card says “No fresh data · pace paused”. Claude sign-in instructions appear only for Claude when its sign-in state is logged out or expired; a stale Codex card does not show `claude login`.
 - **Per‑model weekly limits** — a model with its own 7‑day allowance (e.g. Fable) gets its own percentage pill and a row with its reset time. This is usually the limit you actually run into first: it can sit at 100% while your overall weekly still has room. The model is named by the backend, so new ones appear on their own.
 - **Advanced view** — a second panel layout for people who want to *manage* their limits, not just glance at them. Every window gets a pace line: where a linear plan says you should be by now, how many points you're ahead of it, your average burn rate, and a plain verdict — “Lasts until reset (forecast 53%)” or “Runs out at 09:37, 2 h 13 min before reset”. Below: 7 days of consumption as bars stacked by model, a 35‑day calendar heatmap, and money — what a day costs you out of the subscription versus what the same tokens would cost at API prices. Separately for Claude Code and Codex. Settings → *Panel view*.
-- **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Only daily token totals per model travel — no prompts, paths or project names. There is a Linux port for Astra Linux — see [Linux](#linux-astra-linux) ([protocol](docs/sync-protocol.md)).
+- **Several computers, one account** — sign in with GitHub in Settings and every computer running the app adds its local usage to one secret gist; each copy shows the combined bars, calendar and money. Usage is shared as daily token totals per model — no prompts, paths or project names. The source branch also shares [limits from other computers](#limits-from-other-computers). There is a Linux port for Astra Linux — see [Linux](#linux-astra-linux) ([protocol](docs/sync-protocol.md)).
 - **You choose what the menu bar shows** — pick which number sits on each side of the slash (5‑hour, weekly, or the per‑model limit) and in which order, or clear the right‑hand one for a single figure. Settings → *In the menu bar*. The strip updates the moment you tap.
 - **Codex reset credits** — if you've banked rate‑limit resets, a small ⟳ badge on the Codex card shows how many you have.
 - **Color warnings** — numbers and gauges turn amber at ≥50% and red at ≥80% of a limit.
@@ -174,7 +243,7 @@ you set it. The app also keeps its own utilization samples (35 days, in `~/.clau
 so that pace can later use your recent rate, not just the window average.
 
 Authenticated usage requests go to Anthropic and OpenAI as you. If you enable GitHub sync,
-daily usage aggregates also go to your secret gist. No telemetry. Runtime cache and a Keychain backup live
+daily usage aggregates and, in the source branch, account snapshots also go to your secret gist. No telemetry. Runtime cache and a Keychain backup live
 under `~/.claude-limits-monitor/`.
 
 ## GitHub sign-in and recovery
@@ -233,12 +302,24 @@ you turn it on in Settings.
 ### 3. From source
 
 ```bash
-git clone https://github.com/ArrivaRUS/claude-codex-limits.git
+git clone --branch remote-limits https://github.com/ArrivaRUS/claude-codex-limits.git
 cd claude-codex-limits
-./install.sh        # builds, installs to /Applications, enables launch-at-login, starts it
+CCL_REQUIRE_STABLE_SIGNING=1 bash build.sh
 ```
 
 Requirements: macOS 13+, the Xcode command‑line tools (`swiftc`). No packages to install.
+
+For the unreleased feature above, build in your own Terminal. Quit the previous app
+before installing `dist/Claude Codex Limits.app` into Applications. The strict command
+requires stable signing; if that fails, it stops without replacing the existing app
+in `dist/` with an ad-hoc build.
+
+The build creates a local **`.signing/`** directory with a long-lived signing key,
+certificate and separate signing keychain. **Keep it between builds:** the same
+certificate and bundle ID preserve the app's identity for Keychain permissions.
+Deleting it creates a new identity on the next build and requires granting access
+again. The first stable build may still need **Always Allow** for old entries.
+Keep its secrets out of commits and shared artifacts. Details: [build guide](docs/project-guide.md#сборка-публикация-и-откат).
 
 ### Linux (Astra Linux)
 
@@ -274,7 +355,7 @@ For macOS 3.2.7 and **Linux 0.4.5**. Enable the required subscriptions in Settin
 
 Activity means an increase of at least 1 percentage point per 15 minutes in any comparable limit, measured over the time between readings. The first response establishes a baseline; limit window resets are not consumption. Local token logs are checked every 2 minutes without an API request: three distinct events with positive token usage in the past 15 minutes also restore 15-minute polling.
 
-Opening the panel in Auto keeps its schedule. Errors and cached responses extend automatic polling's pause; local activity cannot shorten error backoff. **Refresh now** bypasses that local pause, subject to the provider's 30-second guard, active request and actual server retry deadline. Activity exclusively on another computer is detected at the next API poll, which can take up to 4 hours during a quiet period. History sync keeps its own schedule.
+Opening the panel in Auto keeps its schedule. Errors and cached responses extend automatic polling's pause; local activity cannot shorten error backoff. **Refresh now** bypasses that local pause, subject to the provider's 30-second guard, active request and actual server retry deadline in the published versions described here. Those versions detect activity exclusively on another computer at the next API poll, which can take up to 4 hours during a quiet period. The [source branch](#limits-from-other-computers) also uses fresh remote readings to accelerate Auto; manual provider polling there has a 15-minute floor for the account (16 minutes after a peer's attempt), and otherwise only re-reads GitHub. History sync keeps its own schedule.
 
 ## Build a release
 
@@ -296,7 +377,8 @@ docs/                         screenshots
 ## Privacy & security
 
 The app only ever reads **your own** local credentials and logs, and only talks to
-Anthropic's and OpenAI's APIs authenticated as you (the same endpoints their own CLIs use).
+Anthropic's and OpenAI's APIs authenticated as you (the same endpoints their own CLIs use),
+plus GitHub when you enable sync, as [described above](#limits-from-other-computers).
 Credentials authenticate their intended API requests and stay out of usage aggregates and logs.
 The Swift sources are readable in `Sources/`.
 Use at your own discretion.
