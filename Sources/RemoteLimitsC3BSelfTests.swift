@@ -454,7 +454,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
            "C3-23/A6: separator-free committed caption and counter agree")
     var labelled = c3bView(2, product: "codex")
     labelled.label = "label-identity"; labelled.historyKey = "different-history-key"
-    let hidden = c3bSettings([two[1], labelled], hidden: ["label-identity"])
+    let hidden = c3bSettings([c3bView(1, product: "codex"), labelled], hidden: ["label-identity"])
     expect(hidden.accounts.last?.visible == false && hidden.menuProducts.isEmpty,
            "C3-24/D6: hiddenAccounts uses C2 label when label differs from historyKey")
     expect(!remoteAccountIsHidden(labelled, hidden: ["different-history-key"])
