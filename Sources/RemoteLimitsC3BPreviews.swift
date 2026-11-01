@@ -881,8 +881,10 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
         check(notes.count == 1 && notes.allSatisfy { $0.rect.maxX <= 334.5 && $0.rect.minY >= 0 && !($0.text ?? "").contains("…") },
               "C5-26 \(language): actual active-day note fits fully")
         let note = notes.first?.text ?? ""
-        check(long ? (note.contains("Claude ≈") && note.contains("Codex ≈") && !note.contains("Ж"))
-                   : (note.contains("Codex Pro") && (one || note.contains("Claude Max"))), "C5-26 \(language): full names before product-name compression")
+        let full = (language == "en" ? "on an active day at API price: " : "в активный день по API: ") + (one ? "" : "Claude Max ≈ $350 · ") + "Codex Pro ≈ $190"
+        let fits = lineWidth(CTLineCreateWithAttributedString(ctAttr(full, ctFont(9.5, .regular), cg(.white)))) <= 308
+        check(long || !fits ? ((one || note.contains("Claude ≈")) && note.contains("Codex ≈") && !note.contains("Ж"))
+                            : note == full, "C5-26 \(language): full names before product-name compression")
         for id in ["footer", "credit"] {
             check(result.element(id).map { $0.rect.minY >= 0 && $0.rect.maxY <= result.height } == true,
                   "C5-26 \(language): actual \(id) entirely inside window")
