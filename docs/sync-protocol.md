@@ -1,9 +1,14 @@
 # Usage sync protocol (v1 · v1.1)
 
 How copies of Claude Codex Limits on different computers share **local usage and account limits** through one
-secret GitHub gist. This file is the contract for the macOS app (`Sources/LimitsMonitor.swift`)
-and the Linux port (`linux/`), including the platform differences below. Incompatible changes
-to the shared file format require bumping `schema` and updating both sides.
+secret GitHub gist. This file is the contract for the macOS app (`Sources/LimitsMonitor.swift`; v1.1 in
+`Sources/RemoteLimits.swift`, `Sources/RemoteLimitsC4.swift`) and the Linux port (`linux/ccl/`: `sync.py`,
+`accounts.py`, `publisher.py`, `coordination.py`, `usage.py`), including the platform differences below.
+Incompatible changes to the shared file format require bumping `schema` and updating both sides.
+
+**Versions.** v1 (usage only) is read and written by macOS ≤ 3.2.7 and Linux ≤ 0.4.5. v1.1 (account limits,
+additive, still `schema: 1`) ships in **macOS 3.4.0** and **Linux 0.5.0**. Unless a sentence names an older
+release, rules below describe these current readers and writers.
 
 ## What is shared and what is not
 
@@ -149,9 +154,12 @@ to the shared file format require bumping `schema` and updating both sides.
 - `GET /gists/{id}` **every cycle**; for a file with `"truncated": true`, fetch its `raw_url`.
 - Read the selected `machine-*.json` files. Exclude **this machine's own id** from usage, remote account records
   and machine rows (own usage comes from the local index). v1.1 captions are the exception: merge them from
-  the own file too, under *Captions*. Require `schema` equal to integer `1`, never boolean `true`:
-  Linux requires `type(schema) is int`; macOS uses `syncCount`, accepting numbers that bridge
-  exactly to Swift `Int` (including `1.0`) and rejecting CFBoolean.
+  the own file too, under *Captions*. Require `schema` equal to the JSON integer `1`, never boolean `true`.
+  **Integer fields** — `schema`, the six counters, `resetCredits` and `schedule.interval` — accept only an
+  integer JSON token: a token with a fraction or exponent (`1.0`, `1e0`) is invalid on both ports. Linux
+  requires `type(n) is int`; macOS rewrites such a token to `null` before parsing
+  (`RemoteLimitsWire.strictIntegerJSON`) and rejects CFBoolean. (Released macOS ≤ 3.2.7 used `syncCount`,
+  which also accepted `1.0`.)
   Skip other schemas and unparsable JSON, including excessive nesting: Linux catches
   `RecursionError`; macOS skips `JSONSerialization` errors via `try?`. One bad file does not
   stop the merge.
@@ -165,11 +173,11 @@ to the shared file format require bumping `schema` and updating both sides.
   (e.g. U+FF12) makes the timestamp invalid.
 - The six counters (`input`, `output`, `cacheRead`, `cacheWrite5m`, `cacheWrite1h`, `turns`) default
   to zero when missing. Each supplied value must be an integer in **0…10^15**; booleans are not
-  numbers. An invalid counter rejects the entire model record. Linux requires a JSON integer
-  (`type(n) is int`); macOS accepts values that bridge exactly to Swift `Int`, rejecting CFBoolean.
-  Invalid nested usage structures are skipped: macOS requires the whole `days` object to cast to
-  its nested dictionary type; Linux checks each product/day/model level separately. A valid
-  machine can remain listed even when it contributes no usable usage records.
+  numbers. An invalid counter (including a non-integer token, above) rejects the entire model record.
+  Invalid nested usage structures are skipped level by level on both ports: a bad product, day or
+  model entry drops only that entry. (Released macOS ≤ 3.2.7 required the whole `days` object to cast
+  to its nested dictionary type.) A valid machine can remain listed even when it contributes no usable
+  usage records.
 - Merge = sum per product → day → model. Both platforms clamp accumulated counters to `10^15`.
   Linux also bounds counts/display amounts before float arithmetic, including older caches.
   macOS `usageSum` ignores a contribution that would overflow `Int`, then clamps to `10^15`.
@@ -352,12 +360,24 @@ is public and goes into the code as `GITHUB_CLIENT_ID`; there is no client secre
 
 ## Usage sync protocol v1.1 — account limits (additive)
 
-Current source contract, reconciled through C5-19/C5-20 on 2026-11-01. REMOTE-LIMITS has
-not been publicly released. macOS is a reader and a publisher of its own Codex account;
-Linux headless publishers publish Claude/Codex. Linux tray account cards and publish-only
-mode remain a second queue, not capabilities of the released Linux 0.4.5 tray.
+Final v1.1 contract as shipped in **macOS 3.4.0** and **Linux 0.5.0**, reconciled with the code on 2026-11-01
+(through C5-24…26). macOS is a reader and a publisher of its own Codex account; Linux headless publishers
+(`install.sh --publisher`) publish Claude and Codex. The Linux tray app 0.5.0 still writes v1 files (no
+`accounts`, no `lastSeenAt`) and shows no account cards; tray reader and tray publisher remain a second queue.
 
 **Why.** Only a machine signed in to an account can read its limits; v1.1 lets it publish them and attributes usage to accounts.
+
+**PRD rules C1–C7 in this document** (`docs/prd-remote-limits.md`, F2):
+
+| Rule | Meaning | Where |
+|---|---|---|
+| C1 | Additive; old readers keep summing root `days` | *Compatibility* |
+| C2 | Contents of an account record | *File shape*, *Field rules* |
+| C3 | A failed attempt keeps the last successful values and their `asOf` | *Field rules* (`asOf`), *Write rules* |
+| C4 | No invented values: no login → status only | *Field rules* (size note), *Account label* |
+| C5 | Usage attributed to accounts, root `days` stays the projection | *Compatibility*, *File shape* (day attribution) |
+| C6 | Whole-file PATCH, three triggers, heartbeat | *Write rules* |
+| C7 | Reader validation and limits | *Read rules* |
 
 ### Compatibility
 
@@ -370,7 +390,7 @@ mode remain a second queue, not capabilities of the released Linux 0.4.5 tray.
 - The root `days` stays the whole machine's usage: per product it **equals** Σ `accounts[*].days` of that product +
   `unattributedDays[product]`, a projection for v1 readers. A v1.1 reader sums **either** that split **or** the root.
 - Both ports test it: a v1.1 fixture through the **old** merge gives the same result as that fixture without v1.1 keys.
-  This is format compatibility; the A5 plan still records the live macOS 3.2.7 reader screenshot as pending.
+  This is format compatibility; a live screenshot of a macOS 3.2.7 reader is still recorded as pending in the A5 plan.
 
 ### File shape
 
@@ -403,8 +423,13 @@ mode remain a second queue, not capabilities of the released Linux 0.4.5 tray.
 
 - `accounts[].days` has no product level (the record's `product` is it); `unattributedDays` has the full root `days`
   shape. Counters follow v1 (six integers, 0…10^15).
-- **Day attribution.** The usage index stores `accountByDay[product][day]` = the local identity active when that day's
-  lines were first indexed; it never changes later. Days with no known identity go to `unattributedDays`.
+- **Day attribution.** The usage index stores `accountByDay[product][day]` = the normalized local identity active when
+  that day's lines were first indexed (Linux `usage._attribute_day`; macOS `UsageIndex.accountByDay`); it never changes
+  later and is pruned with the 45-day window. Days with no known identity go to `unattributedDays`, with one writer
+  exception: the macOS writer assigns an unattributed **Codex** day to the Codex identity when exactly one is known
+  (from `accountByDay` or the current login). Linux writers do not guess; readers apply *Single-account attribution*.
+- An account that was signed in earlier on this machine keeps its usage under its own label: writers publish it as a
+  record with `status: signed_out` and only `days` (no values), never with a reading revived from cache.
 
 ### Field rules
 
@@ -430,9 +455,26 @@ mode remain a second queue, not capabilities of the released Linux 0.4.5 tray.
 | `retryUntil` | time or `null` | the provider's deadline (429 / Retry-After) | no |
 | `days` (record) | day → model → counters | v1 counters | yes, may be `{}` |
 
-Size: ≤ 4 KB of metadata per record (without `days`); file ≤ 8 MiB; above 1 MB the API truncates it → `raw_url` (v1).
-No values are invented (no default zeros): without a login there is no reading, only a status. All times are ISO-8601
-UTC; strings are shown only as plain text.
+Size: ≤ 4096 bytes of sanitized metadata per record (without `days`) — readers drop a larger record whole; file ≤ 8 MiB;
+above 1 MB the API truncates it → `raw_url` (v1). No values are invented (no default zeros): without a login there is no
+reading, only a status. A record with `label: null` carries no plan, tier, `asOf`, windows, models or credits. Writers
+emit ISO-8601 UTC (`Z`); readers also accept an offset and fractional seconds. Strings are shown only as plain text.
+
+**What current writers emit** (readers must not depend on it — every field stays optional):
+
+| | Linux publisher 0.5.0 | macOS 3.4.0 |
+|---|---|---|
+| Live records | one per polled product (`claude`, `codex`) | exactly one `codex` record; no `claude` record |
+| No login / product not polled | `label: null`, `labelReason: no_login`, `status: signed_out` | same, for Codex (also when Codex polling is off) |
+| `plan` / `tier` | `plan` only | `plan` only |
+| `models` | at most one (the per-model weekly limit) | none |
+| `resetCredits` | when the provider returns it | Codex, when known |
+| Earlier accounts of this machine | `signed_out` records with `days` | Codex only, same form |
+| Usage without an account | `unattributedDays` | `unattributedDays` (all Claude usage of the Mac) |
+| `captions` | `{}` (no editor) | own edits only, see *Captions* |
+
+Linux keeps at most one `label: null` record per product; its usage goes to `unattributedDays`. The Linux writer turns
+`stale` into `error`; the macOS writer never produces `stale`.
 
 ### Account label
 
@@ -548,7 +590,13 @@ The optional root `captions` object maps that key to `{"text": "Team", "setAt": 
   - The same rule covers the v1 envelope: `machine.id` → file skipped; `machine.name/os/app` → field dropped
     (`os`/`app` over 64 are dropped, `machine.name` is checked, then truncated to 16); `tz` → dropped, also over 64;
     a product, day or model key of the root `days` → that entry skipped.
-  - Duplicate `(product, label)` in one file → the record with the latest `asOf`.
+  - Duplicate `(product, label)` in one file → the record with the latest `asOf` (a tie keeps the first). The first eight
+    distinct keys are kept; a later duplicate of a kept key can still replace it.
+  - A record with `label: null` never forms a card; macOS moves its `days` to the file's unattributed usage.
+  - **Single-account attribution (R4, both readers).** After the projection check, a product's unattributed usage of
+    one file joins that file's account when the file has ≤ 64 raw `accounts` elements, exactly one distinct key for the
+    product (any status; `null` counts as a key) and that key has a label. Usage is never assigned across files or
+    between two accounts (Linux `accounts.parse_block`, macOS `mergeV11`).
   - Caption validation and conflict resolution follow [Captions](#captions).
   - `asOf` more than 5 min in the future → shown with age 0, no pace or forecast.
 - **Read deadline (60 s per read phase).** Linux: the read phase of a pass (waiting for the `sync` lock, the gist GET, auth recovery and
@@ -559,8 +607,9 @@ The optional root `captions` object maps that key to `{"text": "Team", "setAt": 
   no session: nothing is announced and the machine polls on its own schedule. Known limitation (A4): the single reopen
   (*Write rules*) starts its own 60 s, so the worst pass is about 2 × 60 s of reading.
   Each Linux request waits at most `min(30 s, remaining)`. **macOS** (decision 2026-10-18, T2 S6): the `raw_url` reads
-  of one cycle share the same **60 s** per read phase (`RL_RAW_READ_DEADLINE` in the self-tests); a read starts only
-  before the deadline and its timeout never exceeds the remainder; files already read are merged and the error is visible.
+  of one cycle share the same **60 s** per read phase (`syncRawReadDeadline`; `RL_RAW_READ_DEADLINE` in the self-tests);
+  a read starts only before the deadline and its timeout never exceeds the remainder; files already read are merged and
+  the error «Истёк срок чтения файлов синхронизации (60 с)» is visible.
 - **Reader limits (both ports)** act on the **file**, never on the cycle, so one hostile file can't stop sync (T1).
   Hitting any limit below still records a visible error («слишком большой ответ/файл синхронизации», Linux:
   `res.ok = false`, `lastError`; no backoff), while the other files are merged, the remote cache is written and the
@@ -573,34 +622,44 @@ The optional root `captions` object maps that key to `{"text": "Team", "setAt": 
     remaining budget as its cap, `min(8 MiB, 64 MiB − already read)`; a rejected body counts as cap + 1 bytes.
     Once the budget is spent no further files are read; files already read are merged;
   - `accounts`: only the first 64 raw array elements are examined; of them at most 8 valid records (after dedup) are kept.
-  - **Refused-raw cache** (`sync-state.json` → `rejectedRaw`): a `raw_url` refused for its transport/redirect or for
-    exceeding 8 MiB is stored as the first 16 hex chars of sha256(URL) → refusal time (epoch s). While the entry is
-    present that file is skipped without a download (visible error as above). Entries live 24 h; at most 64 (the
-    oldest is evicted). The URL itself is never stored. On disk, because each headless tick is a new process.
-  - Known limitation (Linux): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
-    whole cycle, not one file.
+  - **Refused-raw cache** (Linux `sync-state.json` → `rejectedRaw`; macOS UserDefaults `syncRejectedRaw`): a `raw_url`
+    refused for its transport/redirect or for exceeding 8 MiB is stored as the first 16 hex chars of sha256(URL) →
+    refusal time (epoch s). While the entry is present that file is skipped without a download (visible error as
+    above). Entries live 24 h; at most 64 (the oldest is evicted). The URL itself is never stored. It is persisted
+    because each headless Linux tick is a new process.
+  - Known limitation (both ports): the gist `GET /gists/{id}` itself is capped at 16 MiB; a larger response fails the
+    whole cycle («Слишком большой ответ синхронизации (предел 16 МиБ)»), not one file.
 - **Grouping and value selection (macOS, V3).** One card per `(product, label)` across machines, own included;
   the latest successful `asOf` with usable window/model values wins (a tie → local). A record whose current status
   is `error` can still carry its last successful values: `attemptAt` is not their reading time. A failed attempt
   never replaces newer successful values or advances their `asOf`. Among equally dated remote candidates the
   first by `machine.id` wins. Normally dated readings take precedence over readings more than 5 minutes in the
   future; a future-only account remains visible but has no pace/forecast.
-  Status is resolved separately from values, using the latest remote `attemptAt` (or `asOf` if absent).
+  Status is resolved separately from values, using the latest remote `attemptAt` (or `asOf` if absent) among records
+  not dated more than 5 minutes in the future (all records if none qualifies).
   On a merged local card with a remote reading, the display clears a local `pollFailed`/error and its retry action
   only when its attempt time is known and `attemptAt ≤` the selected successful `asOf` (C5-20). A newer local
   failure, unknown attempt time, error without `pollFailed`, or local-only card keeps its previous warning/retry
   behavior. This changes the display copy, not the saved polling state or coordination. Source dots retain each
   machine's own reading time, including after restart from an account-bound local cache (C5-19).
-  The usage of a `null` label goes to «<Product> · account not specified». **Projection mismatch:** if a
-  product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the whole root usage of that product
-  goes to «account not specified» and that product's account `days` are **not** added — no double count.
+  **Projection mismatch:** if a product's root `days` ≠ Σ its `accounts[*].days` + `unattributedDays[product]`, the
+  whole root usage of that product is treated as unattributed and that product's account `days` are **not** added —
+  no double count. A remote `retryUntil` is displayed only up to its record's attempt time (or `asOf`) + 24 h; without
+  a usable attempt time a future deadline is not shown.
+- **History & money (macOS 3.4.0, decision 2026-11-01 «one subscription per product»).** Totals per product = this
+  Mac's local usage index + the root `days` of every selected peer file. Account partitions (`accounts[].days`,
+  `unattributedDays`) are validated but do not feed these totals, so there is no «account not specified» group and no
+  per-machine split. One tab and one money row per product with usage or a known account. Its name is the account's
+  caption, otherwise `<Product> <plan>`; its price is the owner's per-product price, otherwise derived from the
+  published `plan`/`tier` (taken as a pair from one record); without either there is no subscription price.
 - **Source-dot freshness (macOS display).** Each machine has its own `asOf` and interval; the winning card values
   do not overwrite its peers' observations. Age = `max(0, now − asOf)`. Green: age ≤ interval + **900 s**;
   amber: above that threshold through **86400 s inclusive**; red: age > 86400 s (always, even with an invalidly
   long interval); grey: absent/nonfinite reading time. Use this Mac's current fixed/Auto interval for its own dot,
   the peer account's published `schedule.interval` for a remote dot, or **14400 s** if unavailable/invalid.
-  Simple shows dots beside the machines below the title; Advanced keeps its source/time line and shows dots
-  after the plan badge. Header tooltip and accessibility text give each source's time and freshness in words.
+  Simple shows dots beside the machines below the title; Advanced shows them after the plan badge. Neither view draws
+  a source/time line (decision 2026-11-01); the header tooltip and accessibility text give each source's time and
+  freshness in words.
   An amber own source beside a green peer is compatible with B2: a peer's attempt younger than 960 s, or its
   successful reading younger than my interval + 60 s, can keep postponing my automatic provider request.
 - **Card freshness (display, reader)** is separate from the dot. For the selected remote snapshot, the reader
@@ -609,6 +668,10 @@ The optional root `captions` object maps that key to `{"text": "Team", "setAt": 
   **900 s**, whereas the source-dot fallback is 14400 s. A remote card's source machine is offline when its `lastSeenAt` is older than
   30 min. If `lastSeenAt` is absent, unparsable or later than `now + 60` (S3), the reader uses the file's `updated`
   instead — this covers v1 files from 3.2.7 / 0.4.5, which never write `lastSeenAt` (synth §F, decision 2026-10-18 m7).
+  If `updated` is unusable or in the future too, the machine counts as offline.
+  Card state precedence (first match wins; UX V5 numbering): GitHub off, revoked or awaiting a code → 7 (no remote
+  values); sync stalled warning → 6; source offline → 5; status `expired`/`signed_out` → 3; displayed `retryUntil` in
+  the future → 4; `now` past the freshness bound, or no `asOf` → 2; otherwise 1 (fresh).
 - **Coordination liveness is a separate rule** (B2, *Liveness* below): there a missing or unparsable `lastSeenAt` makes
   the record **not alive**, with no fallback to `updated`. It governs only poll suppression and the tie-break (§decide),
   never how a card is shown.
@@ -704,8 +767,9 @@ the new record included, so the result is **≤ 512 KiB**. Compaction then does 
 - Only the fields above go into the file. **Never**: tokens or their fingerprints, `id_token`/JWT (`eyJ…`), `scopes`,
   `refreshTokenExpiresAt`, `OPENAI_API_KEY`; email, names, `accountUuid`, `account_id`, `organizationUuid` or any UUID
   other than `machine.id`; prompts, paths, project names, full hostnames; error texts (only the enumerated status).
-- `machine.name` is a sanitized tag (NFKD → ASCII, lowercase, `[a-z0-9-]`, ≤ 16; empty → `mac`/`linux`); the publisher
-  sets it explicitly (`--name vps`). `tz` stays (v1).
+- `machine.name` is a sanitized tag (NFKD → ASCII, lowercase, `[a-z0-9-]`, ≤ 16; empty → `mac`/`linux`). The Linux
+  publisher sets it explicitly (`--name vps`); other Linux installs use `machineName` or the hostname without labels that
+  contain the user's login/GECOS name. macOS uses the `machineName` preference, `macbook` by default. `tz` stays (v1).
 - Writer captions and `models[].name`: a string containing `@`, `/` or `\` is dropped **whole** before truncation
   (never cleaned). The check runs after NFKC, so fullwidth `＠`/`／`/`＼` are refused too. The published text drops
   `Cc`/`Cf` and is NFC-normalized.
@@ -716,9 +780,14 @@ the new record included, so the result is **≤ 512 KiB**. Compaction then does 
 ### Platform differences
 
 - **Linux headless publisher** (VPS, P0): `ccl-sync push --auto` on a 5-min systemd timer, both products, the order
-  above. `credential_write: never` by default: with an expired token it publishes `expired` + `cli_refresh_pending`
-  and the last values, without refreshing. A tray on the same machine runs `delegated` (no polling, `allow_push=False`).
+  above. The GitHub token is kept only in the `0600` file backend. `credential_write: never` by default: with an expired
+  token it publishes `expired` + `cli_refresh_pending` and the last values, without refreshing. A `delegated` tray mode
+  (tray and publisher on one machine) is **not implemented**: the installer refuses while the tray runs, and the tray
+  must not be started on a publisher machine.
 - **macOS** (P0): reader (one card per label, states from `lastSeenAt`/`retryUntil`/`asOf`) and publisher of its own
   Codex account; coordination via `syncNow(mode:completion:)`, `.writeOnly` PATCH against a gist validated by a GET
   ≤ 120 s ago; no completion within 60 s counts as a failed read. Cycles stay at 10 min plus a read before polling.
-- **Second queue:** the Linux tray as a v1.1 reader (account cards) and as a publish-only tray; Linux `reader_card_state` logging.
+- **Linux tray 0.5.0:** v1 usage writer; reads v1.1 files for usage and captions (shown in `ccl-sync status` and the tray
+  tooltip), no account cards.
+- **Second queue:** the Linux tray as a v1.1 reader (account cards), a `delegated` tray beside a publisher, a publish-only
+  tray; Linux `reader_card_state` logging.
