@@ -874,8 +874,6 @@ private func c5C520(_ check: C5Check) {
     var entry = ld2dict(own); entry["accountId"] = id
     let store = ReaderLocalSnapshot(); store.restore(cache: ["codex": entry])
     let restored = store.snapshot()
-    let savedFrame = REMOTE_ACCOUNT_FRAME
-    defer { REMOTE_ACCOUNT_FRAME = savedFrame }
 
     func frame(attempt: Date?, peer: Bool = true, local: Bool = true,
                hasPoll: Bool = true, failed: Bool = true) -> RemoteAccountFrame {
@@ -902,51 +900,55 @@ private func c5C520(_ check: C5Check) {
             ("equal attempt", peerAt, true, false),
             ("local only", C5_NOW.addingTimeInterval(-2.7 * 3600), false, true)
         ] {
-            REMOTE_ACCOUNT_FRAME = frame(attempt: attempt, peer: peer)
-            // This is the very projection drawPanelSimple uses, not raw resolver output.
-            let views = simpleCardViews(restored.local.0, restored.local.1)
-            check(views.count == 1, "C5-20 \(language)/\(name): one Simple account card")
-            guard let view = views.first else { continue }
-            let presentation = remotePresentationCard(view, sync: sync, language: language, narrow: true,
-                now: C5_NOW, timeZone: zone)
-            let status = simpleCardStatus(view, now: C5_NOW, language: language)
-            check(limitPollFailed(view.data) == failure && (view.data.error != nil) == failure,
-                  "C5-20 \(language)/\(name): Simple data compares the known failed attempt with the selected success")
-            check(status.showsSnapshotWarning == failure && status.showsResetRows == !failure,
-                  "C5-20 \(language)/\(name): actual Simple body decision preserves reset rows after newer success")
-            check(status.feedback.action == (failure ? .retry : .none)
-                  && status.feedback.actionTitle == (failure ? (language == "en" ? "Retry" : "Повторить") : ""),
-                  "C5-20 \(language)/\(name): actual quota footer decision and localized Retry")
-            check(view.data.asOf == (peer ? peerAt : ownAt) && view.data.weeklyReset == reset
-                  && view.data.weekly == 65 && view.data.session == nil
-                  && presentation.simpleMachines == (peer ? "● macbook, ● vps" : "● macbook"),
-                  "C5-20 \(language)/\(name): selected reading/reset and source header remain intact")
+            withRemoteRenderScene(frame: frame(attempt: attempt, peer: peer), timeZone: zone, manual: .idle) {
+                // This is the very projection drawPanelSimple uses, not raw resolver output.
+                let views = simpleCardViews(restored.local.0, restored.local.1)
+                check(views.count == 1, "C5-20 \(language)/\(name): one Simple account card")
+                guard let view = views.first else { return }
+                let presentation = remotePresentationCard(view, sync: sync, language: language, narrow: true,
+                    now: C5_NOW, timeZone: zone)
+                let status = simpleCardStatus(view, now: C5_NOW, language: language)
+                check(limitPollFailed(view.data) == failure && (view.data.error != nil) == failure,
+                      "C5-20 \(language)/\(name): Simple data compares the known failed attempt with the selected success")
+                check(status.showsSnapshotWarning == failure && status.showsResetRows == !failure,
+                      "C5-20 \(language)/\(name): actual Simple body decision preserves reset rows after newer success")
+                check(status.feedback.action == (failure ? .retry : .none)
+                      && status.feedback.actionTitle == (failure ? (language == "en" ? "Retry" : "Повторить") : ""),
+                      "C5-20 \(language)/\(name): actual quota footer decision and localized Retry")
+                check(view.data.asOf == (peer ? peerAt : ownAt) && view.data.weeklyReset == reset
+                      && view.data.weekly == 65 && view.data.session == nil
+                      && presentation.simpleMachines == (peer ? "● macbook, ● vps" : "● macbook"),
+                      "C5-20 \(language)/\(name): selected reading/reset and source header remain intact")
+            }
         }
         for (name, attempt, hasPoll, failed) in [
             ("missing Auto", nil as Date?, false, false),
             ("zero attempt", nil as Date?, true, true),
             ("error without pollFailed", C5_NOW.addingTimeInterval(-2.7 * 3600) as Date?, true, false)
         ] {
-            REMOTE_ACCOUNT_FRAME = frame(attempt: attempt, hasPoll: hasPoll, failed: failed)
-            let views = simpleCardViews(restored.local.0, restored.local.1)
-            check(views.count == 1, "C5-20 \(language)/\(name): one merged Simple card")
-            guard let view = views.first else { continue }
-            let status = simpleCardStatus(view, now: C5_NOW, language: language)
-            check(view.data.error != nil && view.data.pollFailed == failed && limitPollFailed(view.data)
-                  && view.data.asOf == peerAt
-                  && (attempt == nil ? view.data.pollAttemptAt == nil : view.data.pollAttemptAt == attempt),
-                  "C5-20 \(language)/\(name): fresh VPS cannot clear an error without a known failed attempt")
-            check(status.showsSnapshotWarning && !status.showsResetRows
-                  && status.feedback.action == .retry
-                  && status.feedback.actionTitle == (language == "en" ? "Retry" : "Повторить"),
-                  "C5-20 \(language)/\(name): actual Simple body/footer retain warning and localized Retry")
+            withRemoteRenderScene(frame: frame(attempt: attempt, hasPoll: hasPoll, failed: failed),
+                                  timeZone: zone, manual: .idle) {
+                let views = simpleCardViews(restored.local.0, restored.local.1)
+                check(views.count == 1, "C5-20 \(language)/\(name): one merged Simple card")
+                guard let view = views.first else { return }
+                let status = simpleCardStatus(view, now: C5_NOW, language: language)
+                check(view.data.error != nil && view.data.pollFailed == failed && limitPollFailed(view.data)
+                      && view.data.asOf == peerAt
+                      && (attempt == nil ? view.data.pollAttemptAt == nil : view.data.pollAttemptAt == attempt),
+                      "C5-20 \(language)/\(name): fresh VPS cannot clear an error without a known failed attempt")
+                check(status.showsSnapshotWarning && !status.showsResetRows
+                      && status.feedback.action == .retry
+                      && status.feedback.actionTitle == (language == "en" ? "Retry" : "Повторить"),
+                      "C5-20 \(language)/\(name): actual Simple body/footer retain warning and localized Retry")
+            }
         }
-        REMOTE_ACCOUNT_FRAME = frame(attempt: C5_NOW, local: false)
-        let foreign = simpleCardViews(LimitData(present: false), LimitData(present: false))
-        check(foreign.count == 1 && foreign.first?.isLocal == false
-              && foreign.first.map { !limitPollFailed($0.data)
-                  && !simpleCardStatus($0, now: C5_NOW, language: language).showsSnapshotWarning } == true,
-              "C5-20 \(language): card without a local login keeps its existing state")
+        withRemoteRenderScene(frame: frame(attempt: C5_NOW, local: false), timeZone: zone, manual: .idle) {
+            let foreign = simpleCardViews(LimitData(present: false), LimitData(present: false))
+            check(foreign.count == 1 && foreign.first?.isLocal == false
+                  && foreign.first.map { !limitPollFailed($0.data)
+                      && !simpleCardStatus($0, now: C5_NOW, language: language).showsSnapshotWarning } == true,
+                  "C5-20 \(language): card without a local login keeps its existing state")
+        }
     }
 }
 
