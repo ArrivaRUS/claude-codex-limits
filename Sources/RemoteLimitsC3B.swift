@@ -119,7 +119,6 @@ func remoteVisibleSourceLine(_ card: RemoteCardPresentation, advanced: Bool) -> 
 }
 
 // C3-B value models. No preferences, singleton history, AppKit, or runtime effects.
-enum RemotePanelStyle { case simple, advanced }
 // A reserved second header line keeps every Simple card at the same height.
 let REMOTE_SIMPLE_HEADER_EXTRA = 13.0
 struct RemoteSimplePanelHeights {
@@ -150,60 +149,27 @@ struct RemotePanelLayout {
     var intervalRect: CGRect
     var authorRect: CGRect
     var windowHeight: Double
-    var historySelectorRect: CGRect?
-    var moneyRows: [CGRect]
 }
 
-func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
-                       historyHeight: Double = 35) -> RemotePanelLayout {
+func remoteSimplePanelLayout(views: [AccountView], now: Date) -> RemotePanelLayout {
     let visible = views
-    if style == .simple {
-        let heights = remoteSimplePanelHeights(views: visible, now: now)
-        if visible.isEmpty {
-            return RemotePanelLayout(cards: [], intervalRect: CGRect(x: 16, y: 224, width: 328, height: 24),
-                authorRect: CGRect(x: 16, y: 265, width: 328, height: 16), windowHeight: heights.windowHeight,
-                historySelectorRect: nil, moneyRows: [])
-        }
-        let cardH = heights.cardHeight, height = heights.windowHeight
-        let cards = visible.indices.map { i -> CGRect in
-            let wide = visible.count == 1 || (visible.count % 2 == 1 && i == visible.count - 1)
-            return CGRect(x: wide || i % 2 == 0 ? 16 : 186,
-                          y: 58 + Double(i / 2) * (cardH + heights.rowGap), width: wide ? 328 : 158, height: cardH)
-        }
-        return RemotePanelLayout(cards: cards, intervalRect: CGRect(x: 16, y: height - 62, width: 328, height: 24),
-            authorRect: CGRect(x: 16, y: height - 21, width: 328, height: 16), windowHeight: height,
-            historySelectorRect: nil, moneyRows: [])
+    let heights = remoteSimplePanelHeights(views: visible, now: now)
+    if visible.isEmpty {
+        return RemotePanelLayout(cards: [], intervalRect: CGRect(x: 16, y: 224, width: 328, height: 24),
+            authorRect: CGRect(x: 16, y: 265, width: 328, height: 16), windowHeight: heights.windowHeight)
     }
-    var top = 58.0
-    let cards = visible.map { view -> CGRect in
-        let metrics = remoteAdvancedMetrics(view)
-        let heights = metrics.map { remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: $0, now: now)) }
-            + (view.product == "codex" ? [24.0] : [])
-        let height = remoteAdvancedCardHeight(rowHeights: heights,
-            noticeHeight: Double(remoteAdvancedNoticeLines(view, now: now)) * 19, footerHeight: remoteAdvancedFooterHeight(view, now: now))
-        let rect = CGRect(x: 15, y: top, width: 330, height: height)
-        top += height + 5
-        return rect
+    let cardH = heights.cardHeight, height = heights.windowHeight
+    let cards = visible.indices.map { i -> CGRect in
+        let wide = visible.count == 1 || (visible.count % 2 == 1 && i == visible.count - 1)
+        return CGRect(x: wide || i % 2 == 0 ? 16 : 186,
+                      y: 58 + Double(i / 2) * (cardH + heights.rowGap), width: wide ? 328 : 158, height: cardH)
     }
-    let products = ["claude", "codex"].filter { p in views.contains { $0.product == p } }
-    let expanded = historyHeight >= 172
-    let history = remoteHistoryLayout(rowCount: products.count, selectorExtra: 0,
-        noteLines: expanded ? ["active day"] : [], expanded: expanded,
-        emptyHeight: max(0, historyHeight - 187))
-    let layout = remoteAdvancedLayout(cardHeights: cards.map { Double($0.height) }, historyHeight: history.height)
-    let money = history.rowTops.map { CGRect(x: 26, y: Double(layout.history.minY) + $0, width: 308, height: 13) }
-    return RemotePanelLayout(cards: layout.cards, intervalRect: layout.footer, authorRect: layout.credit,
-        windowHeight: layout.height, historySelectorRect: nil, moneyRows: money)
-
+    return RemotePanelLayout(cards: cards, intervalRect: CGRect(x: 16, y: height - 62, width: 328, height: 24),
+        authorRect: CGRect(x: 16, y: height - 21, width: 328, height: 16), windowHeight: height)
 }
 
 func remoteAdvancedCardHeight(rowHeights: [Double], noticeHeight: Double, footerHeight: Double) -> Double {
     38 + rowHeights.reduce(0, +) + Double(max(0, rowHeights.count - 1)) + noticeHeight + footerHeight
-}
-func remoteAdvancedFooterHeight(_ view: AccountView, now: Date, statusLine: String? = nil) -> Double {
-    let line = statusLine ?? remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: "en",
-        narrow: false, now: now, timeZone: TimeZone(secondsFromGMT: 0)!).statusLine
-    return remoteQuotaFooterHeight(advanced: true, statusLine: line)
 }
 
 // Shared by the Foundation-only geometry and the real Advanced rows. History can
@@ -337,7 +303,7 @@ func remoteDefaultCaption(_ rawView: AccountView) -> String {
 // History keeps the single-line account identity from before Simple's D2 split.
 // The same title is drawn in its segment and exposed as the segment tooltip.
 func remoteHistorySelectorTitle(_ raw: AccountView, language: String) -> String {
-    let view = remoteSanitizedView(raw), product = view.product == "claude" ? "Claude" : "Codex"
+    let view = remoteSanitizedView(raw)
     if let custom = view.customCaption, !custom.isEmpty { return custom }
     if !view.caption.isEmpty && view.caption != remoteDefaultCaption(view) { return view.caption }
     var subscription = view; subscription.machines = []

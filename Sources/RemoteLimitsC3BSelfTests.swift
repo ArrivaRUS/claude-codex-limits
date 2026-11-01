@@ -13,13 +13,11 @@ import Foundation
 // actual statusItem appearance and real-screen checks remain macOS work.
 //
 // Foundation-only contract (production definitions: RemoteLimitsC3B.swift):
-// enum RemotePanelStyle { case simple, advanced }
 // struct RemotePanelLayout {
 //   var cards: [CGRect]; var intervalRect, authorRect: CGRect
-//   var windowHeight: Double; var historySelectorRect: CGRect?; var moneyRows: [CGRect]
+//   var windowHeight: Double
 // }
-// func remotePanelLayout(views: [AccountView], style: RemotePanelStyle, now: Date,
-//                        historyHeight: Double = 35) -> RemotePanelLayout
+// func remoteSimplePanelLayout(views: [AccountView], now: Date) -> RemotePanelLayout
 // struct RemoteMenuLine {
 //   var product, historyKey, caption, sourceLine: String
 //   var session, weekly: Double?; var sessionAlpha, weeklyAlpha, punctuationAlpha: Double
@@ -94,8 +92,7 @@ private func c3bView(_ index: Int = 0, product: String = "claude", local: Bool =
 }
 
 private func c3bValidRects(_ layout: RemotePanelLayout, _ expect: C3BExpect, _ context: String) {
-    let all = layout.cards + layout.moneyRows + (layout.historySelectorRect.map { [$0] } ?? [])
-        + [layout.intervalRect, layout.authorRect]
+    let all = layout.cards + [layout.intervalRect, layout.authorRect]
     expect(all.allSatisfy { $0.minX.isFinite && $0.minY.isFinite && $0.width > 0 && $0.height > 0
         && $0.minX >= 0 && $0.maxX <= 360 && $0.minY >= 0 && Double($0.maxY) <= layout.windowHeight },
            "C3-06 \(context): positive finite rectangles stay inside 360pt window")
@@ -124,60 +121,27 @@ private func c3bC306(_ expect: C3BExpect) {
     ]
     for (count, model, height, window, rects) in vectors {
         let views = (0..<count).map { c3bView($0, product: $0 == 0 ? "claude" : "codex", model: model && $0 == count - 1) }
-        let layout = remotePanelLayout(views: views, style: .simple, now: c3bNow())
+        let layout = remoteSimplePanelLayout(views: views, now: c3bNow())
         expect(layout.cards == rects && layout.windowHeight == window,
                "C3-06 Simple \(count)/model=\(model): exact UX grid and window height")
         expect(layout.cards.allSatisfy { Double($0.height) == height }, "C3-06 Simple: all cards share scoped row height")
         c3bValidRects(layout, expect, "Simple \(count)/\(model)")
     }
     for product in ["claude", "codex"] {
-        for style in [RemotePanelStyle.simple, .advanced] {
-            for model in [false, true] {
-                var local = c3bView(product: product, local: true, model: model)
-                local.data.auth = .loggedOut
-                var remote = c3bView(product: product, model: model)
-                remote.data.auth = .loggedOut // local auth must not suppress snapshot rows
-                let a = remotePanelLayout(views: [local], style: style, now: c3bNow())
-                let b = remotePanelLayout(views: [remote], style: style, now: c3bNow())
-                expect(a.cards.count == 1 && b.cards.count == 1 && local.data.auth == .loggedOut && remote.data.auth == .loggedOut,
-                       "C3-06 \(product)/\(style)/model=\(model): both loggedOut fixtures retain a card")
-                if style == .advanced {
-                    expect(remoteAdvancedRowKind(local, metric: "weekly", now: c3bNow()) == .stale
-                           && remoteAdvancedRowKind(remote, metric: "weekly", now: c3bNow()) == .full,
-                           "C3-06 loggedOut: local sign-in problem pauses pace; remote last snapshot remains usable")
-                }
-            }
+        for model in [false, true] {
+            var local = c3bView(product: product, local: true, model: model)
+            local.data.auth = .loggedOut
+            var remote = c3bView(product: product, model: model); remote.data.auth = .loggedOut
+            expect(remoteSimplePanelLayout(views: [local], now: c3bNow()).cards.count == 1
+                   && remoteSimplePanelLayout(views: [remote], now: c3bNow()).cards.count == 1,
+                   "C3-06 Simple loggedOut fixtures retain cards")
+            expect(remoteAdvancedRowKind(local, metric: "weekly", now: c3bNow()) == .stale
+                   && remoteAdvancedRowKind(remote, metric: "weekly", now: c3bNow()) == .full,
+                   "C3-06 loggedOut: local sign-in problem pauses pace; remote snapshot remains usable")
         }
     }
-    for count in 1...4 {
-        let views = (0..<count).map { c3bView($0, product: $0 == 0 ? "claude" : "codex") }
-        let collapsed = remotePanelLayout(views: views, style: .advanced, now: c3bNow())
-        expect(collapsed.moneyRows.isEmpty && collapsed.historySelectorRect == nil, "C3-06 Advanced \(count): collapsed history has no money rows or selector")
-        c3bValidRects(collapsed, expect, "Advanced collapsed \(count)")
-        let layout = remotePanelLayout(views: views, style: .advanced, now: c3bNow(), historyHeight: 231)
-        expect(layout.cards.count == count && layout.cards.allSatisfy { $0.minX == 15 && $0.width == 330 },
-               "C3-06 Advanced \(count): complete 330pt stack")
-        for i in layout.cards.indices.dropFirst() {
-            expect(layout.cards[i].minY - layout.cards[i - 1].maxY == 5, "C3-06 Advanced: 5pt inter-card gap")
-        }
-        expect(layout.moneyRows.count == min(count, 2), "C3-06 Advanced: one money row per product")
-        expect(layout.historySelectorRect == nil, "C3-06 Advanced: account count does not add a subscription selector row")
-        for i in layout.moneyRows.indices.dropFirst() {
-            expect(layout.moneyRows[i].minY - layout.moneyRows[i - 1].minY == 15,
-                   "C3-06 Advanced: 15pt per subscription row")
-        }
-        c3bValidRects(layout, expect, "Advanced \(count)")
-    }
-    let four = (0..<4).map { c3bView($0, product: $0 == 0 ? "claude" : "codex") }
-    let twoLayout = remotePanelLayout(views: Array(four.prefix(2)), style: .advanced, now: c3bNow(), historyHeight: 231)
-    let threeLayout = remotePanelLayout(views: Array(four.prefix(3)), style: .advanced, now: c3bNow(), historyHeight: 231)
-    let fourLayout = remotePanelLayout(views: four, style: .advanced, now: c3bNow(), historyHeight: 231)
-    if threeLayout.cards.count == 3 && fourLayout.cards.count == 4 {
-        expect(threeLayout.windowHeight - twoLayout.windowHeight == Double(threeLayout.cards[2].height) + 5,
-               "C3-06 Advanced: third account grows quota stack only; history remains two products")
-        expect(fourLayout.windowHeight - threeLayout.windowHeight == Double(fourLayout.cards[3].height) + 5,
-               "C3-06 Advanced: fourth account adds quota card and gap without another subscription")
-    } else { expect(false, "C3-06 Advanced: three/four card layouts available for growth checks") }
+    // Advanced stack/window assertions moved to the actual bitmap pass (C5-25/26).
+
 }
 
 // Edge vectors use literal expected row/card sizes from UX and the existing
@@ -196,10 +160,7 @@ private func c3bC306Edges(_ expect: C3BExpect) {
     expect(remoteAdvancedRowHeight(weekKind) == 62
            && Double(AdvRow(limit: nil, kind: weekKind, credits: nil).height) == 62,
            "C3-06 edge: week row is 62pt in model and real AdvRow")
-    expect(remotePanelLayout(views: [onlyWeek], style: .advanced, now: now).cards.first?.height
-           == CGFloat(38 + remoteAdvancedRowHeight(.inactive) + remoteAdvancedRowHeight(weekKind)
-                      + remoteAdvancedRowHeight(.credits) + 2 + remoteAdvancedFooterHeight(onlyWeek, now: now)),
-           "C3-06 edge: Codex card includes empty session, week, credits and shared footer height")
+
 
     // Each expected card includes the unaffected 62pt weekly row. For missing or
     // future asOf both quota rows are 50pt and the 19pt paused notice is present.
@@ -235,15 +196,9 @@ private func c3bC306Edges(_ expect: C3BExpect) {
                    "C3-06 edge \(name): expected \(rowHeight)pt row in model and actual AdvRow")
             expect(remoteAdvancedNoticeLines(view, now: now) == noticeLines,
                    "C3-06 edge \(name): expected paused notice count \(noticeLines)")
-            let weekHeight = remoteAdvancedRowHeight(remoteAdvancedRowKind(view, metric: "weekly", now: now))
-            let cardHeight = 38 + rowHeight + weekHeight + 1 + Double(noticeLines) * 19 + remoteAdvancedFooterHeight(view, now: now)
-            expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height == CGFloat(cardHeight),
-                   "C3-06 edge \(name)/local=\(view.isLocal): card derives footer height from shared model")
         }
-        let a = remotePanelLayout(views: [local], style: .advanced, now: now)
-        let b = remotePanelLayout(views: [remote], style: .advanced, now: now)
-        expect(a.cards == b.cards && a.windowHeight == b.windowHeight,
-               "C3-06 edge \(name): zero geometry difference between same local/remote metrics")
+        // Card geometry is checked by drawAdvanced in the AppKit tail.
+
     }
 }
 
@@ -408,10 +363,11 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     let subscriptions = historySubscriptions(views: [legacyClaude, legacyCodex], index: UsageIndex(), now: c3bNow(), language: "en")
     expect(selectedHistorySubscription(subscriptions, product: "codex")?.product == "codex",
            "C3-16/A2: history selection is product-scoped; account price identities remain independent")
-    let claudePrice = accountSubscriptionPrice(legacyClaude, overrides: pricesByID, localFallback: (999, true))
-    let codexPrice = accountSubscriptionPrice(legacyCodex, overrides: pricesByID, localFallback: (999, true))
-    expect(claudePrice.usd == 200 && codexPrice.usd == 20 && !claudePrice.estimated && !codexPrice.estimated,
-           "C3-16/A2: live pricing adapter keeps compound overrides independent across products")
+    let migrated = migratedProductSubscriptionPrices(subscriptions, existing: [:], legacy: pricesByID)
+    let claudePrice = historySubscriptionPrice(subscriptions.first { $0.product == "claude" }!, overrides: migrated, fallback: (999, true))
+    let codexPrice = historySubscriptionPrice(subscriptions.first { $0.product == "codex" }!, overrides: migrated, fallback: (999, true))
+    expect(claudePrice.usd == 200 && codexPrice.usd == 20 && claudePrice.ownerSet && codexPrice.ownerSet,
+           "C3-16/A2: account prices migrate to independent product prices without a legacy-key collision")
 
     var remote = c3bView()
     remote.data.source?.freshUntil = now.addingTimeInterval(60)
@@ -467,16 +423,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteSanitizedView(safe).caption == safe.caption && remoteSanitizedView(safe).machines == safe.machines,
            "C3-18/D1: sanitizing presentation strings twice is stable")
 
-    let two = [c3bView(), c3bView(1, product: "codex")]
-    let subscriptionsOnly = remoteAdvancedLayout(cardHeights: [], historyHeight: 172)
-    expect(subscriptionsOnly.cards.isEmpty && subscriptionsOnly.history.height == 172,
-           "C3-19/D2: usage-only product history needs no synthetic quota/account group")
-    for count in [3, 4] {
-        let views = (0..<count).map { c3bView($0) }
-        let collapsed = remotePanelLayout(views: views, style: .advanced, now: now, historyHeight: 35)
-        expect(collapsed.historySelectorRect == nil && collapsed.moneyRows.isEmpty,
-               "C3-20/D3: collapsed history for \(count) accounts has no selector or money rows")
-    }
+    // Usage-only and collapsed history geometry: actual drawAdvanced, C5-26.
     for state in [RemoteCardState.stale, .signInRequired, .offline, .syncStalled] {
         var view = c3bView(state: state)
         expect(remoteAdvancedRowKind(view, metric: "weekly", now: now) == .full,
@@ -492,7 +439,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     expect(remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: healthy local scoped row reserves 15pt")
     localScoped.data.auth = .loggedOut
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now)
-           && remotePanelLayout(views: [localScoped], style: .simple, now: now).cards.first?.height == 183,
+           && remoteSimplePanelLayout(views: [localScoped], now: now).cards.first?.height == 183,
            "C3-22/A5: local sign-in problem hides model row and removes its 15pt")
     localScoped.data.auth = .ok; localScoped.data.asOf = now.addingTimeInterval(-5 * 3600)
     expect(!remoteSimpleShowsScopedRow(localScoped, now: now), "C3-22/A5: stale local card does not reserve hidden scoped row")
@@ -589,11 +536,13 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
                "C3-26/Q1: original full and compact precede measured machine fitting (\(compactWidth)pt)")
     }
     var pro = c3bView(product: "codex"); pro.data.plan = "Pro"
-    let snapshotPrice = accountSubscriptionPrice(pro, overrides: [:], localFallback: (200, true))
+    var subscription = HistorySubscription(product: "codex", title: "Codex Pro", usageDays: [:], accounts: [pro])
+    let snapshotPrice = historySubscriptionPrice(subscription, overrides: [:], fallback: (200, true))
     expect(snapshotPrice.usd == 200 && !snapshotPrice.estimated,
            "C3-26/V17/V23: known Pro snapshot keeps exact price without approximation across plan capitalization")
     pro.data.plan = nil
-    expect(accountSubscriptionPrice(pro, overrides: [:], localFallback: (200, true)).estimated,
+    subscription.accounts = [pro]
+    expect(historySubscriptionPrice(subscription, overrides: [:], fallback: (200, true)).estimated,
            "C3-26/V17: missing snapshot plan retains estimated fallback")
     for state in [RemoteCardState.signInRequired, .offline, .syncStalled] {
         var view = c3bView(state: state)
@@ -767,16 +716,11 @@ private func c3bC330(_ expect: C3BExpect) {
     var healthy = c3bView(model: true)
     healthy.data.weekly = 39
     healthy.data.weeklyReset = healthy.data.asOf!.addingTimeInterval(84 * 3600)
-    let freshHeight = remotePanelLayout(views: [healthy], style: .advanced, now: now).cards.first?.height
-    expect(freshHeight == CGFloat(38 + 3 * remoteAdvancedRowHeight(.full) + 2 + remoteAdvancedFooterHeight(healthy, now: now)), "C3-30/N3: baseline full three-window Claude uses shared footer geometry")
     for state in [RemoteCardState.signInRequired, .offline, .syncStalled, .serviceWait] {
         var view = healthy; view.state = state
         let kinds = remoteAdvancedMetrics(view).map { remoteAdvancedRowKind(view, metric: $0, now: now) }
         expect(kinds.allSatisfy { $0 == .full } && kinds.allSatisfy { remoteAdvancedRowHeight($0) == 62 },
                "C3-30/N3: in-horizon \(state.rawValue) keeps complete 62pt forecast and metadata rows")
-        expect(remotePanelLayout(views: [view], style: .advanced, now: now).cards.first?.height
-               == (freshHeight ?? 0) + CGFloat(remoteAdvancedFooterHeight(view, now: now) - remoteAdvancedFooterHeight(healthy, now: now)),
-               "C3-30/N3: in-horizon \(state.rawValue) keeps row geometry and adds only its status footer")
         let pace = snapshotWindowPace(used: view.data.weekly, reset: view.data.weeklyReset,
             windowH: 168, asOf: view.data.asOf, now: now)
         let row = AdvRow(limit: PacedLimit(id: "weekly", name: "", pace: pace, color: 0, used: 39), kind: kinds.last!, credits: nil)
@@ -907,20 +851,18 @@ private func c3bC334(_ expect: C3BExpect) {
         let local = c3bView(product: product, local: true)
         let solo = remotePresentationCard(local, sync: ReaderSyncState(phase: .off), language: "ru",
             narrow: false, now: now, timeZone: zone)
-        let layout = remotePanelLayout(views: [local], style: .simple, now: now)
+        let layout = remoteSimplePanelLayout(views: [local], now: now)
         expect(solo.simpleTitle == (product == "claude" ? "Claude" : "Codex")
                && solo.simpleMachines == "● mac" && layout.cards.first?.height == 183 && layout.windowHeight == 317,
                "C3-34/D2: sole local \(product) without sync retains the dotted 13pt second header line")
-        let pair = remotePanelLayout(views: [local, c3bView(1, product: product)], style: .simple, now: now)
+        let pair = remoteSimplePanelLayout(views: [local, c3bView(1, product: product)], now: now)
         expect(pair.cards.map { $0.height } == [183, 183] && pair.windowHeight == 317,
                "C3-34/D2: local and remote cards have equal heights in a mixed row")
     }
-    let empty = remotePanelLayout(views: [], style: .simple, now: now)
+    let empty = remoteSimplePanelLayout(views: [], now: now)
     expect(empty.cards.isEmpty && empty.windowHeight == 286,
            "C3-34/D2: empty Simple panel does not reserve a nonexistent header")
-    let local = c3bView(local: true)
-    expect(remotePanelLayout(views: [local], style: .advanced, now: now).cards.first?.height == CGFloat(38 + 2 * remoteAdvancedRowHeight(.full) + 1 + remoteAdvancedFooterHeight(local, now: now)),
-           "C3-34/D2: Advanced card uses its shared footer and no Simple header increment")
+
 }
 
 private func c3bC335(_ expect: C3BExpect) {

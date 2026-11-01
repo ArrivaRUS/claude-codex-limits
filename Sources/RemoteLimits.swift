@@ -917,8 +917,12 @@ func historySubscriptions(views: [AccountView], index: UsageIndex, now: Date, la
         let defaultTitle = view.customCaption == nil && (view.caption.isEmpty || view.caption == remoteDefaultCaption(view))
         let records = remoteAccounts.filter { $0.product == view.product && $0.label == view.label && $0.label != nil }
             .sorted { ($0.asOf ?? .distantPast) > ($1.asOf ?? .distantPast) }
-        if view.data.plan == nil { view.data.plan = records.first { $0.plan != nil }?.plan }
-        if view.tier == nil { view.tier = records.first { $0.tier != nil }?.tier }
+        if let record = records.first(where: { $0.plan != nil || $0.tier != nil }),
+           (view.data.plan == nil && view.tier == nil) || (record.asOf ?? .distantPast) > (view.data.asOf ?? .distantPast) {
+            // A plan and its tier describe one snapshot; never splice different records.
+            view.data.plan = record.plan; view.tier = record.tier
+            view.data.asOf = record.asOf
+        }
         if view.data.asOf == nil { view.data.asOf = records.first?.asOf }
         if defaultTitle { view.caption = "" }
         return view
@@ -941,13 +945,13 @@ func historySubscriptions(views: [AccountView], index: UsageIndex, now: Date, la
     }
 }
 func subscriptionMoneySummary(_ subscription: HistorySubscription, price: (usd: Double, estimated: Bool),
-                              now: Date, days: Int = 35) -> MoneySummary {
+                              ownerPrice: Bool = false, now: Date, days: Int = 35) -> MoneySummary {
     let rows = dailyUsage(subscription.product, days: days, index: subscription.index, now: now)
     let active = rows.filter { $0.turns > 0 }, total = rows.reduce(0) { $0 + $1.usd }
     let metadata = subscription.representative.map {
         [$0.data.plan, $0.tier].contains { !($0 ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     } ?? false
-    let available = metadata || !price.estimated
+    let available = metadata || ownerPrice
     return MoneySummary(days: days, activeDays: active.count, usdApi: total,
         perCalendarDay: days > 0 ? total / Double(days) : 0, perActiveDay: active.isEmpty ? 0 : total / Double(active.count),
         subMonthly: available ? price.usd : 0, subEstimated: available && price.estimated, hasSubscriptionPrice: available)

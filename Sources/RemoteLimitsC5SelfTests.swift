@@ -500,7 +500,7 @@ private func c5C509(_ check: C5Check) {
         let views = (0..<count).map { index -> AccountView in
             var view = c5DateView(C5_NOW); view.historyKey = "c509-\(index)"; return view
         }
-        let layout = remotePanelLayout(views: views, style: .simple, now: C5_NOW)
+        let layout = remoteSimplePanelLayout(views: views, now: C5_NOW)
         check(layout.cards.allSatisfy { $0.height == 183 }
               && layout.windowHeight == (count <= 2 ? 317 : 512),
               "C5-09 Simple \(count) cards remove one 14pt source row per grid row")
@@ -963,11 +963,8 @@ private func c5C521(_ check: C5Check) {
         let frame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [view], visibleViews: [view], displayedViews: [view])
         withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
             let cards = advCards(LimitData(present: false), view.data)
-            let layout = remotePanelLayout(views: [view], style: .advanced, now: C5_NOW)
             check(cards.first?.rows.contains { $0.limit?.id == "session" && $0.limit?.used == nil } == true,
                   "C5-21 \(language): Advanced keeps the empty Codex session shown in Simple")
-            check(cards.first?.height == layout.cards.first?.height,
-                  "C5-21 \(language): real Advanced card and shared geometry use the same footer/rows")
             let p = remotePresentationCard(view, sync: sync, language: language, narrow: false,
                 now: C5_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
             check(remoteVisibleSourceLine(p, advanced: true).isEmpty && remoteVisibleSourceLine(p, advanced: false).isEmpty
@@ -1102,7 +1099,9 @@ private func c5C524(_ check: C5Check) {
         let row = remoteMoneyRow(usageOnly[0], summary: unknown, language: language)
         check(usageOnly.count == 1 && row.title == "Codex" && row.monthly.isEmpty && row.value.isEmpty && !row.editable && unknown.usdApi == 2,
               "C5-24 \(language): usage without plan keeps API spending, without subscription price/pencil/value")
-        let explicit = historySubscriptionPrice(codex[0], overrides: [remoteAccountID(codex[0].accounts[0]): 150], fallback: (200, true))
+        let migrated = migratedProductSubscriptionPrices(codex, existing: [:],
+            legacy: [remoteAccountID(codex[0].accounts[0]): 150])
+        let explicit = historySubscriptionPrice(codex[0], overrides: migrated, fallback: (200, true))
         check(explicit.usd == 150 && !explicit.estimated, "C5-24 \(language): owner subscription price takes precedence")
         var named = views.first { $0.product == "codex" }!; named.customCaption = "Работа"; named.isLocal = true
         var peer = named; peer.historyKey = "c524-peer"; peer.isLocal = false; peer.customCaption = "Personal"
@@ -1121,77 +1120,57 @@ private func c5C524(_ check: C5Check) {
             language: language, remoteAccounts: [record])
         check(planned.first?.title == "Codex Pro" && metadataOnly.data.plan == nil,
               "C5-24 \(language): account plan metadata without quota windows names the subscription without changing a limit card")
+        var stale = record; stale.plan = nil; stale.tier = "default_claude_max_20x"
+        stale.asOf = C5_NOW.addingTimeInterval(-60)
+        let paired = historySubscriptions(views: [metadataOnly], index: UsageIndex(), now: C5_NOW,
+            language: language, remoteAccounts: [stale, record])
+        check(paired[0].representative?.data.plan == "pro" && paired[0].representative?.tier == nil,
+              "C5-24 P3 \(language): freshest plan/tier pair never borrows an older tier")
+        let noPlan = usageOnly[0]
+        for owner in [false, true] {
+            let zero = remoteMoneyRow(noPlan, summary: subscriptionMoneySummary(noPlan, price: (0, false),
+                ownerPrice: owner, now: C5_NOW), language: language)
+            check(owner ? (!zero.monthly.isEmpty && !zero.value.isEmpty && !zero.editable)
+                        : (zero.monthly.isEmpty && zero.value.isEmpty && !zero.editable),
+                  "C5-24 P2 \(language): zero price requires explicit ownership when plan/tier are absent")
+        }
+        let noPlanDefaults = MemorySelfTestDefaults()
+        check(historyMoneyRows(usageOnly, defaults: noPlanDefaults)[0].monthly.isEmpty,
+              "C5-24 P2 \(language): actual row resolver hides the absent-plan (0,false) fallback")
+        for amount in [0.0, 150.0] {
+            setProductSubscriptionPrice("codex", usd: amount, defaults: noPlanDefaults)
+            let owned = historyMoneyRows(usageOnly, defaults: noPlanDefaults)[0]
+            check(owned.monthly.contains("$" + String(Int(amount))) && !owned.value.isEmpty && !owned.editable,
+                  "C5-24 P2 \(language): actual row resolver honors an explicit owner price without a plan")
+        }
+        let currentPrice = historySubscriptionPrice(codex[0], overrides: [:], fallback: (200, true))
+        let current = remoteMoneyRow(codex[0], summary: subscriptionMoneySummary(codex[0],
+            price: (currentPrice.usd, currentPrice.estimated), ownerPrice: currentPrice.ownerSet, now: C5_NOW), language: language)
+        check(current.monthly.contains("$200") && !current.editable, "C5-24 P2 \(language): current Pro pricing remains unchanged")
+        named.data.asOf = C5_NOW; peer.data.asOf = C5_NOW
+        var priced = codex[0]; priced.accounts = [peer, named]
+        let legacy = [remoteAccountID(named): 100.0, remoteAccountID(peer): 200.0]
+        let memory = MemorySelfTestDefaults(); memory.set(legacy, forKey: "accountSubscriptionUSD")
+        migrateProductSubscriptionPrices([priced], defaults: memory)
+        check(effectiveProductSubscriptionPrices([priced], defaults: memory)["codex"] == 100,
+              "C5-24 P1 \(language): tied legacy prices migrate to the local account")
+        peer.data.asOf = C5_NOW.addingTimeInterval(1); priced.accounts = [named, peer]
+        check(migratedProductSubscriptionPrices([priced], existing: [:], legacy: legacy)["codex"] == 200,
+              "C5-24 P1 \(language): newest account price wins independent of input order")
+        migrateProductSubscriptionPrices([priced], defaults: memory)
+        check(effectiveProductSubscriptionPrices([priced], defaults: memory)["codex"] == 100
+              && (memory.object(forKey: "accountSubscriptionUSD") as? [String: Double]) == legacy,
+              "C5-24 P1 \(language): migration runs once and retains every original account price")
+        setProductSubscriptionPrice("codex", usd: 0, defaults: memory)
+        let shared = historyMoneyRows([priced], defaults: memory)
+        check(shared.count == 1 && shared[0].monthly.contains("$0") && !shared[0].editable,
+              "C5-24 P1 \(language): settings product selection is exactly history's price, including explicit zero")
         let empty = historySubscriptions(views: [], index: UsageIndex(), now: C5_NOW, language: language)
         check(empty.isEmpty, "C5-24 \(language): no account and no recent usage means no tab")
     }
 }
-private func c5C525Views() -> [AccountView] {
-    var claude = c5DateView(C5_NOW, state: .fresh); claude.isLocal = true; claude.data.source = nil
-    claude.caption = ""; claude.data.plan = "max"; claude.data.sessionReset = C5_NOW.addingTimeInterval(4 * 3600)
-    claude.data.weeklyReset = C5_NOW.addingTimeInterval(100 * 3600)
-    claude.data.scoped = ScopedLimit(name: "Fable", percent: 43, reset: C5_NOW.addingTimeInterval(100 * 3600), severity: nil)
-    var codex = claude; codex.product = "codex"; codex.historyKey = "c525-codex"; codex.data.plan = "pro"
-    codex.data.session = nil; codex.data.sessionReset = nil; codex.data.scoped = nil; codex.data.resetCredits = 1
-    return [claude, codex]
-}
-private func c5C525(_ check: C5Check) {
-    for language in ["ru", "en"] {
-        let views = c5C525Views()
-        let frame = RemoteAccountFrame(now: C5_NOW, sync: ReaderSyncState(phase: .on), allViews: views, visibleViews: views, displayedViews: views)
-        withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
-            let cards = advCards(views[0].data, views[1].data)
-            check(cards.map { $0.height } == [226, 176] && cards.allSatisfy { $0.footerHeight == 0 },
-                  "C5-25 \(language): real cards match mockup 226/176 without a blank footer")
-        }
-        var offline = views
-        for i in offline.indices {
-            offline[i].isLocal = false; offline[i].state = .offline
-            var source = RemoteSource(machineId: "c525-vps", machineName: "vps")
-            source.asOf = C5_NOW; source.lastSeenAt = C5_NOW.addingTimeInterval(-3600); source.freshUntil = C5_NOW.addingTimeInterval(3600)
-            offline[i].data.source = source
-        }
-        let failed = RemoteAccountFrame(now: C5_NOW, sync: ReaderSyncState(phase: .on), allViews: offline, visibleViews: offline, displayedViews: offline)
-        withRemoteRenderScene(frame: failed, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
-            check(advCards(offline[0].data, offline[1].data).map { $0.height } == [244, 194],
-                  "C5-25 \(language): nonempty state line adds exactly 18pt to each real card")
-        }
-    }
-}
-private func c5C526(_ check: C5Check) {
-    for language in ["ru", "en"] {
-        let rows = [RemoteMoneyRow(product: "claude", title: "Claude Max", monthly: "$200", apiDaily: "$200", value: "×30", editable: false, activeAmount: "$350"),
-                    RemoteMoneyRow(product: "codex", title: "Codex Pro", monthly: "$200", apiDaily: "$179", value: "×26", editable: false, activeAmount: "$190")]
-        let selector = remoteHistorySelectorLayout(titles: rows.map { $0.title }, measuredWidths: [57, 52], headingWidth: 130,
-            availableWidth: 308, expanded: true)
-        let notes = remoteMoneyNoteLines(rows, language: language, width: 308, measure: { Double($0.count) * 3.5 })
-        let history = remoteHistoryLayout(rowCount: 2, selectorExtra: Double(selector.extraHeight), noteLines: notes, expanded: true)
-        let window = remoteAdvancedLayout(cardHeights: [226, 176], historyHeight: history.height)
-        check(!selector.ownRow && selector.container?.minY == 0 && notes.count == 1 && notes[0].contains("Claude Max") && notes[0].contains("Codex Pro"),
-              "C5-26 \(language): selector top is hy; active-day line retains full subscription names")
-        check(history.height == 187 && window.height == 722 && window.footer.maxY <= window.height && window.credit.maxY <= window.height,
-              "C5-26 \(language): shared draw/window geometry is history 187 and window 722, including complete footer")
-        check(history.columnRightEdges == [190, 283, 334] && history.rowTops[1] - history.rowTops[0] == 15,
-              "C5-26 \(language): real table model has right edges 190/283/334 and 15pt rows")
-        check(remoteHistoryLayout(rowCount: 1, selectorExtra: 0, noteLines: ["one"], expanded: true).height == 172,
-              "C5-26 \(language): one subscription history is 172pt")
-        let long = rows.map { row -> RemoteMoneyRow in var row = row; row.title = String(repeating: "Ж", count: 32); return row }
-        let own = remoteHistorySelectorLayout(titles: long.map { $0.title }, measuredWidths: [256, 256], headingWidth: 130,
-            availableWidth: 308, expanded: true)
-        let fitted = remoteHistoryFittedTitle(long[0].title, width: Double(own.rects[0].width - 10), measure: { Double($0.count) * 8 })
-        let short = remoteMoneyNoteLines(long, language: language, width: 308, measure: { Double($0.count) * 5 })
-        check(own.ownRow && own.extraHeight == 22 && own.fontSize == 10.5 && Set(own.rects.map { $0.minY }).count == 1 && fitted.hasSuffix("…")
-              && own.titles[0].count == 32, "C5-26 \(language): long labels use one extra selector row, ellipsis and full tooltip title")
-        check(short.joined().contains("Claude ≈") && short.joined().contains("Codex ≈") && !short.joined().contains("Ж") && !short.joined().contains("…"),
-              "C5-26 \(language): long L shortens to product names before wrapping")
-        let wrapped = remoteMoneyNoteLines(long, language: language, width: 170, measure: { Double($0.count) * 5 })
-        check(wrapped.count > 1 && wrapped.contains { $0.contains("Codex ≈ $190") },
-              "C5-26 \(language): final compression moves complete items at the middle-dot separator")
-        let grown = remoteHistoryLayout(rowCount: 2, selectorExtra: 22, noteLines: wrapped, expanded: true)
-        let enlarged = remoteAdvancedLayout(cardHeights: [226, 176], historyHeight: grown.height)
-        check(enlarged.height == 722 + 22 + Double(wrapped.count - 1) * 12 && enlarged.credit.maxY <= enlarged.height,
-              "C5-26 \(language): selector and note rows grow window with its footer through the shared draw model")
-    }
-}
+// C5-25/26 require actual CoreText/AppKit rendering. Registered in the AppKit tail
+// through runRemoteLimitsC5AppKitTests, not approximated by Foundation geometry.
 
 func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C501(check); c5C501Sanitization(check); c5C502(check); c5C503(check)
@@ -1202,5 +1181,5 @@ func runRemoteLimitsC5SelfTests(check: (Bool, String) -> Void) {
     c5C519(check)
     c5C520(check)
     c5C521(check); c5C522(check); c5C523(check)
-    c5C524(check); c5C525(check); c5C526(check)
+    c5C524(check)
 }

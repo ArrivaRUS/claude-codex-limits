@@ -4324,6 +4324,7 @@ func setSyncBlock() -> CGFloat { syncBlockShown() ? SET_CAP_H + setSyncCardH() +
 private struct AccountSettingsLayout {
     var model: RemoteSettingsModel
     var views: [AccountView]
+    var subscriptions: [HistorySubscription]
     var accountsCap: CGFloat, accountsTop: CGFloat, accountsHeight: CGFloat
     var trayCap: CGFloat, trayTop: CGFloat, trayHeight: CGFloat
     var subCap: CGFloat, subTop: CGFloat, subHeight: CGFloat
@@ -4343,11 +4344,13 @@ private func accountSettingsLayout() -> AccountSettingsLayout {
     let tc = top, tt = tc + SET_CAP_H, th = SET_TRAY_H + CGFloat(model.menuProducts.count) * SET_ROW_H
     top = tt + th + SET_GAP
     let sc = top, st = sc + SET_CAP_H
-    let sh = CGFloat(views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) }.count) * SET_ROW_H
+    let subscriptions = frame.subscriptions ?? historySubscriptions(views: frame.allViews,
+        index: historyPreviewIndex(frame.allViews), now: frame.now, language: appLang())
+    let sh = CGFloat(subscriptions.count) * SET_ROW_H
     if advancedEnabled(), sh > 0 { top = st + sh + SET_GAP }
     let yc = top, yt = yc + SET_CAP_H
     if model.showsGitHub { top = yt + remoteSyncCardHeight() + SET_GAP }
-    return AccountSettingsLayout(model: model, views: views, accountsCap: ac, accountsTop: at, accountsHeight: ah,
+    return AccountSettingsLayout(model: model, views: views, subscriptions: subscriptions, accountsCap: ac, accountsTop: at, accountsHeight: ah,
         trayCap: tc, trayTop: tt, trayHeight: th, subCap: sc, subTop: st, subHeight: sh,
         syncCap: yc, syncTop: yt, soundsTop: top)
 }
@@ -4389,7 +4392,7 @@ func scopedRowExtra(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
 func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     let views = simpleCardViews(claude, codex)
     if views.isEmpty { return PANEL_H }
-    return CGFloat(remotePanelLayout(views: views, style: .simple, now: remoteRenderNow()).windowHeight)
+    return CGFloat(remoteSimplePanelLayout(views: views, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
 let APP_VERSION = "3.3.1"
@@ -4804,42 +4807,85 @@ private func renderedHasHistory(_ subscription: HistorySubscription?) -> Bool {
         !UsageHistory.shared.samples(subscription.product, acct: $0.historyKey, since: Date(timeIntervalSince1970: 0)).isEmpty
     }
 }
-/// Explicit account prices use the same product-scoped identity as history selection.
-func accountSubscriptionPrice(_ view: AccountView, overrides: [String: Double], localFallback: (usd: Double, estimated: Bool)) -> (usd: Double, estimated: Bool) {
-    if let price = overrides[remoteAccountID(view)], price.isFinite, price >= 0 { return (price, false) }
-    let plan = view.data.plan?.lowercased() ?? ""
-    let known = ["free", "go", "plus", "pro", "max", "max_5x", "max_20x"].contains(plan)
-    return (localFallback.usd, known ? false : localFallback.estimated)
+struct HistorySubscriptionPrice {
+    var usd: Double
+    var estimated: Bool
+    var ownerSet: Bool
 }
-private func renderedSubscriptionPrice(_ view: AccountView) -> (usd: Double, estimated: Bool) {
-    let fallback = subscriptionUSD(view.product, plan: view.data.plan?.lowercased(), tier: view.tier, isLocal: view.isLocal)
-    var overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
-    if overrides[remoteAccountID(view)] == nil, let legacy = overrides[view.historyKey],
-       let frame = REMOTE_ACCOUNT_FRAME, frame.allViews.filter({ $0.historyKey == view.historyKey }).count == 1 {
-        overrides[remoteAccountID(view)] = legacy
-    }
-    return accountSubscriptionPrice(view, overrides: overrides, localFallback: fallback)
-}
-func historySubscriptionPrice(_ subscription: HistorySubscription, overrides: [String: Double],
-                              fallback: (usd: Double, estimated: Bool), allAccounts: [AccountView]? = nil) -> (usd: Double, estimated: Bool) {
-    let all = allAccounts ?? subscription.accounts
-    for account in subscription.accounts {
-        let keys = [remoteAccountID(account)] + (all.filter { $0.historyKey == account.historyKey }.count == 1 ? [account.historyKey] : [])
-        for key in keys {
-            if let price = overrides[key], price.isFinite, price >= 0 { return (price, false) }
+/// One-time product migration: newest priced account, then own account, then stable ID.
+/// Legacy dictionaries are retained verbatim, including prices that did not win.
+func migratedProductSubscriptionPrices(_ subscriptions: [HistorySubscription], existing: [String: Double],
+                                       legacy: [String: Double], local: [String: Double] = [:]) -> [String: Double] {
+    var prices = existing
+    let all = subscriptions.flatMap { $0.accounts }
+    for subscription in subscriptions where prices[subscription.product] == nil {
+        let accounts = subscription.accounts.sorted {
+            let a = $0.data.asOf ?? .distantPast, b = $1.data.asOf ?? .distantPast
+            if a != b { return a > b }
+            if $0.isLocal != $1.isLocal { return $0.isLocal }
+            return remoteAccountID($0) < remoteAccountID($1)
+        }
+        for account in accounts {
+            let keys = [remoteAccountID(account)] + (all.filter { $0.historyKey == account.historyKey }.count == 1 ? [account.historyKey] : [])
+            let price = keys.compactMap { legacy[$0] }.first { $0.isFinite && $0 >= 0 }
+                ?? (account.isLocal ? local[subscription.product] : nil)
+            if let price = price, price.isFinite, price >= 0 { prices[subscription.product] = price; break }
         }
     }
-    return subscription.representative.map { accountSubscriptionPrice($0, overrides: [:], localFallback: fallback) } ?? fallback
+    return prices
 }
-private func historyMoneyRows(_ subscriptions: [HistorySubscription]) -> [RemoteMoneyRow] {
-    let overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
-    return subscriptions.map { subscription in
-        let fallback = subscription.representative.map {
-            subscriptionUSD($0.product, plan: $0.data.plan?.lowercased(), tier: $0.tier, isLocal: $0.isLocal)
-        } ?? (usd: 0, estimated: true)
-        let price = historySubscriptionPrice(subscription, overrides: overrides, fallback: fallback, allAccounts: subscriptions.flatMap { $0.accounts })
-        return remoteMoneyRow(subscription, summary: subscriptionMoneySummary(subscription, price: price, now: remoteRenderNow()), language: appLang())
+func effectiveProductSubscriptionPrices(_ subscriptions: [HistorySubscription], defaults: UserDefaults = .standard) -> [String: Double] {
+    var local: [String: Double] = [:]
+    for product in ["claude", "codex"] {
+        let key = product == "claude" ? "subClaude" : "subCodex"
+        if defaults.object(forKey: key) != nil { local[product] = defaults.double(forKey: key) }
     }
+    return migratedProductSubscriptionPrices(subscriptions,
+        existing: defaults.object(forKey: "productSubscriptionUSD") as? [String: Double] ?? [:],
+        legacy: defaults.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:], local: local)
+}
+func migrateProductSubscriptionPrices(_ subscriptions: [HistorySubscription], defaults: UserDefaults = .standard) {
+    let prices = effectiveProductSubscriptionPrices(subscriptions, defaults: defaults)
+    let stored = defaults.object(forKey: "productSubscriptionUSD") as? [String: Double] ?? [:]
+    if prices != stored { defaults.set(prices, forKey: "productSubscriptionUSD") }
+}
+func setProductSubscriptionPrice(_ product: String, usd: Double, defaults: UserDefaults = .standard) {
+    guard ["claude", "codex"].contains(product), usd.isFinite, usd >= 0 else { return }
+    var prices = defaults.object(forKey: "productSubscriptionUSD") as? [String: Double] ?? [:]
+    prices[product] = usd
+    defaults.set(prices, forKey: "productSubscriptionUSD")
+}
+func historySubscriptionPrice(_ subscription: HistorySubscription, overrides: [String: Double],
+                              fallback: (usd: Double, estimated: Bool)) -> HistorySubscriptionPrice {
+    if let price = overrides[subscription.product], price.isFinite, price >= 0 {
+        return HistorySubscriptionPrice(usd: price, estimated: false, ownerSet: true)
+    }
+    let plan = subscription.representative?.data.plan?.lowercased() ?? ""
+    let known = ["free", "go", "plus", "pro", "max", "max_5x", "max_20x"].contains(plan)
+    return HistorySubscriptionPrice(usd: fallback.usd, estimated: known ? false : fallback.estimated, ownerSet: false)
+}
+func resolvedHistorySubscriptionPrice(_ subscription: HistorySubscription, in subscriptions: [HistorySubscription],
+                                      defaults: UserDefaults = .standard) -> HistorySubscriptionPrice {
+    let fallback = subscription.representative.map {
+        subscriptionUSD($0.product, plan: $0.data.plan?.lowercased(), tier: $0.tier, isLocal: false)
+    } ?? (usd: 0, estimated: false)
+    return historySubscriptionPrice(subscription, overrides: effectiveProductSubscriptionPrices(subscriptions, defaults: defaults), fallback: fallback)
+}
+/// Settings and history resolve the same product, title and price through this path.
+func historyMoneyRows(_ subscriptions: [HistorySubscription], defaults: UserDefaults = .standard) -> [RemoteMoneyRow] {
+    return subscriptions.map { subscription in
+        let price = resolvedHistorySubscriptionPrice(subscription, in: subscriptions, defaults: defaults)
+        return remoteMoneyRow(subscription, summary: subscriptionMoneySummary(subscription,
+            price: (price.usd, price.estimated), ownerPrice: price.ownerSet, now: remoteRenderNow()), language: appLang())
+    }
+}
+private func subscriptionMigrationNote(_ subscription: HistorySubscription) -> String {
+    let legacy = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
+    let prices = Set(subscription.accounts.flatMap { [legacy[remoteAccountID($0)], legacy[$0.historyKey]].compactMap { $0 }
+            .filter { $0.isFinite && $0 >= 0 && $0 < Double(Int.max) } }).sorted()
+    guard prices.count > 1 else { return "" }
+    return tr(" · прежние цены аккаунтов сохранены: ", " · previous account prices retained: ")
+        + prices.map { "$" + String(Int($0)) }.joined(separator: ", ")
 }
 private func historyMoneyNotes(_ rows: [RemoteMoneyRow]) -> [String] {
     remoteMoneyNoteLines(rows, language: appLang(), width: Double(ADV_IW)) {
@@ -5160,11 +5206,19 @@ func drawPanel(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitDa
     drawPanelBody(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
                   about: about, autoIntervals: autoIntervals)
 }
+struct AdvancedDrawElement {
+    var id: String
+    var rect: CGRect // actual draw coordinates, bottom-left origin
+    var text: String? = nil
+    var fontSize: CGFloat? = nil
+    var selected: Bool? = nil
+}
 func drawAdvanced(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
                   interval: TimeInterval, updated: Date?, about: AboutState = AboutState(),
-                  autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
+                  autoIntervals: [String: TimeInterval] = [:],
+                  record: ((AdvancedDrawElement) -> Void)? = nil) -> [Hit] {
     drawAdvancedBody(ctx, size: size, claude: claude, codex: codex, interval: interval, updated: updated,
-                     about: about, autoIntervals: autoIntervals)
+                     about: about, autoIntervals: autoIntervals, record: record)
 }
 
 private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
@@ -5249,7 +5303,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
     let pad: CGFloat = 16
 
     let cardViews = simpleCardViews(claude, codex)
-    let layout = remotePanelLayout(views: cardViews, style: .simple, now: remoteRenderNow())
+    let layout = remoteSimplePanelLayout(views: cardViews, now: remoteRenderNow())
     let prods = cardViews.enumerated().map { i, view in
         (view.data, view.data.present ? cardPresentation(view, narrow: layout.cards[i].width < 300,
             productAccountCount: cardViews.filter { $0.product == view.product }.count).simpleTitle : view.caption,
@@ -5793,7 +5847,8 @@ func advVerdict(_ row: AdvRow, asOf: Date?) -> String {
 
 @discardableResult
 private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData, codex: LimitData,
-                  interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:]) -> [Hit] {
+                  interval: TimeInterval, updated: Date?, about: AboutState, autoIntervals: [String: TimeInterval] = [:],
+                  record: ((AdvancedDrawElement) -> Void)? = nil) -> [Hit] {
     let scene = advancedSceneLayout(claude, codex)
     if scene.subscriptions.isEmpty && scene.cards.isEmpty {
         return drawPanelBody(ctx, size: size, claude: LimitData(present: false), codex: LimitData(present: false),
@@ -5837,11 +5892,17 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         CTLineDraw(line, ctx)
     }
     /// Vertically centre a single line in a box of height `h` whose top is `topY`.
-    func textC(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, h: CGFloat, align: Int = 0) {
+    func textC(_ s: NSAttributedString, x: CGFloat, topY: CGFloat, h: CGFloat, align: Int = 0, recordID: String? = nil, selected: Bool? = nil) {
         let line = CTLineCreateWithAttributedString(s)
         var asc: CGFloat = 0, desc: CGFloat = 0
-        _ = CTLineGetTypographicBounds(line, &asc, &desc, nil)
+        let w = CGFloat(CTLineGetTypographicBounds(line, &asc, &desc, nil))
         text(s, x: x, topY: topY + (h - asc - desc) / 2 + desc * 0.15, align: align)
+        if let id = recordID {
+            let font = s.length > 0 ? s.attribute(NSAttributedString.Key(kCTFontAttributeName as String), at: 0, effectiveRange: nil) : nil
+            record?(AdvancedDrawElement(id: id,
+                rect: rectTL(align == 2 ? x - w : align == 1 ? x - w / 2 : x, topY, w, h),
+                text: s.string, fontSize: font.map { CTFontGetSize($0 as! CTFont) }, selected: selected))
+        }
     }
     func roundFill(_ r: CGRect, _ rad: CGFloat, _ color: NSColor) {
         ctx.addPath(CGPath(roundedRect: r, cornerWidth: min(rad, r.height / 2, r.width / 2), cornerHeight: min(rad, r.height / 2, r.width / 2), transform: nil))
@@ -6004,6 +6065,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         y = slot.minY
         let ch = slot.height
         let card = rectTL(slot.minX, y, slot.width, ch)
+        record?(AdvancedDrawElement(id: "card:\(index)", rect: card))
         roundFill(card, 14, gray(1, 0.04)); roundStroke(card.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
         let canFix = c.account.map { limitCanFix(remote: $0) } ?? limitCanFix(product: c.product, auth: c.data.auth)
         let presentation = c.account.map { account in
@@ -6111,15 +6173,18 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     y = scene.window.history.minY
     let hh = CGFloat(scene.history.height)
     let hcard = rectTL(ADV_CX, y, ADV_CW, hh)
+    record?(AdvancedDrawElement(id: "history", rect: hcard))
     roundFill(hcard, 14, gray(1, 0.04)); roundStroke(hcard.insetBy(dx: 0.5, dy: 0.5), 14, gray(1, 0.06), 1)
     let hy = y + 8                                  // border 1 + padding 7
     drawSF(ctx, expanded ? "chevron.down" : "chevron.right", in: rectTL(ADV_IX, hy + 4.5, 8, 9), textLo, weight: .semibold)
     let selector = scene.selector
     let selectorExtra = selector.extraHeight
     let baseHistCap = remoteHistoryHeading(language: appLang())
-    textC(caps(baseHistCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18)
+    textC(caps(baseHistCap, 9.5, textLo), x: ADV_IX + 14, topY: hy, h: 18, recordID: "history:heading")
     if let container = selector.container {
-        roundFill(rectTL(ADV_IX + container.minX, hy + container.minY, container.width, container.height), 9, gray(1, 0.07))
+        let rect = rectTL(ADV_IX + container.minX, hy + container.minY, container.width, container.height)
+        roundFill(rect, 9, gray(1, 0.07))
+        record?(AdvancedDrawElement(id: "selector", rect: rect))
     }
     for (i, slot) in selector.rects.enumerated() {
         let subscription = subscriptions[i], title = selector.titles[i]
@@ -6130,7 +6195,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let fitted = remoteHistoryFittedTitle(title, width: Double(slot.width - 10)) {
             Double(width(attr($0, selector.fontSize, weight, textHi)))
         }
-        textC(attr(fitted, selector.fontSize, weight, on ? textHi : textMid), x: r.midX, topY: hy + slot.minY, h: slot.height, align: 1)
+        textC(attr(fitted, selector.fontSize, weight, on ? textHi : textMid), x: r.midX, topY: hy + slot.minY, h: slot.height, align: 1, recordID: "segment:" + subscription.product, selected: on)
         hits.append(Hit(id: "histsubscription:" + subscription.product, rect: r, tooltip: title))
     }
     let toggleWidth = selector.ownRow || selector.rects.isEmpty ? ADV_CW : max(28, (selector.rects.first?.minX ?? 200) - 4)
@@ -6265,19 +6330,19 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
             let pencilWidth: CGFloat = row.editable ? 13 : 0
             let labelWidth = max(0, columns[0] - width(price) - pencilWidth - 8 - ADV_IX)
             let title = remoteHistoryFittedTitle(row.title, width: Double(labelWidth)) { Double(width(attr($0, 10.5, .semibold, textHi))) }
-            textC(attr(title, 10.5, .semibold, textHi), x: ADV_IX, topY: ry, h: 13)
-            textC(price, x: columns[0], topY: ry, h: 13, align: 2)
+            textC(attr(title, 10.5, .semibold, textHi), x: ADV_IX, topY: ry, h: 13, recordID: "moneytitle:" + row.product)
+            textC(price, x: columns[0], topY: ry, h: 13, align: 2, recordID: "money:\(row.product):0")
             hits.append(Hit(id: "moneysubscription:" + row.product, rect: rectTL(ADV_IX, ry, ADV_IW, 13),
                 tooltip: row.title + (row.monthly.isEmpty ? "" : " · " + row.monthly)))
             if row.editable {
                 drawSF(ctx, "pencil", in: rectTL(columns[0] - width(price) - 13, ry + 1.5, 10, 10), ADV_LINK)
                 hits.append(Hit(id: "settings", rect: rectTL(ADV_IX, ry - 1, columns[0] - ADV_IX, 15)))
             }
-            textC(attr(row.apiDaily, 10.5, .regular, row.activeAmount == nil ? textLo : textHi), x: columns[1], topY: ry, h: 13, align: 2)
-            textC(attr(row.value, 10.5, .regular, textHi), x: columns[2], topY: ry, h: 13, align: 2)
+            textC(attr(row.apiDaily, 10.5, .regular, row.activeAmount == nil ? textLo : textHi), x: columns[1], topY: ry, h: 13, align: 2, recordID: "money:\(row.product):1")
+            textC(attr(row.value, 10.5, .regular, textHi), x: columns[2], topY: ry, h: 13, align: 2, recordID: "money:\(row.product):2")
         }
         for (i, note) in scene.notes.enumerated() {
-            textC(attr(note, 9.5, .regular, textLo), x: ADV_IX, topY: y + CGFloat(scene.history.notesTop) + CGFloat(i) * 12, h: 11)
+            textC(attr(note, 9.5, .regular, textLo), x: ADV_IX, topY: y + CGFloat(scene.history.notesTop) + CGFloat(i) * 12, h: 11, recordID: "note:\(i)")
         }
     }
     y += hh + 6
@@ -6286,6 +6351,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
     let footTop = scene.window.footer.minY
     hits += drawPollFooter(ctx, size: size, top: footTop, interval: interval, updated: updated,
                            autoIntervals: autoIntervals, advanced: true, views: displayAccountViews(claude, codex, includeHidden: true))
+    record?(AdvancedDrawElement(id: "footer", rect: rectTL(16, footTop, 328, 24)))
     // credit line: author · version · GitHub
     do {
         let divTop = footTop + 22 + 8
@@ -6296,7 +6362,7 @@ private func drawAdvancedBody(_ ctx: CGContext, size: CGSize, claude: LimitData,
         let preW = width(pre), linkW = width(link)
         let cx = (W - preW - linkW) / 2, ct = divTop + 7
         textC(pre, x: cx, topY: ct, h: 12)
-        textC(link, x: cx + preW, topY: ct, h: 12)
+        textC(link, x: cx + preW, topY: ct, h: 12, recordID: "credit")
         hits.append(Hit(id: "open:\(REPO_URL)", rect: rectTL(cx + preW - 3, ct - 2, linkW + 6, 16)))
     }
     return hits
@@ -6588,10 +6654,12 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
         text(attr(tr("ПОДПИСКИ · ДЛЯ ОЦЕНКИ В ДЕНЬГАХ", "SUBSCRIPTIONS · FOR THE MONEY ESTIMATE"), 9.5, .semibold, textLo), x: pad + 2, topY: SET_SUB_CAP)
         roundFill(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.04))
         roundStroke(rectTL(cardX, SET_SUB_TOP, cardW, SET_SUB_H), 12, gray(1, 0.06), 1)
-        func subRow(_ i: Int, _ view: AccountView, _ choices: [Double]) {
+        let money = historyMoneyRows(settings.subscriptions)
+        func subRow(_ i: Int, _ subscription: HistorySubscription, _ choices: [Double]) {
             let rowTop = SET_SUB_TOP + CGFloat(i) * SET_ROW_H
-            let product = view.product, label = view.caption.isEmpty ? (view.product == "claude" ? "Claude" : "Codex") + tr(" · не указан", " · unlabelled") : view.caption
-            let cur = renderedSubscriptionPrice(view)
+            let label = subscription.title, row = money[i]
+            let available = !row.monthly.isEmpty
+            let cur = resolvedHistorySubscriptionPrice(subscription, in: settings.subscriptions)
             text(fitAttr(label, maxW: 113) { attr($0, 11, .regular, textHi) }, x: cardX + 14, topY: rowTop + (SET_ROW_H - 13) / 2 - 1)
             let f = ctFont(11, .medium)
             let widths = choices.map { ceil(lineWidth(CTLineCreateWithAttributedString(ctAttr("$\(Int($0))", f, cg(.white))))) + 14 }
@@ -6599,17 +6667,18 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let pillH: CGFloat = 22, top = rowTop + (SET_ROW_H - pillH) / 2
             for (j, c) in choices.enumerated() {
                 let r = rectTL(x, top, widths[j], pillH)
-                let on = abs(cur.usd - c) < 0.5
+                let on = available && abs(cur.usd - c) < 0.5
                 roundFill(r, 6, on ? (cur.estimated ? gray(1, 0.12) : gray(1, 0.18)) : gray(1, 0.06))
                 if on, cur.estimated { roundStroke(r, 6, gray(1, 0.25), 1) }
                 text(attr("$\(Int(c))", 11, on ? .semibold : .medium, on ? textHi : textMid), x: r.midX, topY: top + 5, align: 1)
-                hits.append(Hit(id: "accountsub:\(remoteAccountID(view)):\(Int(c))", rect: r, tooltip: label + (cur.estimated ? tr(" · оценка", " · estimate") : "")))
+                hits.append(Hit(id: "productsub:\(subscription.product):\(Int(c))", rect: r,
+                    tooltip: label + (row.monthly.isEmpty ? "" : " · " + row.monthly) + subscriptionMigrationNote(subscription)))
                 x += widths[j] + 4
             }
         }
-        let priced = settings.views.filter { !remoteAccountIsHidden($0, hidden: hiddenAccounts()) }
-        for (i, view) in priced.enumerated() {
-            subRow(i, view, view.product == "claude" ? [20, 100, 200] : [8, 20, 100, 200])
+        let priced = settings.subscriptions
+        for (i, subscription) in priced.enumerated() {
+            subRow(i, subscription, subscription.product == "claude" ? [20, 100, 200] : [8, 20, 100, 200])
             if i + 1 < priced.count { hdiv(cardX + 14, cardX + cardW, SET_SUB_TOP + CGFloat(i + 1) * SET_ROW_H) }
         }
     }
@@ -7598,13 +7667,11 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                 } else if h.id.hasPrefix("histsubscription:") {
                     UserDefaults.standard.set(String(h.id.dropFirst(17)), forKey: "advHistProduct")
                     resizeToContent()
-                } else if h.id.hasPrefix("accountsub:") {
-                    let value = String(h.id.dropFirst(11))
-                    if let split = value.lastIndex(of: ":"), let price = Double(value[value.index(after: split)...]) {
-                        var overrides = UserDefaults.standard.object(forKey: "accountSubscriptionUSD") as? [String: Double] ?? [:]
-                        overrides[String(value[..<split])] = price
-                        UserDefaults.standard.set(overrides, forKey: "accountSubscriptionUSD")
-                        needsDisplay = true
+                } else if h.id.hasPrefix("productsub:") {
+                    let parts = h.id.dropFirst(11).split(separator: ":")
+                    if parts.count == 2, let price = Double(parts[1]) {
+                        setProductSubscriptionPrice(String(parts[0]), usd: price)
+                        resizeToContent()
                     }
                 } else if h.id.hasPrefix("retryquota:") {
                     onRefreshProduct?(String(h.id.dropFirst(11)))
@@ -8967,6 +9034,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (Re)build just the menu-bar image — used by render() and by the update badge refresh.
     func applyTrayImage(_ claude: LimitData, _ codex: LimitData) {
         let frame = captureAccountFrame(claude, codex, now: Date())
+        migrateProductSubscriptionPrices(frame.subscriptions ?? [])
         let previousFrame = REMOTE_ACCOUNT_FRAME
         REMOTE_ACCOUNT_FRAME = frame
         defer { REMOTE_ACCOUNT_FRAME = previousFrame }
@@ -9702,6 +9770,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     }
     check(runRemoteLimitsC3BPreviews(previewDir: previewDir, files: &previewFiles, check: check) == 209,
           "C3-10 209 C3-B preview scenes")
+    check(runRemoteLimitsC5AppKitTests(previewDir: previewDir, files: &previewFiles, check: check) == 4,
+          "C5-25/26 actual render checks and four mockup previews")
     watchdog.begin("Manual refresh UI setup")
     let manualEncoder = JSONEncoder(); manualEncoder.outputFormatting = [.sortedKeys]
     let manualIndexBefore = try! manualEncoder.encode(UsageLogs.shared.snapshot())
@@ -9848,7 +9918,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 } else {
                     let views = simpleCardViews(cl, cx)
                     let at = remoteRenderNow()
-                    let layout = remotePanelLayout(views: views, style: .simple, now: at)
+                    let layout = remoteSimplePanelLayout(views: views, now: at)
                     let heights = remoteSimplePanelHeights(views: views, now: at)
                     manualCheck(height == CGFloat(layout.windowHeight)
                                 && height == CGFloat(heights.windowBaselineHeight + heights.headerExtra + heights.footerHeight),

@@ -715,8 +715,10 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         for view in ["simple-narrow", "advanced"] { expected.insert("c5-freshness-\(language)-\(view).png") }
         for variant in ["late", "old"] { expected.insert("c5-freshness-\(variant)-\(language)-simple-wide.png") }
     }
+    expected.formUnion(["c5-26-advanced-ru.png", "c5-26-advanced-en.png",
+        "c5-26-one-subscription-ru.png", "c5-26-long-labels-ru.png"])
     let registered = Set(files)
-    expect(expected.count == 209, "matrix has 209 specified scenes")
+    expect(expected.count == 213, "matrix has 213 specified scenes")
     expect(expected.isSubset(of: registered), "complete V5/manual/layout/history/data/tray/settings matrix")
     expect(files.count == registered.count, "registered filenames are unique")
     expect(files.allSatisfy { !$0.isEmpty && URL(fileURLWithPath: $0).lastPathComponent == $0 && $0.hasSuffix(".png") },
@@ -742,4 +744,245 @@ func c3VerifyPreviewManifest(previewDir: URL, files: [String], check: (Bool, Str
         expect(false, "manifest/PNG verification: " + error.localizedDescription)
     }
     return failures
+}
+
+/// C5-25/26 run only after NSApplication registration. Every rectangle/text width
+/// below is reported by the real drawAdvanced bitmap pass, never a layout replica.
+@discardableResult
+func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check: (Bool, String) -> Void) -> Int {
+    guard CommandLine.arguments.contains("--subscriptions-selftest"), UserDefaults.standard is MemorySelfTestDefaults else {
+        check(false, "C5-25/26 require isolated AppKit selftest defaults"); return 0
+    }
+    let defaults = UserDefaults.standard, saved = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+    let savedProductPrice = defaults.object(forKey: "productSubscriptionUSD")
+    defer {
+        defaults.set(savedProductPrice, forKey: "productSubscriptionUSD")
+        defaults.setVolatileDomain(saved, forName: UserDefaults.argumentDomain)
+    }
+    let now = c3PreviewDate("2026-11-01T09:34:00Z"), zone = TimeZone(secondsFromGMT: 3 * 3600)!
+    var calendar = Calendar(identifier: .gregorian); calendar.timeZone = zone
+    func fixture() -> [AccountView] {
+        // Limits and the final seven bars come from the accepted mockup. The
+        // preceding days complete its monthly totals ($7000 / $6270) and active-day amounts.
+        var claude = c3PreviewView(product: "claude", identity: 94, machines: ["vps"])
+        claude.caption = ""; claude.tier = nil; claude.data.plan = "max"
+        claude.data.session = 2; claude.data.weekly = 29
+        claude.data.sessionReset = now.addingTimeInterval(5 * 3600 * (1 - 0.203))
+        claude.data.weeklyReset = now.addingTimeInterval(168 * 3600 * (1 - 0.285))
+        claude.data.scoped = ScopedLimit(name: "Fable", percent: 43, reset: claude.data.weeklyReset, severity: nil)
+        var codex = c3PreviewView(product: "codex", identity: 95, machines: ["macbook", "vps"])
+        codex.caption = ""; codex.data.session = nil; codex.data.sessionReset = nil
+        codex.data.weekly = 77; codex.data.resetCredits = 1
+        codex.data.weeklyReset = now.addingTimeInterval(168 * 3600 * (1 - 0.613))
+        let last7: [Double] = [26, 23, 213, 152, 113, 317, 153]
+        let astra7: [Double] = [25, 22, 180, 120, 85, 210, 108]
+        func usage(_ usd: Double, model: String, turns: Int = 1) -> DayModelUsage {
+            var unit = DayModelUsage(); unit.input = 1_000_000
+            var value = DayModelUsage(); value.input = Int((usd / (apiCost(model, unit) ?? 1) * 1_000_000).rounded())
+            value.turns = turns; return value
+        }
+        for i in 0..<35 {
+            let date = calendar.date(byAdding: .day, value: i - 34, to: now)!
+            let f = DateFormatter(); f.timeZone = zone; f.dateFormat = "yyyy-MM-dd"
+            let key = f.string(from: date)
+            if i >= 15 { claude.usageDays[key] = ["claude-opus": usage(350, model: "claude-opus")] }
+            if i >= 28 {
+                codex.usageDays[key] = ["gpt-6-astra": usage(astra7[i - 28], model: "gpt-6-astra"),
+                    "gpt-6.1-sol": usage(last7[i - 28] - astra7[i - 28], model: "gpt-6.1-sol", turns: 0)]
+            } else if i != 5 && i != 24 {
+                codex.usageDays[key] = ["gpt-6.1-sol": usage((6270 - last7.reduce(0, +)) / 26, model: "gpt-6.1-sol")]
+            }
+        }
+        for view in [claude, codex] { check(view.usageDays.count > 0, "C5-26 mockup has actual usage") }
+        for viewIndex in 0..<2 {
+            if viewIndex == 0 {
+                claude.data.asOf = now; claude.data.source?.asOf = now; claude.data.source?.attemptAt = now
+                claude.data.source?.lastSeenAt = now; claude.data.source?.freshUntil = now.addingTimeInterval(3600)
+            } else {
+                codex.data.asOf = now; codex.data.source?.asOf = now; codex.data.source?.attemptAt = now
+                codex.data.source?.lastSeenAt = now; codex.data.source?.freshUntil = now.addingTimeInterval(3600)
+            }
+        }
+        claude.data.source?.nextAt = now.addingTimeInterval(1800); claude.data.source?.interval = 1800
+        claude.sourceReadings = [RemoteMachineReading(machineId: "c5-vps", name: "vps", asOf: now, interval: 1800, isLocal: false)]
+        codex.isLocal = true; codex.data.source = nil
+        codex.sourceReadings = [RemoteMachineReading(machineId: "c5-macbook", name: "macbook", asOf: now, interval: 1800, isLocal: true),
+            RemoteMachineReading(machineId: "c5-vps", name: "vps", asOf: now.addingTimeInterval(-2701), interval: 1800, isLocal: false)]
+        return [claude, codex]
+    }
+    var written = 0
+    struct Rendered {
+        var height: CGFloat
+        var elements: [AdvancedDrawElement]
+        var hits: [Hit]
+        func element(_ id: String) -> AdvancedDrawElement? { elements.first { $0.id == id } }
+    }
+    func render(_ views: [AccountView], language: String, expanded: Bool = true, name: String? = nil,
+                extra: [String: Any] = [:]) -> Rendered? {
+        AppKitSelfTestWatchdog.shared.begin("C5-25/26 " + (name ?? language))
+        var preferences = saved
+        preferences["lang"] = language; preferences["advanced"] = true
+        preferences["advHistExpanded"] = expanded; preferences["advHistProduct"] = "codex"
+        preferences["autoPoll"] = true; preferences["interval"] = 1800
+        preferences["subClaude"] = 200.0; preferences["subCodex"] = 200.0
+        preferences["monitor_claude"] = views.contains { $0.product == "claude" }
+        preferences["monitor_codex"] = views.contains { $0.product == "codex" }
+        preferences["productSubscriptionUSD"] = [String: Double](); preferences["accountSubscriptionUSD"] = [String: Double]()
+        preferences["hiddenAccounts"] = [String](); preferences["localAccountCaptions"] = [String: String]()
+        for (key, value) in extra { preferences[key] = value }
+        defaults.setVolatileDomain(preferences, forName: UserDefaults.argumentDomain)
+        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+            allViews: views, visibleViews: views, displayedViews: views)
+        frame.subscriptions = historySubscriptions(views: views, index: historyPreviewIndex(views), now: now, language: language)
+        return withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) {
+            let empty = LimitData(present: false), height = advancedHeight(empty, empty)
+            guard let ctx = bitmapContext(720, Int(ceil(height * 2))) else {
+                check(false, "C5-26 bitmap allocation"); return nil
+            }
+            ctx.scaleBy(x: 2, y: 2)
+            var elements: [AdvancedDrawElement] = []
+            let hits = drawAdvanced(ctx, size: CGSize(width: 360, height: height), claude: empty, codex: empty,
+                interval: 1800, updated: now, record: { elements.append($0) })
+            check(hits.allSatisfy { $0.rect.minY >= 0 && $0.rect.maxY <= height }, "C5-26 actual hits inside bitmap \(language)")
+            if let name = name, let image = ctx.makeImage(),
+               let destination = CGImageDestinationCreateWithURL(previewDir.appendingPathComponent(name) as CFURL, "public.png" as CFString, 1, nil) {
+                CGImageDestinationAddImage(destination, image, nil)
+                let ok = CGImageDestinationFinalize(destination)
+                check(ok && image.width == 720 && image.height == Int(ceil(height * 2)), "C5-26 @2x PNG " + name)
+                if ok { files.append(name); written += 1 }
+            } else if name != nil { check(false, "C5-26 cannot save preview") }
+            return Rendered(height: height, elements: elements, hits: hits)
+        }
+    }
+    func close(_ a: CGFloat?, _ b: CGFloat) -> Bool { a.map { abs($0 - b) <= 0.5 } ?? false }
+    func validate(_ result: Rendered, language: String, long: Bool = false, one: Bool = false) {
+        let rows = one ? ["codex"] : ["claude", "codex"]
+        let history = result.element("history"), selector = result.element("selector"), heading = result.element("history:heading")
+        check(close(history?.rect.height, (one ? 172 : 187) + (long ? 22 : 0)), "C5-26 \(language): actual history height")
+        check(close(selector?.rect.maxY, (heading?.rect.maxY ?? 0) - (long ? 22 : 0)), "C5-26 \(language): actual selector top == hy (+22 for long L)")
+        let segments = result.hits.filter { $0.id.hasPrefix("histsubscription:") }
+        check(segments.count == rows.count && Set(segments.map { $0.rect.minY }).count == 1,
+              "C5-26 \(language): actual selector has exactly one row of product tabs")
+        for product in rows {
+            let segment = result.element("segment:" + product)
+            check(segment?.fontSize == 10.5 && (long ? segment?.text?.hasSuffix("…") == true : segment?.text == (product == "claude" ? "Claude Max" : "Codex Pro")),
+                  "C5-26 \(language): actual segment text, fixed 10.5pt font and ellipsis")
+            if long { check(segments.first { $0.id == "histsubscription:" + product }?.tooltip?.count == 32, "C5-26 full L in real tooltip/AX hit") }
+            for (column, edge) in [CGFloat(190), 283, 334].enumerated() {
+                check(close(result.element("money:\(product):\(column)")?.rect.maxX, edge), "C5-26 \(language): actual table right edge \(edge)")
+            }
+            check(result.element("moneytitle:" + product)?.fontSize == 10.5, "C5-26 actual table title font")
+        }
+        if !one {
+            let a = result.element("money:claude:0"), b = result.element("money:codex:0")
+            check(close(a.map { $0.rect.maxY - (b?.rect.maxY ?? 0) }, 15), "C5-26 \(language): drawn table rows are 15pt apart")
+        }
+        let notes = result.elements.filter { $0.id.hasPrefix("note:") }
+        check(notes.count == 1 && notes.allSatisfy { $0.rect.maxX <= 334.5 && $0.rect.minY >= 0 && !($0.text ?? "").contains("…") },
+              "C5-26 \(language): actual active-day note fits fully")
+        let note = notes.first?.text ?? ""
+        check(long ? (note.contains("Claude ≈") && note.contains("Codex ≈") && !note.contains("Ж"))
+                   : (note.contains("Codex Pro") && (one || note.contains("Claude Max"))), "C5-26 \(language): full names before product-name compression")
+        for id in ["footer", "credit"] {
+            check(result.element(id).map { $0.rect.minY >= 0 && $0.rect.maxY <= result.height } == true,
+                  "C5-26 \(language): actual \(id) entirely inside window")
+        }
+        check(result.element("segment:codex")?.selected == true, "C5-26 actual draw selects Codex Pro")
+    }
+    for language in ["ru", "en"] {
+        let views = fixture()
+        if let main = render(views, language: language, name: "c5-26-advanced-\(language).png") {
+            check(close(main.height, 722), "C5-26 \(language): advancedHeight → drawAdvanced window is 722pt")
+            check(close(main.element("card:0")?.rect.height, 226) && close(main.element("card:1")?.rect.height, 176),
+                  "C5-25 \(language): actual drawn cards are 226/176 without blank footer")
+            validate(main, language: language)
+            var long = views
+            for i in long.indices { long[i].customCaption = String(repeating: "Ж", count: 32); long[i].caption = long[i].customCaption! }
+            if let drawn = render(long, language: language, name: language == "ru" ? "c5-26-long-labels-ru.png" : nil) {
+                check(close(drawn.height - main.height, 22), "C5-26 \(language): real long selector grows whole window by22")
+                validate(drawn, language: language, long: true)
+            }
+        }
+        if let one = render([views[1]], language: language, name: language == "ru" ? "c5-26-one-subscription-ru.png" : nil) {
+            validate(one, language: language, one: true)
+        }
+        var costly = views
+        for i in costly.indices {
+            costly[i].customCaption = String(repeating: "Ж", count: 32)
+            for day in Array(costly[i].usageDays.keys) {
+                for model in Array(costly[i].usageDays[day]!.keys) { costly[i].usageDays[day]![model]!.input *= 1_000_000_000 }
+            }
+        }
+        if let drawn = render(costly, language: language) {
+            let notes = drawn.elements.filter { $0.id.hasPrefix("note:") }
+            check(notes.count > 1 && notes.allSatisfy { $0.rect.maxX <= 334.5 && !($0.text ?? "").contains("…") }
+                  && notes.contains { ($0.text ?? "").hasPrefix("Codex ≈ $") }, "C5-26 actual CoreText overflow moves the whole product item")
+            for i in notes.indices.dropFirst() { check(close(notes[i - 1].rect.maxY - notes[i].rect.maxY, 12), "C5-26 actual wrapped note step12") }
+            check(close(drawn.height, 722 + 22 + CGFloat(notes.count - 1) * 12)
+                  && (drawn.element("credit")?.rect.minY ?? -1) >= 0, "C5-26 wrapped text grows real window with footer")
+        }
+        var offline = views
+        for i in offline.indices {
+            offline[i].isLocal = false; offline[i].state = .offline
+            var source = RemoteSource(machineId: "c5-vps", machineName: "vps")
+            source.asOf = now; source.lastSeenAt = now.addingTimeInterval(-3600); source.freshUntil = now.addingTimeInterval(3600)
+            offline[i].data.source = source
+        }
+        if let drawn = render(offline, language: language) {
+            check(close(drawn.element("card:0")?.rect.height, 244) && close(drawn.element("card:1")?.rect.height, 194)
+                  && drawn.hits.filter { $0.id.hasPrefix("quotafeedback:") }.count == 2,
+                  "C5-25 \(language): real status footer adds exactly18pt")
+        }
+        for count in 2...4 {
+            var stack = views
+            while stack.count < count {
+                var other = views[1]; other.historyKey += "-\(stack.count)"; other.label = other.historyKey; other.usageDays = [:]
+                stack.append(other)
+            }
+            if let drawn = render(stack, language: language, expanded: false) {
+                let cards = drawn.elements.filter { $0.id.hasPrefix("card:") }
+                check(cards.count == count && cards.allSatisfy { $0.rect.minX == 15 && $0.rect.width == 330 }, "C3-06 actual Advanced stack count/width")
+                for i in cards.indices.dropFirst() { check(close(cards[i - 1].rect.minY - cards[i].rect.maxY, 5), "C3-06 actual5pt gap") }
+                check(!drawn.hits.contains { $0.id.hasPrefix("histsubscription:") || $0.id.hasPrefix("moneysubscription:") }
+                      && drawn.element("history")?.rect.height == 35, "C3-20 actual collapsed history has no tabs/table")
+            }
+        }
+    }
+    // P1: two saved account prices are exposed as one product price/settings row.
+    for language in ["ru", "en"] {
+        var local = fixture()[1]; local.isLocal = true; local.data.source = nil
+        local.customCaption = language == "ru" ? "Работа" : "Work"; local.caption = local.customCaption!
+        var older = local; older.isLocal = false; older.historyKey += "-old"; older.label = older.historyKey
+        older.data.asOf = now.addingTimeInterval(-60); older.customCaption = nil; older.caption = ""
+        let accounts = [older, local], legacy = [remoteAccountID(older): 200.0, remoteAccountID(local): 100.0]
+        _ = render(accounts, language: language, extra: ["accountSubscriptionUSD": legacy])
+        // Allow the real setter to change the RAM value rather than shadowing it
+        // with the renderer fixture's argument-domain reset.
+        var arguments = defaults.volatileDomain(forName: UserDefaults.argumentDomain)
+        arguments.removeValue(forKey: "productSubscriptionUSD")
+        defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
+        defaults.removeObject(forKey: "productSubscriptionUSD")
+        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+            allViews: accounts, visibleViews: accounts, displayedViews: accounts)
+        frame.subscriptions = historySubscriptions(views: accounts, index: historyPreviewIndex(accounts), now: now, language: language)
+        withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) {
+            migrateProductSubscriptionPrices(frame.subscriptions!)
+            let row = historyMoneyRows(frame.subscriptions!)[0]
+            let height = settingsTotalHeight(AboutState())
+            guard let ctx = bitmapContext(720, Int(ceil(height * 2))) else { check(false, "C5-24 settings bitmap"); return }
+            ctx.scaleBy(x: 2, y: 2)
+            let hits = drawSettings(ctx, size: CGSize(width: 360, height: height), about: AboutState())
+                .filter { $0.id.hasPrefix("productsub:") }
+            check(hits.count == 4 && Set(hits.map { $0.rect.minY }).count == 1
+                  && hits.allSatisfy { ($0.tooltip ?? "").hasPrefix(row.title + " · " + row.monthly)
+                      && !($0.tooltip ?? "").contains("unlabelled") && !($0.tooltip ?? "").contains("не указан") },
+                  "C5-24 P1 actual settings: one product row has history's complete title and price")
+            check(row.monthly.contains("$100") && hits.allSatisfy { ($0.tooltip ?? "").contains("$200") },
+                  "C5-24 P1 migrated price wins and retained conflicting price is disclosed")
+            setProductSubscriptionPrice("codex", usd: 200)
+            check(historyMoneyRows(frame.subscriptions!)[0].monthly.contains("$200"), "C5-24 P1 settings selection immediately changes history")
+        }
+    }
+    check(written == 4, "C5-26 four actual Advanced @2x PNGs saved")
+    return written
 }
