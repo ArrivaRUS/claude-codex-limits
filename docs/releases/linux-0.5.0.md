@@ -74,5 +74,5 @@ Source: `ef75605` on `main`. Linux CI: [run 41402703991](https://github.com/Arri
 
 SHA-256 (`claude-codex-limits_0.5.0_all.deb`):
 ```text
-<fill in after building the DEB>
+d9ae243d46160ff4bfe8f69b6383821098772ed51369ff9aee01c9f9681c1cf7
 ```

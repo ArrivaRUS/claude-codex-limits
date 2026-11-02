@@ -1,3 +1,16 @@
+## 2026-11-02 — Выпуск macOS 3.4.0 и Linux 0.5.0 опубликован (владелец: «да»)
+
+На пакет выпуска владелец ответил «да» (02.11 ~09:50 МСК).
+
+1. PR #9 `remote-limits` → `main` слит перемоткой (`git push origin remote-limits:main`, 7637863 → ef75605): хэши сохранены, GitHub отметил PR слитым. Linux CI на `main` `ef75605` — 822 теста, OK.
+2. **macOS 3.4.0** ([v3.4.0](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/v3.4.0), Latest, цель `ef75605`). DMG собрал владелец на маке из `main` командой `scripts/make-dmg.sh`: `signing: stable (leaf D61C619C)`, `codesign -dr -` — `certificate leaf`, версия 3.4.0, selftest 0 (AppKit-хвост 7885/0). SHA-256 DMG `61d1298a…a99c`.
+   - `secrets-check` по распакованному app: срабатывания — синтетика тестов (`fixturegist…`, `user:pw` в тесте редиректа, `/Users/alexfixture`) и служебные имена Swift с хэшем-дискриминатором. Id gist, токенов и путей сборочной машины нет; `arrivarus` — только в bundle id.
+3. **Linux 0.5.0** ([linux-v0.5.0](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.0), не Latest) — `linux/packaging/release.sh` на клоне `main` `25e88b4`. SHA-256 DEB `d9ae243d…1cf7`.
+   - `secrets-check` по распакованному DEB: 3 файла (`usage.py`, `auth.py`, `cli.py`) побайтно совпадают с репо, их строки уже разобраны и внесены в `.secrets-allow` (`46a8669`). Id gist нет.
+4. Smoke: оба ассета скачаны со страниц выпусков, SHA совпали с собранными; `releases/latest` → v3.4.0 с DMG — обновлятор 3.2.7 его увидит.
+5. Откат: `gh release delete v3.4.0` вернёт Latest на 3.2.7; ассеты 3.2.7 и 0.4.5 на месте.
+6. Проверка гипотезы PM и свод замера G1–G4 — 14.11 (метки сменились 02.11 07:58 МСК, см. запись B1).
+
 ## 2026-11-01 — T3 B1: пересоздать gist синхронизации (владелец, П4-б)
 
 T3 (`docs/security-remote-limits-t3.md`) дал вердикт FAIL с одним blocker B1. Id секретного gist синка с 12.10 записан в `HEARTBEAT.md` и через ветку `remote-limits` попал в публичный репозиторий. Id gist — это ссылка на чтение: снимки всех машин и вся история ревизий, включая старое имя владельца и hostname. Записать по ссылке нельзя.
