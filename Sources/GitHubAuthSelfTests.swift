@@ -1,8 +1,14 @@
 import Foundation
+#if os(macOS)
+import Security
+import Darwin
+#endif
 
-// Independent issuer and in-memory dependency oracle. This file creates no
+// Independent issuer and in-memory dependency oracle: core tests create no
 // production singleton, URLSession, Keychain, AppDelegate or preferences.
 // The opt-in offline sync harness writes only a UUID-named temporary cache.
+// The separately invoked K341 adapter suite has one macOS integration probe;
+// every real security/native query there is scoped to its fresh temporary keychain.
 // A thrown checkpoint models a stopped owner; it is NOT an OS-fsync/process test.
 private enum GHFixtureError: Error { case stopped, unavailable, busy }
 private enum GHResponseFault {
@@ -49,6 +55,8 @@ private final class GHAuthFixture {
     var stageFault: ((GitHubAuthRef, GitHubCredentialV2) -> GitHubAuthStoreStatus?)?
     var deleteFault: GitHubAuthStoreStatus?
     var persistentDeleteFault: GitHubAuthStoreStatus?
+    var cleanupPreflightFault: ((GitHubAuthRef) -> GitHubAuthStoreStatus?)?
+    var usesSecurityWriter = false
     var lateWrites: [(GitHubAuthRef, GitHubCredentialV2)] = []
     var checkpointAction: [String: () throws -> Void] = [:]
     var failLoad = false
@@ -191,7 +199,10 @@ private final class GHAuthFixture {
             }, interactiveLegacy: { action in
                 guard action.admit({ self.storeTrace.append(("read", GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), true)) }) else { return .locked }
                 return self.interactiveLegacyRead?() ?? self.legacyRead
-            }, storeIdle: { self.idle })
+            }, storeIdle: { self.idle }, cleanupPreflight: { ref in
+                self.storeTrace.append(("attributes", ref, false)); self.record("store_attributes")
+                return self.cleanupPreflightFault?(ref) ?? .success
+            }, usesSecurityWriter: usesSecurityWriter)
         return GitHubAuthOwner(dependencies: deps, clientID: "fixture-client")
     }
     func login(_ owner: GitHubAuthOwner, legacy: Bool = false) -> GitHubAuthResult {
@@ -229,6 +240,13 @@ func runGitHubAuthSelfTests() {
     func isTemporary(_ result: GitHubAuthResult) -> Bool { if case .temporary = result { return true }; return false }
     func isAction(_ result: GitHubAuthResult) -> Bool { if case .actionRequired = result { return true }; return false }
     func isSignedOut(_ result: GitHubAuthResult) -> Bool { if case .signedOut = result { return true }; return false }
+    func checkPermissionGate(_ fixture: GHAuthFixture, _ owner: GitHubAuthOwner, _ label: String) {
+        let operations = fixture.storeTrace.count
+        check(isTemporary(owner.ensureAccess(reason: "restart")), label + " still requires explicit permission")
+        check(fixture.storeTrace.count == operations && owner.snapshot().reason == "permission_required"
+              && owner.keychainRetryDelay() == .infinity && fixture.manifest?.keychainPermissionRequired == true,
+              label + " persisted permission gate suppresses all credential adapters")
+    }
 
     // KEYCHAIN-QUIET: actual helper bootstrap policy with fake native/configure
     // closures. No compiled test path here contains Security, Process or app startup.
@@ -306,6 +324,38 @@ func runGitHubAuthSelfTests() {
         for _ in 0..<3 { f.now += 601; _ = owner.ensureAccess(reason: "wake") }
         check(f.storeTrace.filter { $0.interactive }.count == 1, "denial never schedules interactive retries")
     }
+    // One interactive source read cannot authorize a later quiet candidate
+    // timeout in the same manual pass to schedule more background reads.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        check(isReady(f.login(owner)), "K341-manual quiet read initial login")
+        if let active = f.manifest?.active, let existing = f.items[active] {
+            let candidate = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+            f.manifest!.transition = GitHubAuthTransition(from: active, to: candidate, phase: "prepared")
+            f.manifest!.keychainPermissionRequired = true
+            f.interactiveRead = { ref in ref == active ? .ready(existing) : .locked }
+            f.readForRef = { ref in ref == candidate ? .timeout : nil }
+            f.storeTrace.removeAll()
+            check(isTemporary(owner.retryKeychainAccess()) && owner.snapshot().reason == "permission_required"
+                  && owner.keychainRetryDelay() == .infinity && f.manifest?.keychainPermissionRequired == true,
+                  "K341-manual quiet candidate timeout restores permission latch after successful interactive source")
+            check(f.storeTrace.count == 2 && f.storeTrace[0].ref == active && f.storeTrace[0].interactive
+                  && f.storeTrace[1].ref == candidate && !f.storeTrace[1].interactive,
+                  "K341-manual source uses user permission; candidate timeout is a separate quiet read")
+            f.now += 601
+            checkPermissionGate(f, owner, "K341-manual quiet read after 601 seconds")
+            let restarted = f.owner()
+            checkPermissionGate(f, restarted, "K341-manual quiet read after restart")
+            check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1,
+                  "K341-manual quiet read timeout and suppressed retries spend no issuer grant")
+            f.readForRef = nil
+            check(f.protectedRead(restarted.retryKeychainAccess()) && f.manifest?.active == candidate,
+                  "K341-manual quiet read recovers original prepared candidate through explicit retry")
+            check(f.counts["refresh_request", default: 0] == 1 && f.counts["refresh_consumed", default: 0] == 1
+                  && f.counts["device_flow", default: 0] == 1 && f.manifest?.keychainPermissionRequired != true,
+                  "K341-manual quiet read recovery spends exactly one refresh and clears permission latch")
+        } else { check(false, "K341-manual quiet read active fixture missing") }
+    }
     // A requestStarted transition cannot silently become missing/revoked or issue
     // another OAuth POST merely because the candidate/source needs permission.
     do {
@@ -324,25 +374,80 @@ func runGitHubAuthSelfTests() {
               && f.storeTrace.first { $0.interactive }?.ref == before?.active,
               "missing candidate does not waste permit needed by source generation")
     }
-    // Signed-out explicit cleanup selects one ref. Allow on its read cannot
-    // cascade into UI for its delete or any neighboring generation.
+    // Signed-out cleanup never borrows a manual read permit: metadata and delete
+    // remain quiet for every generation, including an explicit retry.
     do {
         let f = GHAuthFixture(); let owner = f.owner()
         check(isReady(f.login(owner)), "GC permit fixture login")
-        f.readOverride = .locked
+        f.cleanupPreflightFault = { _ in .locked }
         _ = owner.logoutDetailed()
         let refs = f.manifest!.cleanupRefs, epoch = f.manifest!.epoch
-        f.interactiveRead = { _ in .missing }
         f.persistentDeleteFault = .locked
         f.storeTrace.removeAll()
         check(isSignedOut(owner.retryKeychainAccess()), "manual cleanup keeps tombstone")
-        check(f.storeTrace.filter { $0.interactive }.count == 1
-              && f.storeTrace.first { $0.interactive }?.ref == refs.first,
-              "cleanup permits one operation on first selected ref only")
+        check(!f.storeTrace.contains { $0.interactive || $0.operation == "read" }
+              && f.storeTrace.contains { $0.operation == "attributes" },
+              "manual cleanup reaches only quiet metadata, never a secret read or prompt")
         check(Set(f.manifest!.cleanupRefs) == Set(refs) && f.manifest?.epoch == epoch,
               "blocked delete retains every pending ref and tombstone")
         f.now += 601; _ = f.owner().ensureAccess(reason: "startup")
-        check(f.storeTrace.filter { $0.interactive }.count == 1, "cleanup permission never survives restart")
+        check(!f.storeTrace.contains { $0.interactive || $0.operation == "read" }, "cleanup stays quiet across restart")
+    }
+    // beginLogin is manual, but its first probe write is still quiet. A quiet
+    // timeout persists the permission gate; a later successful login probe clears it.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        f.stageFault = { _, credential in credential.kind == "probe" ? .timeout : nil }
+        check(owner.beginLogin() == nil && owner.snapshot().reason == "permission_required"
+              && owner.keychainRetryDelay() == .infinity && f.manifest?.keychainPermissionRequired == true,
+              "K341-login quiet probe timeout persists permission gate despite manual pass")
+        check(f.storeTrace.map { $0.operation } == ["read", "stage"]
+              && !f.storeTrace.contains { $0.interactive } && f.lateWrites.count == 1,
+              "K341-login quiet timed-out probe never launches interactive fallback or readback")
+        f.now += 601
+        checkPermissionGate(f, owner, "K341-login quiet probe after 601 seconds")
+        let restarted = f.owner()
+        checkPermissionGate(f, restarted, "K341-login quiet probe after restart")
+        check(f.counts["device_flow", default: 0] == 0 && f.counts["refresh_request", default: 0] == 0,
+              "K341-login blocked probe and background retries consume no issuer grant")
+
+        f.stageFault = nil; f.releaseLateWrites(); f.storeTrace.removeAll()
+        if let epoch = restarted.beginLogin() {
+            check(restarted.snapshot().state == "loginPending" && restarted.keychainRetryDelay() == nil
+                  && f.manifest?.keychainPermissionRequired != true,
+                  "K341-login successful quiet probe clears persisted and runtime permission gate")
+            check(f.storeTrace.map { $0.operation } == ["read", "stage", "read"]
+                  && !f.storeTrace.contains { $0.interactive },
+                  "K341-login recovery probe succeeds quietly without spending user interaction")
+            let issued = f.issue(explicit: true)
+            check(f.protectedRead(restarted.completeLogin(response: issued.wire, epoch: epoch))
+                  && f.manifest?.epoch == epoch && f.manifest?.transition == nil
+                  && f.manifest?.active != nil && f.manifest?.keychainPermissionRequired != true,
+                  "K341-login recovered probe preserves completeLogin and usable credential publication")
+            check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0
+                  && !f.storeTrace.contains { $0.interactive },
+                  "K341-login recovery spends exactly one explicit grant and persists issued tokens quietly")
+        } else { check(false, "K341-login successful quiet probe failed to begin recovery login") }
+    }
+    // A timeout returned by the actual interactive probe retains its bounded
+    // cooldown instead of being reclassified as a quiet permission timeout.
+    do {
+        let f = GHAuthFixture(); let owner = f.owner()
+        f.stageFault = { _, _ in .locked }
+        f.interactiveStage = { _, _ in .timeout }
+        check(owner.beginLogin() == nil && owner.snapshot().reason == "timeout"
+              && owner.keychainRetryDelay() == 600 && f.manifest?.keychainPermissionRequired != true,
+              "K341-login interactive probe timeout retains bounded timeout gate")
+        check(f.storeTrace.map { $0.operation } == ["read", "stage", "stage"]
+              && f.storeTrace.filter { $0.interactive }.count == 1 && f.storeTrace.last?.interactive == true,
+              "K341-login interactive timeout follows one settled quiet denial with no readback")
+        let operations = f.storeTrace.count
+        f.now += 599
+        check(isTemporary(owner.ensureAccess(reason: "wake")) && f.storeTrace.count == operations
+              && owner.keychainRetryDelay() == 1 && owner.snapshot().reason == "timeout",
+              "K341-login interactive timeout suppresses background adapters until bounded deadline")
+        check(f.counts["device_flow", default: 0] == 0 && f.counts["refresh_request", default: 0] == 0,
+              "K341-login interactive timed-out probe consumes no issuer grant")
     }
     // Only the explicit probe may interact during beginLogin. Denial and delayed
     // completeLogin cannot transfer that permission to issued-token persistence.
@@ -586,7 +691,10 @@ func runGitHubAuthSelfTests() {
         let target = f.manifest?.transition?.to
         check(f.lateWrites.count == 1, "one late candidate writer")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().ensureAccess(reason: "restart")), "late target recovered")
+        let restarted = f.owner()
+        checkPermissionGate(f, owner, "late target after 600 seconds")
+        checkPermissionGate(f, restarted, "late target after restart")
+        check(f.protectedRead(restarted.retryKeychainAccess()), "late target recovered by explicit permission")
         check(f.manifest?.active == target, "late target published")
         check(f.counts["refresh_request", default: 0] == 1, "late no repeat refresh")
     }
@@ -600,7 +708,12 @@ func runGitHubAuthSelfTests() {
         } else { check(false, "probe intent absent") }
         check(f.counts["refresh_request", default: 0] == 0, "probe blocks issuer")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().ensureAccess(reason: "restart")), "probe recovery")
+        let restarted = f.owner()
+        checkPermissionGate(f, owner, "probe after 600 seconds")
+        checkPermissionGate(f, restarted, "probe after restart")
+        check(f.counts["refresh_request", default: 0] == 0, "permission gate keeps probe issuer unspent")
+        check(f.protectedRead(restarted.retryKeychainAccess()), "probe recovery after explicit permission")
+        check(f.counts["refresh_request", default: 0] == 1, "manual probe recovery spends one refresh")
     }
     do {
         let f = GHAuthFixture(); let owner = f.owner(); check(isReady(f.login(owner)), "logout initial login"); f.due()
@@ -817,12 +930,16 @@ func runGitHubAuthSelfTests() {
         let postsAfterTimeout = f.counts["refresh_request", default: 0]
         let retryBefore = f.manifest?.retryAt
         f.now += 599
-        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "uncertain candidate suppressed before exact cooldown boundary")
+        check(isTemporary(owner.ensureAccess(reason: "maintenance")), "uncertain candidate remains suppressed at 599 seconds")
         check(f.counts["store_read", default: 0] == readsAfterTimeout, "no protected-store re-read at 599 seconds")
         check(f.counts["refresh_request", default: 0] == postsAfterTimeout && f.manifest?.retryAt == retryBefore,
               "suppressed candidate leaves issuer budget and durable retry unchanged")
         f.now += 1
-        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "readable uncertain pair can publish validated identity at 600 seconds")
+        checkPermissionGate(f, owner, "readable uncertain writer at 600 seconds")
+        checkPermissionGate(f, f.owner(), "readable uncertain writer after restart")
+        check(f.protectedRead(owner.retryKeychainAccess()), "explicit permission can publish readable uncertain pair without certifying writer settlement")
+        check(f.counts["refresh_request", default: 0] == postsAfterTimeout,
+              "manual readable candidate recovery cannot spend refresh again")
         if let active = f.manifest?.active, let payload = f.items[active] {
             f.lateWrites.append((active, payload))
             _ = f.lateWrites.removeFirst()
@@ -899,12 +1016,16 @@ func runGitHubAuthSelfTests() {
         check(target != nil && f.items[target!] == nil && f.lateWrites.count == 1, "helper still live and candidate currently missing")
         for _ in 0..<4 {
             f.now += 600
-            check(isTemporary(f.owner().ensureAccess(reason: "restart")), "fresh owner waits for unsettled helper")
+            checkPermissionGate(f, f.owner(), "fresh owner waits for unsettled helper")
             check(f.manifest?.transition?.to == target, "unsettled helper durable address preserved")
             check(f.counts["refresh_request", default: 0] == 1 && f.counts["refresh_consumed", default: 0] == 1, "missing toRef cannot spend refresh while helper unsettled")
         }
+        check(isTemporary(f.owner().retryKeychainAccess()), "explicit permission still waits for missing unsettled candidate")
+        check(f.manifest?.transition?.to == target && target.map { f.manifest?.uncertainRefs.contains($0) == true } == true
+              && f.counts["refresh_request", default: 0] == 1 && f.counts["refresh_consumed", default: 0] == 1,
+              "manual retry preserves uncertain target and never spends a second grant")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().ensureAccess(reason: "maintenance")), "settled helper candidate resumes authorized work")
+        check(f.protectedRead(f.owner().retryKeychainAccess()), "settled helper candidate resumes authorized work after explicit retry")
         check(f.manifest?.active == target && f.counts["refresh_request", default: 0] == 1, "helper recovery publishes same result without OAuth reuse")
     }
     // Publication callback is memory-only and must execute while the injected
@@ -1063,11 +1184,14 @@ func runGitHubAuthSelfTests() {
         check(probe != nil && f.items[probe!] != nil && !f.lateWrites.isEmpty, "probe readable before writer acknowledgement")
         for _ in 0..<3 {
             f.now += 600
-            check(isTemporary(f.owner().ensureAccess(reason: "restart")), "readable unsettled probe restart still waits")
+            checkPermissionGate(f, f.owner(), "readable unsettled probe restart still waits")
             check(f.counts["refresh_request", default: 0] == 0, "readable unsettled probe zero OAuth")
         }
+        check(isTemporary(f.owner().retryKeychainAccess()), "explicit permission cannot treat readable unsettled probe as completed")
+        check(probe.map { f.manifest?.uncertainRefs.contains($0) == true } == true && f.counts["refresh_request", default: 0] == 0,
+              "manual probe retry retains uncertain address and zero OAuth before acknowledgement")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().ensureAccess(reason: "maintenance")), "probe acknowledgement resumes protected work")
+        check(f.protectedRead(f.owner().retryKeychainAccess()), "probe acknowledgement and explicit retry resume protected work")
         check(f.counts["refresh_request", default: 0] == 1, "settled preflight grants one refresh")
     }
     // New permit journals can prove no helper invocation; old uncertain refs
@@ -1155,14 +1279,18 @@ func runGitHubAuthSelfTests() {
         let posts = f.counts["refresh_request", default: 0]
         let epoch = f.manifest?.epoch
         let retry = f.manifest?.retryAt
-        check(owner.keychainRetryDelay() == 600, "cooldown deadline from failure completion")
+        let needsPermission: Bool
+        if case .timeout = fault { needsPermission = true } else { needsPermission = false }
+        check(owner.keychainRetryDelay() == (needsPermission ? .infinity : 600),
+              "background read timeout requires permission; other failures have bounded cooldown")
         f.now += 86400 // advancing wall clock must not admit a Keychain request
         check(isTemporary(owner.ensureAccess(reason: "startup")), "wall forward does not bypass monotonic cooldown")
         f.now -= 172800 // nor may rollback extend it indefinitely
         check(isTemporary(owner.ensureAccess(reason: "maintenance")), "wall rollback does not bypass cooldown")
         f.monotonicNow = 1599
         check(isTemporary(owner.ensureAccess(reason: "background_sync")), "multiple background callers suppressed at 599")
-        check(owner.keychainRetryDelay() == 1, "relative monotonic delay independent of wall clock")
+        check(owner.keychainRetryDelay() == (needsPermission ? .infinity : 1),
+              "permission gate and bounded monotonic delay are independent of wall clock")
         check(f.counts["store_read", default: 0] == reads && f.counts["store_stage", default: 0] == stages
               && f.counts["store_delete_attempt", default: 0] == deletes, "suppressed operation never touches any protected-store adapter")
         check(f.counts["refresh_request", default: 0] == posts && f.counts["device_flow", default: 0] == 1,
@@ -1170,9 +1298,17 @@ func runGitHubAuthSelfTests() {
         check(f.manifest?.epoch == epoch && f.manifest?.retryAt == retry && f.manifest?.signedOut == false,
               "access cooldown does not rewrite issuer backoff or sign out")
         f.monotonicNow = 1600; f.readOverride = nil
-        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "automatic access recovers at exact monotonic boundary")
-        check(f.counts["store_read", default: 0] > reads && owner.keychainRetryDelay() == nil,
-              "successful protected-store access clears runtime cooldown")
+        if needsPermission {
+            f.monotonicNow = 1_000_000
+            check(isTemporary(owner.ensureAccess(reason: "maintenance")) && f.counts["store_read", default: 0] == reads,
+                  "elapsed time never launches another background reader after timeout")
+            check(owner.snapshot().reason == "permission_required", "background timeout names permission recovery")
+            check(f.protectedRead(owner.retryKeychainAccess()), "successful explicit read releases timeout permission gate")
+        } else {
+            check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "automatic access recovers at exact monotonic boundary")
+        }
+        check((needsPermission || f.counts["store_read", default: 0] > reads) && owner.keychainRetryDelay() == nil,
+              "successful permitted protected-store access clears runtime gate")
     }
     do {
         let f = GHAuthFixture(); f.monotonicNow = 1000
@@ -1191,21 +1327,23 @@ func runGitHubAuthSelfTests() {
         check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
               "explicit retry does not replace login or consume refresh")
     }
-    // Security P2: an explicit signed-out retry must bypass both the storage
-    // cooldown and the GC wall-clock throttle without opening a device flow.
+    // Explicit signed-out retry bypasses the separate GC throttle without
+    // reading credentials or opening a device flow.
     for wallShift: Double in [1, -3600] {
         let f = GHAuthFixture(); f.monotonicNow = 1000
         let owner = f.owner(); check(isReady(f.login(owner)), "signed-out retry initial login")
-        f.readOverride = .locked
+        f.cleanupPreflightFault = { _ in .locked }
         let result = owner.logoutDetailed()
         check(result.accessDisabled && f.manifest?.cleanupRefs.isEmpty == false, "signed-out retry preserves pending cleanup")
         let epoch = f.manifest?.epoch, reads = f.counts["store_read", default: 0]
-        f.now += wallShift; f.monotonicNow = 1001; f.readOverride = nil
+        let attributes = f.counts["store_attributes", default: 0]
+        f.now += wallShift; f.monotonicNow = 1001; f.cleanupPreflightFault = nil
         check(isSignedOut(owner.ensureAccess(reason: "background_sync")), "signed-out background remains disabled")
         check(f.counts["store_read", default: 0] == reads, "signed-out background respects gate")
         check(isSignedOut(owner.retryKeychainAccess()), "explicit signed-out retry remains disabled")
-        check(f.counts["store_read", default: 0] > reads && f.manifest?.cleanupRefs.isEmpty == true,
-              "manual cleanup bypasses recent or rolled-back wall clock")
+        check(f.counts["store_read", default: 0] == reads && f.counts["store_attributes", default: 0] > attributes
+              && f.manifest?.cleanupRefs.isEmpty == true,
+              "manual cleanup bypasses recent or rolled-back clock using metadata only")
         check(f.manifest?.epoch == epoch && f.manifest?.active == nil && f.items.isEmpty,
               "manual cleanup retains tombstone and removes stored fixture items")
         check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
@@ -1228,7 +1366,10 @@ func runGitHubAuthSelfTests() {
         defaults.set(Date(), forKey: "syncDiscoveredAt")
         var events: [String] = [], activeReads = 0
         f.readForRef = { ref in
-            if ref == f.manifest?.active { activeReads += 1; return nil }
+            if ref == f.manifest?.active { activeReads += 1 }
+            return nil
+        }
+        f.cleanupPreflightFault = { ref in
             guard f.manifest?.cleanupRefs.contains(ref) == true else { return nil }
             events.append("cleanup")
             check(defaults.object(forKey: "syncLastOkAt") != nil && FileManager.default.fileExists(atPath: remote.path),
@@ -1258,16 +1399,374 @@ func runGitHubAuthSelfTests() {
             check(cache?.authEpoch == f.manifest?.epoch && cache?.authUserID == "1001", "published cache bound to current account")
             check(sync.ui.phase == .on && sync.ui.lastSync != nil && sync.ui.lastError == nil,
                   "optional GC failure cannot erase healthy sync publication")
-            check(owner.keychainRetryDelay() == 600 && sync.ui.keychainRetryAvailable, "post-publication GC failure still arms cooldown")
-            let reads = f.counts["store_read", default: 0], previousEvents = events
-            sync.syncSynchronously(force: true)
-            check(events == previousEvents && f.counts["store_read", default: 0] == reads,
-                  "next sync during cooldown performs no store or API work")
+            check(owner.keychainRetryDelay() == nil && !sync.ui.keychainRetryAvailable,
+                  "post-publication GC failure never arms the credential gate or recovery action")
+            let reads = f.counts["store_read", default: 0]
+            let attributes = f.counts["store_attributes", default: 0]
+            events.removeAll(); sync.syncSynchronously(force: true)
+            check(events == ["GET", "PATCH"] && f.counts["store_read", default: 0] > reads
+                  && f.counts["store_attributes", default: 0] == attributes,
+                  "next sync remains healthy while only optional cleanup respects its own timer")
         }
         check(f.counts["device_flow", default: 0] == 1 && f.counts["refresh_request", default: 0] == 0,
               "three healthy syncs with GC faults never replace login or consume grants")
     }
 #endif
+    runGitHubKeychain341OwnerSelfTests(check: check)
     print("AUTH SELFTEST: \(checks) checks, \(failed) failures (synthetic dependencies only)")
     if failed > 0 { exit(1) }
+}
+
+// 3.4.1 contract checks use only the independent in-memory issuer/store oracle.
+// No adapter in this group can touch a real Keychain, account, log or API.
+func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
+    func ready(_ value: GitHubAuthResult) -> Bool { if case .ready = value { return true }; return false }
+    func temporary(_ value: GitHubAuthResult) -> Bool { if case .temporary = value { return true }; return false }
+
+    for status in [GitHubAuthStoreStatus.locked, .timeout, .unreachable, .failed, .inputTooLarge] {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-GC initial synthetic login")
+        initial.cleanupRetiredCredentials()
+        guard let active = f.manifest?.active, var old = f.items[active] else {
+            check(false, "K341-GC active fixture missing"); continue
+        }
+        let retired = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        old.generation = retired.generation; f.items[retired] = old
+        f.manifest!.cleanupRefs = [retired]; f.monotonicNow = 1000
+        f.cleanupPreflightFault = { ref in ref == retired ? status : nil }
+        let owner = f.owner(); f.storeTrace.removeAll()
+        owner.cleanupRetiredCredentials()
+        check(f.storeTrace.count == 1 && f.storeTrace[0].operation == "attributes"
+              && !f.storeTrace[0].interactive && f.storeTrace[0].ref == retired,
+              "K341-GC failed preflight performs only exact-ref quiet metadata")
+        check(owner.keychainRetryDelay() == nil && f.manifest?.active == active
+              && f.manifest?.cleanupRefs.contains(retired) == true,
+              "K341-GC metadata failure retains retired address without blocking active")
+        check(ready(owner.ensureAccess(reason: "background_sync")), "K341-GC healthy active remains readable immediately")
+        let attrs = f.counts["store_attributes", default: 0]
+        f.now += 86400; f.monotonicNow = 1059
+        owner.cleanupRetiredCredentials()
+        check(f.counts["store_attributes", default: 0] == attrs, "K341-GC separate monotonic timer ignores wall jump")
+        f.cleanupPreflightFault = nil; f.monotonicNow = 1060
+        f.storeTrace.removeAll(); owner.cleanupRetiredCredentials()
+        check(f.storeTrace.map { $0.operation } == ["attributes", "delete"]
+              && !f.storeTrace.contains { $0.interactive }, "K341-GC exact timer permits quiet metadata and native delete, zero secret reads")
+        check(f.manifest?.cleanupRefs.isEmpty == true && f.items[retired] == nil
+              && owner.keychainRetryDelay() == nil, "K341-GC successful retry clears only cleanup")
+    }
+    for status in [GitHubAuthStoreStatus.locked, .timeout, .unreachable, .failed] {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-delete initial synthetic login")
+        initial.cleanupRetiredCredentials()
+        guard let active = f.manifest?.active, var old = f.items[active] else {
+            check(false, "K341-delete active fixture missing"); continue
+        }
+        let retired = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+        old.generation = retired.generation; f.items[retired] = old; f.manifest!.cleanupRefs = [retired]
+        f.persistentDeleteFault = status
+        let owner = f.owner(); f.storeTrace.removeAll(); owner.cleanupRetiredCredentials()
+        check(f.storeTrace.map { $0.operation } == ["attributes", "delete"]
+              && !f.storeTrace.contains { $0.interactive }, "K341-delete failure uses quiet metadata/delete without secret read")
+        check(owner.keychainRetryDelay() == nil && ready(owner.ensureAccess(reason: "background_sync")),
+              "K341-delete failure never poisons credential gate")
+        f.due()
+        check(ready(owner.ensureAccess(reason: "maintenance")) && f.counts["refresh_request", default: 0] == 1,
+              "K341-delete optional cleanup failure cannot prevent due renewal")
+    }
+    do {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-permission initial synthetic login")
+        let owner = f.owner(); let original = f.manifest
+        f.readOverride = .timeout
+        check(temporary(owner.ensureAccess(reason: "background")) && owner.snapshot().reason == "permission_required"
+              && owner.keychainRetryDelay() == .infinity, "K341-permission background timeout requests manual permission")
+        f.readOverride = .locked
+        check(temporary(owner.retryKeychainAccess()), "K341-permission failed manual attempt stays temporary")
+        let attempts = f.storeTrace.count
+        f.now += 86400; f.monotonicNow = 1_000_000
+        check(temporary(owner.ensureAccess(reason: "wake")) && f.storeTrace.count == attempts
+              && owner.keychainRetryDelay() == .infinity, "K341-permission failed manual retry cannot rearm background readers")
+        var denied = f.manifest; denied?.keychainPermissionRequired = original?.keychainPermissionRequired
+        check(denied == original && f.manifest?.keychainPermissionRequired == true,
+              "K341-permission denial changes only persisted permission latch")
+        let restarted = f.owner(); let beforeRestart = f.storeTrace.count
+        check(temporary(restarted.ensureAccess(reason: "startup")) && f.storeTrace.count == beforeRestart
+              && restarted.keychainRetryDelay() == .infinity,
+              "K341-permission restart restores latch before any background credential adapter")
+        f.readOverride = nil
+        check(ready(owner.retryKeychainAccess()) && owner.keychainRetryDelay() == nil
+              && f.manifest?.keychainPermissionRequired != true,
+              "K341-permission only successful manual read clears runtime and persisted permission gate")
+        check(ready(owner.ensureAccess(reason: "background")) && !f.storeTrace.last!.interactive,
+              "K341-permission later background read remains quiet")
+    }
+    for interrupted in [false, true] {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-migrate initial unmarked synthetic generation")
+        initial.cleanupRetiredCredentials()
+        guard let source = f.manifest?.active, let original = f.items[source] else {
+            check(false, "K341-migrate source fixture missing"); continue
+        }
+        f.usesSecurityWriter = true
+        var observedIntent = false
+        f.checkpointAction["after_intent"] = {
+            observedIntent = f.manifest?.transition?.kind == "securityMigration"
+                && f.manifest?.transition?.from == source && f.manifest?.active == source
+            if interrupted { throw GHFixtureError.stopped }
+        }
+        let owner = f.owner(); let first = owner.ensureAccess(reason: "startup")
+        check(observedIntent, "K341-migrate journals migration transition before writer, preserves active pointer")
+        if interrupted {
+            check(!ready(first) && f.manifest?.active == source && f.items[source] == original,
+                  "K341-migrate stopped intent preserves original complete credential")
+            check(ready(f.owner().ensureAccess(reason: "restart")), "K341-migrate durable transition resumes after restart")
+        } else { check(ready(first), "K341-migrate unmarked generation moves through successful writer/readback") }
+        guard let migrated = f.manifest?.active, let value = f.items[migrated] else {
+            check(false, "K341-migrate published candidate missing"); continue
+        }
+        check(migrated != source && value.epoch == original.epoch && value.accessToken == original.accessToken
+              && value.refreshToken == original.refreshToken && value.userID == original.userID,
+              "K341-migrate fresh generation preserves epoch, identity and credential pair")
+        check(f.manifest?.transition == nil && f.manifest?.securityWriterRefs?.contains(migrated) == true
+              && f.manifest?.securityWriterRefs?.contains(source) != true,
+              "K341-migrate published security writer marker is per generation")
+        if let encoded = try? JSONEncoder().encode(f.manifest),
+           let decoded = try? JSONDecoder().decode(GitHubAuthManifest.self, from: encoded) { f.manifest = decoded }
+        else { check(false, "K341-migrate manifest marker roundtrip") }
+        let stages = f.counts["store_stage", default: 0]
+        check(ready(f.owner().ensureAccess(reason: "restart")) && f.counts["store_stage", default: 0] == stages,
+              "K341-migrate persisted marked generation never migrates again after restart")
+        check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1
+              && f.publicStateIsNonsecret(owner), "K341-migrate uses no OAuth grant, new login or secret journal")
+    }
+    for status in [GitHubAuthStoreStatus.failed, .locked, .inputTooLarge] {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-migrate failure initial synthetic login")
+        guard let source = f.manifest?.active, let original = f.items[source] else {
+            check(false, "K341-migrate failure source missing"); continue
+        }
+        f.usesSecurityWriter = true; f.stageFault = { _, _ in status }
+        let owner = f.owner()
+        check(!ready(owner.ensureAccess(reason: "startup")) && f.manifest?.active == source
+              && f.items[source] == original && f.manifest?.transition?.kind == "securityMigration",
+              "K341-migrate failed writer preserves source and recoverable migration transition")
+        check(f.manifest?.securityWriterRefs?.contains(source) != true
+              && f.counts["refresh_request", default: 0] == 0,
+              "K341-migrate failure cannot mark old native generation or request OAuth")
+    }
+}
+
+// Pure writer contract checks and one explicitly isolated temporary-Keychain probe.
+// Called only by selftest dispatch, before AppKit or production singletons.
+func runGitHubKeychain341AdapterSelfTests(check: (Bool, String) -> Void) {
+    let service = "Claude Codex Limits GitHub Credential V2"
+    let generation = "01234567-89ab-cdef-0123-456789abcdef"
+    let credential = GitHubCredentialV2(epoch: generation, generation: generation,
+        accessToken: "ccl-test-writer-access", refreshToken: "ccl-test-writer-refresh", obtainedAt: 1000,
+        userID: "1001", login: "fixture")
+    guard let data = try? JSONEncoder().encode(credential) else {
+        check(false, "K341-writer synthetic envelope encoding"); return
+    }
+    let envelope = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    do {
+        let command = try githubAuthSecurityWriteCommand(service: service, generation: generation, envelope: envelope)
+        check(command.arguments == ["-i"] && !command.arguments.joined().contains(envelope),
+              "K341-writer only -i is in process argv; all secret data uses stdin")
+        check(command.input.hasPrefix("add-generic-password -s ")
+              && command.input.contains(" -a " + generation + " -T /usr/bin/security -w " + envelope)
+              && command.input.hasSuffix("\n") && command.input.filter { $0 == "\n" }.count == 1
+              && !command.input.contains(" -U") && !command.input.contains("quit"),
+              "K341-writer one add-only stdin command, trusted security ACL, newline and EOF")
+        let minimum = try githubAuthSecurityWriteCommand(service: "x", generation: generation, envelope: envelope)
+        for target in [2047, 2048, 2049] {
+            let length = target - minimum.input.utf8.count + 1
+            var runs = 0, probes = 0
+            do {
+                let status = try githubAuthSecurityWrite(service: String(repeating: "x", count: length), generation: generation,
+                    envelope: envelope, run: { args, line in
+                        runs += 1
+                        check(args == ["-i"] && line.utf8.count == target, "K341-writer exact UTF8 command-line boundary including newline")
+                        return .success
+                    }, attributes: { probes += 1; return .success })
+                check(target <= 2048 && status == .success && runs == 1 && probes == 1,
+                      "K341-writer accepts only bounded lines and confirms attributes")
+            } catch {
+                check(target == 2049 && runs == 0 && probes == 0,
+                      "K341-writer rejects 2049-byte command before any process or Keychain probe")
+            }
+        }
+        // Two-byte scalars ensure the cap counts UTF8 bytes, not Swift characters.
+        let budget = 2048 - minimum.input.utf8.count + 1
+        let utf8Service = String(repeating: "é", count: budget / 2) + (budget % 2 == 1 ? "x" : "")
+        let utf8Command = try githubAuthSecurityWriteCommand(service: utf8Service, generation: generation, envelope: envelope)
+        check(utf8Command.input.utf8.count == 2048, "K341-writer multibyte service observes same 2048-byte cap")
+        var multibyteRan = false
+        do {
+            _ = try githubAuthSecurityWrite(service: utf8Service + "é", generation: generation, envelope: envelope,
+                run: { _, _ in multibyteRan = true; return .success }, attributes: { .success })
+            check(false, "K341-writer rejects multibyte overflow")
+        } catch { check(!multibyteRan, "K341-writer multibyte overflow rejected before spawn") }
+        for invalid in ["", "bad\nservice", "bad\rservice", "bad\0service"] {
+            var ran = false
+            do {
+                _ = try githubAuthSecurityWrite(service: invalid, generation: generation, envelope: envelope,
+                    run: { _, _ in ran = true; return .success }, attributes: { .success })
+                check(false, "K341-writer rejects control/empty service")
+            } catch { check(!ran, "K341-writer invalid service cannot inject another command") }
+        }
+        for (code, presence, success) in [(SyncKeychainStatus.success, SyncKeychainStatus.success, true),
+                (.success, .missing, false), (.failure(1), .missing, false),
+                (.failure(45), .success, true), (.success, .failure(36), false), (.timedOut, .success, false)] {
+            var probes = 0, runs = 0
+            let status = try githubAuthSecurityWrite(service: service, generation: generation, envelope: envelope,
+                run: { _, _ in runs += 1; return code }, attributes: { probes += 1; return presence })
+            check(runs == 1 && (status == .success) == success && probes == (code == .timedOut ? 0 : 1),
+                  "K341-writer rc0 never certifies missing item; settled duplicate needs attributes; timeout stays uncertain")
+        }
+        for (candidateGeneration, candidateEnvelope) in [("not-a-uuid", envelope),
+                (UUID().uuidString.lowercased(), envelope), (generation, "invalid-envelope"),
+                (generation, envelope + "\nadd-generic-password")] {
+            var ran = false
+            do {
+                _ = try githubAuthSecurityWrite(service: service, generation: candidateGeneration, envelope: candidateEnvelope,
+                    run: { _, _ in ran = true; return .success }, attributes: { .success })
+                check(false, "K341-writer rejects malformed or generation-mismatched envelope")
+            } catch { check(!ran, "K341-writer invalid envelope rejected before process launch") }
+        }
+        let quoted = try githubAuthSecurityWriteCommand(service: "fixture \"quoted\" \\ service", generation: generation,
+            envelope: envelope, keychainPath: "/tmp/fixture \"quoted\".keychain-db")
+        check(quoted.arguments == ["-i"] && quoted.input.filter { $0 == "\n" }.count == 1
+              && quoted.input.contains("\\\"quoted\\\"") && quoted.input.contains("\\\\ service"),
+              "K341-writer quotes service and test keychain path using interactive-parser escaping")
+    } catch { check(false, "K341-writer valid synthetic command unexpectedly rejected") }
+    for language in ["ru", "en"] {
+        let permission = language == "en"
+            ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt"
+            : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей» и в окне «security» нажмите «Разрешать всегда»"
+        for reason in ["locked", "timeout", "permission_required"] {
+            check(githubAuthMessage(reason, language: language) == permission,
+                  "K341-copy permission recovery names retry, security prompt and Always Allow exactly")
+        }
+    }
+    runGitHubKeychain341TemporaryKeychainProbe(check: check)
+}
+
+#if os(macOS)
+private final class GH341CapturedOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes = Data()
+    func store(_ value: Data) { lock.lock(); bytes = value; lock.unlock() }
+    func value() -> Data { lock.lock(); defer { lock.unlock() }; return bytes }
+}
+// Output, including dump-keychain and synthetic secret reads, never reaches stdout.
+private func github341TemporarySecurity(_ arguments: [String], input: String? = nil) -> (SyncKeychainStatus, Data) {
+    let process = Process(), output = Pipe(), stdin = Pipe()
+    let stopped = DispatchSemaphore(value: 0), captured = DispatchSemaphore(value: 0), bytes = GH341CapturedOutput()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/security"); process.arguments = arguments
+    process.standardOutput = output; process.standardError = FileHandle.nullDevice
+    process.standardInput = input == nil ? FileHandle.nullDevice : stdin.fileHandleForReading
+    _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    process.terminationHandler = { _ in stopped.signal() }
+    do { try process.run() } catch { return (.failure(1), Data()) }
+    DispatchQueue.global().async {
+        bytes.store(output.fileHandleForReading.readDataToEndOfFile()); captured.signal()
+    }
+    if let input = input {
+        do { try stdin.fileHandleForWriting.write(contentsOf: Data(input.utf8)) }
+        catch { process.terminate() }
+        try? stdin.fileHandleForWriting.close()
+    }
+    let timedOut = stopped.wait(timeout: .now() + 15) != .success
+    if timedOut {
+        process.terminate()
+        if stopped.wait(timeout: .now() + 2) != .success { _ = kill(process.processIdentifier, SIGKILL) }
+    }
+    guard captured.wait(timeout: .now() + 2) == .success else { return (.timedOut, Data()) }
+    if timedOut { return (.timedOut, Data()) }
+    guard process.terminationReason == .exit else { return (.failure(1), Data()) }
+    return (process.terminationStatus == 0 ? .success : .failure(process.terminationStatus), bytes.value())
+}
+#endif
+
+private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) -> Void) {
+#if os(macOS)
+    guard FileManager.default.isExecutableFile(atPath: "/usr/bin/security") else {
+        print("K341 TEMP KEYCHAIN: SKIP (security tool unavailable)"); return
+    }
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("ccl-keychain-341-" + UUID().uuidString, isDirectory: true)
+    do { try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+    catch { print("K341 TEMP KEYCHAIN: SKIP (temporary directory unavailable)"); return }
+    defer { try? fm.removeItem(at: root) }
+    let path = root.appendingPathComponent("fixture.keychain-db").path
+    let password = UUID().uuidString + UUID().uuidString
+    let created = github341TemporarySecurity(["create-keychain", "-p", password, path]).0
+    guard created == .success else {
+        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain creation unavailable)"); return
+    }
+    defer {
+        check(github341TemporarySecurity(["delete-keychain", path]).0 == .success,
+              "K341-integration deletes only its temporary keychain")
+    }
+    guard github341TemporarySecurity(["unlock-keychain", "-p", password, path]).0 == .success else {
+        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain unlock unavailable)"); return
+    }
+    var opened: SecKeychain?
+    let openStatus = path.withCString { SecKeychainOpen($0, &opened) }
+    guard openStatus == errSecSuccess, let keychain = opened else {
+        check(false, "K341-integration open created temporary keychain for scoped attributes"); return
+    }
+    let generation = UUID().uuidString.lowercased(), service = "CCL isolated 3.4.1 probe " + UUID().uuidString
+    let credential = GitHubCredentialV2(epoch: generation, generation: generation,
+        accessToken: "ccl-test-access-" + UUID().uuidString, refreshToken: "ccl-test-refresh-" + UUID().uuidString,
+        obtainedAt: 1000, userID: "1001", login: "fixture")
+    guard let encoded = try? JSONEncoder().encode(credential) else { check(false, "K341-integration fixture encoding"); return }
+    let envelope = encoded.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    func attributes() -> SyncKeychainStatus {
+        // Explicit search list and UI-fail: never consult the user's keychains.
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: generation,
+            kSecMatchSearchList as String: [keychain], kSecReturnAttributes as String: true,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+        var resultAttributes: CFTypeRef?
+        let result = SecItemCopyMatching(query as CFDictionary, &resultAttributes)
+        return result == errSecSuccess ? .success : result == errSecItemNotFound ? .missing : .failure(result)
+    }
+    do {
+        let status = try githubAuthSecurityWrite(service: service, generation: generation, envelope: envelope, keychainPath: path,
+            run: githubAuthRunSecurityWriter, attributes: attributes)
+        check(status == .success, "K341-integration production writer creates temporary-keychain item")
+        let (dumpStatus, dump) = github341TemporarySecurity(["dump-keychain", "-a", path])
+        let aclCount = (String(data: dump, encoding: .utf8)?.components(separatedBy: "apple-tool:").count ?? 0) - 1
+        check(dumpStatus == .success && aclCount >= 1, "K341-integration ACL contains apple-tool partition")
+        print("K341 TEMP KEYCHAIN: apple-tool partition count=\(max(0, aclCount))")
+        let (readStatus, readback) = github341TemporarySecurity(["find-generic-password", "-s", service, "-a", generation, "-w", path])
+        check(readStatus == .success && (readback == Data(envelope.utf8) || readback == Data((envelope + "\n").utf8)),
+              "K341-integration security reads exact synthetic envelope without interaction")
+        // Duplicate must preserve the existing immutable item and its readable ACL.
+        var replacement = credential
+        replacement.accessToken = "ccl-test-replacement-access-" + UUID().uuidString
+        replacement.refreshToken = "ccl-test-replacement-refresh-" + UUID().uuidString
+        let replacementEnvelope = try JSONEncoder().encode(replacement).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        var duplicateExit: SyncKeychainStatus?
+        let duplicate = try githubAuthSecurityWrite(service: service, generation: generation, envelope: replacementEnvelope, keychainPath: path,
+            run: { args, line in let result = githubAuthRunSecurityWriter(arguments: args, input: line); duplicateExit = result; return result },
+            attributes: attributes)
+        check(duplicate == .success && duplicateExit != .timedOut, "K341-integration settled duplicate is confirmed by quiet attributes")
+        let (duplicateReadStatus, duplicateReadback) = github341TemporarySecurity(["find-generic-password", "-s", service, "-a", generation, "-w", path])
+        check(duplicateReadStatus == .success
+              && (duplicateReadback == Data(envelope.utf8) || duplicateReadback == Data((envelope + "\n").utf8)),
+              "K341-integration duplicate preserves exact original immutable envelope and readable ACL")
+        let missingPath = root.appendingPathComponent("absent.keychain-db").path
+        let failure = try githubAuthSecurityWrite(service: service, generation: generation,
+            envelope: envelope, keychainPath: missingPath,
+            run: githubAuthRunSecurityWriter, attributes: { .missing })
+        check(failure != .success, "K341-integration failed interactive subcommand cannot be certified by zero process exit")
+    } catch { check(false, "K341-integration production writer rejected isolated fixture") }
+#else
+    print("K341 TEMP KEYCHAIN: SKIP (requires macOS temporary-keychain capability)")
+#endif
 }

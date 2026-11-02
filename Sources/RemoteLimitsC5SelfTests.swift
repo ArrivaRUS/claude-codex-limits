@@ -323,12 +323,14 @@ private func c5C503(_ check: C5Check) {
 }
 
 private func c5C504(_ check: C5Check) {
-    for issue in ["locked", "unreachable", "timeout"] {
+    for issue in ["locked", "unreachable", "timeout", "permission_required"] {
         check(syncShowsKeychainRetry(issue), "C5-04 retry visible for \(issue)")
         for phase in [SyncPhase.off, .on, .revoked, .awaitingCode] {
             var plain = SyncUIState(); plain.phase = phase
             var failed = plain; failed.authReason = issue
             let visible = phase != .awaitingCode
+            check(failed.error == nil && failed.lastError == nil && failed.keychainIssue == (visible ? issue : nil),
+                  "C5-04 reason alone supplies recovery without an error-message fallback; awaiting code suppresses it")
             check(failed.canRetryKeychain == visible && setSyncCardH(failed) - setSyncCardH(plain) == (visible ? 36 : 0),
                   "C5-04 \(issue): retry row exists only in an actionable settings phase")
             if phase == .on {
@@ -337,6 +339,11 @@ private func c5C504(_ check: C5Check) {
                 check(remoteSyncCardHeight(failed) - remoteSyncCardHeight(plain) == 36,
                       "C5-04 live settings height reserves the same actionable retry row")
             }
+            var signingIn = failed; signingIn.keychainRetryAvailable = true
+            signingIn.prepareForGitHubLogin()
+            check(signingIn.phase == .awaitingCode && signingIn.authReason == nil && signingIn.keychainIssue == nil
+                  && !signingIn.canRetryKeychain && !signingIn.keychainRetryAvailable && syncWarning(signingIn) == nil,
+                  "C5-04 sign-in clears recognized permission reason and hides recovery throughout awaiting code")
         }
     }
     for issue: String? in [nil, "", "oauth_denied", "cleanup_pending", "revoked", "LOCKED"] {
@@ -346,11 +353,16 @@ private func c5C504(_ check: C5Check) {
     check(!staleAvailability.canRetryKeychain && setSyncCardH(staleAvailability) == setSyncCardH(SyncUIState()),
           "C5-04 stale scheduling flag alone cannot expose a dead Retry button or allocate its row")
     for language in ["ru", "en"] {
-        for issue in ["locked", "unreachable", "timeout"] {
+        for issue in ["locked", "unreachable", "timeout", "permission_required"] {
             var restored = SyncUIState(phase: .on, authState: "healthy", login: "fixture")
             restored.lastError = githubAuthMessage(issue, language: language)
-            check(restored.keychainIssue == issue && restored.canRetryKeychain,
+            let canonicalIssue = issue == "unreachable" ? issue : "permission_required"
+            check(restored.keychainIssue == canonicalIssue && restored.canRetryKeychain,
                   "C5-14 persisted Keychain error retains its action after authReason clears or language changes")
+            restored.lastErrorAt = C5_NOW
+            restored.prepareForGitHubLogin()
+            check(restored.lastError == nil && restored.lastErrorAt == nil && !restored.canRetryKeychain,
+                  "C5-04 sign-in clears persisted permission message and timestamp")
         }
     }
     var unrelated = SyncUIState(phase: .on, authState: "healthy", lastError: "HTTP 500")
@@ -709,6 +721,7 @@ private func c5C516(_ check: @escaping C5Check) {
     let credential = GitHubCredentialV2(epoch: generation, generation: generation, accessToken: "c5-action-token",
         obtainedAt: 1000, userID: "1001", login: "fixture")
     var manifest = GitHubAuthManifest(epoch: generation, active: ref, userID: "1001", login: "fixture")
+    manifest.securityWriterRefs = [ref] // C5-16 tests permission timing, not old-generation migration.
     let encoded = try! JSONEncoder().encode(credential).base64EncodedString()
         .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     var quiet = 0, probes = 0, deadlines: [Double] = []
@@ -733,12 +746,18 @@ private func c5C516(_ check: @escaping C5Check) {
     _ = owner.ensureAccess(reason: "background")
     check(quiet == 1 && deadlines == [120] && githubKeychainProcessTimeout(action: nil) == 15,
           "C5-16 successful manual permission does not turn later background reads interactive")
+    check(manifest.keychainPermissionRequired == true && owner.keychainRetryDelay() == .infinity,
+          "C5-16 later background timeout persists manual permission requirement")
+    let restarted = GitHubAuthOwner(dependencies: deps, clientID: "fixture")
+    _ = restarted.ensureAccess(reason: "startup")
+    check(quiet == 1 && deadlines == [120], "C5-16 restart cannot relaunch background security after timeout")
     let remainingAction = GitHubAuthUserAction()
     check(githubKeychainProcessTimeout(action: remainingAction, remaining: 7) == 7
           && githubKeychainProcessTimeout(action: nil, remaining: 7) == 7
           && githubKeychainProcessTimeout(action: remainingAction, remaining: -1) == 0,
           "C5-16 metadata/tool confirmation share remaining budget instead of restarting15/120")
     for attributes in [SyncKeychainStatus.success, .failure(36), .failure(1), .missing] {
+        manifest.keychainPermissionRequired = nil // Each ambiguous44 case is an independent clean read.
         var confirming = deps
         confirming.readStore = { requested in
             githubAuthReadWithCommand(requested, interactive: false, probe: { unlocked in unlocked ? .success : attributes },

@@ -130,7 +130,7 @@ func githubKeychainWait(timeout: Double, now: () -> Double, waits: [(Double) -> 
 }
 
 func syncShowsKeychainRetry(_ issue: String?) -> Bool {
-    ["locked", "unreachable", "timeout"].contains(issue ?? "")
+    ["locked", "unreachable", "timeout", "permission_required"].contains(issue ?? "")
 }
 
 func remoteSimpleHeaderLayout(availableWidth: Double, measuredLabelWidth: Double, measuredValueWidth: Double)

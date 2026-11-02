@@ -6,7 +6,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="Claude Codex Limits"
 EXE_NAME="ClaudeCodexLimits"
 BUNDLE_ID="com.arrivarus.claudecodexlimits"
-VERSION="3.4.0"
+VERSION="3.4.1"
 DIST_APP="$DIR/dist/$APP_NAME.app"
 
 # Recover an interrupted publication before starting another build. Once the

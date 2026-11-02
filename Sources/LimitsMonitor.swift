@@ -1542,7 +1542,7 @@ private func syncCount(_ value: Any?) -> Int? {
 }
 
 /// Keychain secrets use private pipes. V2 reads use the already-trusted system
-/// tool; legacy reads and all writes/deletes retain the native helper policy.
+/// tool; writes use its stdin under the permit helper, deletes stay native and quiet.
 enum SyncKeychainRead {
     case token(String), missing, timedOut, failure(Int32)
 }
@@ -1664,7 +1664,7 @@ struct SecuritySyncKeychain: SyncKeychain {
                                      input: token, lifetime: lifetime).status
     }
     func delete() -> SyncKeychainStatus {
-        githubKeychainProcess(["--github-auth-keychain-helper", "delete", "legacy", action != nil ? "interactive" : "quiet"], lifetime: lifetime, action: action).status
+        githubKeychainProcess(["--github-auth-keychain-helper", "delete", "legacy", "quiet"], lifetime: lifetime).status
     }
 }
 typealias SyncHTTPResult = (status: Int, data: Data?, err: String?, headers: [String: String])
@@ -1696,7 +1696,7 @@ private func syncRawURL(_ value: String) -> Bool {
     return true
 }
 
-func syncKeychainTimeout() -> String { tr("Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s") }
+func syncKeychainTimeout() -> String { githubAuthMessage("permission_required", language: appLang()) }
 func syncKeychainReadError(_ result: SyncKeychainRead) -> String {
     switch result {
     case .timedOut: return syncKeychainTimeout()
@@ -1837,7 +1837,34 @@ func githubAuthReadWithCommand(_ ref: GitHubAuthRef, interactive: Bool,
         return .ready(c)
     }
 }
+/// A system permission prompt must sit above our menu panel. Preserve window
+/// visibility and restore only the levels we changed, including failure/cancel.
+final class GitHubKeychainPanelSuspension {
+    private var levels: [(NSWindow, NSWindow.Level)] = []
+    init(windows: [NSWindow]) {
+        precondition(Thread.isMainThread)
+        for window in windows where window.isVisible && window.level == .popUpMenu {
+            levels.append((window, window.level)); window.level = .normal
+        }
+    }
+    func restore() {
+        precondition(Thread.isMainThread)
+        for (window, level) in levels { window.level = level }
+        levels.removeAll()
+    }
+}
 private func githubAuthRead(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthRead {
+    var suspension: GitHubKeychainPanelSuspension?
+    if action != nil {
+        let lower = { suspension = GitHubKeychainPanelSuspension(windows: NSApp?.windows ?? []) }
+        if Thread.isMainThread { lower() } else { DispatchQueue.main.sync(execute: lower) }
+    }
+    defer {
+        if let suspension = suspension {
+            if Thread.isMainThread { suspension.restore() }
+            else { DispatchQueue.main.sync { suspension.restore() } }
+        }
+    }
     let deadline = ProcessInfo.processInfo.systemUptime + githubKeychainProcessTimeout(action: action)
     return githubAuthReadWithCommand(ref, interactive: action != nil, probe: { unlocked in
         guard let args = githubAuthKeychainArguments(operation: unlocked ? "preflight" : "attributes", ref: ref) else { return .failure(1) }
@@ -1872,6 +1899,80 @@ func githubAuthHelperEnvelope(_ input: Data, generation: String) -> GitHubCreden
     }
     return credential
 }
+struct GitHubAuthSecurityWriteCommand {
+    let arguments: [String]
+    let input: String
+}
+enum GitHubAuthSecurityWriteError: Error { case invalidInput, lineTooLong }
+/// security's interactive parser understands double quotes and backslash escapes.
+/// This is NOT shell syntax; the secret travels only through stdin.
+func githubAuthSecurityWriteCommand(service: String, generation: String, envelope: String,
+                                    keychainPath: String? = nil) throws -> GitHubAuthSecurityWriteCommand {
+    func quoted(_ value: String) throws -> String {
+        guard !value.isEmpty, !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+            throw GitHubAuthSecurityWriteError.invalidInput
+        }
+        return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+    }
+    guard githubAuthHelperEnvelope(Data(envelope.utf8), generation: generation) != nil else {
+        throw GitHubAuthSecurityWriteError.invalidInput
+    }
+    var line = "add-generic-password -s " + (try quoted(service)) + " -a " + generation
+        + " -T /usr/bin/security -w " + envelope
+    // Only the isolated test harness supplies a path. Production never accepts one.
+    if let path = keychainPath { line += " " + (try quoted(path)) }
+    line += "\n"
+    guard line.utf8.count <= 2048 else { throw GitHubAuthSecurityWriteError.lineTooLong }
+    return GitHubAuthSecurityWriteCommand(arguments: ["-i"], input: line)
+}
+/// Shared helper/test boundary. An interactive security process can return zero
+/// despite a failed subcommand; quiet attributes, never a data read, prove presence.
+func githubAuthSecurityWrite(service: String, generation: String, envelope: String,
+                             keychainPath: String? = nil,
+                             run: ([String], String) -> SyncKeychainStatus,
+                             attributes: () -> SyncKeychainStatus) throws -> SyncKeychainStatus {
+    let command = try githubAuthSecurityWriteCommand(service: service, generation: generation,
+        envelope: envelope, keychainPath: keychainPath)
+    let status = run(command.arguments, command.input)
+    if status == .timedOut { return status } // Never certify an unsettled child.
+    let presence = attributes()
+    if presence == .success { return .success } // Add-only duplicate keeps its original value/ACL.
+    if presence == .missing { return status == .success ? .failure(1) : status }
+    return presence
+}
+
+/// Actual process boundary shared with the opt-in temporary-keychain harness.
+/// No application globals, user files, or credential output are accessed here.
+func githubAuthRunSecurityWriter(arguments: [String], input: String) -> SyncKeychainStatus {
+    guard arguments == ["-i"], input.utf8.count <= 2048, input.hasSuffix("\n"),
+          !input.dropLast().contains("\n"), !input.contains("\r") else { return .failure(66) }
+    let child = Process(), pipe = Pipe(), ended = DispatchSemaphore(value: 0)
+    child.terminationHandler = { _ in ended.signal() }
+    child.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    child.arguments = arguments
+    child.standardInput = pipe
+    child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
+    do { try child.run() } catch { return .failure(1) }
+    _ = fcntl(pipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    var written = true
+    do { try pipe.fileHandleForWriting.write(contentsOf: Data(input.utf8)) } catch { written = false }
+    try? pipe.fileHandleForWriting.close()
+    if ended.wait(timeout: .now() + 10) != .success {
+        if child.isRunning { child.terminate() }
+        if ended.wait(timeout: .now() + 2) != .success, child.isRunning {
+            _ = kill(child.processIdentifier, SIGKILL)
+        }
+        // Never release the permit or claim completion until even a
+        // forcibly stopped security process has really terminated.
+        child.waitUntilExit()
+        return .timedOut
+    }
+    child.waitUntilExit()
+    guard written, child.terminationReason == .exit else { return .failure(1) }
+    return child.terminationStatus == 0 ? .success : .failure(child.terminationStatus)
+}
+
 enum GitHubAuthWriterPhase: String, Codable { case prepared, rpcStarted, completed, notStarted }
 struct GitHubAuthWriterRecord: Codable {
     var schema: Int = 1
@@ -1960,6 +2061,38 @@ private func githubAuthHelperInput(limit: Int) -> Data? {
     } catch { return nil }
     return input
 }
+private func githubAuthNativePresence(service: String, generation: String,
+                                      requireUnlocked: Bool, delete: Bool = false) -> Int32 {
+    var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service, kSecReturnAttributes as String: true,
+        kSecMatchLimit as String: kSecMatchLimitOne,
+        kSecUseDataProtectionKeychain as String: false,
+        kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+    if generation != "legacy" { query[kSecAttrAccount as String] = generation }
+    if requireUnlocked { query[kSecReturnRef as String] = true }
+    if delete { query[kSecReturnPersistentRef as String] = true }
+    var item: CFTypeRef?
+    let status = SecItemCopyMatching(query as CFDictionary, &item)
+    guard status == errSecSuccess else { return githubAuthNativeExit(status) }
+    guard let attributes = item as? [String: Any] else { return 1 }
+    if requireUnlocked {
+        guard let value = attributes[kSecValueRef as String],
+              CFGetTypeID(value as CFTypeRef) == SecKeychainItemGetTypeID() else { return 1 }
+        let reference = value as! SecKeychainItem
+        var keychain: SecKeychain?
+        guard SecKeychainItemCopyKeychain(reference, &keychain) == errSecSuccess, let keychain = keychain else { return 1 }
+        var flags: SecKeychainStatus = 0
+        guard SecKeychainGetStatus(keychain, &flags) == errSecSuccess else { return 1 }
+        guard flags & SecKeychainStatus(kSecUnlockStateStatus) != 0 else { return 36 }
+    }
+    if delete {
+        guard let reference = attributes[kSecValuePersistentRef as String] as? Data, !reference.isEmpty else { return 65 }
+        return githubAuthNativeExit(SecItemDelete([kSecValuePersistentRef as String: reference,
+            kSecUseDataProtectionKeychain as String: false,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail] as CFDictionary))
+    }
+    return 0
+}
 private func githubAuthNativeKeychainHelper() -> Int32 {
     guard let request = GitHubKeychainHelperRequest.parse(CommandLine.arguments) else { return 64 }
     return githubAuthHelperInteraction(interactive: request.interactive,
@@ -1971,24 +2104,8 @@ private func githubAuthNativeKeychainHelper() -> Int32 {
         if request.generation != "legacy" { query[kSecAttrAccount as String] = request.generation }
         switch request.operation {
         case "attributes", "preflight":
-            query[kSecReturnAttributes as String] = true
-            query[kSecMatchLimit as String] = kSecMatchLimitOne
-            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
-            if request.operation == "preflight" { query[kSecReturnRef as String] = true }
-            var item: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &item)
-            guard status == errSecSuccess else { return githubAuthNativeExit(status) }
-            if request.operation == "preflight" {
-                guard let attributes = item as? [String: Any], let value = attributes[kSecValueRef as String],
-                      CFGetTypeID(value as CFTypeRef) == SecKeychainItemGetTypeID() else { return 1 }
-                let reference = value as! SecKeychainItem
-                var keychain: SecKeychain?
-                guard SecKeychainItemCopyKeychain(reference, &keychain) == errSecSuccess, let keychain = keychain else { return 1 }
-                var flags: SecKeychainStatus = 0
-                guard SecKeychainGetStatus(keychain, &flags) == errSecSuccess else { return 1 }
-                guard flags & SecKeychainStatus(kSecUnlockStateStatus) != 0 else { return 36 }
-            }
-            return 0 // No secret bytes or attributes are written to stdout.
+            return githubAuthNativePresence(service: request.service, generation: request.generation,
+                requireUnlocked: request.operation == "preflight")
         case "read":
             query[kSecReturnData as String] = true
             query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -2000,18 +2117,8 @@ private func githubAuthNativeKeychainHelper() -> Int32 {
             do { try FileHandle.standardOutput.write(contentsOf: data) } catch { return 74 }
             return 0
         case "delete":
-            if request.generation == "legacy" {
-                // Historical legacy lookup selected one service match. Never turn
-                // that into a service-wide delete when several accounts exist.
-                query[kSecReturnPersistentRef as String] = true
-                query[kSecMatchLimit as String] = kSecMatchLimitOne
-                var item: CFTypeRef?
-                let status = SecItemCopyMatching(query as CFDictionary, &item)
-                guard status == errSecSuccess else { return githubAuthNativeExit(status) }
-                guard let reference = item as? Data, !reference.isEmpty else { return 65 }
-                return githubAuthNativeExit(SecItemDelete([kSecValuePersistentRef as String: reference] as CFDictionary))
-            }
-            return githubAuthNativeExit(SecItemDelete(query as CFDictionary))
+            return githubAuthNativePresence(service: request.service, generation: request.generation,
+                requireUnlocked: true, delete: true)
         case "legacy-write":
             guard let data = githubAuthHelperInput(limit: 16384),
                   let token = String(data: data, encoding: .ascii), !token.isEmpty,
@@ -2034,28 +2141,28 @@ private func githubAuthNativeStoreHelper() -> Int32 {
     let generation = CommandLine.arguments[2], operation = CommandLine.arguments[3]
     guard UUID(uuidString: generation)?.uuidString.lowercased() == generation,
           UUID(uuidString: operation)?.uuidString.lowercased() == operation else { return 64 }
-    return githubAuthHelperInteraction(interactive: CommandLine.arguments[4] == "interactive",
+    return githubAuthHelperInteraction(interactive: false,
         setAllowed: { SecKeychainSetUserInteractionAllowed($0) == errSecSuccess }) {
         guard let input = githubAuthHelperInput(limit: 128 * 1024),
               let credential = githubAuthHelperEnvelope(input, generation: generation) else { return 65 }
         let service = "Claude Codex Limits GitHub Credential V2"
-        var trusted: SecTrustedApplication?
-        guard SecTrustedApplicationCreateFromPath("/usr/bin/security", &trusted) == errSecSuccess, let trusted = trusted else { return 70 }
-        var helper: SecTrustedApplication?
-        guard SecTrustedApplicationCreateFromPath(nil, &helper) == errSecSuccess, let helper = helper else { return 70 }
-        var access: SecAccess?
-        // New items explicitly trust this helper identity plus the existing system tool.
-        // Add-only below never broadens ACLs of existing items, including duplicate refs.
-        guard SecAccessCreate(service as CFString, [trusted, helper] as CFArray, &access) == errSecSuccess,
-              let access = access else { return 70 }
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: generation,
-            kSecAttrAccess as String: access,
-            kSecValueData as String: input,
-        ]
-        // The permit lock is held across the native RPC. Recovery can close an absent or
+        guard let envelope = String(data: input, encoding: .ascii) else { return 65 }
+        // Validate length before publishing rpcStarted or launching the child.
+        do { _ = try githubAuthSecurityWriteCommand(service: service, generation: generation, envelope: envelope) }
+        catch GitHubAuthSecurityWriteError.lineTooLong { return 66 }
+        catch { return 65 }
+        // security does not inherit this helper's no-UI policy. A quiet writer
+        // must not launch it against a locked default file keychain.
+        if CommandLine.arguments[4] == "quiet" {
+            var keychain: SecKeychain?
+            let status = SecKeychainCopyDefault(&keychain)
+            guard status == errSecSuccess, let keychain = keychain else { return githubAuthNativeExit(status == errSecSuccess ? errSecNotAvailable : status) }
+            var flags: SecKeychainStatus = 0
+            let checked = SecKeychainGetStatus(keychain, &flags)
+            guard checked == errSecSuccess else { return githubAuthNativeExit(checked) }
+            guard flags & SecKeychainStatus(kSecUnlockStateStatus) != 0 else { return 36 }
+        }
+        // The permit lock is held across the child RPC. Recovery can close an absent or
         // prepared permit before any delayed helper gets here; operation UUIDs prevent ABA.
         guard let writerFD = githubAuthWriterLock(generation) else { return 69 }
         defer { flock(writerFD, LOCK_UN); close(writerFD) }
@@ -2066,12 +2173,26 @@ private func githubAuthNativeStoreHelper() -> Int32 {
             record = value; record.phase = .rpcStarted
             try githubAuthWriterSave(record)
         } catch { return 75 }
-        // Add only. A retry cannot overwrite any previously stored immutable generation.
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        record.phase = .completed; record.status = status
+        // Keep the permit locked until the child has actually exited. A killed
+        // helper leaves rpcStarted uncertain; it never certifies a late writer.
+        let result: SyncKeychainStatus
+        do {
+            result = try githubAuthSecurityWrite(service: service, generation: generation, envelope: envelope,
+                run: githubAuthRunSecurityWriter, attributes: {
+                    let code = githubAuthNativePresence(service: service, generation: generation, requireUnlocked: false)
+                    return code == 0 ? .success : code == 44 ? .missing : .failure(code)
+                })
+        } catch { result = .failure(1) }
+        let code: Int32
+        switch result {
+        case .success: code = 0
+        case .missing: code = 44
+        case .timedOut: code = 76
+        case .failure(let value): code = value == 36 ? 36 : 1
+        }
+        record.phase = .completed; record.status = code
         do { try githubAuthWriterSave(record) } catch { return 75 }
-
-        return githubAuthNativeExit(status)
+        return code
     }
 }
 
@@ -2130,9 +2251,11 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2, acti
           let data = try? JSONEncoder().encode(c) else { return .failed }
     let encoded = data.base64EncodedString().replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-    // 16 KiB tokens plus bounded identity/metadata fit this 128 KiB native envelope;
-    // no CLI command-line/interactive-line size participates in the write path.
+    // Reject an overlong interactive command before launching even the writer helper.
     guard githubAuthHelperEnvelope(Data(encoded.utf8), generation: ref.generation) != nil else { return .failed }
+    do { _ = try githubAuthSecurityWriteCommand(service: GITHUB_AUTH_SERVICE, generation: ref.generation, envelope: encoded) }
+    catch GitHubAuthSecurityWriteError.lineTooLong { return .inputTooLarge }
+    catch { return .failed }
     guard githubAuthProcessFence.begin() else { return .timeout }
     var launched = false
     defer { if !launched { githubAuthProcessFence.ended() } }
@@ -2147,7 +2270,7 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2, acti
     } catch { flock(fd, LOCK_UN); close(fd); return .unreachable }
     flock(fd, LOCK_UN); close(fd)
     let process = Process(), input = Pipe(), ended = DispatchSemaphore(value: 0)
-    // No security -i line parser: native SecItemAdd receives the complete envelope.
+    // The permit helper sends one bounded add-only command to security stdin.
     // Secrets are stdin only; argv contains a private operation and immutable UUID.
     guard let executable = Bundle.main.executableURL else { return .failed }
     process.executableURL = executable
@@ -2174,20 +2297,21 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2, acti
         try? input.fileHandleForWriting.close()
     }
     guard ended.wait(timeout: .now() + 15) == .success else {
-        if process.isRunning { process.terminate() }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-            if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
-        }
+        // The helper supervises its child and owns the permit until child exit.
+        // Killing the helper here could orphan a still-writing security process.
+        // Retain it and the process fence; recovery must await actual completion.
         return .timeout
     }
     guard process.terminationReason == .exit, (0..<128).contains(process.terminationStatus),
           githubAuthSettled(ref) else { return .timeout }
     if process.terminationStatus == 36 { return .locked }
+    if process.terminationStatus == 66 { return .inputTooLarge }
+    if process.terminationStatus == 76 { return .timeout }
     return process.terminationStatus == 0 ? .success : .unreachable
 }
 private func githubAuthDelete(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthStoreStatus {
-    guard let args = githubAuthKeychainArguments(operation: "delete", ref: ref, interactive: action != nil) else { return .failed }
-    return githubAuthStatus(githubKeychainProcess(args, lifetime: githubAuthProcessFence, action: action).status)
+    guard let args = githubAuthKeychainArguments(operation: "delete", ref: ref) else { return .failed }
+    return githubAuthStatus(githubKeychainProcess(args, lifetime: githubAuthProcessFence).status)
 }
 private func githubAuthAtomicSave(_ manifest: GitHubAuthManifest, path: String) throws {
     let directory = (path as NSString).deletingLastPathComponent
@@ -2292,7 +2416,11 @@ private func makeProductionGitHubAuth() -> GitHubAuthOwner {
         interactiveStageStore: { githubAuthStage($0, $1, action: $2) },
         interactiveDeleteStore: { githubAuthDelete($0, action: $1) },
         interactiveLegacy: { githubAuthLegacy(action: $0) },
-        storeIdle: { githubAuthProcessFence.isIdle })
+        storeIdle: { githubAuthProcessFence.isIdle },
+        cleanupPreflight: { ref in
+            guard let args = githubAuthKeychainArguments(operation: "preflight", ref: ref) else { return .failed }
+            return githubAuthStatus(githubKeychainProcess(args, lifetime: githubAuthProcessFence).status)
+        }, usesSecurityWriter: true)
     return GitHubAuthOwner(dependencies: dependencies, clientID: GITHUB_CLIENT_ID)
 }
 
@@ -2300,13 +2428,9 @@ private func githubAuthLegacy(action: GitHubAuthUserAction? = nil) -> GitHubAuth
     let d = UserDefaults.standard
     if d.bool(forKey: "syncRevoked") { return .revoked }
     guard let login = d.string(forKey: "syncLogin") else { return .signedOut }
-    switch SecuritySyncKeychain(lifetime: githubAuthProcessFence, action: action).read() {
-    case .token(let token): return .ready(GitHubCredentialV2(epoch: "legacy", generation: "legacy", accessToken: token,
-        refreshToken: nil, obtainedAt: 0, login: login))
-    case .missing: return .missing
-    case .timedOut: return .timeout
-    case .failure(let code): return code == 36 ? .locked : .unreachable
-    }
+    let result = githubAuthRead(GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), action: action)
+    if case .ready(var credential) = result { credential.login = login; return .ready(credential) }
+    return result
 }
 
 func githubAuthMessage(_ reason: String, language: String) -> String {
@@ -2319,9 +2443,9 @@ func githubAuthMessage(_ reason: String, language: String) -> String {
     case "lost_result": return english ? "Couldn't recover the renewal result. Sign in again." : "Не удалось восстановить результат продления. Войдите заново."
     case "bad_refresh_token", "refresh_expired", "access_expired", "revoked": return english ? "GitHub sign-in needs renewal. Sign in again." : "Необходимо обновить вход в GitHub. Войдите заново."
     case "incomplete_candidate", "identity_changed", "corrupt": return english ? "Couldn't verify the saved sign-in. Sign in again." : "Не удалось проверить сохранённый вход. Войдите заново."
-    case "locked": return english ? "Keychain needs permission. Click Retry Keychain access to allow it." : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей»."
+    case "locked", "permission_required", "timeout": return english ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt" : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей» и в окне «security» нажмите «Разрешать всегда»"
+    case "credential_too_large": return english ? "Couldn't save sign-in: the Keychain command exceeds 2048 bytes." : "Не удалось сохранить вход: команда Связки ключей превышает 2048 байт."
     case "unreachable": return english ? "No access to Keychain. Click Retry Keychain access." : "Нет доступа к Связке ключей. Нажмите «Повторить доступ к Связке ключей»."
-    case "timeout": return english ? "Keychain did not respond. Click Retry Keychain access to try again." : "Связка ключей не ответила. Для новой попытки нажмите «Повторить доступ к Связке ключей»."
     case "response_unknown": return english ? "Renewal response is unavailable; checking saved sign-in." : "Ответ продления недоступен; проверяем сохранённый вход."
     case "identity_unavailable", "candidate_unauthorized", "login_pending": return english ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."
     default: return english ? "Sign-in is temporarily unavailable; retrying automatically." : "Вход временно недоступен; повторим автоматически."
@@ -2333,9 +2457,13 @@ func githubAuthMessage(_ reason: String, language: String) -> String {
 /// the still-visible persisted Keychain error without its recovery action.
 func githubKeychainIssue(forMessage message: String?) -> String? {
     guard let message = message else { return nil }
-    for issue in ["locked", "unreachable", "timeout"] {
+    for issue in ["permission_required", "locked", "unreachable", "timeout"] {
         if ["ru", "en"].contains(where: { githubAuthMessage(issue, language: $0) == message }) { return issue }
     }
+    if ["Keychain did not respond. Click Retry Keychain access to try again.",
+        "Связка ключей не ответила. Для новой попытки нажмите «Повторить доступ к Связке ключей»."].contains(message) { return "timeout" }
+    if ["Keychain needs permission. Click Retry Keychain access to allow it.",
+        "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей»."].contains(message) { return "locked" }
     if ["Связка ключей не ответила за 15 с", "Keychain didn't answer in 15 s"].contains(message) { return "timeout" }
     for prefix in ["Ошибка Связки ключей: ", "Keychain error: "] where message.hasPrefix(prefix) {
         if let code = Int32(message.dropFirst(prefix.count)) { return code == 36 ? "locked" : "unreachable" }
@@ -4412,7 +4540,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     return CGFloat(remoteSimplePanelLayout(views: views, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.4.0"
+let APP_VERSION = "3.4.1"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
@@ -8264,19 +8392,45 @@ func runGitHubKeychainRetryAppKitSelfTests(check: (Bool, String) -> Void) {
     }
     let saved = defaults.volatileDomain(forName: UserDefaults.argumentDomain), savedSync = SYNC_PREVIEW
     defer { defaults.setVolatileDomain(saved, forName: UserDefaults.argumentDomain); SYNC_PREVIEW = savedSync }
+    // This lifecycle check creates only fixture windows and invokes no auth adapter.
+    let foreground = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 80, height: 60),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    let ordinary = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 80, height: 60),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    let hidden = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 80, height: 60),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    for panel in [foreground, ordinary, hidden] { panel.isReleasedWhenClosed = false }
+    defer { for panel in [foreground, ordinary, hidden] { panel.close() } }
+    foreground.level = .popUpMenu; ordinary.level = .normal; hidden.level = .popUpMenu
+    foreground.orderFront(nil); ordinary.orderFront(nil)
+    let suspension = GitHubKeychainPanelSuspension(windows: [foreground, ordinary, hidden])
+    check(foreground.isVisible && foreground.level == .normal && ordinary.level == .normal
+          && !hidden.isVisible && hidden.level == .popUpMenu,
+          "K341-panel interactive read lowers visible popup panel while preserving other windows")
+    suspension.restore(); suspension.restore()
+    check(foreground.isVisible && foreground.level == .popUpMenu && ordinary.isVisible
+          && ordinary.level == .normal && !hidden.isVisible && hidden.level == .popUpMenu,
+          "K341-panel success, failure and cancel restoration is idempotent and preserves visibility")
     let now = Date(timeIntervalSince1970: 1793448000)
     for language in ["ru", "en"] {
         for advanced in [false, true] {
             var arguments = saved; arguments["lang"] = language; arguments["advanced"] = advanced
             defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
-            for issue in ["locked", "unreachable", "timeout", "none"] {
+            for issue in ["locked", "unreachable", "timeout", "permission_required", "none"] {
                 for restored in [false, true] {
                     for awaiting in [false, true] {
                           AppKitSelfTestWatchdog.shared.begin("C5-14 Settings \(issue) \(language) advanced=\(advanced) restored=\(restored) awaiting=\(awaiting)")
                           var state = SyncUIState(phase: awaiting ? .awaitingCode : .on, authState: restored ? "healthy" : "temporarilyUnavailable",
                               authReason: restored || issue == "none" ? nil : issue, login: "fixture-account")
-                          state.lastError = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: restored ? (language == "en" ? "ru" : "en") : language)
-                          state.lastErrorAt = now; state.keychainRetryAvailable = issue == "none"
+                          // The live case must rely on authReason alone: a
+                          // persisted message would hide a broken reason lookup.
+                          state.lastError = issue == "none" ? "HTTP 500" : (restored ? githubAuthMessage(issue, language: language == "en" ? "ru" : "en") : nil)
+                          state.lastErrorAt = state.lastError == nil ? nil : now
+                          state.keychainRetryAvailable = issue == "none"
+                          if !restored && issue != "none" {
+                              check(state.error == nil && state.lastError == nil && state.authReason == issue,
+                                    "C5-14 reason-only fixture has no persisted error fallback")
+                          }
                           SYNC_PREVIEW = state
                           let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
                               allViews: [], visibleViews: [], displayedViews: [])
@@ -8289,7 +8443,11 @@ func runGitHubKeychainRetryAppKitSelfTests(check: (Bool, String) -> Void) {
                               let hits = drawSettings(ctx, size: CGSize(width: PANEL_W, height: height), about: AboutState())
                               let errors = hits.filter { $0.id == "syncerror:github" }
                               let retries = hits.filter { $0.id == "sync:keychain-retry" }
-                              let expected = issue == "none" ? "HTTP 500" : githubAuthMessage(issue, language: language)
+                              let permission = language == "en"
+                                  ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt"
+                                  : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей» и в окне «security» нажмите «Разрешать всегда»"
+                              let expected = issue == "none" ? "HTTP 500"
+                                  : (["locked", "timeout", "permission_required"].contains(issue) ? permission : githubAuthMessage(issue, language: language))
                               check(awaiting ? errors.isEmpty : (errors.count == 1 && errors[0].tooltip?.contains(expected) == true),
                                     "C5-14 actual drawn error/AX text uses current-language Keychain state")
                               check(retries.count == (awaiting || issue == "none" ? 0 : 1),
@@ -9782,6 +9940,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(runRemoteLimitsC3SelfTests() == 0, "C3 remote-limits model selftests (part A)")
     check(runRemoteLimitsC3BSelfTests() == 0, "C3 remote-limits model selftests (part B)")
     runRemoteLimitsC5SelfTests(check: check)
+    runGitHubKeychain341OwnerSelfTests(check: check)
+    runGitHubKeychain341AdapterSelfTests(check: check)
     let manualPreferences = prefs
     // Finish AppKit's one-time registration before measuring draw side effects.
     // The memory-only defaults adapter is already installed; no app delegate,
@@ -10495,7 +10655,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
             ("renewing", SyncUIState(phase: .on, authState: "renewing", authReason: "renewing", keychainItemLeft: true, login: "fixture-account"),
              en ? "Renewing GitHub sign-in automatically…" : "Автоматически продлеваем вход в GitHub…"),
             ("storage-locked", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "locked", keychainItemLeft: true, login: "fixture-account"),
-             en ? "Keychain needs permission. Click Retry Keychain access to allow it." : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей»."),
+             en ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt" : "Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей» и в окне «security» нажмите «Разрешать всегда»"),
             ("identity-pending", SyncUIState(phase: .on, authState: "temporarilyUnavailable", authReason: "identity_unavailable", keychainItemLeft: true, login: "fixture-account"),
              en ? "Sign-in is saved; waiting for GitHub verification." : "Вход сохранён; ждём проверки GitHub."),
             ("cleanup-pending", SyncUIState(phase: .off, authState: "signedOut", authReason: "cleanup_pending", keychainItemLeft: true),
@@ -10792,7 +10952,8 @@ if CommandLine.arguments.contains("--sync-selftest") {
         s.syncSynchronously()
         expect(selfTestDefaults.bool(forKey: "syncRevoked") && s.ui.phase == .revoked && store.token == tokA && store.deletes == 0,
                "M3 Keychain .timedOut at revocation: flag set, token left in place")
-        expect((s.ui.lastError ?? "").contains("Связка ключей не ответила"), "M3 lastError names the Keychain timeout: \(s.ui.lastError ?? "nil")")
+        expect((s.ui.lastError ?? "").contains("Связке ключей нужно разрешение. Нажмите «Повторить доступ к Связке ключей» и в окне «security» нажмите «Разрешать всегда»"),
+               "M3 compound revoked notice explains explicit permission and Always Allow recovery")
         http.reset(); let reads = store.readCount
         s.syncSynchronously()
         expect(http.calls.isEmpty && store.readCount == reads, "M3 background cycle paused (no HTTP, no Keychain read)")

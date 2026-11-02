@@ -41,6 +41,9 @@ struct GitHubAuthManifest: Codable, Equatable {
     var failureCount: Int = 0
     var uncertainRefs: [GitHubAuthRef] = []
     var permitWriterRefs: [GitHubAuthRef]? = nil
+    // Writer provenance is metadata, never part of ref identity.
+    var securityWriterRefs: [GitHubAuthRef]? = nil
+    var keychainPermissionRequired: Bool? = nil
     // Nonsecret, authoritative identity bound atomically to the active epoch/ref.
     var userID: String?
     var login: String?
@@ -48,7 +51,7 @@ struct GitHubAuthManifest: Codable, Equatable {
 enum GitHubAuthRead {
     case ready(GitHubCredentialV2), missing, locked, unreachable, timeout, corrupt, changed, signedOut, revoked
 }
-enum GitHubAuthStoreStatus: Equatable { case success, locked, unreachable, timeout, failed }
+enum GitHubAuthStoreStatus: Equatable { case success, locked, unreachable, timeout, failed, inputTooLarge }
 struct GitHubAuthAccess {
     let token: String
     let epoch: String
@@ -111,6 +114,9 @@ struct GitHubAuthDependencies {
     var interactiveLegacy: ((GitHubAuthUserAction) -> GitHubAuthRead)? = nil
     // Pure liveness check; never launch a reader while its predecessor is terminating.
     var storeIdle: () -> Bool = { true }
+    // Attribute-only, quiet lookup. Cleanup never reads credential data.
+    var cleanupPreflight: (GitHubAuthRef) -> GitHubAuthStoreStatus = { _ in .unreachable }
+    var usesSecurityWriter: Bool = false
 }
 
 // No defaults, filesystem, Security or global constants: safe before app startup.
@@ -125,7 +131,7 @@ struct GitHubKeychainHelperRequest: Equatable {
         let generation = arguments[3]
         guard generation == "legacy" || UUID(uuidString: generation)?.uuidString.lowercased() == generation else { return nil }
         guard arguments[2] != "legacy-write" || (generation == "legacy" && arguments[4] == "quiet") else { return nil }
-        guard !["attributes", "preflight"].contains(arguments[2]) || (generation != "legacy" && arguments[4] == "quiet") else { return nil }
+        guard !["attributes", "preflight", "delete"].contains(arguments[2]) || arguments[4] == "quiet" else { return nil }
         return Self(operation: arguments[2], generation: generation, interactive: arguments[4] == "interactive")
     }
     var service: String { generation == "legacy" ? "Claude Codex Limits GitHub" : "Claude Codex Limits GitHub Credential V2" }
@@ -201,13 +207,12 @@ final class GitHubAuthOwner {
     private let retryLock = NSLock()
     private var storeRetryDeadline: Double?
     private var storeFailure: String?
+    private var permissionRequired = false
     // Only accessed under operationLock. A manual permit belongs to this stack frame.
     private var manualStorePass = false
     private var interactionAvailable = false
     private var userAction: GitHubAuthUserAction?
     private var interactionTarget: GitHubAuthRef?
-    private var cleanupInteractionTarget: GitHubAuthRef?
-    private var retiring = false
     private var storeFailedInPass = false
     private var touchedStoreInPass = false
     private var directManualRead = false
@@ -216,6 +221,7 @@ final class GitHubAuthOwner {
     /// Scheduler integration: relative monotonic delay, never manifest.retryAt.
     func keychainRetryDelay() -> Double? {
         retryLock.lock(); defer { retryLock.unlock() }
+        if permissionRequired { return .infinity }
         return storeRetryDeadline.map { max(0, $0 - dependencies.monotonicClock()) }
     }
     private func withAuthLock(manual: Bool = false, action: GitHubAuthUserAction? = nil, _ body: () throws -> Void) throws {
@@ -225,16 +231,19 @@ final class GitHubAuthOwner {
         manualStorePass = manual; storeFailedInPass = false; touchedStoreInPass = false
         directManualRead = false; manualReadCache.removeAll()
         userAction = action
-        interactionAvailable = manual && action != nil; interactionTarget = nil; cleanupInteractionTarget = nil
+        interactionAvailable = manual && action != nil; interactionTarget = nil
         defer {
             if touchedStoreInPass && !storeFailedInPass {
-                retryLock.lock(); storeRetryDeadline = nil; storeFailure = nil; retryLock.unlock()
+                retryLock.lock(); storeRetryDeadline = nil; storeFailure = permissionRequired ? "permission_required" : nil; retryLock.unlock()
             }
             userAction?.cancel(); userAction = nil
-            manualStorePass = false; interactionAvailable = false; interactionTarget = nil; cleanupInteractionTarget = nil
+            manualStorePass = false; interactionAvailable = false; interactionTarget = nil
             directManualRead = false; manualReadCache.removeAll()
         }
         try dependencies.withLock {
+            if try dependencies.loadManifest()?.keychainPermissionRequired == true {
+                retryLock.lock(); permissionRequired = true; storeFailure = "permission_required"; retryLock.unlock()
+            }
             do { try body() }
             catch {
                 if case GitHubStoreUnavailable.access(let reason) = error {
@@ -248,7 +257,7 @@ final class GitHubAuthOwner {
     }
     private func checkStoreAccess() throws {
         retryLock.lock(); defer { retryLock.unlock() }
-        if storeFailedInPass || (!manualStorePass && storeRetryDeadline.map({ dependencies.monotonicClock() < $0 }) == true) {
+        if storeFailedInPass || (!manualStorePass && (permissionRequired || storeRetryDeadline.map({ dependencies.monotonicClock() < $0 }) == true)) {
             throw GitHubStoreUnavailable.access(storeFailure ?? "unreachable")
         }
         guard dependencies.storeIdle() else { throw GitHubStoreUnavailable.access(storeFailure ?? "timeout") }
@@ -256,23 +265,44 @@ final class GitHubAuthOwner {
     private func storeFailed(_ reason: String) {
         storeFailedInPass = true
         retryLock.lock()
-        storeFailure = reason; storeRetryDeadline = dependencies.monotonicClock() + 600
+        if reason == "permission_required" { permissionRequired = true }
+        storeFailure = permissionRequired ? "permission_required" : reason; storeRetryDeadline = dependencies.monotonicClock() + 600
         retryLock.unlock()
+        if reason == "permission_required", var manifest = try? dependencies.loadManifest() {
+            manifest.keychainPermissionRequired = true
+            try? dependencies.saveManifest(manifest)
+        }
     }
-    private func checkedRead(_ call: () -> GitHubAuthRead) throws -> GitHubAuthRead {
+    private func checkedRead(_ call: (inout Bool) -> GitHubAuthRead) throws -> GitHubAuthRead {
         try checkStoreAccess(); touchedStoreInPass = true
-        let result = call()
+        // A manual pass can consume its one permission before a later quiet call.
+        // Classify this call's timeout by the adapter actually invoked.
+        var didInteract = false
+        let result = call(&didInteract)
         switch result {
         case .locked: storeFailed("locked"); throw GitHubStoreUnavailable.access("locked")
-        case .timeout: storeFailed("timeout"); throw GitHubStoreUnavailable.access("timeout")
+        case .timeout:
+            let reason = didInteract ? "timeout" : "permission_required"
+            storeFailed(reason); throw GitHubStoreUnavailable.access(reason)
         case .unreachable: storeFailed("unreachable"); throw GitHubStoreUnavailable.access("unreachable")
-        default: return result
+        default:
+            if manualStorePass, case .ready = result {
+                retryLock.lock(); permissionRequired = false; retryLock.unlock()
+                if var manifest = try dependencies.loadManifest() {
+                    manifest.keychainPermissionRequired = nil
+                    do { try dependencies.saveManifest(manifest) }
+                    catch {
+                        retryLock.lock(); permissionRequired = true; retryLock.unlock()
+                        throw error
+                    }
+                }
+            }
+            return result
         }
     }
     private func consumeInteraction(for ref: GitHubAuthRef) -> Bool {
-        // GC during a healthy/recovering sign-in never inherits the manual permit.
-        // Signed-out cleanup may authorize just its selected first ref, once.
-        guard interactionAvailable, userAction?.isCancelled == false, (!retiring || cleanupInteractionTarget == ref),
+        // Cleanup has no interactive path and never consumes this permit.
+        guard interactionAvailable, userAction?.isCancelled == false,
               interactionTarget == nil || interactionTarget == ref,
               dependencies.storeIdle() else { return false }
         interactionAvailable = false
@@ -280,55 +310,61 @@ final class GitHubAuthOwner {
     }
     private func readStore(_ ref: GitHubAuthRef) throws -> GitHubAuthRead {
         if let cached = manualReadCache[ref] { try checkStoreAccess(); return cached }
-        return try checkedRead {
+        return try checkedRead { didInteract in
             if directManualRead, interactionAvailable {
                 guard let interactive = dependencies.interactiveReadStore,
                       consumeInteraction(for: ref), let action = userAction else { return .locked }
+                didInteract = true
                 return interactive(ref, action)
             }
             let value = dependencies.readStore(ref)
             if case .locked = value, let interactive = dependencies.interactiveReadStore,
-               consumeInteraction(for: ref), let action = userAction { return interactive(ref, action) }
+               consumeInteraction(for: ref), let action = userAction {
+                didInteract = true
+                return interactive(ref, action)
+            }
             return value
         }
     }
     private func readLegacy() throws -> GitHubAuthRead {
-        try checkedRead {
+        try checkedRead { didInteract in
             if directManualRead, interactionAvailable {
                 guard let interactive = dependencies.interactiveLegacy,
                       consumeInteraction(for: GitHubAuthRef(generation: "legacy", backend: "legacy-keychain")),
                       let action = userAction else { return .locked }
+                didInteract = true
                 return interactive(action)
             }
             let value = dependencies.legacy()
             if case .locked = value, let interactive = dependencies.interactiveLegacy,
                consumeInteraction(for: GitHubAuthRef(generation: "legacy", backend: "legacy-keychain")), let action = userAction {
+                didInteract = true
                 return interactive(action)
             }
             return value
         }
     }
-    private func stageStore(_ ref: GitHubAuthRef, _ credential: GitHubCredentialV2) -> GitHubAuthStoreStatus {
+    private func stageStore(_ ref: GitHubAuthRef, _ credential: GitHubCredentialV2,
+                            didInteract: inout Bool) -> GitHubAuthStoreStatus {
         let status = dependencies.stageStore(ref, credential)
         // .locked is a completed native RPC; timeouts/unknown results never retry.
         if status == .locked, let interactive = dependencies.interactiveStageStore,
-           dependencies.settled(ref), consumeInteraction(for: ref), let action = userAction { return interactive(ref, credential, action) }
+           dependencies.settled(ref), consumeInteraction(for: ref), let action = userAction {
+            didInteract = true
+            return interactive(ref, credential, action)
+        }
         return status
     }
-    private func deleteStore(_ ref: GitHubAuthRef) -> GitHubAuthStoreStatus {
-        let status = dependencies.deleteStore(ref)
-        if status == .locked, let interactive = dependencies.interactiveDeleteStore,
-           consumeInteraction(for: ref), let action = userAction { return interactive(ref, action) }
-        return status
-    }
-    private func checkedStatus(_ call: () -> GitHubAuthStoreStatus) throws -> GitHubAuthStoreStatus {
+    private func checkedStatus(_ call: (inout Bool) -> GitHubAuthStoreStatus) throws -> GitHubAuthStoreStatus {
         try checkStoreAccess(); touchedStoreInPass = true
-        let status = call()
+        var didInteract = false
+        let status = call(&didInteract)
         switch status {
         case .success: break
         case .locked: storeFailed("locked")
-        case .timeout: storeFailed("timeout")
+        case .timeout: storeFailed(didInteract ? "timeout" : "permission_required")
         case .unreachable, .failed: storeFailed("unreachable")
+        case .inputTooLarge: storeFailed("credential_too_large")
         }
         return status
     }
@@ -357,6 +393,11 @@ final class GitHubAuthOwner {
             epoch: manifest?.epoch ?? (credential?.epoch == "legacy" ? legacyCacheSession?.epoch : credential?.epoch),
             userID: manifest?.userID ?? credential?.userID)
         if state == "signedOut" { presentation.login = nil }
+    }
+    private func saveManifest(_ manifest: inout GitHubAuthManifest) throws {
+        retryLock.lock(); let required = permissionRequired; retryLock.unlock()
+        manifest.keychainPermissionRequired = required ? true : nil
+        try dependencies.saveManifest(manifest)
     }
     private func checkpoint(_ name: String, _ m: GitHubAuthManifest, _ ref: GitHubAuthRef? = nil) throws {
         try dependencies.checkpoint(name, m.epoch, ref?.generation ?? m.transition?.to.generation ?? "")
@@ -457,7 +498,7 @@ final class GitHubAuthOwner {
         let delay: Double = m.failureCount == 1 ? 60 : m.failureCount == 2 ? 300 : 600
         let jitter = min(30, max(0, dependencies.jitter()))
         m.retryAt = now + max(min(600, delay + jitter), retryAfter ?? 0); m.failureReason = reason
-        try dependencies.saveManifest(m)
+        try saveManifest(&m)
         present(m.transition == nil ? "unavailable" : "candidatePending", reason, manifest: m)
         return .temporary(reason)
     }
@@ -467,48 +508,34 @@ final class GitHubAuthOwner {
         // Keep both the active pointer and durable transition: later secure-store recovery
         // can still discover a late candidate. Terminal is never credential deletion.
         m.failureReason = reason; m.retryAt = nil
-        try dependencies.saveManifest(m)
+        try saveManifest(&m)
         present("actionRequired", reason, manifest: m)
         return .actionRequired(reason)
     }
     private func retire(_ m: inout GitHubAuthManifest, force: Bool = false) throws {
-        retiring = true; defer { retiring = false }
-        let now = dependencies.clock()
+        let now = dependencies.monotonicClock()
         guard force || now >= cleanupRetryAt else { return }
-        // Bounded cleanup also runs during healthy access-only maintenance, not just
-        // after rotations. Rotate uncompleted refs so one locked item cannot starve GC.
         let eligible = m.cleanupRefs.filter { $0 != m.active && $0 != m.transition?.from && $0 != m.transition?.to && $0 != m.transition?.probe }
-        guard !eligible.isEmpty else { return }
+        guard !eligible.isEmpty, dependencies.storeIdle() else { return }
         cleanupRetryAt = now + 60
         for ref in eligible.prefix(3) {
             try checkpoint("before_retire", m, ref)
-            guard try dependencies.loadManifest() == m else { return }
-            // Suppression from an earlier error in this same pass is not an attempt.
-            try checkStoreAccess()
-            let read: GitHubAuthRead
-            do { read = try readStore(ref) }
-            catch {
-                // Rotate only a real failed attempt, never a suppressed call. The
-                // shared gate still stops this pass; other refs get a turn next time.
-                if storeFailedInPass, try dependencies.loadManifest() == m {
-                    m.cleanupRefs.removeAll { $0 == ref }; m.cleanupRefs.append(ref)
-                    try dependencies.saveManifest(m)
-                }
-                throw error
-            }
+            guard try dependencies.loadManifest() == m, dependencies.storeIdle() else { return }
+            // Neither quiet attributes nor deletion can consume a user permission,
+            // read secrets, or poison the active credential's store cooldown.
+            let preflight = dependencies.cleanupPreflight(ref)
             if m.uncertainRefs.contains(ref), dependencies.settled(ref) {
-                m.uncertainRefs.removeAll { $0 == ref }; try dependencies.saveManifest(m)
+                m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
             }
-            let canDelete: Bool
-            switch read { case .ready, .missing, .corrupt: canDelete = true; default: canDelete = false }
-            let deleted = try canDelete && checkedStatus { deleteStore(ref) } == .success
+            let status = preflight == .success ? dependencies.deleteStore(ref) : preflight
             guard try dependencies.loadManifest() == m else { return }
             m.cleanupRefs.removeAll { $0 == ref }
-            if !deleted || m.uncertainRefs.contains(ref) { m.cleanupRefs.append(ref) }
-            try dependencies.saveManifest(m)
+            if status != .success || m.uncertainRefs.contains(ref) { m.cleanupRefs.append(ref) }
+            else { m.securityWriterRefs?.removeAll { $0 == ref } }
+            try saveManifest(&m)
             snapshotLock.lock(); presentation.cleanupPending = !m.cleanupRefs.isEmpty; snapshotLock.unlock()
             try checkpoint("after_retire", m, ref)
-            try checkStoreAccess()
+            if status != .success { return }
         }
     }
     private func presentSignedOut(_ m: GitHubAuthManifest) {
@@ -521,7 +548,7 @@ final class GitHubAuthOwner {
         m.epoch = UUID().uuidString.lowercased(); m.signedOut = true
         m.active = nil; m.transition = nil; m.userID = nil; m.login = nil
         m.failureReason = nil; m.retryAt = nil
-        try dependencies.saveManifest(m); pending.removeAll(); responseLock.lock(); pendingLoginResponses.removeAll(); responseLock.unlock()
+        try saveManifest(&m); pending.removeAll(); responseLock.lock(); pendingLoginResponses.removeAll(); responseLock.unlock()
         presentSignedOut(m)
     }
     // Carry the original device-attempt fence through every successor operation.
@@ -547,7 +574,7 @@ final class GitHubAuthOwner {
             // Never start a second writer until the preceding operation acknowledged
             // completion. A ready read alone does not establish writer settlement.
             guard dependencies.settled(ref) else { return .timeout }
-            m.uncertainRefs.removeAll { $0 == ref }; try dependencies.saveManifest(m)
+            m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
             wasUncertain = false
         }
         if !wasUncertain {
@@ -556,15 +583,21 @@ final class GitHubAuthOwner {
             m.uncertainRefs.append(ref)
             if !(m.permitWriterRefs ?? []).contains(ref) {
                 if m.permitWriterRefs == nil { m.permitWriterRefs = [] }; m.permitWriterRefs!.append(ref)
+                if dependencies.usesSecurityWriter {
+                    if m.securityWriterRefs == nil { m.securityWriterRefs = [] }
+                    m.securityWriterRefs!.append(ref)
+                }
             }
-            try dependencies.saveManifest(m)
+            try saveManifest(&m)
         }
-        let status = try checkedStatus { stageStore(ref, credential) }
+        let status = try checkedStatus { didInteract in
+            stageStore(ref, credential, didInteract: &didInteract)
+        }
         // All non-timeout results mean the adapter returned synchronously with no
         // worker outstanding. Timeout alone is explicitly indeterminate.
         if status != .timeout && !wasUncertain {
             guard try isCurrent(m) else { return status }
-            m.uncertainRefs.removeAll { $0 == ref }; try dependencies.saveManifest(m)
+            m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
         }
         return status
     }
@@ -588,7 +621,7 @@ final class GitHubAuthOwner {
         m.failureReason = issuerPostsInOperation == 0 ? nil : "candidate_renewal"
         m.retryAt = issuerPostsInOperation == 0 ? nil : now + 60
         m.failureCount = 0
-        try dependencies.saveManifest(m); try checkpoint("after_intent", m, next)
+        try saveManifest(&m); try checkpoint("after_intent", m, next)
         if try cancelIfRequested(&m, canPublish: canPublish) { return .signedOut }
         present("renewing", "candidate_renewal", manifest: m)
         // At most one actual issuer POST per outer operation, even if a newly issued
@@ -619,7 +652,7 @@ final class GitHubAuthOwner {
         if let expires = candidate.accessExpiresAt, now >= expires {
             return try renewCandidate(candidate, manifest: &m, now: now, canPublish: canPublish)
         }
-        m.transition?.phase = "validationPending"; try dependencies.saveManifest(m)
+        m.transition?.phase = "validationPending"; try saveManifest(&m)
         try checkpoint("before_identity", m)
         if try cancelIfRequested(&m, canPublish: canPublish) { return .signedOut }
         let identity = dependencies.identity(token)
@@ -647,7 +680,7 @@ final class GitHubAuthOwner {
             if let probe = t.probe { remember(probe, in: &m) }
             m.active = t.to; m.userID = userID; m.login = login
             m.transition = nil; m.failureReason = nil; m.retryAt = nil; m.failureCount = 0
-            try dependencies.saveManifest(m)
+            try saveManifest(&m)
             pending.removeValue(forKey: t.to)
             responseLock.lock(); pendingLoginResponses.removeValue(forKey: m.epoch); responseLock.unlock()
             try checkpoint("after_publish", m, t.to)
@@ -671,7 +704,7 @@ final class GitHubAuthOwner {
         guard case .ready(let stored) = readback, stored == candidate else {
             return try fail(&m, status == .timeout ? "storage_timeout" : "storage_unavailable", now: now)
         }
-        m.transition?.phase = "ready"; try dependencies.saveManifest(m)
+        m.transition?.phase = "ready"; try saveManifest(&m)
         pending.removeValue(forKey: ref)
         return try validateCandidate(stored, manifest: &m, now: now, canPublish: canPublish)
     }
@@ -687,7 +720,7 @@ final class GitHubAuthOwner {
             guard m.transition!.recoveryAttempts < 1 else { return try terminal(&m, "lost_result", canPublish: canPublish) }
             m.transition!.recoveryAttempts += 1
         }
-        m.transition!.phase = "requestStarted"; try dependencies.saveManifest(m)
+        m.transition!.phase = "requestStarted"; try saveManifest(&m)
         try checkpoint("after_request_started", m)
         if try cancelIfRequested(&m, canPublish: canPublish) { return .signedOut }
         guard try isCurrent(m) else { return .temporary("changed") }
@@ -713,7 +746,7 @@ final class GitHubAuthOwner {
             if response.knownNotSent && response.status == 0 {
                 m.transition!.recoveryAttempts = previousAttempts
             }
-            try dependencies.saveManifest(m)
+            try saveManifest(&m)
             let retry = response.headers.first { $0.key.lowercased() == "retry-after" }.flatMap { Double($0.value) }
             return try fail(&m, "network_unavailable", now: now, retryAfter: retry?.isFinite == true ? retry : nil)
         }
@@ -734,7 +767,7 @@ final class GitHubAuthOwner {
     private func probeSettled(_ ref: GitHubAuthRef, manifest m: inout GitHubAuthManifest, now: Double) throws -> Bool {
         if m.uncertainRefs.contains(ref) {
             guard dependencies.settled(ref) else { _ = try fail(&m, "probe_pending", now: now); return false }
-            m.uncertainRefs.removeAll { $0 == ref }; try dependencies.saveManifest(m)
+            m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
         }
         return true
     }
@@ -795,11 +828,11 @@ final class GitHubAuthOwner {
                     let replacement = GitHubAuthRef(generation: UUID().uuidString.lowercased(), backend: ref.backend)
                     remember(ref, in: &m); remember(replacement, in: &m)
                     m.transition!.probe = replacement
-                    try dependencies.saveManifest(m)
+                    try saveManifest(&m)
                 }
                 return try fail(&m, "storage_pending", now: now)
             }
-            m.uncertainRefs.removeAll { $0 == ref }; try dependencies.saveManifest(m)
+            m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
         }
         if !unresolved.isEmpty {
             // Settlement and our earlier missing read can race; consult toRef again.
@@ -823,6 +856,12 @@ final class GitHubAuthOwner {
         if ["bad_refresh_token", "lost_result", "incomplete_candidate", "identity_changed"].contains(m.failureReason ?? "") {
             present("actionRequired", m.failureReason, manifest: m)
             return .actionRequired(m.failureReason!)
+        }
+        if t.kind == "securityMigration", let source = t.from {
+            let read = source == m.active ? try self.read(m) : try readStore(source)
+            guard case .ready(var credential) = read else { return unavailable(read, manifest: m) }
+            credential.generation = t.to.generation
+            return try stage(credential, manifest: &m, now: now, canPublish: canPublish)
         }
         guard t.kind == "refresh" else { present("candidatePending", "login_pending", manifest: m); return .temporary("login_pending") }
         let source = try refreshSource(m)
@@ -853,9 +892,8 @@ final class GitHubAuthOwner {
                 }
                 guard m.formatVersion == 2 else { result = self.unavailable(.corrupt, manifest: m); return }
                 if m.signedOut {
-                    if manual { self.interactionTarget = m.cleanupRefs.first; self.cleanupInteractionTarget = m.cleanupRefs.first }
-                    // Explicit retry bypasses only GC's local throttle and the store
-                    // cooldown. The process fence and first-error stop still apply.
+                    // Explicit retry bypasses only GC's local throttle.
+                    // Deletion is always quiet and independent of the active store gate.
                     try? self.retire(&m, force: manual)
                     self.presentSignedOut(m); result = .signedOut; return
                 }
@@ -882,6 +920,17 @@ final class GitHubAuthOwner {
                 }
                 let read = try self.read(m)
                 guard case .ready(let c) = read else { result = self.unavailable(read, manifest: m); return }
+                if self.dependencies.usesSecurityWriter, let active = m.active,
+                   !(m.securityWriterRefs ?? []).contains(active), self.usable(c, now: now, reason: reason) {
+                    let to = GitHubAuthRef(generation: UUID().uuidString.lowercased(), backend: active.backend)
+                    try self.checkpoint("before_intent", m, to)
+                    guard try self.isCurrent(m) else { result = .temporary("changed"); return }
+                    m.transition = GitHubAuthTransition(from: active, to: to, phase: "prepared", kind: "securityMigration")
+                    try self.saveManifest(&m); try self.checkpoint("after_intent", m, to)
+                    var candidate = c; candidate.generation = to.generation
+                    result = try self.stage(candidate, manifest: &m, now: now, canPublish: { true })
+                    return
+                }
                 if !self.due(c, now: now) && reason != "unauthorized" { result = self.ready(c, manifest: m); return }
                 guard c.refreshToken != nil else {
                     if c.accessExpiresAt == nil || now < c.accessExpiresAt! { result = self.ready(c, manifest: m) }
@@ -901,7 +950,7 @@ final class GitHubAuthOwner {
                 guard try self.isCurrent(m) else { result = .temporary("changed"); return }
                 m.transition = GitHubAuthTransition(from: m.active, to: to, phase: "prepared", probe: probe)
                 self.remember(probe, in: &m)
-                try self.dependencies.saveManifest(m); try self.checkpoint("after_intent", m)
+                try self.saveManifest(&m); try self.checkpoint("after_intent", m)
                 self.present("renewing", credential: c, manifest: m)
                 result = try self.recover(&m, now: now, canPublish: { true }) ?? .temporary("storage_unavailable")
                 if m.failureReason == "bad_refresh_token", m.transition?.from == m.active, self.usable(c, now: now, reason: reason) {
@@ -922,6 +971,7 @@ final class GitHubAuthOwner {
             m.cleanupRefs = old?.cleanupRefs ?? []
             m.uncertainRefs = old?.uncertainRefs ?? []
             m.permitWriterRefs = old?.permitWriterRefs
+            m.securityWriterRefs = old?.securityWriterRefs
             self.remember(GitHubAuthRef(generation: "legacy", backend: "legacy-keychain"), in: &m)
             if let active = old?.active { self.remember(active, in: &m) }
             if let t = old?.transition { self.remember(t.to, in: &m); if let source = t.from { self.remember(source, in: &m) }; if let p = t.probe { self.remember(p, in: &m) } }
@@ -930,7 +980,7 @@ final class GitHubAuthOwner {
             self.interactionTarget = probe
             m.transition = GitHubAuthTransition(to: ref, phase: "prepared", kind: "login", probe: probe)
             self.remember(probe, in: &m)
-            try self.dependencies.saveManifest(m)
+            try self.saveManifest(&m)
             guard try self.probe(&m, now: self.dependencies.clock()) else { return }
             epoch = m.epoch
             self.present("loginPending", manifest: m)
@@ -1000,8 +1050,7 @@ final class GitHubAuthOwner {
     }
     /// Optional GC must run only after the whole sync/authenticated operation has
     /// finished, never between ensureAccess and its subsequent API/publication fence.
-    /// It retains the common store gate: a failure pauses future passes, but cannot
-    /// retroactively prevent the sync that has already published successfully.
+    /// GC uses its own retry clock and never changes active storage availability.
     func cleanupRetiredCredentials() {
         do { try withAuthLock {
             guard var m = try self.dependencies.loadManifest(), !m.signedOut,
@@ -1018,11 +1067,10 @@ final class GitHubAuthOwner {
               try dependencies.loadManifest() == m else { return }
         if let ref = m.active {
             remember(ref, in: &m); m.active = nil
-            try dependencies.saveManifest(m)
+            try saveManifest(&m)
         }
-        // The monotonic store gate owns retries here, including manual admission.
-        // Do not add GC's wall-clock throttle after the store cooldown has expired.
-        try retire(&m, force: true)
+        // Cleanup retains its own throttle even for a revoked credential.
+        try retire(&m)
     }
     /// Only an independently confirmed access-only 401 chain reaches this method.
     @discardableResult func confirmedUnauthorized(_ access: GitHubAuthAccess) -> Bool {
@@ -1033,7 +1081,7 @@ final class GitHubAuthOwner {
                   m.transition == nil, case .ready(let c) = try self.read(m),
                   c.refreshToken == nil, c.accessToken == access.token else { return }
             m.failureReason = "revoked"; m.retryAt = nil
-            try self.dependencies.saveManifest(m)
+            try self.saveManifest(&m)
             changed = true
             try? self.retireRevoked(&m)
             self.present("actionRequired", "revoked", manifest: m)
