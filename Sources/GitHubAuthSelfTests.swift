@@ -1420,7 +1420,7 @@ func runGitHubAuthSelfTests() {
               "three healthy syncs with GC faults never replace login or consume grants")
     }
 #endif
-    runGitHubKeychain341OwnerSelfTests(check: check)
+    runGitHubKeychain341OwnerSelfTests(check: { condition, label in check(condition, label) })
     print("AUTH SELFTEST: \(checks) checks, \(failed) failures (synthetic dependencies only)")
     if failed > 0 { exit(1) }
 }
