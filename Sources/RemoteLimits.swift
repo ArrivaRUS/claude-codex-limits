@@ -1164,7 +1164,7 @@ func remoteAccountFrame(local: (LimitData, LimitData), localIds: [String: String
 
 private func remoteManualIsActive(_ phase: RemoteManualPhase, now: Date) -> Bool {
     switch phase {
-    case .idle: return false
+    case .idle, .cooldown: return false
     case .checked(let at): return (0..<60).contains(now.timeIntervalSince(at))
     default: return true
     }
@@ -1212,7 +1212,9 @@ func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteM
     case .reading: return t("Читаем GitHub…", "Reading GitHub…")
     case .checked(let at):
         if (0..<60).contains(now.timeIntervalSince(at)) { return t("GitHub проверен ", "GitHub checked ") + time(at) }
-    case .cooldown(let seconds): return t("Повтор через \(max(0, seconds)) с", "Retry in \(max(0, seconds)) s")
+    // 3.4.1: the 30-second repeat guard stays, but its countdown is not shown;
+    // the line falls through to the ordinary card state exactly like .idle.
+    case .cooldown: break
     case .failed: return t("GitHub не ответил", "GitHub didn't respond")
     case .pollAllowed(let at): return t("Опрос можно с ", "Poll allowed at ") + time(at)
     case .idle: break

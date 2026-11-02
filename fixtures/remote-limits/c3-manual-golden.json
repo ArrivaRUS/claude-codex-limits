@@ -12,7 +12,7 @@
   {
     "language": "ru",
     "phase": "cooldown",
-    "text": "Повтор через 12 с"
+    "text": ""
   },
   {
     "language": "ru",
@@ -37,7 +37,7 @@
   {
     "language": "en",
     "phase": "cooldown",
-    "text": "Retry in 12 s"
+    "text": ""
   },
   {
     "language": "en",

@@ -1486,8 +1486,9 @@ func pacedLimits(_ d: LimitData, product: String, acct: String? = nil, now: Date
     let historyKey = acct ?? (REMOTE_RENDER_ISOLATED ? "l:preview" : localHistoryKey(product))
     let paceNow: Date? = d.source == nil ? nil : now
     var out: [PacedLimit] = []
-    // Both panel modes keep the session row, including a missing value (owner 2026-11-01).
-    do {
+    // Claude always keeps the session row; Codex only while the service reports a
+    // session value (owner 2026-11-02, 3.4.1; same rule as linux paced_limits).
+    if limitShowsSessionRow(product: product, session: d.session) {
         out.append(PacedLimit(id: "session", name: tr("Сессия · 5 ч", "Session · 5 h"),
                               pace: snapshotWindowPace(used: d.session, reset: d.sessionReset, windowH: 5,
                                                asOf: d.asOf, recentRate: d.asOf.flatMap { h?.recentRate(product, acct: historyKey, metric: { $0.session }, minutes: 60, now: $0) }, now: paceNow), color: 0, used: d.session))
@@ -5565,12 +5566,20 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
         let stale = isStale(d, now)
         let sCol = metricIsStale(d, metric: "session", now: now) ? gray(1, 0.3) : metricColor(blue, d.session)
         let wCol = metricIsStale(d, metric: "weekly", now: now) ? gray(1, 0.3) : metricColor(purple, d.weekly)
-        gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
-        gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
-        let sTxt = d.session == nil ? "—" : numText(d.session) + "%"
+        // 3.4.1 (owner 2026-11-02): Codex without a reported session value gets one
+        // week ring and no "Session" row — the same single-ring card as linux panel.py.
+        let showsSession = limitShowsSessionRow(product: product, session: input.session)
         let wTxt = d.weekly == nil ? "—" : numText(d.weekly) + "%"
-        text(attr(sTxt, 15, .semibold, sCol), x: cx, topY: cyTop - 18, align: 1)
-        text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
+        if showsSession {
+            gauge(cx: cx, cyTop: cyTop, r: 38, th: 6, pct: d.weekly, color: wCol)
+            gauge(cx: cx, cyTop: cyTop, r: 26, th: 6, pct: d.session, color: sCol)
+            let sTxt = d.session == nil ? "—" : numText(d.session) + "%"
+            text(attr(sTxt, 15, .semibold, sCol), x: cx, topY: cyTop - 18, align: 1)
+            text(attr(wTxt, 15, .semibold, wCol), x: cx, topY: cyTop + 1, align: 1)
+        } else {
+            gauge(cx: cx, cyTop: cyTop, r: 34, th: 7, pct: d.weekly, color: wCol)
+            text(attr(wTxt, 19, .semibold, wCol), x: cx, topY: cyTop - 10, align: 1)
+        }
         // The ring's lower opening carries one supplementary metric: Codex's banked resets
         // (⟳N), or — for Claude — the per-model weekly limit's own percentage (✦NN%), the
         // number that actually runs out first when you lean on a single model.
@@ -5598,6 +5607,7 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
             pill(nil, numText(s.percent) + "%", scopedCol, tinted: true)
         }
         let l1 = bodyTop + 124, l2 = bodyTop + 139
+        let weekTop = showsSession ? l2 : l1
         let status = view.map { simpleCardStatus($0, now: now) }
         if status?.showsSnapshotWarning ?? (!remote && (canFix || stale || limitPollFailed(d))) {
             // Keep the last good read distinct from the CLI's sign-in state.
@@ -5632,11 +5642,13 @@ private func drawPanelBody(_ ctx: CGContext, size: CGSize, claude: LimitData, co
                 text(valueText, x: right, topY: top, align: 2)
                 ctx.restoreGState()
             }
-            resetRow(tr("Сессия", "Session"), limitResetText(d.sessionReset, now: now), top: l1, color: sCol)
-            resetRow(tr("Неделя", "Week"), limitResetText(d.weeklyReset, now: now), top: l2, color: wCol)
+            if showsSession {
+                resetRow(tr("Сессия", "Session"), limitResetText(d.sessionReset, now: now), top: l1, color: sCol)
+            }
+            resetRow(tr("Неделя", "Week"), limitResetText(d.weeklyReset, now: now), top: weekTop, color: wCol)
             // Per-model weekly limit — named by the backend, so a future model needs no code change.
             if showsScopedRow(d, remote: remote), let s = d.scoped {
-                let l3 = l2 + SCOPED_ROW_H
+                let l3 = weekTop + SCOPED_ROW_H
                 dot(lx, centerTopY: l3 + 5, scopedCol)
                 text(attr(s.name, 10.5, .regular, textMid), x: lx + 11, topY: l3)
                 text(attr(limitResetText(s.reset, now: now), 10, .regular, textLo), x: x + w - 14, topY: l3, align: 2)
@@ -9931,6 +9943,30 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 authenticationRequired: true, dataAt: nil, nextAutomaticAt: nil, now: 1000, english: true, credentialIssue: issue)
             manualCheck(feedback.action != .allowKeychain, "only interaction-required exposes permission action: \(issue)")
         }
+        // 3.4.1 (owner 2026-11-02): the local 30-second guard shows no countdown and
+        // withholds Retry; server and Keychain waits keep their informative timers.
+        for english in [false, true] {
+            for failed in [false, true] {
+                let guarded = quotaRefreshFeedback(inFlight: false, serverUntil: nil, localUntil: 1030, failed: failed,
+                    authenticationRequired: false, dataAt: 900, nextAutomaticAt: nil, now: 1000, english: english)
+                manualCheck(guarded.action == .none && guarded.actionTitle.isEmpty
+                            && !guarded.status.contains("Повтор через") && !guarded.status.contains("Retry in"),
+                            "3.4.1 local guard has no countdown (failed=\(failed), en=\(english))")
+                let elapsed = quotaRefreshFeedback(inFlight: false, serverUntil: nil, localUntil: 1030, failed: failed,
+                    authenticationRequired: false, dataAt: 900, nextAutomaticAt: nil, now: 1030, english: english)
+                manualCheck(elapsed.action == (failed ? .retry : .none),
+                            "3.4.1 Retry returns exactly when the local guard ends (failed=\(failed), en=\(english))")
+            }
+            let server = quotaRefreshFeedback(inFlight: false, serverUntil: 1600, localUntil: 1030, failed: true,
+                authenticationRequired: false, dataAt: 900, nextAutomaticAt: nil, now: 1000, english: english)
+            manualCheck(server.status == (english ? "Service allows retry in 10 min" : "Сервис разрешит повтор через 10 мин"),
+                        "3.4.1 server wait keeps its countdown (en=\(english))")
+            let keychain = quotaRefreshFeedback(inFlight: false, serverUntil: nil, localUntil: 1030, failed: true,
+                authenticationRequired: false, dataAt: 900, nextAutomaticAt: nil, now: 1000, english: english,
+                credentialIssue: .readInteractionRequired)
+            manualCheck(keychain.status == (english ? "Keychain permission needed · retry in 30 s" : "Нужно разрешение · повтор через 30 с"),
+                        "3.4.1 Keychain permission wait keeps its countdown (en=\(english))")
+        }
     }
     // REMOTE-LIMITS C2 (Sources/RemoteLimitsC2SelfTests.swift): settings, money, history, reader_card_state. Runs before the
     // first AppKit use (NSApplication.shared below aborts in the remote-hands sandbox without WindowServer). Needs no AppKit.
@@ -10072,8 +10108,10 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 }
                 if fixture == "local-30s-one-claude" {
                     let feedback = quotaFeedback(cl, now: now)
-                    manualCheck(feedback.action == .none && feedback.actionTitle == (lang == "ru" ? "Повтор через 30 с" : "Retry in 30 s")
-                                && cl.serverRetryAt == nil, label + " local countdown is explicitly 30 seconds")
+                    // 3.4.1: the local guard withholds Retry for 30 s without showing a countdown.
+                    manualCheck(feedback.action == .none && feedback.actionTitle.isEmpty
+                                && quotaCompactAction(feedback, data: cl, now: now).isEmpty
+                                && cl.serverRetryAt == nil, label + " local 30-second guard shows no countdown")
                 }
                 if fixture == "server-wait-auth" {
                     let feedback = quotaFeedback(cl, now: now)
@@ -10541,9 +10579,11 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                                       && !metricIsStale(sample, metric: "weekly", now: authNow),
                                       label + " 100% ended session is muted without muting the week")
                         } else {
-                            authCheck(card.rows.contains { $0.limit?.id == "session" && $0.limit?.used == nil }
-                                      && sample.session == nil,
-                                      label + " empty session row never blocks weekly forecast")
+                            // 3.4.1: Claude keeps an empty session row; Codex without a session value has none.
+                            let emptySession = card.rows.contains(where: { $0.limit?.id == "session" && $0.limit?.used == nil })
+                            let anySession = card.rows.contains(where: { $0.limit?.id == "session" })
+                            authCheck((product == "codex" ? !anySession : emptySession) && sample.session == nil,
+                                      label + " empty session (Claude row, Codex none) never blocks weekly forecast")
                         }
                     }
                     let nextClock = DateFormatter(); nextClock.dateFormat = "HH:mm"

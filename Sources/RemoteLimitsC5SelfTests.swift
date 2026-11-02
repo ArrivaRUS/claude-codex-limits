@@ -975,33 +975,62 @@ private func c5C520(_ check: C5Check) {
 // C5-21…23: owner decisions 2026-11-01. Production row/height/money models,
 // explicit language, clock and in-memory usage only; registered before AppKit.
 private func c5C521(_ check: C5Check) {
-    for language in ["ru", "en"] {
-        var view = c5DateView(C5_NOW)
-        view.product = "codex"; view.data.session = nil; view.data.sessionReset = nil
-        let sync = ReaderSyncState(phase: .on)
+    // 3.4.1 (owner 2026-11-02, as linux paced_limits): Codex shows a session row
+    // only while the service reports a session value; Claude always keeps it.
+    let zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    typealias Scene = (rows: [String], height: Double, sessionUsed: Double?)
+    func scene(_ view: AccountView) -> Scene {
         let frame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [view], visibleViews: [view], displayedViews: [view])
-        withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
-            let cards = advCards(LimitData(present: false), view.data)
-            check(cards.first?.rows.contains { $0.limit?.id == "session" && $0.limit?.used == nil } == true,
-                  "C5-21 \(language): Advanced keeps the empty Codex session shown in Simple")
-            let p = remotePresentationCard(view, sync: sync, language: language, narrow: false,
-                now: C5_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
-            check(remoteVisibleSourceLine(p, advanced: true).isEmpty && remoteVisibleSourceLine(p, advanced: false).isEmpty
-                  && remoteQuotaFooterHeight(advanced: true, statusLine: p.statusLine) == remoteQuotaFooterHeight(advanced: false)
-                  && p.sourceHeader?.tooltip.isEmpty == false && !p.statusLine.isEmpty && !p.advancedBadge.isEmpty,
-                  "C5-21 \(language): both modes hide source ink, retaining source tooltip/AX model")
-            if let row = cards.first?.rows.first(where: { $0.limit?.id == "session" }) {
-                check(remoteAdvancedVerdict(row, data: view.data, now: C5_NOW, language: language,
-                    timeZone: TimeZone(secondsFromGMT: 0)!) == "—",
-                      "C5-21 \(language): foreign empty window says dash, never inactive instruction")
-            }
+        return withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) { () -> Scene in
+            let cards = view.product == "claude" ? advCards(view.data, LimitData(present: false))
+                : advCards(LimitData(present: false), view.data)
+            guard let card = cards.first else { return ([], 0, nil) }
+            let session = card.rows.first(where: { $0.limit?.id == "session" })
+            return (card.rows.compactMap { $0.limit?.id }, Double(card.height), session?.limit?.used)
         }
+    }
+    for language in ["ru", "en"] {
+        var withSession = c5DateView(C5_NOW); withSession.product = "codex"
+        var view = withSession; view.data.session = nil; view.data.sessionReset = nil
+        let empty = scene(view), reported = scene(withSession)
+        check(!empty.rows.contains("session") && empty.rows.contains("weekly"),
+              "C5-21 \(language): foreign Codex without a session value has no session row in Advanced")
+        check(!remoteAdvancedMetrics(view).contains("session") && remoteAdvancedMetrics(withSession).contains("session"),
+              "C5-21 \(language): shared Advanced metrics follow the Codex session value")
+        check(reported.rows.contains("session") && reported.sessionUsed == 20,
+              "C5-21 \(language): Codex with a reported session keeps its row")
+        check(empty.height > 0 && empty.height < reported.height,
+              "C5-21 \(language): Codex card without session is shorter than with one")
+        let p = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: C5_NOW, timeZone: zone)
+        check(remoteVisibleSourceLine(p, advanced: true).isEmpty && remoteVisibleSourceLine(p, advanced: false).isEmpty
+              && remoteQuotaFooterHeight(advanced: true, statusLine: p.statusLine) == remoteQuotaFooterHeight(advanced: false)
+              && p.sourceHeader?.tooltip.isEmpty == false && !p.statusLine.isEmpty && !p.advancedBadge.isEmpty,
+              "C5-21 \(language): both modes hide source ink, retaining source tooltip/AX model")
         var own = view; own.isLocal = true; own.data.source = nil
-        let ownFrame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [own], visibleViews: [own], displayedViews: [own])
-        withRemoteRenderScene(frame: ownFrame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
-            let row = advCards(LimitData(present: false), own.data).first?.rows.first { $0.limit?.id == "session" }
+        var ownReported = withSession; ownReported.isLocal = true; ownReported.data.source = nil
+        let ownEmpty = scene(own), ownWith = scene(ownReported)
+        check(!ownEmpty.rows.contains("session") && ownWith.rows.contains("session")
+              && ownEmpty.height < ownWith.height,
+              "C5-21 \(language): own Codex card drops the inactive session row and its height")
+        // Claude is unchanged: an empty session still has its row (foreign: dash; own: inactive).
+        var claude = c5DateView(C5_NOW); claude.data.session = nil; claude.data.sessionReset = nil
+        let claudeScene = scene(claude)
+        check(claudeScene.rows.contains("session") && claudeScene.sessionUsed == nil
+              && remoteAdvancedMetrics(claude).contains("session"),
+              "C5-21 \(language): Claude without a session value keeps its empty session row")
+        let claudeFrame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [claude], visibleViews: [claude], displayedViews: [claude])
+        withRemoteRenderScene(frame: claudeFrame, timeZone: zone, manual: .idle) {
+            if let row = advCards(claude.data, LimitData(present: false)).first?.rows.first(where: { $0.limit?.id == "session" }) {
+                check(remoteAdvancedVerdict(row, data: claude.data, now: C5_NOW, language: language, timeZone: zone) == "—",
+                      "C5-21 \(language): foreign empty Claude window says dash, never inactive instruction")
+            } else { check(false, "C5-21 \(language): foreign empty Claude session row exists") }
+        }
+        var ownClaude = claude; ownClaude.isLocal = true; ownClaude.data.source = nil
+        let ownClaudeFrame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [ownClaude], visibleViews: [ownClaude], displayedViews: [ownClaude])
+        withRemoteRenderScene(frame: ownClaudeFrame, timeZone: zone, manual: .idle) {
+            let row = advCards(ownClaude.data, LimitData(present: false)).first?.rows.first { $0.limit?.id == "session" }
             check(row?.kind == .inactive && row?.limit?.used == nil,
-                  "C5-21 \(language): own empty session retains the local inactive row")
+                  "C5-21 \(language): own empty Claude session retains the local inactive row")
         }
     }
 }

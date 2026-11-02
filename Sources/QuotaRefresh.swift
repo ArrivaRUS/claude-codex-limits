@@ -208,10 +208,10 @@ func quotaRefreshFeedback(inFlight: Bool, serverUntil: Double?, localUntil: Doub
     let status = failed ? (english ? "Could not refresh" : "Не удалось обновить")
         : (dataAt == nil ? (english ? "No successful reading yet" : "Успешных ответов пока нет")
            : (english ? "Last reading received" : "Последний ответ получен"))
-    if now < localUntil {
-        return result(status, .none, (english ? "Retry in " : "Повтор через ") + quotaCountdown(until: localUntil, now: now, english: english))
-    }
-    return result(status, failed ? .retry : .none, failed ? (english ? "Retry" : "Повторить") : "")
+    // 3.4.1: the local 30-second guard still withholds Retry, but its countdown is
+    // not shown; server and Keychain waits above keep their informative timers.
+    let retryable = failed && now >= localUntil
+    return result(status, retryable ? .retry : .none, retryable ? (english ? "Retry" : "Повторить") : "")
 }
 
 // Only an explicit read-permission action can create this one-shot, expiring permit.

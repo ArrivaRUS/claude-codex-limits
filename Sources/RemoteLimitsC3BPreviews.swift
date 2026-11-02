@@ -414,7 +414,10 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         for view in ["simple-narrow", "simple-wide", "advanced"] {
             let presentation = remotePresentationCard(account, sync: sync, language: row.language, narrow: view == "simple-narrow",
                 now: now, timeZone: C3_PREVIEW_ZONE, manual: phase, readerManual: readerManual)
-            check(presentation.statusLine == row.text && presentation.tooltip.contains(row.text) && presentation.sourceLine.contains("15:43"),
+            // 3.4.1: the cooldown row is empty — the guard has no visible countdown.
+            check(presentation.statusLine == row.text && (row.text.isEmpty || presentation.tooltip.contains(row.text))
+                  && !presentation.tooltip.contains("Retry in") && !presentation.tooltip.contains("Повтор через")
+                  && presentation.sourceLine.contains("15:43"),
                   "C3-10 manual scene agrees with C3-A golden " + row.phase + "/" + row.language + "/" + view)
             render("c3-manual-\(row.phase)-\(row.language)-\(view).png", language: row.language, view: view,
                 accounts: sceneAccounts(account, view: view), sync: sync, now: now, phase: phase, readerManual: readerManual)
@@ -894,9 +897,11 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
     for language in ["ru", "en"] {
         let views = fixture()
         if let main = render(views, language: language, name: "c5-26-advanced-\(language).png") {
-            check(close(main.height, 722), "C5-26 \(language): advancedHeight → drawAdvanced window is 722pt")
-            check(close(main.element("card:0")?.rect.height, 226) && close(main.element("card:1")?.rect.height, 176),
-                  "C5-25 \(language): actual drawn cards are 226/176 without blank footer")
+            // 3.4.1: the Codex mockup has no session value, so its 50pt inactive row and
+            // 1pt divider are gone: card 176 → 125, window 722 → 671 (owner 2026-11-02).
+            check(close(main.height, 671), "C5-26 \(language): advancedHeight → drawAdvanced window is 671pt")
+            check(close(main.element("card:0")?.rect.height, 226) && close(main.element("card:1")?.rect.height, 125),
+                  "C5-25 \(language): actual drawn cards are 226/125 without blank footer or empty Codex session")
             validate(main, language: language)
             var long = views
             for i in long.indices { long[i].customCaption = String(repeating: "Ж", count: 32); long[i].caption = long[i].customCaption! }
@@ -920,7 +925,7 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
             check(notes.count > 1 && notes.allSatisfy { $0.rect.maxX <= 334.5 && !($0.text ?? "").contains("…") }
                   && notes.contains { ($0.text ?? "").hasPrefix("Codex ≈ $") }, "C5-26 actual CoreText overflow moves the whole product item")
             for i in notes.indices.dropFirst() { check(close(notes[i - 1].rect.maxY - notes[i].rect.maxY, 12), "C5-26 actual wrapped note step12") }
-            check(close(drawn.height, 722 + 22 + CGFloat(notes.count - 1) * 12)
+            check(close(drawn.height, 671 + 22 + CGFloat(notes.count - 1) * 12)
                   && (drawn.element("credit")?.rect.minY ?? -1) >= 0, "C5-26 wrapped text grows real window with footer")
         }
         var offline = views
@@ -931,7 +936,7 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
             offline[i].data.source = source
         }
         if let drawn = render(offline, language: language) {
-            check(close(drawn.element("card:0")?.rect.height, 244) && close(drawn.element("card:1")?.rect.height, 194)
+            check(close(drawn.element("card:0")?.rect.height, 244) && close(drawn.element("card:1")?.rect.height, 143)
                   && drawn.hits.filter { $0.id.hasPrefix("quotafeedback:") }.count == 2,
                   "C5-25 \(language): real status footer adds exactly18pt")
         }

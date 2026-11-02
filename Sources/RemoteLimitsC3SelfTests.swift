@@ -179,9 +179,11 @@ private func c3C302(_ expect: C3Expect) {
                 expect(false, "C3-02 B8 fresh golden tooltip exists"); continue
             }
             let p = c3Presentation(v, language: g.language, narrow: narrow, now: now, manual: phase)
-            let expectedTooltip = ([g.text] + (g.phase == "pollAllowed" ? [floorExplanation] : []) + [base.tooltip]).joined(separator: "\n")
+            // 3.4.1: the cooldown golden row is empty — the repeat guard has no visible countdown.
+            let expectedTooltip = ([g.text] + (g.phase == "pollAllowed" ? [floorExplanation] : []) + [base.tooltip])
+                .filter { !$0.isEmpty }.joined(separator: "\n")
             expect(p.statusLine == g.text && p.sourceLine.contains("15:43"), "C3-02 B8 \(g.phase)/\(g.language)/\(narrow): exact phase; asOf unchanged")
-            expect(p.tooltip == expectedTooltip && p.tooltip.contains(g.text) && p.accessibilityValue == expectedTooltip,
+            expect(p.tooltip == expectedTooltip && (g.text.isEmpty || p.tooltip.contains(g.text)) && p.accessibilityValue == expectedTooltip,
                    "C3-02 B8 \(g.phase)/\(g.language)/\(narrow): exact complete tooltip/AX, manual phase first")
             if g.phase == "checked" {
                 for age in [60.0, 61.0] {
@@ -479,11 +481,15 @@ private func c3C314(_ root: String, _ expect: C3Expect) {
     expect(text() == "GitHub checked 16:00" && text("ru") == "GitHub проверен 16:00",
            "C3-14 successful completion publishes checked using injected completion clock")
     now = C3_NOW.addingTimeInterval(18)
+    // 3.4.1: the thirty-second guard still blocks the read, but shows no countdown.
     expect(!controller.request() && completions.count == 1
-           && text() == "Retry in 12 s" && text("ru") == "Повтор через 12 с",
-           "C3-14 repeat inside thirty-second protection reads nothing and shows remaining seconds")
+           && text().isEmpty && text("ru").isEmpty,
+           "C3-14 repeat inside thirty-second protection reads nothing and shows no countdown")
+    if case .cooldown = controller.phase(now: now) { expect(true, "C3-14 guard phase is still cooldown") }
+    else { expect(false, "C3-14 guard phase is still cooldown") }
     now = C3_NOW.addingTimeInterval(29.1)
-    expect(text() == "Retry in 1 s", "C3-14 fractional cooldown rounds remaining time up")
+    expect(text().isEmpty, "C3-14 cooldown never renders a countdown before its boundary")
+    expect(!controller.request() && completions.count == 1, "C3-14 guard still refuses a read at 29.1 s")
     now = C3_NOW.addingTimeInterval(30)
     expect(text() == "GitHub checked 16:00", "C3-14 thirty-second cooldown ends at its boundary")
     now = C3_NOW.addingTimeInterval(60.999)
@@ -707,6 +713,39 @@ private func c3C311(_ expect: C3Expect) {
     expect(machineTag(setting: "MacBook Pro — Алекс", hostname: "ignored.synthetic") == "macbook-pro", "C3-11 Т13: machine tag excludes non-ASCII personal suffix")
 }
 
+// 3.4.1 (owner 2026-11-02): the 30-second repeat guard keeps its phase, but the
+// card never shows its countdown; line 2 and the tooltip are exactly the .idle ones.
+private func c3Release341Cooldown(_ expect: C3Expect) {
+    let states: [RemoteCardState] = [.fresh, .stale, .signInRequired, .serviceWait, .offline, .syncStalled, .signedOut]
+    for state in states {
+        for status in state == .signInRequired ? ["expired", "signed_out"] : (state == .serviceWait ? ["rate_limited"] : ["ok"]) {
+            let v = c3View(state: state, status: status)
+            for lang in ["ru", "en"] {
+                for wide in [true, false] {
+                    let idle = remoteCardLine2(v, state: state, phase: .idle, lang: lang, wide: wide, now: C3_NOW, timeZone: C3_ZONE)
+                    for seconds in [1, 12, 30] {
+                        let line = remoteCardLine2(v, state: state, phase: .cooldown(seconds), lang: lang, wide: wide, now: C3_NOW, timeZone: C3_ZONE)
+                        expect(line == idle && !line.contains("Повтор через") && !line.contains("Retry in"),
+                               "3.4.1 cooldown line2 equals idle without countdown: \(state.rawValue)/\(status)/\(lang)/\(wide)/\(seconds)")
+                    }
+                }
+                for phase in [SyncPhase.on, .revoked] {
+                    let sync = ReaderSyncState(phase: phase)
+                    let idle = c3Presentation(v, language: lang, sync: sync, manual: .idle)
+                    let cooling = c3Presentation(v, language: lang, sync: sync, manual: .cooldown(12))
+                    expect(cooling.statusLine == idle.statusLine && cooling.tooltip == idle.tooltip
+                           && cooling.statusTone == idle.statusTone && cooling.accessibilityValue == idle.accessibilityValue
+                           && !cooling.tooltip.contains("Повтор через") && !cooling.tooltip.contains("Retry in"),
+                           "3.4.1 cooldown presentation equals idle: \(state.rawValue)/\(status)/\(lang)/\(phase)")
+                    expect(remoteQuotaFooterHeight(advanced: true, statusLine: cooling.statusLine)
+                           == remoteQuotaFooterHeight(advanced: true, statusLine: idle.statusLine),
+                           "3.4.1 cooldown adds no Advanced footer height: \(state.rawValue)/\(status)/\(lang)/\(phase)")
+                }
+            }
+        }
+    }
+}
+
 func runRemoteLimitsC3SelfTests() -> Int {
     var failures = 0, checks = 0
     func expect(_ ok: Bool, _ message: String) { checks += 1; if !ok { failures += 1 }; print("\(ok ? "OK" : "FAIL") \(message)") }
@@ -715,6 +754,7 @@ func runRemoteLimitsC3SelfTests() -> Int {
     catch { print("FAIL C3 temp directory creation"); return 1 }
     defer { try? FileManager.default.removeItem(atPath: root) }
     c3C301(expect); c3C302(expect); c3C303(root, expect); c3C304(expect); c3C305(expect); c3C307(expect); c3C311(expect); c3C312(expect); c3C313(expect); c3C314(root, expect)
+    c3Release341Cooldown(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3 model tests: \(checks) checks; \(failures) failures")
     return failures
 }

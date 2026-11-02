@@ -174,8 +174,14 @@ func remoteAdvancedCardHeight(rowHeights: [Double], noticeHeight: Double, footer
 
 // Shared by the Foundation-only geometry and the real Advanced rows. History can
 // change recent-rate text, but cannot change the row kind or its measured height.
+// 3.4.1 (owner 2026-11-02), as linux/ccl/limits.py paced_limits: Claude always
+// keeps its session row; Codex shows one only while the service reports a
+// session value, so a returning 5-hour window brings the row back by itself.
+func limitShowsSessionRow(product: String, session: Double?) -> Bool {
+    product == "claude" || session != nil
+}
 func remoteAdvancedMetrics(_ view: AccountView) -> [String] {
-    ["session"]
+    (limitShowsSessionRow(product: view.product, session: view.data.session) ? ["session"] : [])
         + (view.data.scoped != nil ? ["scoped"] : []) + ["weekly"]
 }
 func remoteAdvancedRowHeight(_ kind: AdvRowKind) -> Double {

@@ -145,15 +145,21 @@ private func c3bC306(_ expect: C3BExpect) {
 }
 
 // Edge vectors use literal expected row/card sizes from UX and the existing
-// Advanced contract: Claude 2 quota rows; Codex keeps session/week + 24pt credits.
+// Advanced contract: Claude 2 quota rows; Codex session only when reported (3.4.1) + 24pt credits.
 // No AdvCard instance: its notice clock is runtime-owned. AdvRow.height itself is
 // a pure value property, so these checks also cover the real draw row adapter.
 private func c3bC306Edges(_ expect: C3BExpect) {
     let now = c3bNow()
     var onlyWeek = c3bView(product: "codex")
     onlyWeek.data.session = nil; onlyWeek.data.sessionReset = nil
-    expect(remoteAdvancedMetrics(onlyWeek) == ["session", "weekly"],
-           "C3-06 edge: Codex week-only retains a blank session metric in both modes")
+    expect(remoteAdvancedMetrics(onlyWeek) == ["weekly"],
+           "C3-06 edge: Codex week-only has no blank session metric (3.4.1)")
+    var claudeWeekOnly = c3bView(); claudeWeekOnly.data.session = nil; claudeWeekOnly.data.sessionReset = nil
+    expect(remoteAdvancedMetrics(claudeWeekOnly).first == "session",
+           "C3-06 edge: Claude without a session value keeps its session metric")
+    var codexWithSession = onlyWeek; codexWithSession.data.session = 12
+    expect(remoteAdvancedMetrics(codexWithSession) == ["session", "weekly"],
+           "C3-06 edge: a reported Codex session brings its metric back")
     let weekKind = remoteAdvancedRowKind(onlyWeek, metric: "weekly", now: now)
     if case .full = weekKind { expect(true, "C3-06 edge: Codex reported week is a full row") }
     else { expect(false, "C3-06 edge: Codex reported week is a full row") }
