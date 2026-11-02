@@ -247,6 +247,12 @@ func runGitHubAuthSelfTests() {
               && owner.keychainRetryDelay() == .infinity && fixture.manifest?.keychainPermissionRequired == true,
               label + " persisted permission gate suppresses all credential adapters")
     }
+    // 3.4.1 review B: only a background READ timeout means a hidden permission prompt.
+    func checkWriteTimeoutBounded(_ fixture: GHAuthFixture, _ owner: GitHubAuthOwner, _ label: String) {
+        check(owner.snapshot().reason != "permission_required" && owner.keychainRetryDelay() != .infinity
+              && fixture.manifest?.keychainPermissionRequired != true,
+              label + " write timeout keeps bounded self-healing gate, never the permission latch")
+    }
 
     // KEYCHAIN-QUIET: actual helper bootstrap policy with fake native/configure
     // closures. No compiled test path here contains Security, Process or app startup.
@@ -393,29 +399,31 @@ func runGitHubAuthSelfTests() {
         f.now += 601; _ = f.owner().ensureAccess(reason: "startup")
         check(!f.storeTrace.contains { $0.interactive || $0.operation == "read" }, "cleanup stays quiet across restart")
     }
-    // beginLogin is manual, but its first probe write is still quiet. A quiet
-    // timeout persists the permission gate; a later successful login probe clears it.
+    // beginLogin is manual, but its first probe write is still quiet. A write
+    // timeout is the bounded timeout class (600 s), never the permission latch.
     do {
         let f = GHAuthFixture(); let owner = f.owner()
         f.stageFault = { _, credential in credential.kind == "probe" ? .timeout : nil }
-        check(owner.beginLogin() == nil && owner.snapshot().reason == "permission_required"
-              && owner.keychainRetryDelay() == .infinity && f.manifest?.keychainPermissionRequired == true,
-              "K341-login quiet probe timeout persists permission gate despite manual pass")
+        check(owner.beginLogin() == nil && owner.snapshot().reason == "timeout"
+              && owner.keychainRetryDelay() == 600 && f.manifest?.keychainPermissionRequired != true,
+              "K341-login quiet probe write timeout keeps bounded timeout gate despite manual pass")
         check(f.storeTrace.map { $0.operation } == ["read", "stage"]
               && !f.storeTrace.contains { $0.interactive } && f.lateWrites.count == 1,
               "K341-login quiet timed-out probe never launches interactive fallback or readback")
         f.now += 601
-        checkPermissionGate(f, owner, "K341-login quiet probe after 601 seconds")
+        checkWriteTimeoutBounded(f, owner, "K341-login quiet probe after 601 seconds")
+        check(owner.keychainRetryDelay() == 0, "K341-login probe write-timeout cooldown elapses after 600 seconds")
         let restarted = f.owner()
-        checkPermissionGate(f, restarted, "K341-login quiet probe after restart")
+        checkWriteTimeoutBounded(f, restarted, "K341-login quiet probe after restart")
+        check(restarted.keychainRetryDelay() == nil, "K341-login write timeout persists no gate across restart")
         check(f.counts["device_flow", default: 0] == 0 && f.counts["refresh_request", default: 0] == 0,
-              "K341-login blocked probe and background retries consume no issuer grant")
+              "K341-login timed-out probe consumes no issuer grant")
 
         f.stageFault = nil; f.releaseLateWrites(); f.storeTrace.removeAll()
         if let epoch = restarted.beginLogin() {
             check(restarted.snapshot().state == "loginPending" && restarted.keychainRetryDelay() == nil
                   && f.manifest?.keychainPermissionRequired != true,
-                  "K341-login successful quiet probe clears persisted and runtime permission gate")
+                  "K341-login successful quiet probe leaves no persisted or runtime gate")
             check(f.storeTrace.map { $0.operation } == ["read", "stage", "read"]
                   && !f.storeTrace.contains { $0.interactive },
                   "K341-login recovery probe succeeds quietly without spending user interaction")
@@ -691,10 +699,9 @@ func runGitHubAuthSelfTests() {
         let target = f.manifest?.transition?.to
         check(f.lateWrites.count == 1, "one late candidate writer")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        let restarted = f.owner()
-        checkPermissionGate(f, owner, "late target after 600 seconds")
-        checkPermissionGate(f, restarted, "late target after restart")
-        check(f.protectedRead(restarted.retryKeychainAccess()), "late target recovered by explicit permission")
+        checkWriteTimeoutBounded(f, owner, "late target after 600 seconds")
+        check(owner.keychainRetryDelay() == 0, "late target bounded write-timeout cooldown elapsed at 600 seconds")
+        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "late target recovered automatically after write timeout")
         check(f.manifest?.active == target, "late target published")
         check(f.counts["refresh_request", default: 0] == 1, "late no repeat refresh")
     }
@@ -708,12 +715,10 @@ func runGitHubAuthSelfTests() {
         } else { check(false, "probe intent absent") }
         check(f.counts["refresh_request", default: 0] == 0, "probe blocks issuer")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        let restarted = f.owner()
-        checkPermissionGate(f, owner, "probe after 600 seconds")
-        checkPermissionGate(f, restarted, "probe after restart")
-        check(f.counts["refresh_request", default: 0] == 0, "permission gate keeps probe issuer unspent")
-        check(f.protectedRead(restarted.retryKeychainAccess()), "probe recovery after explicit permission")
-        check(f.counts["refresh_request", default: 0] == 1, "manual probe recovery spends one refresh")
+        checkWriteTimeoutBounded(f, owner, "probe after 600 seconds")
+        check(f.counts["refresh_request", default: 0] == 0, "probe write timeout keeps issuer unspent")
+        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "probe recovery after bounded write timeout")
+        check(f.counts["refresh_request", default: 0] == 1, "automatic probe recovery spends one refresh")
     }
     do {
         let f = GHAuthFixture(); let owner = f.owner(); check(isReady(f.login(owner)), "logout initial login"); f.due()
@@ -935,11 +940,10 @@ func runGitHubAuthSelfTests() {
         check(f.counts["refresh_request", default: 0] == postsAfterTimeout && f.manifest?.retryAt == retryBefore,
               "suppressed candidate leaves issuer budget and durable retry unchanged")
         f.now += 1
-        checkPermissionGate(f, owner, "readable uncertain writer at 600 seconds")
-        checkPermissionGate(f, f.owner(), "readable uncertain writer after restart")
-        check(f.protectedRead(owner.retryKeychainAccess()), "explicit permission can publish readable uncertain pair without certifying writer settlement")
+        checkWriteTimeoutBounded(f, owner, "readable uncertain writer at 600 seconds")
+        check(f.protectedRead(owner.ensureAccess(reason: "maintenance")), "readable uncertain pair can publish validated identity at 600 seconds")
         check(f.counts["refresh_request", default: 0] == postsAfterTimeout,
-              "manual readable candidate recovery cannot spend refresh again")
+              "readable candidate recovery cannot spend refresh again")
         if let active = f.manifest?.active, let payload = f.items[active] {
             f.lateWrites.append((active, payload))
             _ = f.lateWrites.removeFirst()
@@ -1016,7 +1020,9 @@ func runGitHubAuthSelfTests() {
         check(target != nil && f.items[target!] == nil && f.lateWrites.count == 1, "helper still live and candidate currently missing")
         for _ in 0..<4 {
             f.now += 600
-            checkPermissionGate(f, f.owner(), "fresh owner waits for unsettled helper")
+            let fresh = f.owner()
+            check(isTemporary(fresh.ensureAccess(reason: "restart")), "fresh owner waits for unsettled helper")
+            checkWriteTimeoutBounded(f, fresh, "fresh owner waiting for unsettled helper")
             check(f.manifest?.transition?.to == target, "unsettled helper durable address preserved")
             check(f.counts["refresh_request", default: 0] == 1 && f.counts["refresh_consumed", default: 0] == 1, "missing toRef cannot spend refresh while helper unsettled")
         }
@@ -1025,7 +1031,7 @@ func runGitHubAuthSelfTests() {
               && f.counts["refresh_request", default: 0] == 1 && f.counts["refresh_consumed", default: 0] == 1,
               "manual retry preserves uncertain target and never spends a second grant")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().retryKeychainAccess()), "settled helper candidate resumes authorized work after explicit retry")
+        check(f.protectedRead(f.owner().ensureAccess(reason: "maintenance")), "settled helper candidate resumes authorized work")
         check(f.manifest?.active == target && f.counts["refresh_request", default: 0] == 1, "helper recovery publishes same result without OAuth reuse")
     }
     // Publication callback is memory-only and must execute while the injected
@@ -1184,14 +1190,16 @@ func runGitHubAuthSelfTests() {
         check(probe != nil && f.items[probe!] != nil && !f.lateWrites.isEmpty, "probe readable before writer acknowledgement")
         for _ in 0..<3 {
             f.now += 600
-            checkPermissionGate(f, f.owner(), "readable unsettled probe restart still waits")
+            let fresh = f.owner()
+            check(isTemporary(fresh.ensureAccess(reason: "restart")), "readable unsettled probe restart still waits")
+            checkWriteTimeoutBounded(f, fresh, "readable unsettled probe restart")
             check(f.counts["refresh_request", default: 0] == 0, "readable unsettled probe zero OAuth")
         }
         check(isTemporary(f.owner().retryKeychainAccess()), "explicit permission cannot treat readable unsettled probe as completed")
         check(probe.map { f.manifest?.uncertainRefs.contains($0) == true } == true && f.counts["refresh_request", default: 0] == 0,
               "manual probe retry retains uncertain address and zero OAuth before acknowledgement")
         f.stageFault = nil; f.releaseLateWrites(); f.now += 600
-        check(f.protectedRead(f.owner().retryKeychainAccess()), "probe acknowledgement and explicit retry resume protected work")
+        check(f.protectedRead(f.owner().ensureAccess(reason: "maintenance")), "probe acknowledgement resumes protected work")
         check(f.counts["refresh_request", default: 0] == 1, "settled preflight grants one refresh")
     }
     // New permit journals can prove no helper invocation; old uncertain refs
@@ -1525,7 +1533,8 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
             check(false, "K341-migrate published candidate missing"); continue
         }
         check(migrated != source && value.epoch == original.epoch && value.accessToken == original.accessToken
-              && value.refreshToken == original.refreshToken && value.userID == original.userID,
+              && value.refreshToken == original.refreshToken && value.userID == f.manifest?.userID
+              && f.manifest?.userID == "1001",
               "K341-migrate fresh generation preserves epoch, identity and credential pair")
         check(f.manifest?.transition == nil && f.manifest?.securityWriterRefs?.contains(migrated) == true
               && f.manifest?.securityWriterRefs?.contains(source) != true,
@@ -1539,20 +1548,123 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
         check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1
               && f.publicStateIsNonsecret(owner), "K341-migrate uses no OAuth grant, new login or secret journal")
     }
-    for status in [GitHubAuthStoreStatus.failed, .locked, .inputTooLarge] {
+    // Review A: migration is optional. A permanent writer rejection (oversized
+    // 3.4.0 envelope, deterministic adapter failure) declines this generation for good.
+    for status in [GitHubAuthStoreStatus.inputTooLarge, .failed] {
         let f = GHAuthFixture(); let initial = f.owner()
-        check(ready(f.login(initial)), "K341-migrate failure initial synthetic login")
+        check(ready(f.login(initial)), "K341-migrate permanent failure initial synthetic login")
+        initial.cleanupRetiredCredentials()
         guard let source = f.manifest?.active, let original = f.items[source] else {
-            check(false, "K341-migrate failure source missing"); continue
+            check(false, "K341-migrate permanent failure source missing"); continue
         }
-        f.usesSecurityWriter = true; f.stageFault = { _, _ in status }
+        f.usesSecurityWriter = true; f.stageFault = { _, c in c.kind == "credential" ? status : nil }
+        let owner = f.owner(), stagesBefore = f.counts["store_stage", default: 0]
+        check(f.protectedRead(owner.ensureAccess(reason: "startup")) && f.manifest?.active == source
+              && f.items[source] == original,
+              "K341-migrate permanent writer failure still syncs on the readable active generation")
+        check(f.manifest?.transition == nil && f.manifest?.securityMigrationDeclinedRefs == [source]
+              && f.manifest?.securityWriterRefs?.contains(source) != true,
+              "K341-migrate permanent failure drops the transition and remembers the declined generation")
+        check(owner.keychainRetryDelay() == nil && f.manifest?.keychainPermissionRequired != true
+              && owner.snapshot().state == "healthy",
+              "K341-migrate optional writer failure arms no store gate or permission latch")
+        if case .ready(let access) = owner.ensureAccess(reason: "background_sync") {
+            check(owner.withCurrentAccess(access) {}, "K341-migrate declined generation still admits sync publication")
+        } else { check(false, "K341-migrate declined generation lost access") }
+        for reason in ["background_sync", "maintenance", "wake"] {
+            f.now += 3601
+            check(f.protectedRead(owner.ensureAccess(reason: reason)), "K341-migrate declined generation keeps syncing")
+        }
+        check(f.protectedRead(f.owner().ensureAccess(reason: "restart"))
+              && f.counts["store_stage", default: 0] == stagesBefore + 1 && f.manifest?.transition == nil,
+              "K341-migrate declined generation is never retried, including after restart")
+        check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1
+              && f.publicStateIsNonsecret(owner), "K341-migrate permanent failure requests no OAuth or new login")
+    }
+    // Temporary writer failures never stop sync; retries are spaced by the
+    // migration interval and bounded to three attempts, then migration is declined.
+    for status in [GitHubAuthStoreStatus.timeout, .locked, .unreachable] {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let initial = f.owner()
+        check(ready(f.login(initial)), "K341-migrate temporary failure initial synthetic login")
+        initial.cleanupRetiredCredentials()
+        guard let source = f.manifest?.active, let original = f.items[source] else {
+            check(false, "K341-migrate temporary failure source missing"); continue
+        }
+        f.usesSecurityWriter = true; f.stageFault = { _, c in c.kind == "credential" ? status : nil }
+        let owner = f.owner(), stagesBefore = f.counts["store_stage", default: 0]
+        check(f.protectedRead(owner.ensureAccess(reason: "startup")) && f.manifest?.active == source
+              && f.items[source] == original,
+              "K341-migrate temporary writer failure still syncs on the readable active generation")
+        let target = f.manifest?.transition?.to
+        check(f.manifest?.transition?.kind == "securityMigration" && f.manifest?.transition?.recoveryAttempts == 1
+              && owner.keychainRetryDelay() == nil && f.manifest?.keychainPermissionRequired != true
+              && owner.snapshot().reason != "permission_required",
+              "K341-migrate temporary failure keeps a counted retry without store gate or permission latch")
+        if case .ready(let access) = owner.ensureAccess(reason: "background_sync") {
+            check(owner.withCurrentAccess(access) {}, "K341-migrate pending optional migration does not fence sync publication")
+        } else { check(false, "K341-migrate pending migration lost access") }
+        check(f.manifest?.transition?.recoveryAttempts == 1 && f.counts["store_stage", default: 0] == stagesBefore + 1,
+              "K341-migrate no second attempt before the retry interval")
+        for _ in 0..<5 {
+            f.now += 3601; f.monotonicNow! += 3601
+            check(f.protectedRead(owner.ensureAccess(reason: "background_sync")), "K341-migrate sync continues during bounded retries")
+            check(owner.keychainRetryDelay() == nil, "K341-migrate retries never arm the store gate")
+        }
+        // A timed-out writer stays unsettled, so later attempts cannot start a second writer.
+        let expectedStages = stagesBefore + (status == .timeout ? 1 : 3)
+        check(f.manifest?.transition == nil && f.manifest?.securityMigrationDeclinedRefs == [source]
+              && f.manifest?.active == source && target.map { f.manifest?.cleanupRefs.contains($0) == true } == true,
+              "K341-migrate gives up after three attempts and keeps candidate address for cleanup")
+        check(f.counts["store_stage", default: 0] == expectedStages,
+              "K341-migrate at most three writer launches, none while a timed-out writer is unsettled")
+        check(f.protectedRead(f.owner().ensureAccess(reason: "restart"))
+              && f.counts["store_stage", default: 0] == expectedStages && f.manifest?.transition == nil,
+              "K341-migrate abandoned migration is not retried after restart")
+        check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1,
+              "K341-migrate bounded retries request no OAuth or new login")
+    }
+    // A late copy found on a later attempt is published without another writer.
+    do {
+        let f = GHAuthFixture(); let initial = f.owner()
+        check(ready(f.login(initial)), "K341-migrate late copy initial synthetic login")
+        initial.cleanupRetiredCredentials()
+        let source = f.manifest?.active
+        f.usesSecurityWriter = true; f.stageFault = { _, c in c.kind == "credential" ? .timeout : nil }
         let owner = f.owner()
-        check(!ready(owner.ensureAccess(reason: "startup")) && f.manifest?.active == source
-              && f.items[source] == original && f.manifest?.transition?.kind == "securityMigration",
-              "K341-migrate failed writer preserves source and recoverable migration transition")
-        check(f.manifest?.securityWriterRefs?.contains(source) != true
-              && f.counts["refresh_request", default: 0] == 0,
-              "K341-migrate failure cannot mark old native generation or request OAuth")
+        check(source != nil && f.protectedRead(owner.ensureAccess(reason: "startup")) && f.manifest?.active == source,
+              "K341-migrate timed-out writer still syncs on source")
+        let stages = f.counts["store_stage", default: 0]
+        f.stageFault = nil; f.releaseLateWrites(); f.now += 3601
+        let target = f.manifest?.transition?.to
+        check(target != nil && f.protectedRead(owner.ensureAccess(reason: "background_sync")) && f.manifest?.active == target
+              && f.manifest?.transition == nil && f.counts["store_stage", default: 0] == stages,
+              "K341-migrate later attempt publishes the settled late copy without a second writer")
+    }
+    // Review B: a background WRITE timeout is the bounded timeout class with
+    // self-recovery; only a background READ timeout requires manual permission.
+    do {
+        let f = GHAuthFixture(); f.monotonicNow = 1000
+        let owner = f.owner(); check(ready(f.login(owner)), "K341-write-timeout initial synthetic login"); f.due()
+        f.stageFault = { _, c in c.kind == "credential" ? .timeout : nil }
+        check(temporary(owner.ensureAccess(reason: "background_sync")), "K341-write-timeout renewal write timeout is temporary")
+        check(owner.snapshot().reason == "timeout" && owner.keychainRetryDelay() == 600
+              && f.manifest?.keychainPermissionRequired != true,
+              "K341-write-timeout background write timeout is bounded, not permission_required, no manifest latch")
+        check(f.owner().keychainRetryDelay() == nil, "K341-write-timeout restart restores no permission gate")
+        f.stageFault = nil; f.releaseLateWrites(); f.monotonicNow = 1599
+        let reads = f.counts["store_read", default: 0]
+        check(temporary(owner.ensureAccess(reason: "background_sync")) && owner.keychainRetryDelay() == 1
+              && f.counts["store_read", default: 0] == reads,
+              "K341-write-timeout cooldown suppresses background adapters until its finite deadline")
+        f.monotonicNow = 1600
+        check(f.protectedRead(owner.ensureAccess(reason: "background_sync")) && owner.keychainRetryDelay() == nil
+              && f.counts["refresh_request", default: 0] == 1,
+              "K341-write-timeout background self-recovers after 600 seconds without manual retry")
+        f.readOverride = .timeout
+        check(temporary(owner.ensureAccess(reason: "background_sync")) && owner.snapshot().reason == "permission_required"
+              && owner.keychainRetryDelay() == .infinity && f.manifest?.keychainPermissionRequired == true,
+              "K341-write-timeout background read timeout still requires manual permission")
     }
 }
 
@@ -1687,6 +1799,22 @@ private func github341TemporarySecurity(_ arguments: [String], input: String? = 
     guard process.terminationReason == .exit else { return (.failure(1), Data()) }
     return (process.terminationStatus == 0 ? .success : .failure(process.terminationStatus), bytes.value())
 }
+// dump-keychain may print ACL/partition plists as plain text or as hex (0x… or
+// "<hex>"). Count the marker in every form at byte level; the dump itself is never printed.
+func github341PartitionMarkerCount(_ dump: Data, marker: String = "apple-tool:") -> Int {
+    func occurrences(_ pattern: Data, in data: Data) -> Int {
+        guard !pattern.isEmpty else { return 0 }
+        var count = 0, start = data.startIndex
+        while start < data.endIndex, let found = data.range(of: pattern, in: start..<data.endIndex) {
+            count += 1; start = found.upperBound
+        }
+        return count
+    }
+    let raw = Data(marker.utf8)
+    let lower = raw.map { String(format: "%02x", $0) }.joined()
+    return occurrences(raw, in: dump) + occurrences(Data(lower.utf8), in: dump)
+        + occurrences(Data(lower.uppercased().utf8), in: dump)
+}
 #endif
 
 private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) -> Void) {
@@ -1739,9 +1867,9 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
             run: githubAuthRunSecurityWriter, attributes: attributes)
         check(status == .success, "K341-integration production writer creates temporary-keychain item")
         let (dumpStatus, dump) = github341TemporarySecurity(["dump-keychain", "-a", path])
-        let aclCount = (String(data: dump, encoding: .utf8)?.components(separatedBy: "apple-tool:").count ?? 0) - 1
-        check(dumpStatus == .success && aclCount >= 1, "K341-integration ACL contains apple-tool partition")
-        print("K341 TEMP KEYCHAIN: apple-tool partition count=\(max(0, aclCount))")
+        let aclCount = dumpStatus == .success ? github341PartitionMarkerCount(dump) : 0
+        check(dumpStatus == .success && aclCount >= 1, "K341-integration ACL contains apple-tool partition (plain or hex)")
+        print("K341 TEMP KEYCHAIN: apple-tool partition count=\(aclCount)")
         let (readStatus, readback) = github341TemporarySecurity(["find-generic-password", "-s", service, "-a", generation, "-w", path])
         check(readStatus == .success && (readback == Data(envelope.utf8) || readback == Data((envelope + "\n").utf8)),
               "K341-integration security reads exact synthetic envelope without interaction")
@@ -1760,11 +1888,27 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         check(duplicateReadStatus == .success
               && (duplicateReadback == Data(envelope.utf8) || duplicateReadback == Data((envelope + "\n").utf8)),
               "K341-integration duplicate preserves exact original immutable envelope and readable ACL")
+        // The real `security -i` exit code against an absent keychain is the evidence here;
+        // the stubbed attributes alone would make any outcome look like a failure.
         let missingPath = root.appendingPathComponent("absent.keychain-db").path
+        var missingExit: SyncKeychainStatus?
         let failure = try githubAuthSecurityWrite(service: service, generation: generation,
             envelope: envelope, keychainPath: missingPath,
-            run: githubAuthRunSecurityWriter, attributes: { .missing })
-        check(failure != .success, "K341-integration failed interactive subcommand cannot be certified by zero process exit")
+            run: { args, line in let result = githubAuthRunSecurityWriter(arguments: args, input: line); missingExit = result; return result },
+            attributes: { .missing })
+        let exitLabel: String
+        switch missingExit {
+        case .success?: exitLabel = "0"
+        case .failure(let code)?: exitLabel = String(code)
+        case .timedOut?: exitLabel = "timeout"
+        case .missing?: exitLabel = "missing"
+        case nil: exitLabel = "not-run"
+        }
+        print("K341 TEMP KEYCHAIN: missing-keychain exit=\(exitLabel)")
+        let nonzeroExit: Bool
+        if case .failure(let code)? = missingExit { nonzeroExit = code != 0 } else { nonzeroExit = false }
+        check(nonzeroExit && failure == missingExit,
+              "K341-integration security -i reports a nonzero exit for a failed add to an absent keychain; writer returns that code")
     } catch { check(false, "K341-integration production writer rejected isolated fixture") }
 #else
     print("K341 TEMP KEYCHAIN: SKIP (requires macOS temporary-keychain capability)")

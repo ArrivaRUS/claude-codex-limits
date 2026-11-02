@@ -28,6 +28,8 @@ struct GitHubAuthTransition: Codable, Equatable {
     var recoveryAttempts: Int = 0
     var kind: String = "refresh"
     var probe: GitHubAuthRef?
+    // securityMigration only: wall-clock time before which no further optional attempt runs.
+    var notBefore: Double? = nil
 }
 struct GitHubAuthManifest: Codable, Equatable {
     var formatVersion: Int = 2
@@ -43,6 +45,8 @@ struct GitHubAuthManifest: Codable, Equatable {
     var permitWriterRefs: [GitHubAuthRef]? = nil
     // Writer provenance is metadata, never part of ref identity.
     var securityWriterRefs: [GitHubAuthRef]? = nil
+    // Active generation whose optional security-writer migration was abandoned.
+    var securityMigrationDeclinedRefs: [GitHubAuthRef]? = nil
     var keychainPermissionRequired: Bool? = nil
     // Nonsecret, authoritative identity bound atomically to the active epoch/ref.
     var userID: String?
@@ -217,6 +221,10 @@ final class GitHubAuthOwner {
     private var touchedStoreInPass = false
     private var directManualRead = false
     private var manualReadCache: [GitHubAuthRef: GitHubAuthRead] = [:]
+    // Optional migration writes never arm the shared store gate.
+    private var optionalStoreWrite = false
+    private static let securityMigrationAttemptLimit = 3
+    private static let securityMigrationRetryInterval: Double = 3600
 
     /// Scheduler integration: relative monotonic delay, never manifest.retryAt.
     func keychainRetryDelay() -> Double? {
@@ -359,10 +367,13 @@ final class GitHubAuthOwner {
         try checkStoreAccess(); touchedStoreInPass = true
         var didInteract = false
         let status = call(&didInteract)
+        if optionalStoreWrite { return status }
         switch status {
         case .success: break
         case .locked: storeFailed("locked")
-        case .timeout: storeFailed(didInteract ? "timeout" : "permission_required")
+        // A write timeout is never a permission prompt: a quiet add cannot raise UI and
+        // locked is exit 36. Keep the bounded self-healing timeout class (600 s).
+        case .timeout: storeFailed("timeout")
         case .unreachable, .failed: storeFailed("unreachable")
         case .inputTooLarge: storeFailed("credential_too_large")
         }
@@ -872,6 +883,101 @@ final class GitHubAuthOwner {
         }
         return try request(c, manifest: &m, now: now, recovery: true, canPublish: canPublish)
     }
+    // Moving a 3.4.0 generation to the security writer is an optional improvement.
+    // A readable, usable active credential always serves the pass; a failed write
+    // never stops sync. Permanent failure declines this generation for good;
+    // temporary failure retries at most once per interval and a bounded number of times.
+    private func resumeSecurityMigration(_ m: inout GitHubAuthManifest, now: Double, reason: String) throws -> GitHubAuthResult? {
+        let activeRead = try read(m)
+        // Without a readable source there is nothing to copy; keep prior recovery.
+        guard case .ready(let c) = activeRead else { return try recover(&m, now: now, canPublish: { true }) }
+        guard usable(c, now: now, reason: reason), !due(c, now: now) else {
+            // Renewal stages its fresh generation through the same security writer.
+            guard try endSecurityMigration(&m, decline: false) else { return .temporary("changed") }
+            return nil
+        }
+        guard let t = m.transition else { return ready(c, manifest: m) }
+        if t.recoveryAttempts >= Self.securityMigrationAttemptLimit {
+            guard try endSecurityMigration(&m, decline: true) else { return .temporary("changed") }
+            return ready(c, manifest: m)
+        }
+        // A rolled-back wall clock cannot postpone the next attempt beyond one interval.
+        if let notBefore = t.notBefore, now < notBefore, notBefore - now <= Self.securityMigrationRetryInterval {
+            return ready(c, manifest: m)
+        }
+        return try attemptSecurityMigration(&m, active: c, now: now)
+    }
+    private func attemptSecurityMigration(_ m: inout GitHubAuthManifest, active c: GitHubCredentialV2, now: Double) throws -> GitHubAuthResult {
+        guard var t = m.transition, t.kind == "securityMigration", t.from == m.active else { return ready(c, manifest: m) }
+        // A still-terminating helper is not an attempt; a later pass retries.
+        guard dependencies.storeIdle() else { return ready(c, manifest: m) }
+        guard try isCurrent(m) else { return .temporary("changed") }
+        let resumed = t.recoveryAttempts > 0 || m.uncertainRefs.contains(t.to)
+        t.recoveryAttempts += 1; t.notBefore = now + Self.securityMigrationRetryInterval
+        m.transition = t; try saveManifest(&m)
+        var candidate = c; candidate.generation = t.to.generation
+        do {
+            if resumed {
+                // A late or earlier write may already hold the copy; add-only never overwrites.
+                switch try readStore(t.to) {
+                case .ready(let stored):
+                    if stored == candidate { return try publishSecurityMigration(&m, candidate: candidate) }
+                    return try failSecurityMigration(&m, active: c, permanent: true)
+                case .missing: break
+                default: return try failSecurityMigration(&m, active: c, permanent: true)
+                }
+            }
+            let status = try optionalStage(t.to, candidate, manifest: &m)
+            guard try isCurrent(m) else { return .temporary("changed") }
+            switch status {
+            case .success: break
+            // Deterministic adapter rejections (oversized command, unencodable envelope).
+            case .inputTooLarge, .failed: return try failSecurityMigration(&m, active: c, permanent: true)
+            case .locked, .timeout, .unreachable: return try failSecurityMigration(&m, active: c, permanent: false)
+            }
+            guard case .ready(let stored) = try readStore(t.to) else {
+                return try failSecurityMigration(&m, active: c, permanent: false)
+            }
+            guard stored == candidate else { return try failSecurityMigration(&m, active: c, permanent: true) }
+            return try publishSecurityMigration(&m, candidate: candidate)
+        } catch GitHubStoreUnavailable.access(_) {
+            // A gated readback is not a migration verdict; the active read already succeeded.
+            return try failSecurityMigration(&m, active: c, permanent: false)
+        }
+    }
+    private func optionalStage(_ ref: GitHubAuthRef, _ credential: GitHubCredentialV2,
+                               manifest m: inout GitHubAuthManifest) throws -> GitHubAuthStoreStatus {
+        optionalStoreWrite = true; defer { optionalStoreWrite = false }
+        return try durableStage(ref, credential, manifest: &m)
+    }
+    private func failSecurityMigration(_ m: inout GitHubAuthManifest, active c: GitHubCredentialV2, permanent: Bool) throws -> GitHubAuthResult {
+        if permanent || (m.transition?.recoveryAttempts ?? 0) >= Self.securityMigrationAttemptLimit {
+            guard try endSecurityMigration(&m, decline: true) else { return .temporary("changed") }
+        }
+        return ready(c, manifest: m)
+    }
+    @discardableResult private func endSecurityMigration(_ m: inout GitHubAuthManifest, decline: Bool) throws -> Bool {
+        guard let t = m.transition, t.kind == "securityMigration", try isCurrent(m) else { return false }
+        // The candidate address may hold a (late) copy: retain it for quiet cleanup.
+        remember(t.to, in: &m)
+        if decline, let source = t.from { m.securityMigrationDeclinedRefs = [source] }
+        m.transition = nil
+        try saveManifest(&m)
+        pending.removeValue(forKey: t.to)
+        return true
+    }
+    private func publishSecurityMigration(_ m: inout GitHubAuthManifest, candidate: GitHubCredentialV2) throws -> GitHubAuthResult {
+        // Same epoch, identity and pair as the readable active credential: no OAuth or identity call.
+        guard let t = m.transition, try isCurrent(m) else { return .temporary("changed") }
+        try checkpoint("before_publish", m)
+        guard try isCurrent(m) else { return .temporary("changed") }
+        if let old = t.from { remember(old, in: &m) }
+        m.active = t.to; m.transition = nil; m.securityMigrationDeclinedRefs = nil
+        try saveManifest(&m)
+        pending.removeValue(forKey: t.to)
+        try checkpoint("after_publish", m, t.to)
+        return ready(candidate, manifest: m)
+    }
     func retryKeychainAccess(action: GitHubAuthUserAction = GitHubAuthUserAction()) -> GitHubAuthResult {
         ensureAccess(reason: "keychain_manual", manual: true, action: action)
     }
@@ -909,6 +1015,10 @@ final class GitHubAuthOwner {
                     self.interactionTarget = active
                     self.manualReadCache[active] = try self.readStore(active)
                 }
+                if m.transition?.kind == "securityMigration", m.transition?.from != nil, m.transition?.from == m.active,
+                   let migrated = try self.resumeSecurityMigration(&m, now: now, reason: reason) {
+                    result = migrated; return
+                }
                 if let recovered = try self.recover(&m, now: now, canPublish: { true }) {
                     if case .ready = recovered { result = recovered; return }
                     // An issuer has potentially invalidated the old access in requestStarted.
@@ -921,14 +1031,15 @@ final class GitHubAuthOwner {
                 let read = try self.read(m)
                 guard case .ready(let c) = read else { result = self.unavailable(read, manifest: m); return }
                 if self.dependencies.usesSecurityWriter, let active = m.active,
-                   !(m.securityWriterRefs ?? []).contains(active), self.usable(c, now: now, reason: reason) {
+                   !(m.securityWriterRefs ?? []).contains(active),
+                   !(m.securityMigrationDeclinedRefs ?? []).contains(active),
+                   self.usable(c, now: now, reason: reason), !self.due(c, now: now) {
                     let to = GitHubAuthRef(generation: UUID().uuidString.lowercased(), backend: active.backend)
                     try self.checkpoint("before_intent", m, to)
                     guard try self.isCurrent(m) else { result = .temporary("changed"); return }
                     m.transition = GitHubAuthTransition(from: active, to: to, phase: "prepared", kind: "securityMigration")
                     try self.saveManifest(&m); try self.checkpoint("after_intent", m, to)
-                    var candidate = c; candidate.generation = to.generation
-                    result = try self.stage(candidate, manifest: &m, now: now, canPublish: { true })
+                    result = try self.attemptSecurityMigration(&m, active: c, now: now)
                     return
                 }
                 if !self.due(c, now: now) && reason != "unauthorized" { result = self.ready(c, manifest: m); return }
@@ -1037,7 +1148,8 @@ final class GitHubAuthOwner {
             if let m = try self.dependencies.loadManifest() {
                 guard !m.signedOut, m.epoch == access.epoch,
                       m.active?.generation == access.generation,
-                      (m.transition == nil || m.failureReason == "bad_refresh_token"),
+                      (m.transition == nil || m.failureReason == "bad_refresh_token"
+                       || (m.transition?.kind == "securityMigration" && m.transition?.from == m.active)),
                       m.failureReason != "revoked",
                       case .ready(let c) = try self.read(m), c.userID == access.userID, c.accessToken == access.token else { return }
             } else {
