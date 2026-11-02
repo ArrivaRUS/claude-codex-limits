@@ -24,7 +24,7 @@
 
 macOS 13+, Apple Silicon. Linux — 0.5.0.
 
-DMG SHA-256: `<заполнить после сборки DMG>`.
+DMG SHA-256: `61d1298a390e1416901072cf932f55b057c07baef18033d38f0287d8afdba99c`.
 
 <!--EN-->
 **Limits from other computers.** Claude Code and Codex limits and usage from all your machines — a VPS, other laptops — now appear in one window on your Mac. Machines signed in to the same GitHub account publish to your secret gist, and the Mac shows them. The Mac does not need its own subscription: turn a product off under “Poll on this computer”, and the card from your server still appears.
@@ -50,4 +50,4 @@ DMG SHA-256: `<заполнить после сборки DMG>`.
 
 macOS 13+, Apple Silicon. Linux is at 0.5.0.
 
-DMG SHA-256: `<fill in after building the DMG>`.
+DMG SHA-256: `61d1298a390e1416901072cf932f55b057c07baef18033d38f0287d8afdba99c`.

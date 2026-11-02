@@ -70,7 +70,7 @@ Linux CI runs tests and builds the DEB on Ubuntu 22.04. The 0.5.0 tray has not y
 
 ## Verification
 
-Source: `<commit after merge>`. Linux CI: `<run link, test count>`.
+Source: `ef75605` on `main`. Linux CI: [run 41402703991](https://github.com/ArrivaRUS/claude-codex-limits/actions/runs/41402703991) — 822 tests, 0 skipped.
 
 SHA-256 (`claude-codex-limits_0.5.0_all.deb`):
 ```text
