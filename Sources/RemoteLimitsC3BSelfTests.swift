@@ -1029,7 +1029,7 @@ private func c3bC338(_ expect: C3BExpect) {
         badgeWidth: 79, planWidth: 59, machineWidth: 31, isCustomTitle: false, minimumTitleWidth: 64)
     expect(widths.title == 82 && widths.badge == 79 && widths.plan == 59 && widths.machines == 31,
            "C3-38: corrected 268pt header budget fits complete product, status, plan and vps suffix")
-    expect(APP_VERSION == "3.4.0", "C3-38: public application version is 3.4.0")
+    expect(APP_VERSION == "3.4.1", "C3-38: public application version is 3.4.1")
 }
 
 // R2: real CoreText widths are covered by c3-...-longname-... PNG scenes. This
