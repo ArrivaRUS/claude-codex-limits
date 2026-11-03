@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Подвал Авто-опроса</title>
+<style>
+  :root {
+    --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", Inter, "Helvetica Neue", Arial, sans-serif;
+    --cap: rgba(255,255,255,.88);
+    --cap-dim: rgba(255,255,255,.55);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: linear-gradient(180deg, #3b3f47 0%, #2a2d33 100%) fixed;
+    color: var(--cap); font-family: var(--font); -webkit-font-smoothing: antialiased;
+    padding: 20px 16px 48px;
+  }
+  .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin: 0 0 10px; }
+  .top h1 { font-size: 17px; font-weight: 600; margin: 0; }
+  .top .sub { font-size: 12.5px; color: var(--cap-dim); }
+  .scale { display: inline-flex; gap: 2px; background: rgba(255,255,255,.08); border-radius: 8px; padding: 2px; }
+  .scale button { font: 500 12px var(--font); color: var(--cap-dim); background: none; border: 0; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+  .scale button.on { background: rgba(255,255,255,.18); color: #fff; font-weight: 600; }
+  .intro { max-width: 1140px; font-size: 12.5px; line-height: 1.45; color: var(--cap-dim); margin: 0 0 18px; }
+  .intro b { color: #fff; font-weight: 600; }
+  .check { font-size: 12px; margin: 0 0 22px; padding: 6px 10px; border-radius: 8px; display: inline-block; }
+  .check.ok { background: rgba(51,217,179,.14); color: #7fe9cf; }
+  .check.bad { background: rgba(255,69,59,.18); color: #ff8a83; }
+  .zoomwrap { transform-origin: 0 0; }
+  section { margin: 0 0 30px; }
+  section h2 { font-size: 13.5px; font-weight: 600; margin: 0 0 4px; color: #fff; }
+  section .why { font-size: 12px; color: var(--cap-dim); margin: 0 0 10px; max-width: 1140px; line-height: 1.4; }
+  .row { display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; gap: 6px; width: 360px; max-width: 100%; }
+  .col .caption { font-size: 12px; line-height: 1.4; }
+  .col .caption b { font-weight: 600; color: #fff; }
+  .col .caption span { color: var(--cap-dim); }
+  .col .caption .dh { color: #ffc56b; }
+  /* panel fragment — 1 CSS px = 1 pt */
+  .panel {
+    position: relative; width: 360px; overflow: hidden; border-radius: 0 0 18px 18px;
+    background: linear-gradient(180deg, rgb(26,26,26) 0%, rgb(19,19,19) 100%);
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.08), 0 14px 30px rgba(0,0,0,.4);
+    font-family: var(--font); -webkit-font-smoothing: antialiased; color: rgba(255,255,255,.95);
+  }
+  .panel .b, .panel .t, .panel .dot, .panel svg { position: absolute; }
+  .panel .t { white-space: pre; display: block; }
+  .panel .zone { position: absolute; outline: 1px dashed rgba(255,197,107,.0); }
+  body.zones .panel .zone { outline-color: rgba(255,197,107,.55); }
+  .panel .overflow { outline: 1px solid #ff453b !important; background: rgba(255,69,59,.25); }
+  .tip { position: absolute; z-index: 5; max-width: 300px; font: 11px/1.35 var(--font); color: rgba(255,255,255,.9);
+    background: rgba(45,45,48,.97); box-shadow: 0 0 0 .5px rgba(255,255,255,.18), 0 6px 18px rgba(0,0,0,.45);
+    border-radius: 6px; padding: 5px 8px; white-space: pre-line; pointer-events: none; }
+  label.zt { font-size: 12px; color: var(--cap-dim); display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>Подвал панели: частота опроса в режиме «Авто»</h1>
+  <span class="sub">макет 2026-11-03 · тёмная тема · фрагмент низа панели 360 pt, 1 px = 1 pt</span>
+  <span class="scale" role="group" aria-label="Масштаб">
+    <button type="button" data-z="1" class="on">1×</button><button type="button" data-z="2">2× (как снимки @2x)</button>
+  </span>
+  <label class="zt"><input type="checkbox" id="zones"> показать зоны текста</label>
+</div>
+<p class="intro">
+  <b>Задача:</b> в «Авто» видно интервал каждого продукта и кто его опрашивает, без наведения курсора.
+  Сегменты «15м · 30м · 1ч · 4ч» и кнопка «А» управляют только <b>этим Mac</b>. Поэтому подсвечиваются только интервалы продуктов, которые опрашивает этот Mac, как в 3.4.1.
+  Интервал с другой машины (vps) управляется там и показывается подписью, а не подсветкой сегмента.
+  <b>Вариант A</b>: строка простым текстом под сегментами, панель выше на 14 pt, только в «Авто».
+  <b>Вариант B</b>: легенда из двух строк в пустом месте между «А» и кнопкой питания, высота не меняется.
+  Наведите на подвал, чтобы увидеть подсказку (она вторична и дублирует видимое).
+</p>
+<div id="check" class="check"></div>
+<div class="zoomwrap" id="zw"><div id="root"></div></div>
+
+<script>
+(() => {
+'use strict';
+const W = 360;
+const FONT = getComputedStyle(document.body).getPropertyValue('--font').trim() || 'sans-serif';
+const C = {
+  hi: 'rgba(255,255,255,.95)', mid: 'rgba(255,255,255,.5)', lo: 'rgba(255,255,255,.32)', name: 'rgba(255,255,255,.62)',
+  fresh: '#33D9B3', late: '#FFA00A', old: '#FF453B', link: '#6B9EF5', sep: 'rgba(255,255,255,.06)',
+};
+const cv = document.createElement('canvas').getContext('2d');
+function mw(s, size, weight = 400) { cv.font = `${weight} ${size}px ${FONT}`; return cv.measureText(s).width; }
+function el(p, cls, style) { const d = document.createElement('div'); if (cls) d.className = cls; if (style) d.style.cssText = style; p.appendChild(d); return d; }
+function box(p, x, y, w, h, bg, r, extra = '') { return el(p, 'b', `left:${x}px;top:${y}px;width:${w}px;height:${h}px;background:${bg};border-radius:${r}px;${extra}`); }
+function txt(p, x, y, h, s, o = {}) {
+  const size = o.size || 11, weight = o.weight || 400, w = mw(s, size, weight);
+  const left = o.align === 'c' ? x - w / 2 : o.align === 'r' ? x - w : x;
+  const d = el(p, 't', `left:${left}px;top:${y}px;height:${h}px;line-height:${h}px;font-size:${size}px;font-weight:${weight};color:${o.color || C.hi};`);
+  d.textContent = s; return w;
+}
+function dot(p, x, cy, color, d = 6) { el(p, 'dot', `left:${x}px;top:${cy - d / 2}px;width:${d}px;height:${d}px;border-radius:50%;background:${color};`); }
+function truncate(s, size, weight, maxW) {
+  if (mw(s, size, weight) <= maxW) return s;
+  let t = s; while (t.length > 1 && mw(t + '…', size, weight) > maxW) t = t.slice(0, -1);
+  return t + '…';
+}
+/* runs: [{t, size, weight, color} | {dot: color}] — drawn left→right from x; returns width */
+const DOT = 6, DOT_GAP = 3;
+function runsWidth(runs) { return runs.reduce((a, r) => a + (r.dot ? DOT + DOT_GAP : mw(r.t, r.size, r.weight)), 0); }
+function drawRuns(p, x, y, h, runs) {
+  let cx = x;
+  for (const r of runs) {
+    if (r.dot) { dot(p, cx, y + h / 2 + 0.5, r.dot); cx += DOT + DOT_GAP; }
+    else cx += txt(p, cx, y, h, r.t, r);
+  }
+  return cx - x;
+}
+function powerSvg(p, x, y) {
+  const ns = 'http://www.w3.org/2000/svg', s = document.createElementNS(ns, 'svg');
+  s.setAttribute('viewBox', '0 0 16 16'); s.setAttribute('width', 16); s.setAttribute('height', 16);
+  s.style.cssText = `left:${x}px;top:${y}px;`;
+  s.innerHTML = '<g fill="none" stroke="rgba(255,255,255,.5)" stroke-width="1.7" stroke-linecap="round">' +
+    '<path d="M10.29 1.70 A6.7 6.7 0 1 1 5.71 1.70"/><path d="M8 7 L8 0.3"/></g>';
+  p.appendChild(s);
+}
+
+// ---------- state data ----------
+// prod: {name, sec, src: null (этот Mac) | {machine, tone, dataAt}}
+const L = {
+  ru: { auto: 'Авто', on: 'на', here: 'на этом Mac', and: 'и', data: 'данные от', min: ' мин', h: ' ч', m: 'м', hh: 'ч', segs: ['15м', '30м', '1ч', '4ч'], A: 'А' },
+  en: { auto: 'Auto', on: 'on', here: 'on this Mac', and: 'and', data: 'data from', min: ' min', h: ' h', m: 'm', hh: 'h', segs: ['15m', '30m', '1h', '4h'], A: 'A' },
+};
+const SECS = [900, 1800, 3600, 14400];
+const durLong = (s, l) => s >= 3600 ? (s / 3600) + L[l].h : (s / 60) + L[l].min;
+const durShort = (s, l) => s >= 3600 ? (s / 3600) + L[l].hh : (s / 60) + L[l].m;
+const isStale = p => p.src && p.src.tone !== 'fresh';
+
+const STATES = [
+  { id: 1, title: 'Авто: Claude опрашивает сервер «vps» раз в 15 мин (на этом Mac входа в Claude нет), Codex опрашивает этот Mac раз в 4 ч',
+    why: 'Случай владельца. В 3.4.1 подсвечено только «4ч», а подсказка «А» перечисляет только Codex: про Claude в подвале нет ни слова. Отсюда вывод «Claude опрашивается раз в 4 ч».',
+    auto: true, langs: ['ru', 'en'], baseline: true,
+    prods: [{ name: 'Claude', sec: 900, src: { machine: 'vps', tone: 'fresh' } }, { name: 'Codex', sec: 14400, src: null }] },
+  { id: 2, title: 'Авто: оба продукта опрашивает этот Mac, интервал одинаковый — 30 мин',
+    why: 'Подсвечен один сегмент. В A одинаковые интервалы склеены в одну фразу; в B обе строки показаны, чтобы раскладка не прыгала.',
+    auto: true, langs: ['ru'],
+    prods: [{ name: 'Claude', sec: 1800, src: null }, { name: 'Codex', sec: 1800, src: null }] },
+  { id: 3, title: 'Авто: оба продукта опрашивает этот Mac, интервалы разные — Claude 15 мин, Codex 1 ч',
+    why: 'Подсвечены два сегмента; подпись говорит, какой из них чей.',
+    auto: true, langs: ['ru'],
+    prods: [{ name: 'Claude', sec: 900, src: null }, { name: 'Codex', sec: 3600, src: null }] },
+  { id: 4, title: 'Авто: включена одна подписка — только Claude, опрашивает этот Mac раз в 15 мин',
+    why: 'В B одна строка по центру зоны по вертикали.',
+    auto: true, langs: ['ru'],
+    prods: [{ name: 'Claude', sec: 900, src: null }] },
+  { id: 5, title: 'Ручной режим 30 мин (не «Авто»)',
+    why: 'Как в 3.4.1: подсвечен выбранный сегмент, «А» выключена. Подписи нет. В A строка убрана вместе со своей высотой (+0 pt).',
+    auto: false, manual: 1800, langs: ['ru'], prods: [] },
+  { id: 6, title: 'Авто: Claude приходит с «vps», но сервер давно не присылал данных; Codex опрашивает этот Mac раз в 4 ч',
+    why: 'Интервал vps не показываем: расписание, которое не выполняется, вводит в заблуждение. Вместо интервала — время последних данных и точка того же цвета, что у «vps» в шапке карточки (жёлтая — устарело, красная — очень старое). Баннеров нет; объяснение — в карточке Claude («Данные устарели») и в подсказке.',
+    auto: true, langs: ['ru', 'en'],
+    prods: [{ name: 'Claude', sec: 900, src: { machine: 'vps', tone: 'late', dataAt: '09:12' } }, { name: 'Codex', sec: 14400, src: null }] },
+  { id: 7, title: 'Предел: имя машины 16 знаков (максимум в приложении)',
+    why: 'Проверка переполнения. Имя машины сокращается многоточием; полное — в подсказке. Названия продуктов и интервалы не сокращаются никогда.',
+    auto: true, langs: ['ru', 'en'],
+    prods: [{ name: 'Claude', sec: 900, src: { machine: 'macbook-pro-alex', tone: 'fresh' } }, { name: 'Codex', sec: 14400, src: null }] },
+];
+
+// ---------- shared footer row (as drawPollFooter, advanced=true) ----------
+function selectedSecs(st) {
+  if (!st.auto) return new Set([st.manual]);
+  return new Set(st.prods.filter(p => !p.src).map(p => p.sec)); // only what THIS Mac polls
+}
+function drawRow(p, F, st, lang) {
+  const sel = selectedSecs(st);
+  box(p, 16, F, 160, 24, 'rgba(255,255,255,.06)', 8);
+  L[lang].segs.forEach((s, i) => {
+    const on = sel.has(SECS[i]);
+    if (on) box(p, 16 + 40 * i + 2, F + 2, 36, 20, 'rgba(255,255,255,.18)', 6);
+    txt(p, 16 + 40 * i + 20, F, 24, s, { size: 12, weight: on ? 600 : 500, color: on ? C.hi : C.mid, align: 'c' });
+  });
+  if (st.auto) box(p, 181, F + 2, 30, 20, 'linear-gradient(135deg,#3479EF,#7968E8)', 10, 'box-shadow:inset 0 0 0 1px rgba(184,207,255,.35);');
+  else box(p, 181, F + 2, 30, 20, 'rgb(38,50,74)', 10, 'box-shadow:inset 0 0 0 1px rgb(130,154,213);');
+  txt(p, 196, F, 24, L[lang].A, { size: 12, weight: 600, color: st.auto ? '#fff' : 'rgb(217,229,255)', align: 'c' });
+  powerSvg(p, 324, F + 4);
+}
+function drawCredit(p, divTop) {
+  box(p, 15, divTop, 330, 1, C.sep, 0);
+  const pre = 'Claude Codex Limits 3.4.1 · by Alex Kovalev · ';
+  const pw = mw(pre, 9.5), lw = mw('GitHub', 9.5, 600), cx = (W - pw - lw) / 2;
+  txt(p, cx, divTop + 7, 12, pre, { size: 9.5, color: C.lo });
+  txt(p, cx + pw, divTop + 7, 12, 'GitHub', { size: 9.5, weight: 600, color: C.link });
+}
+
+// ---------- tooltip text (secondary; same facts as the visible line) ----------
+function tooltipText(st, lang) {
+  const en = lang === 'en';
+  if (!st.auto) return en ? 'Every 30 min' : 'Каждые 30 мин';
+  return st.prods.map(pr => {
+    const name = pr.name === 'Claude' ? 'Claude Code' : 'Codex';
+    if (!pr.src) return name + (en ? ': polled by this Mac every ' : ': опрашивает этот Mac, каждые ') + durLong(pr.sec, lang);
+    if (isStale(pr)) return name + (en ? `: from ${pr.src.machine}; no new data since ${pr.src.dataAt}. Its schedule is set on ${pr.src.machine}.`
+      : `: с машины ${pr.src.machine}; новых данных нет с ${pr.src.dataAt}. Расписание задаётся на ${pr.src.machine}.`);
+    return name + (en ? `: polled by ${pr.src.machine} every ${durLong(pr.sec, lang)}; this Mac only reads GitHub. Change it on ${pr.src.machine}.`
+      : `: опрашивает ${pr.src.machine}, каждые ${durLong(pr.sec, lang)}; этот Mac только читает GitHub. Менять — на ${pr.src.machine}.`);
+  }).join('\n');
+}
+
+// ---------- Variant A: one plain-language line under the row ----------
+const A = { gapAbove: 3, lineH: 12, gapBelow: 5, size: 10, x: 16, maxW: 328 }; // +14 pt total incl. 1pt divider shift
+function aRuns(st, lang, machineMax) {
+  const T = L[lang], S = A.size;
+  const lbl = s => ({ t: s, size: S, weight: 400, color: C.mid });
+  const nm = s => ({ t: s, size: S, weight: 600, color: 'rgba(255,255,255,.85)' });
+  const iv = s => ({ t: s, size: S, weight: 600, color: C.hi });
+  const sep = { t: ' · ', size: S, weight: 400, color: C.lo };
+  const anyRemote = st.prods.some(p => p.src);
+  const runs = [{ t: T.auto, size: S, weight: 600, color: C.mid }, sep];
+  // merge identical local intervals: «Claude и Codex 30 мин»
+  const loc = st.prods.filter(p => !p.src);
+  const groups = [];
+  st.prods.forEach(p => {
+    if (!p.src && loc.length === 2 && loc[0].sec === loc[1].sec && !anyRemote) {
+      if (!groups.length) groups.push({ names: loc.map(x => x.name), p });
+    } else groups.push({ names: [p.name], p });
+  });
+  groups.forEach((g, i) => {
+    if (i) runs.push(sep);
+    g.names.forEach((n, j) => { if (j) runs.push(lbl(' ' + T.and + ' ')); runs.push(nm(n)); });
+    const pr = g.p;
+    const m = pr.src ? (machineMax ? truncate(pr.src.machine, S, 400, machineMax) : pr.src.machine) : '';
+    if (pr.src && isStale(pr)) {
+      runs.push(lbl(':  '), { dot: C[pr.src.tone] }, lbl(m + ', ' + T.data + ' '), { t: pr.src.dataAt, size: S, weight: 400, color: C.mid });
+    } else {
+      runs.push(lbl(' '), iv(durLong(pr.sec, lang)));
+      if (pr.src) runs.push(lbl(' ' + T.on + ' '), { dot: C[pr.src.tone] }, lbl(m));
+      else if (anyRemote) runs.push(lbl(' ' + T.here));
+    }
+  });
+  return runs;
+}
+function variantA(host, st, lang) {
+  const F = 10, show = st.auto && st.prods.length > 0;
+  const extra = show ? A.gapAbove + A.lineH + A.gapBelow - 6 : 0;   // row→divider was 6 pt (24→30)
+  const H = F + 59 + extra;
+  const p = el(host, 'panel', `height:${H}px;`);
+  drawRow(p, F, st, lang);
+  if (show) {
+    let runs = aRuns(st, lang), w = runsWidth(runs);
+    if (w > A.maxW) { // shorten only the machine name
+      for (let mm = 120; mm > 12 && w > A.maxW; mm -= 2) { runs = aRuns(st, lang, mm); w = runsWidth(runs); }
+    }
+    const y = F + 24 + A.gapAbove;
+    el(p, 'zone', `left:${A.x}px;top:${y}px;width:${A.maxW}px;height:${A.lineH}px;`).dataset.max = A.maxW;
+    p.querySelector('.zone').dataset.w = drawRuns(p, A.x, y, A.lineH, runs);
+  }
+  drawCredit(p, F + 30 + extra);
+  p.dataset.tip = tooltipText(st, lang);
+  return { H, extra };
+}
+
+// ---------- Variant B: two-line legend between «А» and power ----------
+const B = { x0: 218, x1: 318, rowH: 11.5, size: 9.5, nameGap: 5, ivGap: 4 };
+function variantB(host, st, lang) {
+  const F = 10, H = F + 59;
+  const p = el(host, 'panel', `height:${H}px;`);
+  drawRow(p, F, st, lang);
+  if (st.auto && st.prods.length) {
+    const n = st.prods.length, zoneW = B.x1 - B.x0;
+    const top0 = n === 1 ? F + (24 - B.rowH) / 2 : F + (24 - 2 * B.rowH) / 2;
+    el(p, 'zone', `left:${B.x0}px;top:${F}px;width:${zoneW}px;height:24px;`);
+    st.prods.forEach((pr, i) => {
+      const y = top0 + i * B.rowH, S = B.size;
+      const nameW = txt(p, B.x0, y, B.rowH, pr.name, { size: S, weight: 600, color: C.name });
+      const stale = isStale(pr);
+      const ivText = stale ? pr.src.dataAt : durShort(pr.sec, lang);
+      const ivW = mw(ivText, S, stale ? 400 : 600);
+      let used = nameW + B.nameGap + ivW;
+      if (pr.src) {
+        const room = zoneW - used - B.ivGap - DOT - DOT_GAP;
+        const m = truncate(pr.src.machine, S, 400, room);
+        const mW = mw(m, S, 400);
+        const sx = B.x1 - ivW - B.ivGap - mW - DOT - DOT_GAP;
+        dot(p, sx, y + B.rowH / 2 + 0.5, C[pr.src.tone]);
+        txt(p, sx + DOT + DOT_GAP, y, B.rowH, m, { size: S, color: C.mid });
+        used += B.ivGap + DOT + DOT_GAP + mW;
+      }
+      txt(p, B.x1, y, B.rowH, ivText, { size: S, weight: stale ? 400 : 600, color: stale ? C.mid : C.hi, align: 'r' });
+      p.querySelector('.zone').dataset.w = Math.max(+(p.querySelector('.zone').dataset.w || 0), used);
+    });
+    p.querySelector('.zone').dataset.max = zoneW;
+  }
+  drawCredit(p, F + 30);
+  p.dataset.tip = tooltipText(st, lang);
+  return { H, extra: 0 };
+}
+
+// ---------- baseline 3.4.1 ----------
+function baseline(host, st, lang) {
+  const F = 10, H = F + 59;
+  const p = el(host, 'panel', `height:${H}px;`);
+  drawRow(p, F, st, lang);
+  drawCredit(p, F + 30);
+  // 3.4.1 tooltip on «А»: only local products (remoteAutoFooter filters isLocal)
+  p.dataset.tip = 'Авто: Codex → 4 ч';
+  return { H, extra: 0 };
+}
+
+// ---------- assemble ----------
+function col(row, caption, fn, st, lang) {
+  const c = el(row, 'col');
+  const cap = el(c, 'caption');
+  const res = fn(c, st, lang);
+  cap.innerHTML = caption + ` <span>· высота подвала ${59 + res.extra} pt</span>` +
+    (res.extra ? ` <span class="dh">(+${res.extra} pt)</span>` : ' <span>(+0 pt)</span>');
+}
+function render() {
+  const root = document.getElementById('root'); root.innerHTML = '';
+  for (const st of STATES) {
+    for (const lang of st.langs) {
+      const sec = document.createElement('section'); root.appendChild(sec);
+      const h = document.createElement('h2'); h.textContent = `${st.id}${lang === 'en' ? ' · EN' : ''}. ${st.title}`; sec.appendChild(h);
+      const w = document.createElement('p'); w.className = 'why'; w.textContent = lang === 'en' ? 'English UI: same layout, longest strings — nothing is cut.' : st.why; sec.appendChild(w);
+      const row = el(sec, 'row');
+      if (st.baseline && lang === 'ru') col(row, '<b>Сейчас (3.4.1)</b> <span>— подсказка «А»: «Авто: Codex → 4 ч»</span>', baseline, st, lang);
+      col(row, '<b>Вариант A</b> <span>— строка под сегментами</span>', variantA, st, lang);
+      col(row, '<b>Вариант B</b> <span>— легенда справа от «А»</span>', variantB, st, lang);
+    }
+  }
+  // overflow check: every text zone must hold its drawn width
+  let bad = 0;
+  document.querySelectorAll('.zone').forEach(z => {
+    if (+z.dataset.w > +z.dataset.max + 0.5) { bad++; z.classList.add('overflow'); }
+  });
+  const ch = document.getElementById('check');
+  ch.className = 'check ' + (bad ? 'bad' : 'ok');
+  ch.textContent = bad ? `Переполнение: ${bad} зон(ы) текста шире отведённого места (обведены красным)`
+    : `Проверка переполнения: все подписи помещаются (шрифт браузера: ${FONT.split(',')[0]} → фактически отрисован доступный из списка)`;
+  // tooltip
+  let tip = null;
+  document.querySelectorAll('.panel').forEach(p => {
+    p.addEventListener('mouseenter', () => {
+      tip = el(p.parentNode, 'tip'); tip.textContent = p.dataset.tip;
+      p.parentNode.style.position = 'relative';
+      tip.style.left = '200px'; tip.style.top = (p.offsetTop + 4) + 'px'; tip.style.transform = 'translateY(-100%)';
+    });
+    p.addEventListener('mouseleave', () => { if (tip) tip.remove(); tip = null; });
+  });
+}
+(document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(render);
+
+document.getElementById('zones').addEventListener('change', e => document.body.classList.toggle('zones', e.target.checked));
+document.querySelectorAll('.scale button').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.scale button').forEach(x => x.classList.toggle('on', x === b));
+  const z = +b.dataset.z, zw = document.getElementById('zw');
+  zw.style.transform = z === 1 ? '' : `scale(${z})`;
+  zw.style.width = z === 1 ? '' : (100 / z) + '%';
+}));
+})();
+</script>
+</body>
+</html>

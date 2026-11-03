@@ -4601,15 +4601,29 @@ struct AutoPollState: Codable {
         guard fresh, !current.isEmpty else { failed = true; slowDown(); return }
         failed = false
         let elapsed = now - observedAt
-        var comparable = false, active = false
+        var comparable = false, active = false, grew = false
         if observedAt > 0, elapsed > 0 {
             for (key, value) in current {
-                guard let old = readings[key], old.reset == value.reset else { continue }
+                guard let old = readings[key] else { continue }
+                guard old.reset == value.reset else {
+                    // The previous window ended before this reading, so the new one opened since the last
+                    // poll and all of its usage is fresh consumption. A reset that merely moved (old one still
+                    // in the future) or an empty new window is not activity.
+                    if let oldReset = old.reset, oldReset <= now, value.used > 0 { active = true }
+                    continue
+                }
                 comparable = true
+                if value.used > old.used { grew = true }
                 if autoReadingGrowth(previous: old, current: value, elapsed: elapsed) { active = true }
             }
         }
-        if active { interval = 900 } else if comparable { slowDown() }
+        if active {
+            interval = 900
+        } else if comparable {
+            slowDown()
+            // Slow growth (e.g. a weekly window) is still use somewhere: never sleep for 4 hours on it.
+            if grew { interval = min(interval, 3600) }
+        }
         readings = current; observedAt = now
     }
     @discardableResult
@@ -9826,6 +9840,31 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
     check(auto.interval == 900, "active consumption restores 15-minute polling")
     observe(&auto, 2, 137800, reset: 1100000)
     check(auto.interval == 900, "limit reset establishes a new baseline without false activity")
+    func observeBoth(_ state: inout AutoPollState, _ session: Double, _ weekly: Double, _ at: Double) {
+        var d = reading(session, at)
+        d.weekly = weekly; d.weeklyReset = Date(timeIntervalSince1970: 2000000)
+        state.begin(at); state.observe(d, now: at)
+    }
+    var remoteWork = AutoPollState(); remoteWork.interval = 14400
+    observe(&remoteWork, 40, 100000, reset: 103600)
+    observe(&remoteWork, 5, 114400, reset: 121600)
+    check(remoteWork.interval == 900, "Auto: a new window used since the expired one wakes a 4-hour schedule")
+    var emptyWindow = AutoPollState(); emptyWindow.interval = 14400
+    observe(&emptyWindow, 40, 100000, reset: 103600)
+    observe(&emptyWindow, 0, 114400, reset: 121600)
+    check(emptyWindow.interval == 14400, "Auto: an unused new window does not wake the schedule")
+    var movedReset = AutoPollState(); movedReset.interval = 14400
+    observe(&movedReset, 40, 100000, reset: 200000)
+    observe(&movedReset, 45, 114400, reset: 200600)
+    check(movedReset.interval == 14400, "Auto: a moved reset with the old window still open is not activity")
+    var slowWeekly = AutoPollState(); slowWeekly.interval = 14400
+    observeBoth(&slowWeekly, 10, 40, 100000)
+    observeBoth(&slowWeekly, 10, 40.5, 114400)
+    check(slowWeekly.interval == 3600, "Auto: slow weekly growth caps the schedule at 1 hour")
+    var quietHour = AutoPollState(); quietHour.interval = 3600
+    observeBoth(&quietHour, 10, 40, 100000)
+    observeBoth(&quietHour, 10, 40, 103600)
+    check(quietHour.interval == 14400, "Auto: no growth at 1 hour still sleeps for 4 hours")
     var cached = reading(50, 138700); cached.apiFresh = false
     auto.begin(138700); auto.observe(cached, now: 138730)
     check(auto.failed && auto.interval == 1800, "cached/rollout fallback backs off instead of posing as fresh API data")

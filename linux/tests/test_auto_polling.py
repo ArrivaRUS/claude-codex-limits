@@ -54,6 +54,43 @@ class TestAutoPolicy(unittest.TestCase):
         self.observe(state, 2, 103600, reset=1100000)
         self.assertEqual(state.interval, 3600)
 
+    def observe_both(self, state, session, weekly, at, session_reset=1000000, weekly_reset=2000000):
+        d = self.sample(session, at, session_reset)
+        d.weekly, d.weekly_reset = weekly, weekly_reset
+        state.begin(at)
+        state.observe(d, at)
+
+    def test_new_window_after_expiry_with_usage_wakes_four_hour_schedule(self):
+        state = polling.PollState({"interval": 14400})
+        self.observe(state, 40, 100000, reset=103600)       # baseline; window ends in an hour
+        self.assertEqual(state.interval, 14400)
+        self.observe(state, 5, 114400, reset=121600)        # old window expired, new one already used
+        self.assertEqual(state.interval, 900)
+
+    def test_new_window_after_expiry_without_usage_does_not_wake(self):
+        state = polling.PollState({"interval": 14400})
+        self.observe(state, 40, 100000, reset=103600)
+        self.observe(state, 0, 114400, reset=121600)
+        self.assertEqual(state.interval, 14400)
+
+    def test_moved_reset_with_old_window_still_open_does_not_wake(self):
+        state = polling.PollState({"interval": 14400})
+        self.observe(state, 40, 100000, reset=200000)
+        self.observe(state, 45, 114400, reset=200600)       # reset jitter, not a new window
+        self.assertEqual(state.interval, 14400)
+
+    def test_slow_weekly_growth_caps_sleep_at_one_hour(self):
+        state = polling.PollState({"interval": 14400})
+        self.observe_both(state, 10, 40, 100000)
+        self.observe_both(state, 10, 40.5, 114400)          # 0.5 pp in 4 hours: below the activity rate
+        self.assertEqual(state.interval, 3600)
+
+    def test_no_growth_at_one_hour_still_sleeps_four_hours(self):
+        state = polling.PollState({"interval": 3600})
+        self.observe_both(state, 10, 40, 100000)
+        self.observe_both(state, 10, 40, 103600)
+        self.assertEqual(state.interval, 14400)
+
     def test_error_and_cached_fallback_back_off(self):
         for kind in ("error", "cache", "rollout", "expired", "no_limits"):
             with self.subTest(kind=kind):

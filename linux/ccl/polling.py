@@ -9,6 +9,7 @@ import math
 STEPS = (900, 1800, 3600, 14400)
 MINIMUM = STEPS[0]
 DEFAULT = 1800
+GROWTH_CEILING = STEPS[2]  # any growth in a comparable window keeps polling at least hourly
 
 
 def normalize_interval(value):
@@ -79,19 +80,30 @@ class PollState:
             return
         self.failed = False
         elapsed = now - self.observed_at
-        comparable, active = False, False
+        comparable, active, grew = False, False, False
         if self.observed_at and elapsed > 0:
             for name, pair in current.items():
                 old = self.readings.get(name)
-                if not isinstance(old, (list, tuple)) or len(old) != 2 or not number(old[0]) or old[1] != pair[1]:
-                    continue                         # a reset/model change isn't consumption
+                if not isinstance(old, (list, tuple)) or len(old) != 2 or not number(old[0]):
+                    continue
+                if old[1] != pair[1]:
+                    # The previous window ended before this reading, so the new one opened since the last
+                    # poll and all of its usage is fresh consumption. A reset that merely moved (old one
+                    # still in the future), a model change or an empty new window is not activity.
+                    if number(old[1]) and old[1] <= now and pair[0] > 0:
+                        active = True
+                    continue
                 comparable = True
+                if pair[0] > old[0]:
+                    grew = True
                 if (pair[0] - old[0]) * MINIMUM >= elapsed:
                     active = True                    # ≥1 percentage point per 15 minutes
         if active:
             self.interval = MINIMUM
         elif comparable:
             self.interval = STEPS[min(STEPS.index(self.interval) + 1, len(STEPS) - 1)]
+            if grew:                                 # slow growth is still use: never sleep 4 hours on it
+                self.interval = min(self.interval, GROWTH_CEILING)
         self.readings, self.observed_at = current, now
 
     def local_activity(self, timestamps, now):
