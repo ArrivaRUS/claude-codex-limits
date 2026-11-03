@@ -4351,6 +4351,12 @@ struct SyncUIState {
         keychainIssue.map { githubAuthMessage($0, language: appLang()) } ?? raw
     }
     var canRetryKeychain: Bool { keychainIssue != nil }
+    /// The Settings error line: the persisted cycle error or, without one, the live
+    /// Keychain issue (reason-only state). nil = no line; height and draw both use it.
+    var settingsErrorText: String? {
+        if let error = lastError { return presentedError(error) }
+        return keychainIssue.map { githubAuthMessage($0, language: appLang()) }
+    }
     mutating func prepareForGitHubLogin() {
         if githubKeychainIssue(forMessage: lastError) != nil { lastError = nil; lastErrorAt = nil }
         if syncShowsKeychainRetry(authReason) { authReason = nil }
@@ -4422,9 +4428,9 @@ func syncSignOutHint(_ lang: String = appLang()) -> String {
         : "Выход только на этом компьютере. Отзыв доступа:\ngithub.com/settings/applications"
 }
 func remoteSyncErrorPresentation(_ s: SyncUIState, width: CGFloat = PANEL_W - 60) -> RemoteSettingsErrorPresentation {
-    let full = s.lastError.map { error in
-        tr("Ошибка ", "Error ") + (s.lastErrorAt.map { fmtMoment($0) + ": " } ?? "") + s.presentedError(error)
-    } ?? ""
+    // The time belongs to the persisted error; a reason-only Keychain issue has none.
+    let stamp: String = s.lastError == nil ? "" : (s.lastErrorAt.map { fmtMoment($0) + ": " } ?? "")
+    let full = s.settingsErrorText.map { message in tr("Ошибка ", "Error ") + stamp + message } ?? ""
     return remoteSettingsErrorPresentation(full, availableWidth: Double(width)) { value in
         Double(lineWidth(CTLineCreateWithAttributedString(ctAttr(value, ctFont(10.5, .regular), cg(gray(1, 0.5))))))
     }
@@ -4436,11 +4442,11 @@ func setSyncCardH(_ s: SyncUIState = syncUIState()) -> CGFloat {
     let retryH: CGFloat = s.canRetryKeychain ? SET_ROW_H : 0
     switch s.phase {
     case .off:          return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
-    case .revoked:      return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.lastError != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0)
+    case .revoked:      return retryH + SET_ROW_H + SET_SYNC_NOTE_H + (s.settingsErrorText != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0)
                                 + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
     case .awaitingCode:  return retryH + SET_ROW_H + 44 + 26
     case .on:            return retryH + SET_ROW_H + CGFloat(max(1, s.machines.count)) * SET_SYNC_MROW_H + 4
-                                + SET_SYNC_STATUS_H + (s.lastError != nil ? SET_SYNC_STATUS_H - 4 + remoteSyncErrorExtraHeight(s) : 0)
+                                + SET_SYNC_STATUS_H + (s.settingsErrorText != nil ? SET_SYNC_STATUS_H - 4 + remoteSyncErrorExtraHeight(s) : 0)
                                 + SET_SYNC_SIGNOUT_HINT_H
     }
 }
@@ -4457,7 +4463,7 @@ private func disconnectedSyncNote(_ s: SyncUIState) -> String {
 func remoteSyncCardHeight(_ s: SyncUIState = syncUIState()) -> CGFloat {
     guard s.phase == .off || s.phase == .revoked else { return setSyncCardH(s) }
     let noteH = measuredTextHeight(disconnectedSyncNote(s), width: PANEL_W - 60, size: 10.5) + 8
-    let errorH: CGFloat = s.phase == .revoked && s.lastError != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0
+    let errorH: CGFloat = s.phase == .revoked && s.settingsErrorText != nil ? SET_SYNC_STATUS_H + remoteSyncErrorExtraHeight(s) : 0
     return SET_ROW_H * 2 + noteH + errorH + (s.canSignOut ? SET_SYNC_SIGNOUT_HINT_H : 0)
         + (s.canRetryKeychain ? SET_ROW_H : 0)
 }
@@ -6894,7 +6900,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let noteTop = controlsTop + SET_ROW_H
             let noteH = measuredTextHeight(disconnectedSyncNote(sy), width: cardW - 28, size: 10.5) + 8
             note(disconnectedSyncNote(sy), noteTop, height: noteH)
-            if revoked && sy.lastError != nil { errorNote(noteTop + noteH) }
+            if revoked && sy.settingsErrorText != nil { errorNote(noteTop + noteH) }
             if sy.canSignOut {
                 note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H,
                      height: SET_SYNC_SIGNOUT_HINT_H)
@@ -6951,7 +6957,7 @@ func drawSettings(_ ctx: CGContext, size: CGSize, about: AboutState, soundsPage:
             let upl = sy.lastUploadAt.map { fmtMoment($0) } ?? "—", rd = sy.lastSync.map { fmtMoment($0) } ?? "—"
             text(fitAttr(tr("Последняя отправка: \(upl) · чтение: \(rd)", "Last upload: \(upl) · read: \(rd)"), maxW: cardW - 28) { attr($0, 10.5, .regular, textMid) },
                  x: cardX + 14, topY: st + (SET_SYNC_STATUS_H - 10.5) / 2)
-            if sy.lastError != nil { errorNote(st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2) }
+            if sy.settingsErrorText != nil { errorNote(st + SET_SYNC_STATUS_H - 4 + (SET_SYNC_STATUS_H - 10.5) / 2 - 2) }
             note(syncSignOutHint(), syTop + syH - (sy.canRetryKeychain ? SET_ROW_H : 0) - SET_SYNC_SIGNOUT_HINT_H, height: SET_SYNC_SIGNOUT_HINT_H)
         }
         if sy.canRetryKeychain {

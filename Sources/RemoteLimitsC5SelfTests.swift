@@ -331,14 +331,17 @@ private func c5C504(_ check: C5Check) {
             let visible = phase != .awaitingCode
             check(failed.error == nil && failed.lastError == nil && failed.keychainIssue == (visible ? issue : nil),
                   "C5-04 reason alone supplies recovery without an error-message fallback; awaiting code suppresses it")
-            check(failed.canRetryKeychain == visible && setSyncCardH(failed) - setSyncCardH(plain) == (visible ? 36 : 0),
+            // In .on/.revoked the reason alone also draws the Settings error line, whose
+            // height is CoreText-measured; this pre-NSApplication check stays
+            // Foundation-only, so there it asserts the line's text and C5-14 (AppKit
+            // tail) checks the drawn error + retry geometry.
+            let errorLine = phase == .on || phase == .revoked
+            check(failed.canRetryKeychain == visible
+                  && (errorLine || setSyncCardH(failed) - setSyncCardH(plain) == (visible ? 36 : 0)),
                   "C5-04 \(issue): retry row exists only in an actionable settings phase")
-            if phase == .on {
-                // Production height entry; nil lastError keeps this branch
-                // Foundation-only, before NSApplication registration.
-                check(remoteSyncCardHeight(failed) - remoteSyncCardHeight(plain) == 36,
-                      "C5-04 live settings height reserves the same actionable retry row")
-            }
+            let expectedText: String? = visible ? githubAuthMessage(issue, language: appLang()) : nil
+            check(failed.settingsErrorText == expectedText,
+                  "C5-04 \(issue): reason alone supplies the Settings error text; awaiting code suppresses it")
             var signingIn = failed; signingIn.keychainRetryAvailable = true
             signingIn.prepareForGitHubLogin()
             check(signingIn.phase == .awaitingCode && signingIn.authReason == nil && signingIn.keychainIssue == nil
