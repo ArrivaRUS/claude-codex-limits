@@ -1905,10 +1905,10 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         case nil: exitLabel = "not-run"
         }
         print("K341 TEMP KEYCHAIN: missing-keychain exit=\(exitLabel)")
-        let nonzeroExit: Bool
-        if case .failure(let code)? = missingExit { nonzeroExit = code != 0 } else { nonzeroExit = false }
-        check(nonzeroExit && failure == missingExit,
-              "K341-integration security -i reports a nonzero exit for a failed add to an absent keychain; writer returns that code")
+        // security -i may exit 0 on a failed subcommand; the writer must still report failure via quiet attributes.
+        let writerFailed: Bool
+        if case .failure(let code) = failure { writerFailed = code != 0 } else { writerFailed = false }
+        check(writerFailed, "K341-integration failed add to an absent keychain is reported by the writer as a nonzero failure")
     } catch { check(false, "K341-integration production writer rejected isolated fixture") }
 #else
     print("K341 TEMP KEYCHAIN: SKIP (requires macOS temporary-keychain capability)")
