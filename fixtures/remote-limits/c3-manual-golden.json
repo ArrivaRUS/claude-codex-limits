@@ -22,7 +22,7 @@
   {
     "language": "ru",
     "phase": "pollAllowed",
-    "text": "Опрос можно с 15:58"
+    "text": ""
   },
   {
     "language": "en",
@@ -47,6 +47,6 @@
   {
     "language": "en",
     "phase": "pollAllowed",
-    "text": "Poll allowed at 15:58"
+    "text": ""
   }
 ]
