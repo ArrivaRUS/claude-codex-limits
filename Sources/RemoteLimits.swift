@@ -1137,6 +1137,19 @@ struct RemoteAutoFooter {
     var products: [String]
     var noSubscriptions: Bool
     var tooltip: String
+    // Variant B legend (mockup 2026-11-03): one row per product, own or foreign.
+    // Segment highlighting stays on `products` (only what this Mac polls).
+    var legend: [RemoteAutoLegendRow] = []
+    var legendTooltip: String { legend.map { $0.tooltip }.joined(separator: "\n") }
+}
+struct RemoteAutoLegendRow: Equatable {
+    var product: String
+    var machine: String? = nil              // nil: this Mac polls the product
+    var tone: RemoteFreshnessTone = .fresh  // the same tone as the machine dot in the card header
+    var value: String                       // short interval («15м», «4h») or the data time
+    var valueIsTime: Bool = false
+    var tooltip: String
+    var name: String { product == "claude" ? "Claude" : "Codex" }
 }
 
 // One immutable scene feeds the card draw, Auto, accessibility and display event.
@@ -1356,22 +1369,92 @@ func remoteCardPresentation(_ view: AccountView, sync: ReaderSyncState, language
         sessionResetText: reset, sessionDimmed: metricIsStale(view.data, metric: "session", now: now), showsValues: state != .signedOut)
 }
 
-func remoteAutoFooter(views: [AccountView], enabled: Set<String>, intervals: [String: TimeInterval], language: String) -> RemoteAutoFooter {
+func remoteAutoFooter(views: [AccountView], enabled: Set<String>, intervals: [String: TimeInterval], language: String,
+                      now: Date = Date(), timeZone: TimeZone = .current) -> RemoteAutoFooter {
     let products = ["claude", "codex"].filter { product in
         enabled.contains(product) && views.contains { $0.product == product && $0.isLocal && $0.data.present && $0.data.auth != .loggedOut }
     }
     let en = language == "en"
+    let legend = remoteAutoLegend(views: views, local: products, intervals: intervals, language: language,
+                                  now: now, timeZone: timeZone)
     guard !products.isEmpty else {
         return RemoteAutoFooter(products: [], noSubscriptions: true, tooltip: en
             ? "This computer polls nothing. Accounts from other computers update on their own schedule, shown in the card tooltip."
-            : "Этот компьютер ничего не опрашивает. Аккаунты с других компьютеров обновляются по их расписанию — оно в подсказке карточки.")
+            : "Этот компьютер ничего не опрашивает. Аккаунты с других компьютеров обновляются по их расписанию — оно в подсказке карточки.",
+            legend: legend)
     }
     let rows = products.map { product -> String in
         let seconds = intervals[product] ?? 1800
         let duration = seconds >= 3600 ? "\(Int(seconds / 3600))" + (en ? " h" : " ч") : "\(Int(seconds / 60))" + (en ? " min" : " мин")
         return (product == "claude" ? "Claude Code" : "Codex") + " → " + duration
     }
-    return RemoteAutoFooter(products: products, noSubscriptions: false, tooltip: (en ? "Auto: " : "Авто: ") + rows.joined(separator: "; "))
+    return RemoteAutoFooter(products: products, noSubscriptions: false, tooltip: (en ? "Auto: " : "Авто: ") + rows.joined(separator: "; "),
+                            legend: legend)
+}
+
+// One row per product: this Mac's own Auto interval, else the machine that
+// publishes the product. Freshness is the card header's remoteSourceFreshness
+// over the same machine reading, so the dot colour never disagrees with it.
+private func remoteAutoLegend(views: [AccountView], local: [String], intervals: [String: TimeInterval],
+                              language: String, now: Date, timeZone: TimeZone) -> [RemoteAutoLegendRow] {
+    let en = language == "en"
+    // As on the segments («15м», «4ч») and in the card's schedule line («15 мин», «4 ч»).
+    func short(_ seconds: Int) -> String {
+        if seconds >= 3600 && seconds % 3600 == 0 { return String(seconds / 3600) + (en ? "h" : "ч") }
+        return String(seconds / 60) + (en ? "m" : "м")
+    }
+    func long(_ seconds: Int) -> String {
+        if seconds >= 3600 && seconds % 3600 == 0 { return String(seconds / 3600) + (en ? " h" : " ч") }
+        return String(seconds / 60) + (en ? " min" : " мин")
+    }
+    let localMachineIds = Set(views.flatMap { view in view.sourceReadings.filter { $0.isLocal }.map { $0.machineId } })
+    var rows: [RemoteAutoLegendRow] = []
+    for product in ["claude", "codex"] {
+        let title = product == "claude" ? "Claude Code" : "Codex"
+        if local.contains(product) {
+            // The same supported steps as the native Auto tooltip; no invented default.
+            guard let interval = intervals[product], [900.0, 1800, 3600, 14400].contains(interval) else { continue }
+            let seconds = Int(interval)
+            rows.append(RemoteAutoLegendRow(product: product, value: short(seconds),
+                tooltip: title + (en ? ": polled by this Mac every " : ": опрашивает этот Mac, каждые ") + long(seconds)))
+            continue
+        }
+        guard let view = views.first(where: { candidate in
+            guard candidate.product == product, candidate.state != .signedOut, let published = candidate.data.source else { return false }
+            return !localMachineIds.contains(published.machineId)
+        }), let source = view.data.source else { continue }
+        let machine = remoteDisplayText(source.machineName.isEmpty ? (view.machines.first ?? "?") : source.machineName, limit: 16)
+        var asOf = view.data.asOf
+        var toneInterval = source.interval.map { TimeInterval($0) }
+        var shownInterval = toneInterval
+        if let reading = view.sourceReadings.first(where: { $0.machineId == source.machineId }) {
+            asOf = reading.asOf; toneInterval = reading.interval; shownInterval = reading.interval ?? shownInterval
+        }
+        let tone = remoteSourceFreshness(asOf: asOf, interval: toneInterval, now: now)
+        let seconds = shownInterval.flatMap { value -> Int? in value.isFinite && value >= 60 && value <= 604800 ? Int(value) : nil }
+        if tone == .fresh, let seconds = seconds {
+            rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: short(seconds),
+                tooltip: title + (en ? ": polled by \(machine) every \(long(seconds)); this Mac only reads GitHub. Change it on \(machine)."
+                                     : ": опрашивает \(machine), каждые \(long(seconds)); этот Mac только читает GitHub. Менять — на \(machine).")))
+            continue
+        }
+        // A schedule that is not being kept is not shown: the data time replaces it.
+        let value = remoteCardTimestamp(asOf, now: now, timeZone: timeZone, compactOtherDay: true)
+        let tooltip: String
+        if tone == .fresh {
+            tooltip = title + (en ? ": polled by \(machine); this Mac only reads GitHub. Change it on \(machine)."
+                                  : ": опрашивает \(machine); этот Mac только читает GitHub. Менять — на \(machine).")
+        } else if asOf == nil {
+            tooltip = title + (en ? ": from \(machine); no data yet. Its schedule is set on \(machine)."
+                                  : ": с машины \(machine); данных пока нет. Расписание задаётся на \(machine).")
+        } else {
+            let since = remoteCardTimestamp(asOf, now: now, timeZone: timeZone)
+            tooltip = title + (en ? ": from \(machine); no new data since \(since). Its schedule is set on \(machine)."
+                                  : ": с машины \(machine); новых данных нет с \(since). Расписание задаётся на \(machine).")
+        }
+        rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: value, valueIsTime: true, tooltip: tooltip))
+    }
+    return rows
 }
 
 // Deterministic verdict for remote snapshots. The existing local formatter stays

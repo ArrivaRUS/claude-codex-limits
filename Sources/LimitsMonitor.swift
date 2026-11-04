@@ -4867,6 +4867,56 @@ func drawPower(_ ctx: CGContext, _ r: CGRect, _ color: NSColor) {
     ctx.restoreGState()
 }
 
+/// Auto legend, variant B of design/mockups/auto-poll-footer-2026-11-03: two lines in the
+/// 218–318 zone between «А» (right edge 211) and power (left edge 324); height +0.
+enum AutoLegendMetrics {
+    static let x0: CGFloat = 218, x1: CGFloat = 318
+    static let rowH: CGFloat = 11.5, font: CGFloat = 9.5
+    static let nameGap: CGFloat = 5, valueGap: CGFloat = 4, dot: CGFloat = 6, dotGap: CGFloat = 3
+}
+/// Rects are top-down (y grows downward from the panel top), like `top` in drawPollFooter.
+struct AutoLegendLine {
+    var row: RemoteAutoLegendRow
+    var top: CGFloat
+    var name: NSAttributedString, nameRect: CGRect
+    var machine: NSAttributedString?, machineRect: CGRect, dotRect: CGRect
+    var value: NSAttributedString, valueRect: CGRect
+}
+func autoLegendLayout(_ rows: [RemoteAutoLegendRow], top: CGFloat) -> [AutoLegendLine] {
+    typealias M = AutoLegendMetrics
+    let shown = Array(rows.prefix(2))
+    // One line is centred (F+6.25); two lines start at F+0.5 and F+12.
+    let first = top + (shown.count == 1 ? (24 - M.rowH) / 2 : (24 - 2 * M.rowH) / 2)
+    func width(_ a: NSAttributedString) -> CGFloat { lineWidth(CTLineCreateWithAttributedString(a)) }
+    func make(_ s: String, _ weight: NSFont.Weight, _ alpha: CGFloat) -> NSAttributedString {
+        ctAttr(s, ctFont(M.font, weight), cg(gray(1, alpha)))
+    }
+    var lines: [AutoLegendLine] = []
+    for (index, row) in shown.enumerated() {
+        let y = first + CGFloat(index) * M.rowH
+        let name = make(row.name, .semibold, 0.62), nameW = width(name)
+        let value = row.valueIsTime ? make(row.value, .regular, 0.5) : make(row.value, .semibold, 0.95)
+        let valueW = width(value), valueX = M.x1 - valueW
+        var machine: NSAttributedString? = nil
+        var machineRect = CGRect.zero, dotRect = CGRect.zero
+        if let full = row.machine {
+            // Only the machine name is shortened; product name and value never are.
+            let room = (M.x1 - M.x0) - (nameW + M.nameGap + valueW) - M.valueGap - M.dot - M.dotGap
+            var fitted = fitAttr(full, maxW: max(0, room)) { make($0, .regular, 0.5) }
+            if width(fitted) > room { fitted = make("", .regular, 0.5) }
+            let machineW = width(fitted)
+            let dotX = valueX - M.valueGap - machineW - M.dotGap - M.dot
+            dotRect = CGRect(x: dotX, y: y + M.rowH / 2 + 0.5 - M.dot / 2, width: M.dot, height: M.dot)
+            machineRect = CGRect(x: dotX + M.dot + M.dotGap, y: y, width: machineW, height: M.rowH)
+            machine = fitted
+        }
+        lines.append(AutoLegendLine(row: row, top: y, name: name, nameRect: CGRect(x: M.x0, y: y, width: nameW, height: M.rowH),
+                                    machine: machine, machineRect: machineRect, dotRect: dotRect,
+                                    value: value, valueRect: CGRect(x: valueX, y: y, width: valueW, height: M.rowH)))
+    }
+    return lines
+}
+
 /// Shared 360-point footer; Auto paint only consumes an interval snapshot.
 func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: TimeInterval,
                     updated: Date?, autoIntervals: [String: TimeInterval], advanced: Bool = false, views: [AccountView]? = nil) -> [Hit] {
@@ -4920,6 +4970,28 @@ func drawPollFooter(_ ctx: CGContext, size: CGSize, top: CGFloat, interval: Time
     let labelColor = color(217, 229, 255)
     textC(attr(tr("А", "A"), 12, .semibold, auto ? gray(1, 1) : labelColor), x: autoHit.midX, y: top, h: 24, align: 1)
     hits.append(Hit(id: "iv0", rect: autoHit, tooltip: pollTooltip(0, autoIntervals: autoIntervals, views: views)))
+    // Auto legend (variant B): only in Auto; foreign rows are text, never a lit segment.
+    if auto, let views = views {
+        let model = remoteAutoFooter(views: views, enabled: Set(["claude", "codex"].filter { productEnabled($0) }),
+                                     intervals: autoIntervals, language: appLang(),
+                                     now: remoteRenderNow(), timeZone: remoteRenderTimeZone())
+        let lines = autoLegendLayout(model.legend, top: top)
+        for line in lines {
+            let h = AutoLegendMetrics.rowH
+            textC(line.name, x: line.nameRect.minX, y: line.top, h: h)
+            if let machine = line.machine {
+                let d = line.dotRect
+                ctx.setFillColor(cg(remoteFreshnessInk(line.row.tone)))
+                ctx.fillEllipse(in: rect(d.minX, d.minY, d.width, d.height))
+                textC(machine, x: line.machineRect.minX, y: line.top, h: h)
+            }
+            textC(line.value, x: line.valueRect.minX, y: line.top, h: h)
+        }
+        if !lines.isEmpty {
+            hits.append(Hit(id: "autolegend", rect: rect(AutoLegendMetrics.x0, top, AutoLegendMetrics.x1 - AutoLegendMetrics.x0, 24),
+                            tooltip: model.legendTooltip))
+        }
+    }
     let power = rect(320, top, 24, 24)
     drawPower(ctx, power.insetBy(dx: 4, dy: 4), gray(1, advanced ? 0.5 : 0.6))
     hits.append(Hit(id: "quit", rect: power))
@@ -5180,13 +5252,7 @@ func drawRemoteSourceHeader(_ ctx: CGContext, header: RemoteSourceHeader, in rec
     }
     drawText(prefix, x: 0)
     for (index, run) in layout.runs.enumerated() {
-        let ink: NSColor
-        switch run.tone {
-        case .fresh: ink = ADV_MODEL[0]
-        case .late: ink = ADV_WARN
-        case .old: ink = ADV_CRIT
-        case .unknown: ink = gray(1, 0.35)
-        }
+        let ink = remoteFreshnessInk(run.tone)
         let x = prefixWidth + run.x
         ctx.setFillColor(cg(ink))
         ctx.fillEllipse(in: CGRect(x: rect.minX + CGFloat(x), y: rect.midY - 3, width: 6, height: 6))
@@ -5196,6 +5262,15 @@ func drawRemoteSourceHeader(_ ctx: CGContext, header: RemoteSourceHeader, in rec
     if layout.overflow > 0 { drawText(" +\(layout.overflow)", x: prefixWidth + layout.overflowX) }
 }
 
+/// Machine dot colour shared by the card header and the Auto footer legend.
+func remoteFreshnessInk(_ tone: RemoteFreshnessTone) -> NSColor {
+    switch tone {
+    case .fresh: return ADV_MODEL[0]   // #33D9B3
+    case .late: return ADV_WARN        // #FFA00A
+    case .old: return ADV_CRIT         // #FF453B
+    case .unknown: return gray(1, 0.35)
+    }
+}
 func remoteToneColor(_ tone: String) -> NSColor {
     tone == "amber" ? NSColor(srgbRed: 1, green: 0.62, blue: 0.18, alpha: 1)
         : (tone == "ADV_LINK" ? ADV_LINK : gray(1, 0.5))
@@ -7373,6 +7448,7 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
     var autoIntervals: [String: TimeInterval] = [:]
     var updated: Date?
     var hits: [Hit] = []
+    private var registeredToolTipRects: [CGRect] = []
     var onInterval: ((TimeInterval) -> Void)?
     var onRefresh: (() -> Void)?
     var onRefreshProduct: ((String) -> Void)?
@@ -7521,17 +7597,19 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
                 )
             button.setAccessibilityLabel(accessibleTitle)
             button.setAccessibilityHelp(hit.tooltip ?? accessibleTitle)
-            button.toolTip = hit.id == "refresh" ? accessibleTitle : accessibleTitle + "\n" + (hit.tooltip ?? "")
+            var buttonTip: String? = hit.id == "refresh" ? accessibleTitle : accessibleTitle + "\n" + (hit.tooltip ?? "")
             if let sec = pollInterval {
-                button.toolTip = hit.tooltip
+                buttonTip = hit.tooltip
                 button.setAccessibilityValue((pollSelected(sec, manual: interval, autoIntervals: autoIntervals, views: displayAccountViews(claude, codex, includeHidden: true))
                     ? tr("Выбрано · ", "Selected · ") : "") + (hit.tooltip ?? accessibleTitle))
             }
             button.focusRingType = .default; button.setAccessibilityRole(.button)
             button.isEnabled = hit.id != "refresh" || !monitoringPaused() || remoteRefreshAvailable(claude, codex)
             if hit.id == "refresh" && !button.isEnabled {
-                button.toolTip = accessibleTitle + "\n" + tr("Выберите подписки в настройках", "Choose subscriptions in Settings")
+                buttonTip = accessibleTitle + "\n" + tr("Выберите подписки в настройках", "Choose subscriptions in Settings")
             }
+            // Assign only on change: the one-second Auto repaint must not restart the hover delay.
+            if button.toolTip != buttonTip { button.toolTip = buttonTip }
             if hit.id == "refresh" { button.keyEquivalent = "r"; button.keyEquivalentModifierMask = .command }
             if existing == nil { addSubview(button); quotaButtons.append(button) }
         }
@@ -7574,10 +7652,17 @@ final class LimitsPanelView: NSView, NSTextFieldDelegate {
             }
             setAccessibilityChildren(accessibleChildren)
         } else { setAccessibilityChildren(nil) }
-        removeAllToolTips()
-        for h in hits where h.tooltip != nil {
+        // Text is read from `hits` at hover time (stringForToolTip). Re-register rects only
+        // when they change: the one-second Auto repaint would otherwise restart the hover delay.
+        let toolTipRects = hits.compactMap { h -> CGRect? in
+            guard h.tooltip != nil else { return nil }
             let rect = h.rect.intersection(bounds)
-            if !rect.isNull && !rect.isEmpty { addToolTip(rect, owner: self, userData: nil) }
+            return rect.isNull || rect.isEmpty ? nil : rect
+        }
+        if toolTipRects != registeredToolTipRects {
+            removeAllToolTips()
+            for rect in toolTipRects { addToolTip(rect, owner: self, userData: nil) }
+            registeredToolTipRects = toolTipRects
         }
         // The same immutable views/clock were consumed by cards, footers and AX.
         // An ordinary show()/needsDisplay redraw therefore logs time-only state changes too.
@@ -8038,6 +8123,9 @@ final class PanelController {
         panel.isFloatingPanel = true
         panel.becomesKeyOnlyIfNeeded = true
         panel.hidesOnDeactivate = false
+        // The popup never activates this accessory app, and AppKit shows no tooltips
+        // in an inactive app's windows by default (owner, 3.4.1: no tooltip on «А»).
+        panel.allowsToolTipsWhenApplicationIsInactive = true
         // isFloatingPanel assigns the floating level. Apply our custom popup
         // level after that setter, in the shared production/test constructor.
         panel.level = .popUpMenu
@@ -8253,6 +8341,8 @@ func runCaptionEditorAppKitSelfTests(report: ((Bool, String) -> Void)? = nil) ->
               "C5-12 popup hidesOnDeactivate retained (initialized=\(initializedHides), actual=\(panel.hidesOnDeactivate), expected=false)")
         check(panel.styleMask.contains(.nonactivatingPanel),
               "C5-12 popup nonactivatingPanel retained (initializedMask=\(initializedMask), actualMask=\(panel.styleMask.rawValue), actual=\(panel.styleMask.contains(.nonactivatingPanel)), expected=true)")
+        check(panel.allowsToolTipsWhenApplicationIsInactive,
+              "Tooltips: nonactivating popup shows tooltips while the accessory app stays inactive («А», legend, cards)")
         let key = remoteAccountID(account)
         check(view.hits.contains { $0.id == "edit:" + key }, "C5-12 actual Settings pencil exists")
         var previousApplication: NSRunningApplication?
@@ -10497,6 +10587,155 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
     }
     check(autoImages == 88, "88 RU/EN Simple/Advanced Auto, Fixed and Off actual bitmap fixtures")
+    // Auto legend, variant B (design/mockups/auto-poll-footer-2026-11-03): the actual
+    // drawPollFooter with explicit views; geometry from the same autoLegendLayout it draws.
+    watchdog.begin("Auto legend B")
+    do {
+        let savedPrefs = prefs
+        defer { prefs = savedPrefs; defaults.setVolatileDomain(prefs, forName: UserDefaults.argumentDomain) }
+        let legendNow = Date(timeIntervalSince1970: 1_791_820_800), legendZone = TimeZone(secondsFromGMT: 0)!   // 12.10 16:00
+        func legendView(_ product: String, machine: String? = nil, age: TimeInterval = 600, interval: Int = 900) -> AccountView {
+            var source: RemoteSource? = nil
+            if let machine = machine {
+                var published = RemoteSource(machineId: "legend-" + machine, machineName: machine)
+                published.asOf = legendNow.addingTimeInterval(-age); published.lastSeenAt = legendNow
+                published.interval = interval; published.mode = "auto"; published.status = "ok"
+                source = published
+            }
+            let data = LimitData(session: 20, weekly: 40, asOf: legendNow.addingTimeInterval(-age), source: source)
+            return AccountView(product: product, label: nil, historyKey: "legend-" + product + "-" + (machine ?? "local"),
+                               caption: product, data: data, isLocal: machine == nil, tier: nil, usageDays: [:],
+                               machines: [machine ?? "mac"], state: .fresh)
+        }
+        func legendFooter(_ views: [AccountView], _ intervals: [String: TimeInterval], png: String? = nil)
+            -> (ctx: CGContext, hits: [Hit], lines: [AutoLegendLine])? {
+            let frame = RemoteAccountFrame(now: legendNow, sync: ReaderSyncState(phase: .on),
+                                           allViews: views, visibleViews: views, displayedViews: views)
+            return withRemoteRenderScene(frame: frame, timeZone: legendZone, manual: .idle) { () -> (ctx: CGContext, hits: [Hit], lines: [AutoLegendLine])? in
+                guard let ctx = appKitBitmap(720, 80, "Auto legend footer") else { return nil }
+                ctx.scaleBy(x: 2, y: 2)
+                ctx.setFillColor(CGColor(srgbRed: 0.08, green: 0.08, blue: 0.08, alpha: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: 360, height: 40))
+                let hits = drawPollFooter(ctx, size: CGSize(width: 360, height: 40), top: 8, interval: 1800, updated: nil,
+                                          autoIntervals: intervals, advanced: advancedEnabled(), views: views)
+                let model = remoteAutoFooter(views: views, enabled: Set(["claude", "codex"].filter { productEnabled($0) }),
+                                             intervals: intervals, language: appLang(), now: legendNow, timeZone: legendZone)
+                if let png = png { save(ctx, png) }
+                return (ctx: ctx, hits: hits, lines: autoLegendLayout(model.legend, top: 8))
+            }
+        }
+        // Any ink inside 218.5–317.5 × 8.5–31.5 pt (premultiplied RGBA, 2x).
+        func zoneHasInk(_ ctx: CGContext) -> Bool {
+            guard let base = ctx.data else { return false }
+            let bytes = base.assumingMemoryBound(to: UInt8.self), row = ctx.bytesPerRow
+            let ref = bytes + 17 * row + 437 * 4
+            for y in 17..<63 {
+                for x in 437..<635 {
+                    let p = bytes + y * row + x * 4
+                    if p[0] != ref[0] || p[1] != ref[1] || p[2] != ref[2] || p[3] != ref[3] { return true }
+                }
+            }
+            return false
+        }
+        // (6)/(7): nothing past x 318, ≥5 pt between product name and value/source,
+        // product name and value never shortened.
+        func legendFits(_ lines: [AutoLegendLine], _ label: String) {
+            for line in lines {
+                let left: CGFloat = line.machine != nil ? line.dotRect.minX : line.valueRect.minX
+                let inside = line.nameRect.minX >= 217.99 && line.valueRect.maxX <= 318.01
+                let nameGap = left - line.nameRect.maxX >= 4.99
+                let sourceGap = line.machine == nil || line.machineRect.maxX + 3.99 <= line.valueRect.minX
+                check(inside && nameGap && sourceGap, label + " \(line.row.product): inside 218–318, name gap ≥5")
+                check(line.name.string == line.row.name && line.value.string == line.row.value,
+                      label + " \(line.row.product): product name and value are not shortened")
+            }
+        }
+        for lang in ["ru", "en"] {
+            let en = lang == "en"
+            for advanced in [true, false] {
+                let suffix = "\(lang)-\(advanced ? "advanced" : "simple")"
+                prefs["lang"] = lang; prefs["advanced"] = advanced; prefs["autoPoll"] = true; select(false, true)
+                let vps = legendView("claude", machine: "vps"), codexLocal = legendView("codex")
+                let owner = [vps, codexLocal], ownerIntervals: [String: TimeInterval] = ["codex": 14400]
+                // (1) Owner's case: two lines, only 4h lit.
+                for claudeOn in [false, true] {
+                    select(claudeOn, true)
+                    let lit = pollSegments().map { $0.sec }.filter { pollSelected($0, manual: 1800, autoIntervals: ownerIntervals, views: owner) }
+                    check(Set(lit) == Set<TimeInterval>([0, 14400]),
+                          "Legend-1 \(suffix) claudeMonitor=\(claudeOn): only Auto and this Mac's 4h are lit")
+                }
+                select(false, true)
+                guard let ownerDraw = legendFooter(owner, ownerIntervals, png: advanced ? "ccl-auto-legend-1-owner-\(lang).png" : nil) else {
+                    check(false, "Legend-1 \(suffix) bitmap"); continue
+                }
+                let ownerLines = ownerDraw.lines
+                let ownerValues: [String] = en ? ["15m", "4h"] : ["15м", "4ч"]
+                check(ownerLines.count == 2 && ownerLines.first?.machine?.string == "vps" && ownerLines.last?.machine == nil
+                      && ownerLines.map { $0.row.value } == ownerValues,
+                      "Legend-1 \(suffix): Claude ●vps 15m, Codex 4h")
+                check(ownerLines.count == 2 && abs(ownerLines[0].top - 8.5) < 0.01 && abs(ownerLines[1].top - 20) < 0.01,
+                      "Legend-1 \(suffix): two lines at F+0.5 and F+12")
+                let legendHit = ownerDraw.hits.first(where: { $0.id == "autolegend" })
+                let autoTip = ownerDraw.hits.first(where: { $0.id == "iv0" })?.tooltip ?? ""
+                let legendCopy = remoteAutoFooter(views: owner, enabled: ["codex"], intervals: ownerIntervals,
+                                                  language: lang, now: legendNow, timeZone: legendZone).legendTooltip
+                check(legendHit?.rect == CGRect(x: 218, y: 8, width: 100, height: 24) && legendHit?.tooltip == legendCopy,
+                      "Legend \(suffix): tooltip zone 218–318 × 24 carries the legend copy")
+                let overLegend = panelTooltip(at: CGPoint(x: 268, y: 20), hits: ownerDraw.hits)
+                let overAuto = panelTooltip(at: CGPoint(x: 196, y: 20), hits: ownerDraw.hits)
+                check(overLegend == legendCopy && overAuto == autoTip && !autoTip.isEmpty,
+                      "Legend \(suffix): hover over legend and «А» resolves to their own non-empty tooltips")
+                check(zoneHasInk(ownerDraw.ctx), "Legend-1 \(suffix): legend ink drawn in its zone")
+                legendFits(ownerLines, "Legend-1 \(suffix)")
+                // (2) Both own, same 30 min.
+                select(true, true)
+                if let same = legendFooter([legendView("claude"), codexLocal], ["claude": 1800, "codex": 1800],
+                                           png: advanced ? "ccl-auto-legend-2-same-\(lang).png" : nil) {
+                    let thirty = en ? "30m" : "30м"
+                    check(same.lines.count == 2 && same.lines.allSatisfy { $0.machine == nil && $0.row.value == thirty },
+                          "Legend-2 \(suffix): Claude 30m / Codex 30m")
+                    legendFits(same.lines, "Legend-2 \(suffix)")
+                } else { check(false, "Legend-2 \(suffix) bitmap") }
+                // (3) Only Claude, one centred line.
+                select(true, false)
+                if let solo = legendFooter([legendView("claude")], ["claude": 900], png: advanced ? "ccl-auto-legend-3-solo-\(lang).png" : nil) {
+                    check(solo.lines.count == 1 && abs((solo.lines.first?.top ?? 0) - 14.25) < 0.01,
+                          "Legend-3 \(suffix): one line centred at F+6.25")
+                    legendFits(solo.lines, "Legend-3 \(suffix)")
+                } else { check(false, "Legend-3 \(suffix) bitmap") }
+                // (4) Manual: no legend, no hit, no ink.
+                select(false, true); prefs["autoPoll"] = false; select(false, true)
+                if let manual = legendFooter(owner, ownerIntervals) {
+                    check(!manual.hits.contains(where: { $0.id == "autolegend" }) && !zoneHasInk(manual.ctx),
+                          "Legend-4 \(suffix): manual mode has no legend")
+                } else { check(false, "Legend-4 \(suffix) bitmap") }
+                prefs["autoPoll"] = true; select(false, true)
+                // (5) Stale: time instead of the interval; (6) long machine names, also with a date.
+                let cases: [(String, AccountView, String?)] = [
+                    ("5-late", legendView("claude", machine: "vps", age: 3 * 3600), "13:00"),
+                    ("5-old", legendView("claude", machine: "vps", age: 30 * 3600), "11.10"),
+                    ("6-long", legendView("claude", machine: "macbook-pro-alex"), nil),
+                    ("6-long-old", legendView("claude", machine: "macbook-pro-alex", age: 30 * 3600), "11.10")]
+                for (name, remote, stamp) in cases {
+                    guard let drawn = legendFooter([remote, codexLocal], ownerIntervals,
+                                                   png: advanced ? "ccl-auto-legend-\(name)-\(lang).png" : nil),
+                          let first = drawn.lines.first else { check(false, "Legend-\(name) \(suffix) bitmap"); continue }
+                    if let stamp = stamp {
+                        check(first.row.valueIsTime && first.value.string == stamp && first.row.tone != .fresh,
+                              "Legend-\(name) \(suffix): data time \(stamp) replaces the interval")
+                    }
+                    if name.hasPrefix("6") {
+                        let shown = first.machine?.string ?? ""
+                        let tip = drawn.hits.first(where: { $0.id == "autolegend" })?.tooltip ?? ""
+                        let shortened = shown != "macbook-pro-alex" && shown.hasSuffix("…")
+                        check(shortened && first.row.machine == "macbook-pro-alex" && tip.contains("macbook-pro-alex"),
+                              "Legend-\(name) \(suffix): only the machine name is shortened; full name in tooltip")
+                    }
+                    legendFits(drawn.lines, "Legend-\(name) \(suffix)")
+                }
+            }
+        }
+    }
     // Auth-copy regressions (tester): synthetic LimitData and pure bitmap draw only.
     // Never call AppDelegate refresh/scan/timers or infer I/O safety from not-due.
     watchdog.begin("Auth hints setup / recovery guards")

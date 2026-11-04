@@ -1099,6 +1099,98 @@ private func c3bC339(_ expect: C3BExpect) {
     }
 }
 
+// Auto legend, variant B (design/mockups/auto-poll-footer-2026-11-03.md):
+// one row per product, own or foreign. `products` (segment highlighting) and the
+// «А» tooltip still cover only what this Mac polls. Geometry: AppKit tail.
+private func c3bAutoLegend(_ expect: C3BExpect) {
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!   // 2026-10-12 16:00
+    let both: Set<String> = ["claude", "codex"]
+    func foreign(interval: Int = 900, age: TimeInterval = 600, machine: String = "vps") -> AccountView {
+        var view = c3bView(2, product: "claude")
+        view.data.asOf = now.addingTimeInterval(-age); view.data.source?.asOf = view.data.asOf
+        view.data.source?.interval = interval; view.data.source?.machineName = machine
+        view.machines = [machine]
+        return view
+    }
+    let codex = c3bView(1, product: "codex", local: true), claudeLocal = c3bView(local: true)
+    for language in ["ru", "en"] {
+        let en = language == "en"
+        func footer(_ views: [AccountView], _ enabled: Set<String>, _ intervals: [String: TimeInterval]) -> RemoteAutoFooter {
+            remoteAutoFooter(views: views, enabled: enabled, intervals: intervals, language: language, now: now, timeZone: zone)
+        }
+        // (1) Owner's case: Claude from «vps» every 15 min, Codex on this Mac every 4 h.
+        let owner = footer([foreign(), codex], both, ["codex": 14400])
+        expect(owner.products == ["codex"] && !owner.noSubscriptions && owner.legend.map { $0.product } == ["claude", "codex"],
+               "Legend-1 \(language): two rows, only this Mac's Codex lights a segment")
+        let fifteen = en ? "15m" : "15м", four = en ? "4h" : "4ч"
+        if owner.legend.count == 2 {
+            let c = owner.legend[0], x = owner.legend[1]
+            let foreignRow = c.machine == "vps" && c.tone == .fresh && c.value == fifteen && !c.valueIsTime
+            expect(foreignRow, "Legend-1 \(language): foreign Claude row is ●vps + short interval")
+            expect(x.machine == nil && x.value == four && !x.valueIsTime,
+                   "Legend-1 \(language): own Codex row has no source, short interval")
+        } else { expect(false, "Legend-1 \(language): exactly two rows") }
+        let ownerTip = en
+            ? "Claude Code: polled by vps every 15 min; this Mac only reads GitHub. Change it on vps.\nCodex: polled by this Mac every 4 h"
+            : "Claude Code: опрашивает vps, каждые 15 мин; этот Mac только читает GitHub. Менять — на vps.\nCodex: опрашивает этот Mac, каждые 4 ч"
+        expect(owner.legendTooltip == ownerTip, "Legend-1 \(language): legend tooltip copy is exact")
+        let autoTip = en ? "Auto: Codex → 4 h" : "Авто: Codex → 4 ч"
+        expect(owner.tooltip == autoTip, "Legend-1 \(language): «А» model tooltip unchanged (local polls only)")
+        expect(footer([foreign(), codex], ["codex"], ["codex": 14400]).legend == owner.legend,
+               "Legend-1 \(language): foreign Claude is shown whether or not Claude monitoring is on here")
+        // (2) Both own, same 30 min: both rows stay (layout does not jump).
+        let same = footer([claudeLocal, codex], both, ["claude": 1800, "codex": 1800])
+        let thirty = en ? "30m" : "30м"
+        let sameRows = same.legend.allSatisfy { $0.machine == nil && $0.value == thirty && !$0.valueIsTime }
+        expect(same.products == ["claude", "codex"] && same.legend.map { $0.name } == ["Claude", "Codex"] && sameRows,
+               "Legend-2 \(language): equal own intervals keep two rows")
+        // (3) Only Claude polled here; a disabled local Codex without a source adds no row.
+        let solo = footer([claudeLocal, codex], ["claude"], ["claude": 900, "codex": 900])
+        let soloTip = en ? "Claude Code: polled by this Mac every 15 min" : "Claude Code: опрашивает этот Mac, каждые 15 мин"
+        expect(solo.products == ["claude"] && solo.legend.count == 1 && solo.legend.first?.value == fifteen && solo.legendTooltip == soloTip,
+               "Legend-3 \(language): single own product, one row")
+        // No subscriptions here, foreign present: the legend still shows the foreign row.
+        let remoteOnly = footer([foreign()], both, [:])
+        expect(remoteOnly.noSubscriptions && remoteOnly.products.isEmpty && remoteOnly.legend.count == 1
+               && remoteOnly.legend.first?.machine == "vps", "Legend \(language): noSubscriptions keeps foreign rows")
+        // This Mac's poll wins over a foreign account of the same product.
+        let mixed = footer([foreign(), claudeLocal, codex], both, ["claude": 3600, "codex": 900])
+        let hour = en ? "1h" : "1ч"
+        expect(mixed.legend.map { $0.machine == nil } == [true, true] && mixed.legend.first?.value == hour,
+               "Legend \(language): own Claude replaces the foreign Claude row")
+        // (5) Stale source: the data time replaces the schedule.
+        let lateTip = en ? "Claude Code: from vps; no new data since 13:00. Its schedule is set on vps."
+                         : "Claude Code: с машины vps; новых данных нет с 13:00. Расписание задаётся на vps."
+        if let late = footer([foreign(age: 3 * 3600), codex], both, ["codex": 14400]).legend.first {
+            expect(late.tone == .late && late.valueIsTime && late.value == "13:00" && late.tooltip == lateTip,
+                   "Legend-5 \(language): late source shows 13:00 instead of 15 min")
+        } else { expect(false, "Legend-5 \(language): late row exists") }
+        let oldSince = en ? "since 11.10 10:00." : "нет с 11.10 10:00."
+        if let old = footer([foreign(age: 30 * 3600), codex], both, ["codex": 14400]).legend.first {
+            expect(old.tone == .old && old.valueIsTime && old.value == "11.10" && old.tooltip.contains(oldSince),
+                   "Legend-5 \(language): over a day old shows the date; tooltip keeps date and time")
+        } else { expect(false, "Legend-5 \(language): old row exists") }
+        // Same source of truth as the card header dot, including a newer per-machine reading.
+        var reading = foreign()
+        reading.sourceReadings = [RemoteMachineReading(machineId: "c3b-vps", name: "vps", asOf: now.addingTimeInterval(-7200),
+                                                       interval: 900, isLocal: false)]
+        for view in [foreign(), foreign(age: 3 * 3600), foreign(age: 30 * 3600), reading] {
+            let header = remoteSourceHeader(view, now: now, language: language, timeZone: zone).sources.first?.tone
+            expect(header != nil && footer([view], both, [:]).legend.first?.tone == header,
+                   "Legend \(language): dot tone equals the card header tone (\(String(describing: header)))")
+        }
+        var signedOut = foreign(); signedOut.state = .signedOut
+        expect(footer([signedOut], both, [:]).legend.isEmpty, "Legend \(language): signed-out foreign card adds no row")
+        // (6) model side: the full 16-character name reaches the tooltip.
+        let long = footer([foreign(machine: "macbook-pro-alex"), codex], both, ["codex": 14400])
+        let longTip = en ? "Change it on macbook-pro-alex." : "Менять — на macbook-pro-alex."
+        expect(long.legend.first?.machine == "macbook-pro-alex" && long.legendTooltip.contains(longTip),
+               "Legend-6 \(language): full machine name kept for the tooltip")
+        expect(footer([codex], both, ["codex": 2700]).legend.isEmpty && footer([codex], both, [:]).legend.isEmpty,
+               "Legend \(language): unsupported or missing own interval invents no row")
+    }
+}
+
 func runRemoteLimitsC3BSelfTests() -> Int {
     var checks = 0, failures = 0
     func expect(_ ok: Bool, _ message: String) {
@@ -1106,7 +1198,7 @@ func runRemoteLimitsC3BSelfTests() -> Int {
         print("\(ok ? "OK" : "FAIL") \(message)")
     }
     c3bC306(expect); c3bC306Edges(expect); c3bC308(expect); c3bC309(expect)
-    c3bReviewRegressions(expect); c3bC327(expect)
+    c3bReviewRegressions(expect); c3bC327(expect); c3bAutoLegend(expect)
     c3bC328(expect); c3bC329(expect); c3bC330(expect); c3bC331(expect); c3bC332(expect); c3bC333(expect)
     c3bC334(expect); c3bC335(expect); c3bC336(expect); c3bC337(expect); c3bC338(expect); c3bC339(expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3B model tests: \(checks) checks; \(failures) failures")
