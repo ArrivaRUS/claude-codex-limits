@@ -741,6 +741,24 @@ func remotePollAccessibleTitle(_ sec: TimeInterval, language: String) -> String 
     }
 }
 
+func remotePollDurationText(_ seconds: Int, language: String) -> String {
+    let hours = seconds % 3600 == 0
+    let count = max(1, seconds / (hours ? 3600 : 60))
+    let unit: String
+    if language == "en" {
+        unit = hours ? (count == 1 ? "hour" : "hours") : (count == 1 ? "minute" : "minutes")
+    } else if (11...14).contains(count % 100) {
+        unit = hours ? "часов" : "минут"
+    } else if count % 10 == 1 {
+        unit = hours ? "час" : "минута"
+    } else if (2...4).contains(count % 10) {
+        unit = hours ? "часа" : "минуты"
+    } else {
+        unit = hours ? "часов" : "минут"
+    }
+    return "\(count) \(unit)"
+}
+
 // Auto participation comes from C3-A; the native interval control retains its
 // existing accessible duration wording instead of the compact schedule copy.
 func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<String>,
@@ -770,12 +788,21 @@ func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<S
     guard sec == 0 else { return summary }
     let foreign = model.legend.filter { $0.machine != nil }
     guard !foreign.isEmpty else { return summary }
-    let details = foreign.map { row -> String in
-        guard row.tone == .fresh, !row.valueIsTime,
-              let machine = row.machine, let duration = row.intervalDescription else { return row.tooltip }
+    let details = foreign.compactMap { row -> String? in
+        guard let machine = row.machine else { return nil }
         let name = row.product == "claude" ? "Claude Code" : "Codex"
-        return en ? "\(name) is polled by \(machine) every \(duration)."
-                  : "\(name) опрашивает \(machine), каждые \(duration)."
+        let value: String
+        if row.tone == .fresh, !row.valueIsTime, let seconds = row.intervalSeconds {
+            value = remotePollDurationText(seconds, language: language)
+        } else if row.asOf == nil {
+            value = en ? "no data yet" : "данных пока нет"
+        } else if row.tone == .fresh {
+            value = en ? "interval unknown" : "интервал неизвестен"
+        } else {
+            let since = remoteCardTimestamp(row.asOf, now: now, timeZone: timeZone)
+            value = (en ? "no new data since " : "нет новых данных с ") + since
+        }
+        return "\(name) → \(value) (\(machine))."
     }
     return summary + (en ? " (this Mac)." : " (этот Mac).") + "\n" + details.joined(separator: "\n")
 }

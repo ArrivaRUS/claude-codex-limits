@@ -639,8 +639,8 @@ private func c3bC327(_ expect: C3BExpect) {
         expect(remotePollTooltip(0, views: local + [foreign], enabled: both, intervals: intervals, auto: true, language: language) == tooltip,
                "C3-27 \(language): foreign same-product account never duplicates local Auto mapping")
         let mixedTooltip = en
-            ? "Auto: Codex → 4 hours (this Mac).\nClaude Code is polled by vps every 1 h."
-            : "Авто: Codex → 4 часа (этот Mac).\nClaude Code опрашивает vps, каждые 1 ч."
+            ? "Auto: Codex → 4 hours (this Mac).\nClaude Code → 1 hour (vps)."
+            : "Авто: Codex → 4 часа (этот Mac).\nClaude Code → 1 час (vps)."
         expect(remotePollTooltip(0, views: [foreign, codex], enabled: both, intervals: intervals, auto: true, language: language,
                                  now: c3bNow(), timeZone: TimeZone(secondsFromGMT: 0)!) == mixedTooltip,
                "C3-27 \(language): remote Claude is explained separately from this Mac's Codex poll")
@@ -1162,33 +1162,64 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
         expect(owner.tooltip == autoTip, "Legend-1 \(language): «А» model tooltip unchanged (local polls only)")
         expect(footer([foreign(), codex], ["codex"], ["codex": 14400]).legend == owner.legend,
                "Legend-1 \(language): foreign Claude is shown whether or not Claude monitoring is on here")
+        let durations: [(Int, String, String)] = [
+            (600, "10 минут", "10 minutes"), (5400, "90 минут", "90 minutes"),
+            (7200, "2 часа", "2 hours"), (60, "1 минута", "1 minute"),
+            (1260, "21 минута", "21 minutes"), (1320, "22 минуты", "22 minutes"),
+            (660, "11 минут", "11 minutes"), (18000, "5 часов", "5 hours"),
+            (1500, "25 минут", "25 minutes"), (6660, "111 минут", "111 minutes"),
+            (1, "1 минута", "1 minute"), (119, "1 минута", "1 minute")]
+        for (seconds, russian, english) in durations {
+            let expected = en ? english : russian
+            expect(remotePollDurationText(seconds, language: language) == expected,
+                   "Legend-A-duration \(language) \(seconds)s: exact duration, plural and minimum one minute")
+        }
+        for seconds in [900, 1800, 3600, 14400] {
+            let accessible = remotePollAccessibleTitle(TimeInterval(seconds), language: language)
+            expect(remotePollDurationText(seconds, language: language) == accessible,
+                   "Legend-A-duration \(language) \(seconds)s: standard duration equals the existing accessible title")
+        }
         let panelIntervals: [String: TimeInterval] = ["codex": 1800]
         let panelSummary = en ? "Auto: Codex → 30 minutes" : "Авто: Codex → 30 минут"
         let ownSuffix = en ? " (this Mac)." : " (этот Mac)."
         let approvedTooltip = en
-            ? "Auto: Codex → 30 minutes (this Mac).\nClaude Code is polled by vps every 15 min."
-            : "Авто: Codex → 30 минут (этот Mac).\nClaude Code опрашивает vps, каждые 15 мин."
+            ? "Auto: Codex → 30 minutes (this Mac).\nClaude Code → 15 minutes (vps)."
+            : "Авто: Codex → 30 минут (этот Mac).\nClaude Code → 15 минут (vps)."
         let panelTooltip = remotePollTooltip(0, views: [foreign(), codex], enabled: both, intervals: panelIntervals,
                                             auto: true, language: language, now: now, timeZone: zone)
         expect(panelTooltip == approvedTooltip, "Legend-A-tooltip \(language): exact owner-approved fresh foreign source copy")
+        let tenMinuteTooltip = remotePollTooltip(0, views: [foreign(interval: 600), codex], enabled: both,
+            intervals: panelIntervals, auto: true, language: language, now: now, timeZone: zone)
+        let tenMinuteCopy = en
+            ? "Auto: Codex → 30 minutes (this Mac).\nClaude Code → 10 minutes (vps)."
+            : "Авто: Codex → 30 минут (этот Mac).\nClaude Code → 10 минут (vps)."
+        expect(tenMinuteTooltip == tenMinuteCopy, "Legend-A-tooltip \(language): foreign 600s interval is a duration, never Auto")
         let ownOnlyTooltip = remotePollTooltip(0, views: [codex], enabled: both, intervals: panelIntervals,
                                               auto: true, language: language, now: now, timeZone: zone)
         expect(ownOnlyTooltip == panelSummary, "Legend-A-tooltip \(language): no foreign row means byte-for-byte original tooltip")
         for age in [3.0 * 3600, 30.0 * 3600] {
             let views = [foreign(age: age), codex]
-            let staleTip = footer(views, both, panelIntervals).legend.first?.tooltip ?? ""
+            let since = age == 3 * 3600 ? "13:00" : "11.10 10:00"
+            let staleTip = en ? "Claude Code → no new data since \(since) (vps)."
+                              : "Claude Code → нет новых данных с \(since) (vps)."
             let expectedStale = panelSummary + ownSuffix + "\n" + staleTip
             let staleTooltip = remotePollTooltip(0, views: views, enabled: both, intervals: panelIntervals,
                                                 auto: true, language: language, now: now, timeZone: zone)
-            expect(staleTooltip == expectedStale, "Legend-A-tooltip \(language): stale foreign row keeps its full legend tooltip")
+            expect(staleTooltip == expectedStale, "Legend-A-tooltip \(language): stale foreign row uses arrow and full data timestamp")
         }
+        var noData = foreign(); noData.data.asOf = nil; noData.data.source?.asOf = nil
+        let noDataTip = en ? "Claude Code → no data yet (vps)." : "Claude Code → данных пока нет (vps)."
+        let expectedNoData = panelSummary + ownSuffix + "\n" + noDataTip
+        let noDataTooltip = remotePollTooltip(0, views: [noData, codex], enabled: both, intervals: panelIntervals,
+                                             auto: true, language: language, now: now, timeZone: zone)
+        expect(noDataTooltip == expectedNoData, "Legend-A-tooltip \(language): missing asOf has exact no-data copy")
         var noInterval = foreign(); noInterval.data.source?.interval = nil
         let noIntervalViews = [noInterval, codex]
-        let noIntervalTip = footer(noIntervalViews, both, panelIntervals).legend.first?.tooltip ?? ""
+        let noIntervalTip = en ? "Claude Code → interval unknown (vps)." : "Claude Code → интервал неизвестен (vps)."
         let expectedNoInterval = panelSummary + ownSuffix + "\n" + noIntervalTip
         let noIntervalTooltip = remotePollTooltip(0, views: noIntervalViews, enabled: both, intervals: panelIntervals,
                                                  auto: true, language: language, now: now, timeZone: zone)
-        expect(noIntervalTooltip == expectedNoInterval, "Legend-A-tooltip \(language): fresh row without an interval keeps its legend tooltip")
+        expect(noIntervalTooltip == expectedNoInterval, "Legend-A-tooltip \(language): fresh row without an interval has exact unknown-interval copy")
         let segmentTooltip = remotePollTooltip(1800, views: [foreign(), codex], enabled: both, intervals: panelIntervals,
                                               auto: true, language: language, now: now, timeZone: zone)
         let segmentCopy = en ? "30 minutes\nAuto: Codex" : "30 минут\nАвто: Codex"

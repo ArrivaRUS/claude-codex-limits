@@ -1149,7 +1149,8 @@ struct RemoteAutoLegendRow: Equatable {
     var value: String                       // short interval («15м», «4h») or the data time
     var valueIsTime: Bool = false
     var tooltip: String
-    var intervalDescription: String? = nil  // the legend's long duration, without parsing its compact value
+    var intervalSeconds: Int? = nil
+    var asOf: Date? = nil
     var name: String { product == "claude" ? "Claude" : "Codex" }
 }
 
@@ -1444,7 +1445,7 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
             rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: short(seconds),
                 tooltip: title + (en ? ": polled by \(machine) every \(long(seconds)); this Mac only reads GitHub. Change it on \(machine)."
                                      : ": опрашивает \(machine), каждые \(long(seconds)); этот Mac только читает GitHub. Менять — на \(machine)."),
-                intervalDescription: long(seconds)))
+                intervalSeconds: seconds, asOf: asOf))
             continue
         }
         // A schedule that is not being kept is not shown: the data time replaces it.
@@ -1461,7 +1462,8 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
             tooltip = title + (en ? ": from \(machine); no new data since \(since). Its schedule is set on \(machine)."
                                   : ": с машины \(machine); новых данных нет с \(since). Расписание задаётся на \(machine).")
         }
-        rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: value, valueIsTime: true, tooltip: tooltip))
+        rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: value, valueIsTime: true,
+                                        tooltip: tooltip, asOf: asOf))
     }
     return rows
 }
