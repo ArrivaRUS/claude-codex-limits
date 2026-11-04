@@ -1943,9 +1943,11 @@ func githubAuthSecurityWrite(service: String, generation: String, envelope: Stri
     return presence
 }
 
-/// Delete through the creator's trusted binary, without reading credential data.
+/// Prefer quiet native deletion for application-created 3.4.0 items, then use
+/// security for remaining copies trusted to that binary. Never read credential data.
 /// Only confirmed absence retires the whole generation, including duplicate items.
 func githubAuthSecurityDelete(service: String, generation: String, keychainPath: String? = nil,
+                              nativeDelete: (() -> SyncKeychainStatus)? = nil,
                               run: ([String], String) -> SyncKeychainStatus,
                               attributes: () -> SyncKeychainStatus) throws -> SyncKeychainStatus {
     guard UUID(uuidString: generation)?.uuidString.lowercased() == generation else {
@@ -1960,6 +1962,17 @@ func githubAuthSecurityDelete(service: String, generation: String, keychainPath:
     var presence = attributes()
     if presence == .missing { return .success }
     guard presence == .success else { return presence }
+    if let nativeDelete = nativeDelete {
+        for _ in 0..<4 {
+            let status = nativeDelete()
+            if status == .timedOut { return status }
+            presence = attributes()
+            if presence == .missing { return .success }
+            guard presence == .success else { return presence }
+            // A settled native denial may be an ACL owned by security instead.
+            if status != .success { break }
+        }
+    }
     for _ in 0..<4 {
         let status = run(["-i"], line)
         if status == .timedOut { return status } // Never certify an unsettled child.
@@ -2090,13 +2103,17 @@ private func githubAuthHelperInput(limit: Int) -> Data? {
     } catch { return nil }
     return input
 }
-private func githubAuthNativePresence(service: String, generation: String,
-                                      requireUnlocked: Bool, delete: Bool = false) -> Int32 {
+// The isolated harness supplies its own keychain to exercise the native delete adapter.
+func githubAuthNativePresence(service: String, generation: String,
+                              requireUnlocked: Bool, delete: Bool = false,
+                              keychain: SecKeychain? = nil) -> Int32 {
     var query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service, kSecReturnAttributes as String: true,
         kSecMatchLimit as String: kSecMatchLimitOne,
         kSecUseDataProtectionKeychain as String: false,
         kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+    // Only the isolated temporary-keychain harness supplies a search scope.
+    if let keychain = keychain { query[kSecMatchSearchList as String] = [keychain] }
     if generation != "legacy" { query[kSecAttrAccount as String] = generation }
     if requireUnlocked { query[kSecReturnRef as String] = true }
     if delete { query[kSecReturnPersistentRef as String] = true }
@@ -2155,9 +2172,14 @@ private func githubAuthNativeKeychainHelper() -> Int32 {
             guard preflight == 0 || preflight == 44 else { return preflight }
             do {
                 let result = try githubAuthSecurityDelete(service: request.service, generation: request.generation,
+                    nativeDelete: {
+                        let code = githubAuthNativePresence(service: request.service, generation: request.generation,
+                            requireUnlocked: true, delete: true)
+                        return code == 0 ? .success : code == 44 ? .missing : .failure(code)
+                    },
                     run: githubAuthRunSecurityWriter, attributes: {
                         let code = githubAuthNativePresence(service: request.service, generation: request.generation,
-                            requireUnlocked: false)
+                            requireUnlocked: true)
                         return code == 0 ? .success : code == 44 ? .missing : .failure(code)
                     })
                 switch result {

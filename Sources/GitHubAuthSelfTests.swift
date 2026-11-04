@@ -55,6 +55,7 @@ private final class GHAuthFixture {
     var stageFault: ((GitHubAuthRef, GitHubCredentialV2) -> GitHubAuthStoreStatus?)?
     var deleteFault: GitHubAuthStoreStatus?
     var persistentDeleteFault: GitHubAuthStoreStatus?
+    var deleteAdapter: ((GitHubAuthRef) -> GitHubAuthStoreStatus)?
     var cleanupPreflightFault: ((GitHubAuthRef) -> GitHubAuthStoreStatus?)?
     var usesSecurityWriter = false
     var lateWrites: [(GitHubAuthRef, GitHubCredentialV2)] = []
@@ -162,6 +163,7 @@ private final class GHAuthFixture {
                 self.record("store_delete_attempt"); self.deleteAttempts.append(ref)
                 if let fault = self.persistentDeleteFault { return fault }
                 if let fault = self.deleteFault { self.deleteFault = nil; return fault }
+                if let adapter = self.deleteAdapter { return adapter(ref) }
                 self.items.removeValue(forKey: ref); self.record("store_deleted"); return .success
             },
             transport: { self.transport($0) }, identity: { self.identity($0) },
@@ -1868,6 +1870,74 @@ func runGitHubKeychain341AdapterSelfTests(check: (Bool, String) -> Void) {
             }
         }
     } catch { check(false, "K341-delete valid synthetic command unexpectedly rejected") }
+    do {
+        for copies in [0, 1, 2, 4] {
+            var remaining = copies, nativeRuns = 0, securityRuns = 0
+            let status = try githubAuthSecurityDelete(service: service, generation: generation,
+                nativeDelete: { nativeRuns += 1; remaining -= 1; return .success },
+                run: { _, _ in securityRuns += 1; return .failure(1) },
+                attributes: { remaining == 0 ? .missing : .success })
+            let nativeOnly = status == .success && nativeRuns == copies && securityRuns == 0 && remaining == 0
+            check(nativeOnly, "K341-delete-native all native-owned copies disappear without launching security")
+        }
+        var remaining = 2, nativeRuns = 0, securityRuns = 0
+        let fallback = try githubAuthSecurityDelete(service: service, generation: generation,
+            nativeDelete: { nativeRuns += 1; return .failure(36) },
+            run: { _, _ in securityRuns += 1; remaining -= 1; return .success },
+            attributes: { remaining == 0 ? .missing : .success })
+        let fallbackRemoved = fallback == .success && nativeRuns == 1 && securityRuns == 2 && remaining == 0
+        check(fallbackRemoved, "K341-delete-fallback native ACL denial falls back to security only while attributes confirm unlocked")
+
+        // The owner must retain the generation when neither adapter removes it,
+        // including a misleading native success followed by four misleading rc0s.
+        for nativeStatus in [SyncKeychainStatus.success, .failure(36)] {
+            let f = GHAuthFixture(); let initial = f.owner()
+            let login = f.login(initial)
+            let loggedIn: Bool
+            if case .ready = login { loggedIn = true } else { loggedIn = false }
+            check(loggedIn, "K341-delete-pending initial synthetic login")
+            initial.cleanupRetiredCredentials()
+            guard let active = f.manifest?.active, var old = f.items[active] else {
+                check(false, "K341-delete-pending source missing"); continue
+            }
+            let retired = GitHubAuthRef(generation: UUID().uuidString.lowercased())
+            old.generation = retired.generation; f.items[retired] = old; f.manifest!.cleanupRefs = [retired]
+            var nativeAttempts = 0, securityAttempts = 0
+            var deletion: SyncKeychainStatus?
+            f.deleteAdapter = { ref in
+                do {
+                    let result = try githubAuthSecurityDelete(service: service, generation: ref.generation,
+                        nativeDelete: { nativeAttempts += 1; return nativeStatus },
+                        run: { _, _ in securityAttempts += 1; return .success }, attributes: { .success })
+                    deletion = result
+                    return result == .success ? .success : .unreachable
+                } catch { return .failed }
+            }
+            let owner = f.owner(); owner.cleanupRetiredCredentials()
+            let expectedNative = nativeStatus == .success ? 4 : 1
+            let bounded = nativeAttempts == expectedNative && securityAttempts == 4
+            let retained = f.manifest?.cleanupRefs.contains(retired) == true && f.items[retired] != nil
+            let failed = deletion == .failure(1) && owner.snapshot().cleanupPending && owner.keychainRetryDelay() == nil
+            check(bounded && retained && failed,
+                  "K341-delete-pending both adapters fail within eight attempts; generation remains in cleanupRefs")
+        }
+
+        var unlockedCopies = 2, lockedNativeRuns = 0, lockedSecurityRuns = 0
+        let lockedNext = try githubAuthSecurityDelete(service: service, generation: generation,
+            nativeDelete: { lockedNativeRuns += 1; unlockedCopies -= 1; return .success },
+            run: { _, _ in lockedSecurityRuns += 1; return .success },
+            attributes: { unlockedCopies == 2 ? .success : .failure(36) })
+        let stoppedAtLockedCopy = lockedNext == .failure(36) && lockedNativeRuns == 1 && lockedSecurityRuns == 0
+        check(stoppedAtLockedCopy, "K341-delete-locked-next locked second copy stops before any security launch")
+        var nativeTimeoutRuns = 0, timeoutSecurityRuns = 0, nativeTimeoutProbes = 0
+        let nativeTimeout = try githubAuthSecurityDelete(service: service, generation: generation,
+            nativeDelete: { nativeTimeoutRuns += 1; return .timedOut },
+            run: { _, _ in timeoutSecurityRuns += 1; return .success },
+            attributes: { nativeTimeoutProbes += 1; return .success })
+        let stoppedAtTimeout = nativeTimeout == .timedOut && nativeTimeoutRuns == 1
+            && timeoutSecurityRuns == 0 && nativeTimeoutProbes == 1
+        check(stoppedAtTimeout, "K341-delete-native-timeout exits immediately without probes or security fallback")
+    } catch { check(false, "K341-delete native-first synthetic adapter unexpectedly rejected") }
     for language in ["ru", "en"] {
         let permission = language == "en"
             ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt"
@@ -1968,6 +2038,17 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         print("K341 TEMP DELETE: SKIP (temporary keychain open unavailable)")
         check(false, "K341-integration open created temporary keychain for scoped attributes"); return
     }
+    // Match the helper's process-local quiet policy for real native deletion,
+    // and restore the caller's policy when this isolated probe finishes.
+    var interactionAllowed: DarwinBoolean = false
+    let interactionStatus = SecKeychainGetUserInteractionAllowed(&interactionAllowed)
+    guard interactionStatus == errSecSuccess else {
+        print("K341 TEMP DELETE: SKIP (cannot capture native interaction policy)"); return
+    }
+    guard SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+        print("K341 TEMP DELETE: SKIP (cannot suppress native interaction)"); return
+    }
+    defer { _ = SecKeychainSetUserInteractionAllowed(interactionAllowed.boolValue) }
     let generation = UUID().uuidString.lowercased(), service = "CCL isolated 3.4.1 probe " + UUID().uuidString
     let credential = GitHubCredentialV2(epoch: generation, generation: generation,
         accessToken: "ccl-test-access-" + UUID().uuidString, refreshToken: "ccl-test-refresh-" + UUID().uuidString,
@@ -1994,6 +2075,11 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         if result == errSecItemNotFound { return 0 }
         guard result == errSecSuccess, let copies = resultAttributes as? [[String: Any]] else { return nil }
         return copies.count
+    }
+    func nativePresence(_ account: String, delete: Bool = false) -> SyncKeychainStatus {
+        let code = githubAuthNativePresence(service: service, generation: account,
+            requireUnlocked: true, delete: delete, keychain: keychain)
+        return code == 0 ? .success : code == 44 ? .missing : .failure(code)
     }
     do {
         let status = try githubAuthSecurityWrite(service: service, generation: generation, envelope: envelope, keychainPath: path,
@@ -2030,10 +2116,11 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         if unlocked {
             let existed = attributes() == .success
             let removed = try githubAuthSecurityDelete(service: service, generation: generation, keychainPath: path,
-                run: githubAuthRunSecurityWriter, attributes: attributes)
+                nativeDelete: { nativePresence(generation, delete: true) },
+                run: githubAuthRunSecurityWriter, attributes: { nativePresence(generation) })
             let missing = attributes() == .missing
             check(existed && removed == .success && missing,
-                  "K341-delete production writer item is removed by security and quiet attributes confirm missing")
+                  "K341-delete production writer item is removed by native-first helper path and quiet attributes confirm missing")
             if let count = copiesBeforeDelete, count >= 2 {
                 check(removed == .success && missing && copyCount() == 0,
                       "K341-delete all same-generation temporary-keychain copies are removed")
@@ -2042,13 +2129,50 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
             }
             var absentRuns = 0
             let absent = try githubAuthSecurityDelete(service: service, generation: generation, keychainPath: path,
+                nativeDelete: { nativePresence(generation, delete: true) },
                 run: { args, line in
                     absentRuns += 1; return githubAuthRunSecurityWriter(arguments: args, input: line)
-                }, attributes: attributes)
+                }, attributes: { nativePresence(generation) })
             check(absent == .success && absentRuns == 0 && attributes() == .missing,
                   "K341-delete absent temporary-keychain generation succeeds without an error or child")
         } else {
             print("K341 TEMP DELETE: SKIP (temporary-keychain unlocked preflight unavailable)")
+        }
+        // Reproduce 3.4.0 provenance: this binary creates the item natively,
+        // with no security trust entry. The query and every delete stay scoped.
+        let nativeGeneration = UUID().uuidString.lowercased()
+        var nativeCredential = credential; nativeCredential.generation = nativeGeneration
+        let nativeEnvelope = try JSONEncoder().encode(nativeCredential).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        let nativeItem: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: nativeGeneration,
+            kSecValueData as String: Data(nativeEnvelope.utf8), kSecUseKeychain as String: keychain,
+            kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+        let added = SecItemAdd(nativeItem as CFDictionary, nil)
+        if added == errSecSuccess, nativePresence(nativeGeneration) == .success {
+            var nativeRuns = 0, securityRuns = 0
+            var nativeResult: SyncKeychainStatus?
+            let removed = try githubAuthSecurityDelete(service: service, generation: nativeGeneration, keychainPath: path,
+                nativeDelete: {
+                    nativeRuns += 1
+                    let result = nativePresence(nativeGeneration, delete: true)
+                    nativeResult = result; return result
+                },
+                run: { _, _ in
+                    // Fail closed: a native-only fixture must never launch a
+                    // potentially prompting security process if its ACL is unsupported.
+                    securityRuns += 1; return .failure(36)
+                }, attributes: { nativePresence(nativeGeneration) })
+            check(nativeRuns > 0, "K341-delete-native-temp present native-created item must reach the native adapter")
+            if let result = nativeResult, result != .success && result != .missing {
+                print("K341 TEMP DELETE: native-created item could not be deleted by its creator; security fallback suppressed to prevent UI")
+            } else {
+                let missing = nativePresence(nativeGeneration) == .missing
+                let nativeRemoved = removed == .success && missing && nativeRuns == 1 && securityRuns == 0
+                check(nativeRemoved, "K341-delete-native-temp SecItemAdd item is removed quietly through the helper's native-first function")
+            }
+        } else {
+            print("K341 TEMP DELETE: native SecItemAdd fixture or unlocked attributes unavailable (add status=\(added))")
         }
         // The real `security -i` exit code against an absent keychain is the evidence here;
         // the stubbed attributes alone would make any outcome look like a failure.
