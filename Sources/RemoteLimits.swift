@@ -1149,6 +1149,7 @@ struct RemoteAutoLegendRow: Equatable {
     var value: String                       // short interval («15м», «4h») or the data time
     var valueIsTime: Bool = false
     var tooltip: String
+    var intervalDescription: String? = nil  // the legend's long duration, without parsing its compact value
     var name: String { product == "claude" ? "Claude" : "Codex" }
 }
 
@@ -1442,7 +1443,8 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
         if tone == .fresh, let seconds = seconds {
             rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: short(seconds),
                 tooltip: title + (en ? ": polled by \(machine) every \(long(seconds)); this Mac only reads GitHub. Change it on \(machine)."
-                                     : ": опрашивает \(machine), каждые \(long(seconds)); этот Mac только читает GitHub. Менять — на \(machine).")))
+                                     : ": опрашивает \(machine), каждые \(long(seconds)); этот Mac только читает GitHub. Менять — на \(machine)."),
+                intervalDescription: long(seconds)))
             continue
         }
         // A schedule that is not being kept is not shown: the data time replaces it.

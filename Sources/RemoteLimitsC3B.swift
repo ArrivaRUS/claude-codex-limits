@@ -744,8 +744,10 @@ func remotePollAccessibleTitle(_ sec: TimeInterval, language: String) -> String 
 // Auto participation comes from C3-A; the native interval control retains its
 // existing accessible duration wording instead of the compact schedule copy.
 func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<String>,
-                       intervals: [String: TimeInterval], auto: Bool, language: String) -> String {
-    let model = remoteAutoFooter(views: views, enabled: enabled, intervals: intervals, language: language)
+                       intervals: [String: TimeInterval], auto: Bool, language: String,
+                       now: Date = Date(), timeZone: TimeZone = .current) -> String {
+    let model = remoteAutoFooter(views: views, enabled: enabled, intervals: intervals, language: language,
+                                 now: now, timeZone: timeZone)
     let en = language == "en"
     if model.noSubscriptions {
         // A local-only Off panel keeps the established explanation. With foreign
@@ -764,7 +766,18 @@ func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<S
         return sec == 0 ? name + " → " + remotePollAccessibleTitle(interval, language: language) : name
     }
     guard !providers.isEmpty else { return label }
-    return label + (sec == 0 ? ": " : (en ? "\nAuto: " : "\nАвто: ")) + providers.joined(separator: "; ")
+    let summary = label + (sec == 0 ? ": " : (en ? "\nAuto: " : "\nАвто: ")) + providers.joined(separator: "; ")
+    guard sec == 0 else { return summary }
+    let foreign = model.legend.filter { $0.machine != nil }
+    guard !foreign.isEmpty else { return summary }
+    let details = foreign.map { row -> String in
+        guard row.tone == .fresh, !row.valueIsTime,
+              let machine = row.machine, let duration = row.intervalDescription else { return row.tooltip }
+        let name = row.product == "claude" ? "Claude Code" : "Codex"
+        return en ? "\(name) is polled by \(machine) every \(duration) — change it on \(machine)."
+                  : "\(name) опрашивает \(machine), каждые \(duration) — менять на \(machine)."
+    }
+    return summary + (en ? " (polled by this Mac)." : " (опрашивает этот Mac).") + "\n" + details.joined(separator: "\n")
 }
 
 // Time-driven tray redraws do not depend on a local provider poll. Strict `>`
