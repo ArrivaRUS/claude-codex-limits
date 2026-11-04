@@ -802,9 +802,9 @@ func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<S
             let since = remoteCardTimestamp(row.asOf, now: now, timeZone: timeZone)
             value = (en ? "no new data since " : "нет новых данных с ") + since
         }
-        return "\(name) → \(value) (\(machine))."
+        return "\(name) → \(value) (\(machine))"
     }
-    return summary + (en ? " (this Mac)." : " (этот Mac).") + "\n" + details.joined(separator: "\n")
+    return summary + (en ? " (this Mac)" : " (этот Mac)") + "\n" + details.joined(separator: "\n")
 }
 
 // Time-driven tray redraws do not depend on a local provider poll. Strict `>`
