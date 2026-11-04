@@ -28,6 +28,7 @@ func remoteSourceFreshness(asOf: Date?, interval: TimeInterval?, now: Date) -> R
 struct RemoteHeaderSource {
     var name: String
     var tone: RemoteFreshnessTone
+    var reading: RemoteMachineReading
 }
 struct RemoteSourceHeader {
     var sources: [RemoteHeaderSource]
@@ -66,7 +67,7 @@ func remoteSourceHeader(_ raw: AccountView, now: Date, language: String, timeZon
         let moment = tone == .unknown ? "—" : remoteCardTimestamp(record.asOf, now: now, timeZone: timeZone,
             compactOtherDay: tone == .old)
         lines.append(name + " — " + moment + ", " + status)
-        return RemoteHeaderSource(name: name, tone: tone)
+        return RemoteHeaderSource(name: name, tone: tone, reading: record)
     }
     return RemoteSourceHeader(sources: sources, tooltip: lines.joined(separator: "\n"))
 }

@@ -1229,7 +1229,9 @@ func remoteCardLine2(_ view: AccountView, state: RemoteCardState, phase: RemoteM
     // the line falls through to the ordinary card state exactly like .idle.
     case .cooldown: break
     case .failed: return t("GitHub не ответил", "GitHub didn't respond")
-    case .pollAllowed(let at): return t("Опрос можно с ", "Poll allowed at ") + time(at)
+    // The 15-minute account guard stays, but its deadline is not shown;
+    // the line falls through to the ordinary card state exactly like .idle.
+    case .pollAllowed: break
     case .idle: break
     }
     var machine = remoteStatusMachine(view)
@@ -1407,7 +1409,10 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
         if seconds >= 3600 && seconds % 3600 == 0 { return String(seconds / 3600) + (en ? " h" : " ч") }
         return String(seconds / 60) + (en ? " min" : " мин")
     }
-    let localMachineIds = Set(views.flatMap { view in view.sourceReadings.filter { $0.isLocal }.map { $0.machineId } })
+    var localMachineIds = Set(views.flatMap { view in view.sourceReadings.filter { $0.isLocal }.map { $0.machineId } })
+    for view in views where view.isLocal {
+        if let machineId = view.data.source?.machineId { localMachineIds.insert(machineId) }
+    }
     var rows: [RemoteAutoLegendRow] = []
     for product in ["claude", "codex"] {
         let title = product == "claude" ? "Claude Code" : "Codex"
@@ -1420,17 +1425,22 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
             continue
         }
         guard let view = views.first(where: { candidate in
-            guard candidate.product == product, candidate.state != .signedOut, let published = candidate.data.source else { return false }
+            guard candidate.product == product, !candidate.isLocal, candidate.state != .signedOut,
+                  let published = candidate.data.source else { return false }
             return !localMachineIds.contains(published.machineId)
         }), let source = view.data.source else { continue }
-        let machine = remoteDisplayText(source.machineName.isEmpty ? (view.machines.first ?? "?") : source.machineName, limit: 16)
-        var asOf = view.data.asOf
-        var toneInterval = source.interval.map { TimeInterval($0) }
-        var shownInterval = toneInterval
-        if let reading = view.sourceReadings.first(where: { $0.machineId == source.machineId }) {
-            asOf = reading.asOf; toneInterval = reading.interval; shownInterval = reading.interval ?? shownInterval
-        }
-        let tone = remoteSourceFreshness(asOf: asOf, interval: toneInterval, now: now)
+        let rawMachine = source.machineName.isEmpty ? (view.machines.first ?? "?") : source.machineName
+        let machine = remoteDisplayText(rawMachine, limit: 64)
+        // Consume the header's observation and tone together, including its fallback
+        // for missing per-machine readings. Only fitAttr shortens the visible name.
+        let header = remoteSourceHeader(view, now: now, language: language, timeZone: timeZone)
+        let fallbackName = remoteSnapshotText(rawMachine, limit: 16)
+        let entry = header.sources.first(where: {
+            view.sourceReadings.isEmpty ? $0.reading.name == fallbackName : $0.reading.machineId == source.machineId
+        })
+        let asOf = entry?.reading.asOf
+        let shownInterval = entry?.reading.interval
+        let tone = entry?.tone ?? .unknown
         let seconds = shownInterval.flatMap { value -> Int? in value.isFinite && value >= 60 && value <= 604800 ? Int(value) : nil }
         if tone == .fresh, let seconds = seconds {
             rows.append(RemoteAutoLegendRow(product: product, machine: machine, tone: tone, value: short(seconds),

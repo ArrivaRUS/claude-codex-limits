@@ -408,9 +408,18 @@ private func c4C406(_ root: String, _ expect: C4Expect) {
             expect(nextAt == expected, "C4-06 remote attempt pollAllowed exact960s deadline")
             if let nextAt = nextAt {
                 var local = remoteClaude; local.product = "codex"; local.isLocal = true
-                let text = remoteCardLine2(local, state: local.state, phase: .pollAllowed(nextAt), lang: "ru", wide: true,
-                    now: C4_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
-                expect(text.hasPrefix("Опрос можно с "), "C4-06 shared decision appears as pollAllowed UX copy")
+                let zone = TimeZone(secondsFromGMT: 0)!
+                for language in ["ru", "en"] {
+                    let card = remoteCardPresentation(local, sync: ReaderSyncState(phase: .on), language: language,
+                        narrow: false, now: C4_NOW, timeZone: zone, manual: .pollAllowed(nextAt))
+                    let idle = remoteCardPresentation(local, sync: ReaderSyncState(phase: .on), language: language,
+                        narrow: false, now: C4_NOW, timeZone: zone, manual: .idle)
+                    let noDeadline = !card.statusLine.contains("Опрос можно") && !card.statusLine.contains("Poll allowed")
+                    expect(card.statusLine == idle.statusLine && noDeadline,
+                           "C4-06 \(language): shared pollAllowed decision keeps the ordinary card status")
+                    let guardCopy = language == "ru" ? "Не чаще раза в 15 минут" : "At most once per 15 minutes"
+                    expect(card.tooltip.contains(guardCopy), "C4-06 \(language): shared account guard reaches the UI through the tooltip")
+                }
             }
         }
 

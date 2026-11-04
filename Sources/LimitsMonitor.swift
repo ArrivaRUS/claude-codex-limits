@@ -10714,8 +10714,8 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                 let cases: [(String, AccountView, String?)] = [
                     ("5-late", legendView("claude", machine: "vps", age: 3 * 3600), "13:00"),
                     ("5-old", legendView("claude", machine: "vps", age: 30 * 3600), "11.10"),
-                    ("6-long", legendView("claude", machine: "macbook-pro-alex"), nil),
-                    ("6-long-old", legendView("claude", machine: "macbook-pro-alex", age: 30 * 3600), "11.10")]
+                    ("6-long", legendView("claude", machine: "macbook-pro-alexander"), nil),
+                    ("6-long-old", legendView("claude", machine: "macbook-pro-alexander", age: 30 * 3600), "11.10")]
                 for (name, remote, stamp) in cases {
                     guard let drawn = legendFooter([remote, codexLocal], ownerIntervals,
                                                    png: advanced ? "ccl-auto-legend-\(name)-\(lang).png" : nil),
@@ -10727,8 +10727,9 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
                     if name.hasPrefix("6") {
                         let shown = first.machine?.string ?? ""
                         let tip = drawn.hits.first(where: { $0.id == "autolegend" })?.tooltip ?? ""
-                        let shortened = shown != "macbook-pro-alex" && shown.hasSuffix("…")
-                        check(shortened && first.row.machine == "macbook-pro-alex" && tip.contains("macbook-pro-alex"),
+                        let shortened = shown != "macbook-pro-alexander" && shown.hasSuffix("…")
+                        let fullNameKept = first.row.machine == "macbook-pro-alexander" && tip.contains("macbook-pro-alexander")
+                        check(shortened && fullNameKept,
                               "Legend-\(name) \(suffix): only the machine name is shortened; full name in tooltip")
                     }
                     legendFits(drawn.lines, "Legend-\(name) \(suffix)")

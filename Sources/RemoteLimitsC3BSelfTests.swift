@@ -837,8 +837,14 @@ private func c3bC333(_ expect: C3BExpect) {
                 narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
             let foreignCard = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on), language: language,
                 narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
-            expect(localCard.statusLine == (language == "ru" ? "Опрос можно с 15:58" : "Poll allowed at 15:58"),
-                   "C3-33/Q6: \(language) local provider cooldown remains independent at reader age \(Int(age))s")
+            let idleCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: language,
+                narrow: true, now: clock, timeZone: zone, manual: .idle, readerManual: readerPhase)
+            let noDeadline = !localCard.statusLine.contains("Опрос можно") && !localCard.statusLine.contains("Poll allowed")
+            expect(localCard.statusLine == idleCard.statusLine && noDeadline,
+                   "C3-33/Q6: \(language) local provider cooldown keeps the ordinary status at reader age \(Int(age))s")
+            let guardCopy = language == "ru" ? "Не чаще раза в 15 минут" : "At most once per 15 minutes"
+            expect(localCard.tooltip.contains(guardCopy),
+                   "C3-33/Q6: \(language) local provider cooldown remains in the tooltip at reader age \(Int(age))s")
             expect(foreignCard.statusLine == (age < 60 ? (language == "ru" ? "GitHub проверен 15:45" : "GitHub checked 15:45") : ""),
                    "C3-33/Q6: \(language) every foreign card shows successful read for exactly 60 seconds")
         }
@@ -1149,6 +1155,22 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
         let soloTip = en ? "Claude Code: polled by this Mac every 15 min" : "Claude Code: опрашивает этот Mac, каждые 15 мин"
         expect(solo.products == ["claude"] && solo.legend.count == 1 && solo.legend.first?.value == fifteen && solo.legendTooltip == soloTip,
                "Legend-3 \(language): single own product, one row")
+        // A disabled local product may retain its publisher without any readings.
+        var localPublisher = codex
+        localPublisher.data.source = RemoteSource(machineId: "c3b-mac", machineName: "mac")
+        localPublisher.sourceReadings = []
+        let disabledLocal = footer([claudeLocal, localPublisher], ["claude"], ["claude": 900, "codex": 14400])
+        expect(disabledLocal.legend.map { $0.product } == ["claude"],
+               "Legend-local-source \(language): disabled local Codex with a publisher adds no foreign row")
+        let enabledLocal = footer([localPublisher], ["codex"], ["codex": 14400])
+        let ownCodex = enabledLocal.legend.first
+        expect(enabledLocal.legend.count == 1 && ownCodex?.machine == nil && ownCodex?.value == four,
+               "Legend-local-source \(language): enabled local Codex keeps its own interval")
+        var sameMachine = foreign()
+        sameMachine.data.source?.machineId = "c3b-mac"
+        let localSourcePeer = footer([localPublisher, sameMachine], [], [:])
+        expect(localSourcePeer.legend.isEmpty,
+               "Legend-local-source \(language): local view publisher ID excludes a foreign candidate of another product")
         // No subscriptions here, foreign present: the legend still shows the foreign row.
         let remoteOnly = footer([foreign()], both, [:])
         expect(remoteOnly.noSubscriptions && remoteOnly.products.isEmpty && remoteOnly.legend.count == 1
@@ -1179,13 +1201,48 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
             expect(header != nil && footer([view], both, [:]).legend.first?.tone == header,
                    "Legend \(language): dot tone equals the card header tone (\(String(describing: header)))")
         }
+        var unnamed = foreign(machine: "")
+        unnamed.machines = ["vps"]
+        let unnamedHeader = remoteSourceHeader(unnamed, now: now, language: language, timeZone: zone).sources.first
+        let unnamedRow = footer([unnamed], both, [:]).legend.first
+        let unnamedTone = unnamedHeader?.tone
+        expect(unnamedTone == .unknown && unnamedRow?.tone == unnamedTone,
+               "Legend-empty-name \(language): fresh account without a named publisher keeps the header's unknown dot")
+        expect(unnamedRow?.machine == "vps" && unnamedRow?.valueIsTime == true && unnamedRow?.value == "—",
+               "Legend-empty-name \(language): no machine reading means no interval or account timestamp")
+        var newer = foreign(age: 30 * 3600)
+        newer.sourceReadings = [RemoteMachineReading(machineId: "c3b-vps", name: "vps", asOf: now.addingTimeInterval(-60),
+                                                     interval: 900, isLocal: false)]
+        let newerTone = remoteSourceHeader(newer, now: now, language: language, timeZone: zone).sources.first?.tone
+        let newerRow = footer([newer], both, [:]).legend.first
+        expect(newerTone == .fresh && newerRow?.tone == newerTone && newerRow?.value == fifteen,
+               "Legend-newer-reading \(language): newer machine reading overrides old account values as in the header")
+        for hours in [3, 6] {
+            let age = TimeInterval(hours * 3600)
+            var missingInterval = foreign(age: age)
+            missingInterval.sourceReadings = [RemoteMachineReading(machineId: "c3b-vps", name: "vps",
+                asOf: now.addingTimeInterval(-age), interval: nil, isLocal: false)]
+            let headerTone = remoteSourceHeader(missingInterval, now: now, language: language, timeZone: zone).sources.first?.tone
+            let row = footer([missingInterval], both, [:]).legend.first
+            let stamp = hours == 3 ? "13:00" : "10:00"
+            let expectedTone: RemoteFreshnessTone = hours == 3 ? .fresh : .late
+            expect(headerTone == expectedTone && row?.tone == headerTone,
+                   "Legend-missing-interval \(language) \(hours)h: tone uses the header's default cadence")
+            let showsTimestamp = row?.valueIsTime == true && row?.value == stamp
+            expect(showsTimestamp, "Legend-missing-interval \(language) \(hours)h: no 15m schedule borrowed from the account source")
+        }
         var signedOut = foreign(); signedOut.state = .signedOut
         expect(footer([signedOut], both, [:]).legend.isEmpty, "Legend \(language): signed-out foreign card adds no row")
-        // (6) model side: the full 16-character name reaches the tooltip.
-        let long = footer([foreign(machine: "macbook-pro-alex"), codex], both, ["codex": 14400])
-        let longTip = en ? "Change it on macbook-pro-alex." : "Менять — на macbook-pro-alex."
-        expect(long.legend.first?.machine == "macbook-pro-alex" && long.legendTooltip.contains(longTip),
+        // (6) model side: names longer than 16 characters reach the tooltip intact.
+        let long = footer([foreign(machine: "macbook-pro-alexander"), codex], both, ["codex": 14400])
+        let longTip = en ? "Change it on macbook-pro-alexander." : "Менять — на macbook-pro-alexander."
+        expect(long.legend.first?.machine == "macbook-pro-alexander" && long.legendTooltip.contains(longTip),
                "Legend-6 \(language): full machine name kept for the tooltip")
+        let cleanLong = footer([foreign(machine: "macbook-\u{000A}pro-alexander")], both, [:])
+        let cleanRow = cleanLong.legend.first
+        let safeTip = !cleanLong.legendTooltip.contains("\n") && cleanLong.legendTooltip.contains(longTip)
+        expect(cleanRow?.machine == "macbook-pro-alexander" && safeTip,
+               "Legend-6 \(language): full tooltip name keeps the existing control-character sanitization")
         expect(footer([codex], both, ["codex": 2700]).legend.isEmpty && footer([codex], both, [:]).legend.isEmpty,
                "Legend \(language): unsupported or missing own interval invents no row")
     }
