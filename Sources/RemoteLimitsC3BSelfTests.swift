@@ -639,8 +639,8 @@ private func c3bC327(_ expect: C3BExpect) {
         expect(remotePollTooltip(0, views: local + [foreign], enabled: both, intervals: intervals, auto: true, language: language) == tooltip,
                "C3-27 \(language): foreign same-product account never duplicates local Auto mapping")
         let mixedTooltip = en
-            ? "Auto: Codex → 4 hours (polled by this Mac).\nClaude Code is polled by vps every 1 h — change it on vps."
-            : "Авто: Codex → 4 часа (опрашивает этот Mac).\nClaude Code опрашивает vps, каждые 1 ч — менять на vps."
+            ? "Auto: Codex → 4 hours (this Mac).\nClaude Code is polled by vps every 1 h."
+            : "Авто: Codex → 4 часа (этот Mac).\nClaude Code опрашивает vps, каждые 1 ч."
         expect(remotePollTooltip(0, views: [foreign, codex], enabled: both, intervals: intervals, auto: true, language: language,
                                  now: c3bNow(), timeZone: TimeZone(secondsFromGMT: 0)!) == mixedTooltip,
                "C3-27 \(language): remote Claude is explained separately from this Mac's Codex poll")
@@ -1164,10 +1164,10 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
                "Legend-1 \(language): foreign Claude is shown whether or not Claude monitoring is on here")
         let panelIntervals: [String: TimeInterval] = ["codex": 1800]
         let panelSummary = en ? "Auto: Codex → 30 minutes" : "Авто: Codex → 30 минут"
-        let ownSuffix = en ? " (polled by this Mac)." : " (опрашивает этот Mac)."
+        let ownSuffix = en ? " (this Mac)." : " (этот Mac)."
         let approvedTooltip = en
-            ? "Auto: Codex → 30 minutes (polled by this Mac).\nClaude Code is polled by vps every 15 min — change it on vps."
-            : "Авто: Codex → 30 минут (опрашивает этот Mac).\nClaude Code опрашивает vps, каждые 15 мин — менять на vps."
+            ? "Auto: Codex → 30 minutes (this Mac).\nClaude Code is polled by vps every 15 min."
+            : "Авто: Codex → 30 минут (этот Mac).\nClaude Code опрашивает vps, каждые 15 мин."
         let panelTooltip = remotePollTooltip(0, views: [foreign(), codex], enabled: both, intervals: panelIntervals,
                                             auto: true, language: language, now: now, timeZone: zone)
         expect(panelTooltip == approvedTooltip, "Legend-A-tooltip \(language): exact owner-approved fresh foreign source copy")

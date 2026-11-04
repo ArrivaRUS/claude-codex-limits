@@ -774,10 +774,10 @@ func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<S
         guard row.tone == .fresh, !row.valueIsTime,
               let machine = row.machine, let duration = row.intervalDescription else { return row.tooltip }
         let name = row.product == "claude" ? "Claude Code" : "Codex"
-        return en ? "\(name) is polled by \(machine) every \(duration) — change it on \(machine)."
-                  : "\(name) опрашивает \(machine), каждые \(duration) — менять на \(machine)."
+        return en ? "\(name) is polled by \(machine) every \(duration)."
+                  : "\(name) опрашивает \(machine), каждые \(duration)."
     }
-    return summary + (en ? " (polled by this Mac)." : " (опрашивает этот Mac).") + "\n" + details.joined(separator: "\n")
+    return summary + (en ? " (this Mac)." : " (этот Mac).") + "\n" + details.joined(separator: "\n")
 }
 
 // Time-driven tray redraws do not depend on a local provider poll. Strict `>`
