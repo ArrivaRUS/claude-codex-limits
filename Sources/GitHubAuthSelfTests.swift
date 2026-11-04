@@ -1216,6 +1216,7 @@ func runGitHubAuthSelfTests() {
         if newProtocol {
             check(f.deleteAttempts.contains(ref) && f.manifest?.cleanupRefs.contains(ref) == false,
                   "proven no-send ref is physically deleted and retired")
+            check(f.manifest?.permitWriterRefs?.contains(ref) == false, "proven no-send retirement clears the permit journal ref")
         } else {
             // Deletion is an idempotent cleanup attempt, not evidence that a
             // daemon cannot replay later. The durable address must survive it.
@@ -1443,6 +1444,7 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
         let retired = GitHubAuthRef(generation: UUID().uuidString.lowercased())
         old.generation = retired.generation; f.items[retired] = old
         f.manifest!.cleanupRefs = [retired]; f.monotonicNow = 1000
+        f.manifest!.permitWriterRefs = (f.manifest!.permitWriterRefs ?? []) + [retired]
         f.cleanupPreflightFault = { ref in ref == retired ? status : nil }
         let owner = f.owner(); f.storeTrace.removeAll()
         owner.cleanupRetiredCredentials()
@@ -1452,6 +1454,7 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
         check(owner.keychainRetryDelay() == nil && f.manifest?.active == active
               && f.manifest?.cleanupRefs.contains(retired) == true,
               "K341-GC metadata failure retains retired address without blocking active")
+        check(f.manifest?.permitWriterRefs?.contains(retired) == true, "K341-GC failed cleanup retains the permit journal ref")
         check(ready(owner.ensureAccess(reason: "background_sync")), "K341-GC healthy active remains readable immediately")
         let attrs = f.counts["store_attributes", default: 0]
         f.now += 86400; f.monotonicNow = 1059
@@ -1463,6 +1466,9 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
               && !f.storeTrace.contains { $0.interactive }, "K341-GC exact timer permits quiet metadata and delete, zero secret reads")
         check(f.manifest?.cleanupRefs.isEmpty == true && f.items[retired] == nil
               && owner.keychainRetryDelay() == nil, "K341-GC successful retry clears only cleanup")
+        let retiredPermitCleared = f.manifest?.permitWriterRefs?.contains(retired) == false
+        let activePermitKept = f.manifest?.permitWriterRefs?.contains(active) == true
+        check(retiredPermitCleared && activePermitKept, "K341-GC successful retirement clears only the retired permit journal ref")
     }
     for status in [GitHubAuthStoreStatus.locked, .timeout, .unreachable, .failed] {
         let f = GHAuthFixture(); let initial = f.owner()

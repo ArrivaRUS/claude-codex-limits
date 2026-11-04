@@ -1119,6 +1119,21 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
         return view
     }
     let codex = c3bView(1, product: "codex", local: true), claudeLocal = c3bView(local: true)
+    let localID = "c3b00000-1111-4222-8333-444455556666"
+    guard let key = accountLabelKey(gistId: "c3b-legend-synthetic-gist"),
+          let codexLabel = accountLabel(product: "codex", localId: localID, labelKey: key) else {
+        expect(false, "Legend-merged-peer: synthetic resolver identity is valid"); return
+    }
+    var peerCodex = RemoteAccount(product: "codex", label: codexLabel, status: "ok")
+    peerCodex.asOf = now.addingTimeInterval(-60)
+    peerCodex.machineId = "c3b-vps"; peerCodex.machineName = "vps"; peerCodex.machineLastSeenAt = now
+    peerCodex.windows = RemoteWindows(weekly: RemoteWindow(pct: 40, resetAt: now.addingTimeInterval(86400)))
+    peerCodex.schedule = RemoteSchedule(mode: "auto", interval: 1800)
+    var peerClaude = peerCodex
+    peerClaude.product = "claude"; peerClaude.label = "c3b0000000000002"
+    peerClaude.schedule = RemoteSchedule(mode: "auto", interval: 900)
+    var mergedCache = SyncRemoteCache(); mergedCache.labelKey = key
+    mergedCache.accounts = [peerClaude, peerCodex]
     for language in ["ru", "en"] {
         let en = language == "en"
         func footer(_ views: [AccountView], _ enabled: Set<String>, _ intervals: [String: TimeInterval]) -> RemoteAutoFooter {
@@ -1150,6 +1165,35 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
         let sameRows = same.legend.allSatisfy { $0.machine == nil && $0.value == thirty && !$0.valueIsTime }
         expect(same.products == ["claude", "codex"] && same.legend.map { $0.name } == ["Claude", "Codex"] && sameRows,
                "Legend-2 \(language): equal own intervals keep two rows")
+        // The merged local Codex may take its values from vps; vps still publishes Claude.
+        for localAge in [600.0, 30.0] {
+            var own = codex.data; own.asOf = now.addingTimeInterval(-localAge)
+            let frame = remoteAccountFrame(local: (LimitData(present: false), own), localIds: ["codex": localID],
+                remote: mergedCache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: now,
+                localMachineName: "macbook", localMachineId: "c3b-mac", localIntervals: ["codex": 1800])
+            guard let merged = frame.displayedViews.first(where: { $0.product == "codex" }) else {
+                expect(false, "Legend-merged-peer \(language): merged Codex exists"); continue
+            }
+            let peerWins = localAge > 60
+            let expectedWinner: String? = peerWins ? "c3b-vps" : nil
+            expect(merged.isLocal && merged.data.source?.machineId == expectedWinner,
+                   "Legend-merged-peer \(language) peerWins=\(peerWins): resolver selects the actual freshest values")
+            let localReading = merged.sourceReadings.first(where: { $0.isLocal })
+            let peerReading = merged.sourceReadings.first(where: { !$0.isLocal })
+            let correctReadings = localReading?.machineId == "c3b-mac" && peerReading?.machineId == "c3b-vps"
+            expect(merged.sourceReadings.count == 2 && correctReadings,
+                   "Legend-merged-peer \(language): merged card keeps separate macbook and vps observations")
+            let mergedFooter = footer(frame.displayedViews, both, ["codex": 1800])
+            expect(mergedFooter.legend.map { $0.product } == ["claude", "codex"],
+                   "Legend-merged-peer \(language) peerWins=\(peerWins): both product rows survive")
+            if mergedFooter.legend.count == 2 {
+                let c = mergedFooter.legend[0], x = mergedFooter.legend[1]
+                let correctClaude = c.machine == "vps" && c.tone == .fresh && c.value == fifteen && !c.valueIsTime
+                let correctCodex = x.machine == nil && x.value == thirty && !x.valueIsTime
+                expect(correctClaude && correctCodex,
+                       "Legend-merged-peer \(language) peerWins=\(peerWins): Claude vps 15m and own Codex 30m")
+            }
+        }
         // (3) Only Claude polled here; a disabled local Codex without a source adds no row.
         let solo = footer([claudeLocal, codex], ["claude"], ["claude": 900, "codex": 900])
         let soloTip = en ? "Claude Code: polled by this Mac every 15 min" : "Claude Code: опрашивает этот Mac, каждые 15 мин"
@@ -1168,9 +1212,19 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
                "Legend-local-source \(language): enabled local Codex keeps its own interval")
         var sameMachine = foreign()
         sameMachine.data.source?.machineId = "c3b-mac"
+        sameMachine.data.source?.machineName = "mac"; sameMachine.machines = ["mac"]
+        localPublisher.sourceReadings = [RemoteMachineReading(machineId: "c3b-mac", name: "mac", asOf: now,
+                                                              interval: 14400, isLocal: true)]
         let localSourcePeer = footer([localPublisher, sameMachine], [], [:])
         expect(localSourcePeer.legend.isEmpty,
-               "Legend-local-source \(language): local view publisher ID excludes a foreign candidate of another product")
+               "Legend-local-source \(language): this Mac's local reading excludes an echo of its own publication")
+        localPublisher.data.source = foreign().data.source
+        localPublisher.machines = ["mac", "vps"]
+        localPublisher.sourceReadings.append(RemoteMachineReading(machineId: "c3b-vps", name: "vps", asOf: now,
+                                                                 interval: 900, isLocal: false))
+        let foreignSourcePeer = footer([localPublisher, foreign()], [], [:])
+        expect(foreignSourcePeer.legend.map { $0.product } == ["claude"],
+               "Legend-local-source \(language): foreign winner in a local view does not exclude that machine's Claude")
         // No subscriptions here, foreign present: the legend still shows the foreign row.
         let remoteOnly = footer([foreign()], both, [:])
         expect(remoteOnly.noSubscriptions && remoteOnly.products.isEmpty && remoteOnly.legend.count == 1

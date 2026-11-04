@@ -1409,10 +1409,7 @@ private func remoteAutoLegend(views: [AccountView], local: [String], intervals: 
         if seconds >= 3600 && seconds % 3600 == 0 { return String(seconds / 3600) + (en ? " h" : " ч") }
         return String(seconds / 60) + (en ? " min" : " мин")
     }
-    var localMachineIds = Set(views.flatMap { view in view.sourceReadings.filter { $0.isLocal }.map { $0.machineId } })
-    for view in views where view.isLocal {
-        if let machineId = view.data.source?.machineId { localMachineIds.insert(machineId) }
-    }
+    let localMachineIds = Set(views.flatMap { view in view.sourceReadings.filter { $0.isLocal }.map { $0.machineId } })
     var rows: [RemoteAutoLegendRow] = []
     for product in ["claude", "codex"] {
         let title = product == "claude" ? "Claude Code" : "Codex"

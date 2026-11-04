@@ -544,7 +544,7 @@ final class GitHubAuthOwner {
             guard try dependencies.loadManifest() == m else { return }
             m.cleanupRefs.removeAll { $0 == ref }
             if status != .success || m.uncertainRefs.contains(ref) { m.cleanupRefs.append(ref) }
-            else { m.securityWriterRefs?.removeAll { $0 == ref } }
+            else { m.securityWriterRefs?.removeAll { $0 == ref }; m.permitWriterRefs?.removeAll { $0 == ref } }
             try saveManifest(&m)
             snapshotLock.lock(); presentation.cleanupPending = !m.cleanupRefs.isEmpty; snapshotLock.unlock()
             try checkpoint("after_retire", m, ref)
