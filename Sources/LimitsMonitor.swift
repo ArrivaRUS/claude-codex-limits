@@ -1905,24 +1905,24 @@ struct GitHubAuthSecurityWriteCommand {
     let input: String
 }
 enum GitHubAuthSecurityWriteError: Error { case invalidInput, lineTooLong }
+private func githubAuthSecurityQuoted(_ value: String) throws -> String {
+    guard !value.isEmpty, !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
+        throw GitHubAuthSecurityWriteError.invalidInput
+    }
+    return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
 /// security's interactive parser understands double quotes and backslash escapes.
 /// This is NOT shell syntax; the secret travels only through stdin.
 func githubAuthSecurityWriteCommand(service: String, generation: String, envelope: String,
                                     keychainPath: String? = nil) throws -> GitHubAuthSecurityWriteCommand {
-    func quoted(_ value: String) throws -> String {
-        guard !value.isEmpty, !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
-            throw GitHubAuthSecurityWriteError.invalidInput
-        }
-        return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-    }
     guard githubAuthHelperEnvelope(Data(envelope.utf8), generation: generation) != nil else {
         throw GitHubAuthSecurityWriteError.invalidInput
     }
-    var line = "add-generic-password -s " + (try quoted(service)) + " -a " + generation
+    var line = "add-generic-password -s " + (try githubAuthSecurityQuoted(service)) + " -a " + generation
         + " -T /usr/bin/security -w " + envelope
     // Only the isolated test harness supplies a path. Production never accepts one.
-    if let path = keychainPath { line += " " + (try quoted(path)) }
+    if let path = keychainPath { line += " " + (try githubAuthSecurityQuoted(path)) }
     line += "\n"
     guard line.utf8.count <= 2048 else { throw GitHubAuthSecurityWriteError.lineTooLong }
     return GitHubAuthSecurityWriteCommand(arguments: ["-i"], input: line)
@@ -1941,6 +1941,34 @@ func githubAuthSecurityWrite(service: String, generation: String, envelope: Stri
     if presence == .success { return .success } // Add-only duplicate keeps its original value/ACL.
     if presence == .missing { return status == .success ? .failure(1) : status }
     return presence
+}
+
+/// Delete through the creator's trusted binary, without reading credential data.
+/// Only confirmed absence retires the whole generation, including duplicate items.
+func githubAuthSecurityDelete(service: String, generation: String, keychainPath: String? = nil,
+                              run: ([String], String) -> SyncKeychainStatus,
+                              attributes: () -> SyncKeychainStatus) throws -> SyncKeychainStatus {
+    guard UUID(uuidString: generation)?.uuidString.lowercased() == generation else {
+        throw GitHubAuthSecurityWriteError.invalidInput
+    }
+    var line = "delete-generic-password -s " + (try githubAuthSecurityQuoted(service))
+        + " -a " + (try githubAuthSecurityQuoted(generation))
+    // Only the isolated test harness supplies a path, exactly as for the writer.
+    if let path = keychainPath { line += " " + (try githubAuthSecurityQuoted(path)) }
+    line += "\n"
+    guard line.utf8.count <= 2048 else { throw GitHubAuthSecurityWriteError.lineTooLong }
+    var presence = attributes()
+    if presence == .missing { return .success }
+    guard presence == .success else { return presence }
+    for _ in 0..<4 {
+        let status = run(["-i"], line)
+        if status == .timedOut { return status } // Never certify an unsettled child.
+        presence = attributes()
+        if presence == .missing { return .success }
+        guard presence == .success else { return presence }
+    }
+    // security -i may return zero even when its delete subcommand failed.
+    return .failure(1)
 }
 
 /// Actual process boundary shared with the opt-in temporary-keychain harness.
@@ -2118,8 +2146,27 @@ private func githubAuthNativeKeychainHelper() -> Int32 {
             do { try FileHandle.standardOutput.write(contentsOf: data) } catch { return 74 }
             return 0
         case "delete":
-            return githubAuthNativePresence(service: request.service, generation: request.generation,
-                requireUnlocked: true, delete: true)
+            if request.generation == "legacy" {
+                return githubAuthNativePresence(service: request.service, generation: request.generation,
+                    requireUnlocked: true, delete: true)
+            }
+            let preflight = githubAuthNativePresence(service: request.service, generation: request.generation,
+                requireUnlocked: true)
+            guard preflight == 0 || preflight == 44 else { return preflight }
+            do {
+                let result = try githubAuthSecurityDelete(service: request.service, generation: request.generation,
+                    run: githubAuthRunSecurityWriter, attributes: {
+                        let code = githubAuthNativePresence(service: request.service, generation: request.generation,
+                            requireUnlocked: false)
+                        return code == 0 ? .success : code == 44 ? .missing : .failure(code)
+                    })
+                switch result {
+                case .success: return 0
+                case .missing: return 44
+                case .timedOut: return 76
+                case .failure(let code): return code == 36 ? 36 : 1
+                }
+            } catch { return 65 }
         case "legacy-write":
             guard let data = githubAuthHelperInput(limit: 16384),
                   let token = String(data: data, encoding: .ascii), !token.isEmpty,
@@ -2312,7 +2359,8 @@ private func githubAuthStage(_ ref: GitHubAuthRef, _ c: GitHubCredentialV2, acti
 }
 private func githubAuthDelete(_ ref: GitHubAuthRef, action: GitHubAuthUserAction? = nil) -> GitHubAuthStoreStatus {
     guard let args = githubAuthKeychainArguments(operation: "delete", ref: ref) else { return .failed }
-    return githubAuthStatus(githubKeychainProcess(args, lifetime: githubAuthProcessFence).status)
+    let status = githubKeychainProcess(args, lifetime: githubAuthProcessFence).status
+    return status == .failure(76) ? .timeout : githubAuthStatus(status)
 }
 private func githubAuthAtomicSave(_ manifest: GitHubAuthManifest, path: String) throws {
     let directory = (path as NSString).deletingLastPathComponent

@@ -1458,7 +1458,7 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
         f.cleanupPreflightFault = nil; f.monotonicNow = 1060
         f.storeTrace.removeAll(); owner.cleanupRetiredCredentials()
         check(f.storeTrace.map { $0.operation } == ["attributes", "delete"]
-              && !f.storeTrace.contains { $0.interactive }, "K341-GC exact timer permits quiet metadata and native delete, zero secret reads")
+              && !f.storeTrace.contains { $0.interactive }, "K341-GC exact timer permits quiet metadata and delete, zero secret reads")
         check(f.manifest?.cleanupRefs.isEmpty == true && f.items[retired] == nil
               && owner.keychainRetryDelay() == nil, "K341-GC successful retry clears only cleanup")
     }
@@ -1624,6 +1624,68 @@ func runGitHubKeychain341OwnerSelfTests(check: (Bool, String) -> Void) {
         check(f.counts["refresh_request", default: 0] == 0 && f.counts["device_flow", default: 0] == 1,
               "K341-migrate bounded retries request no OAuth or new login")
     }
+    // Optional candidate readbacks cannot poison the readable active generation,
+    // either immediately after staging or when resuming an earlier timed-out write.
+    for readFault in [GitHubAuthRead.timeout, .locked] {
+        for resumed in [false, true] {
+            let f = GHAuthFixture(); f.monotonicNow = 1000
+            let initial = f.owner()
+            check(ready(f.login(initial)), "K341-migrate-readback initial synthetic login")
+            initial.cleanupRetiredCredentials()
+            guard let source = f.manifest?.active, let original = f.items[source] else {
+                check(false, "K341-migrate-readback source missing"); continue
+            }
+            f.usesSecurityWriter = true
+            let owner = f.owner()
+            if resumed {
+                f.stageFault = { _, c in c.kind == "credential" ? .timeout : nil }
+                check(f.protectedRead(owner.ensureAccess(reason: "startup")),
+                      "K341-migrate-readback timed-out writer still serves source")
+                f.stageFault = nil; f.releaseLateWrites()
+                f.now += 3601; f.monotonicNow! += 3601
+            }
+            var candidateReads = 0
+            f.readForRef = { ref in
+                guard let target = f.manifest?.transition?.to, ref == target else { return nil }
+                candidateReads += 1; return readFault
+            }
+            let first = owner.ensureAccess(reason: "background_sync")
+            let sourceUnchanged = f.manifest?.active == source && f.items[source] == original
+            let noGate = owner.keychainRetryDelay() == nil && f.manifest?.keychainPermissionRequired == nil
+            let firstHealthy = f.protectedRead(first) && sourceUnchanged && noGate && candidateReads == 1
+            check(firstHealthy,
+                  "K341-migrate-readback timeout/locked keeps active token and arms no permission latch or cooldown")
+            guard let target = f.manifest?.transition?.to, let notBefore = f.manifest?.transition?.notBefore else {
+                check(false, "K341-migrate-readback retains deferred migration"); continue
+            }
+            let attempts = f.manifest?.transition?.recoveryAttempts
+            let stages = f.counts["store_stage", default: 0]
+            f.storeTrace.removeAll()
+            let next = owner.ensureAccess(reason: "background_sync")
+            let readActive = f.storeTrace.contains { $0.operation == "read" && $0.ref == source && !$0.interactive }
+            let deferred = f.manifest?.transition?.recoveryAttempts == attempts && candidateReads == 1
+            let nextHealthy = f.protectedRead(next) && readActive && deferred && owner.keychainRetryDelay() == nil
+            check(nextHealthy,
+                  "K341-migrate-readback next background pass reads active while only migration waits")
+            if let encoded = try? JSONEncoder().encode(f.manifest),
+               let decoded = try? JSONDecoder().decode(GitHubAuthManifest.self, from: encoded) { f.manifest = decoded }
+            else { check(false, "K341-migrate-readback manifest roundtrip") }
+            let restarted = f.owner(); f.storeTrace.removeAll()
+            let afterRestart = restarted.ensureAccess(reason: "background_sync")
+            let restartReadActive = f.storeTrace.contains { $0.operation == "read" && $0.ref == source && !$0.interactive }
+            let restartNoGate = restarted.keychainRetryDelay() == nil && f.manifest?.keychainPermissionRequired == nil
+            let restartHealthy = f.protectedRead(afterRestart) && restartReadActive && restartNoGate && candidateReads == 1
+            check(restartHealthy,
+                  "K341-migrate-readback restart retains healthy background access and deferred migration")
+            f.readForRef = nil; f.now = notBefore + 1; f.monotonicNow! += 3601
+            let retried = restarted.ensureAccess(reason: "background_sync")
+            let published = f.manifest?.active == target && f.manifest?.transition == nil
+            let noExtraWrite = f.counts["store_stage", default: 0] == stages
+            let retryHealthy = f.protectedRead(retried) && published && noExtraWrite && restarted.keychainRetryDelay() == nil
+            check(retryHealthy,
+                  "K341-migrate-readback later retry publishes existing copy without another writer")
+        }
+    }
     // A late copy found on a later attempt is published without another writer.
     do {
         let f = GHAuthFixture(); let initial = f.owner()
@@ -1752,6 +1814,60 @@ func runGitHubKeychain341AdapterSelfTests(check: (Bool, String) -> Void) {
               && quoted.input.contains("\\\"quoted\\\"") && quoted.input.contains("\\\\ service"),
               "K341-writer quotes service and test keychain path using interactive-parser escaping")
     } catch { check(false, "K341-writer valid synthetic command unexpectedly rejected") }
+    do {
+        let expected = "delete-generic-password -s \"" + service + "\" -a \"" + generation + "\"\n"
+        for copies in [0, 1, 2, 4, 5] {
+            for exit in [SyncKeychainStatus.success, .failure(1)] {
+                var remaining = copies, runs = 0
+                let status = try githubAuthSecurityDelete(service: service, generation: generation,
+                    run: { args, line in
+                        runs += 1
+                        check(args == ["-i"] && line == expected,
+                              "K341-delete exact nonsecret stdin command; argv contains only -i")
+                        remaining -= 1; return exit
+                    }, attributes: { remaining == 0 ? .missing : .success })
+                let removedAll = copies <= 4 && remaining == 0 && status == .success
+                let bounded = copies > 4 && remaining == 1 && status != .success
+                check((removedAll || bounded) && runs == min(copies, 4),
+                      "K341-delete absent succeeds without a child; all copies removed up to four; further copies stay pending")
+            }
+        }
+        var runs = 0
+        let falseSuccess = try githubAuthSecurityDelete(service: service, generation: generation,
+            run: { _, _ in runs += 1; return .success }, attributes: { .success })
+        check(falseSuccess != .success && runs == 4,
+              "K341-delete rc0 cannot certify deletion while attributes still find a copy")
+        var timeoutProbes = 0
+        let timeout = try githubAuthSecurityDelete(service: service, generation: generation,
+            run: { _, _ in .timedOut }, attributes: { timeoutProbes += 1; return .success })
+        check(timeout == .timedOut && timeoutProbes == 1,
+              "K341-delete timeout never certifies an unsettled child or launches another delete")
+        var deniedRuns = 0
+        let denied = try githubAuthSecurityDelete(service: service, generation: generation,
+            run: { _, _ in deniedRuns += 1; return .success }, attributes: { .failure(36) })
+        check(denied == .failure(36) && deniedRuns == 0,
+              "K341-delete failed quiet attributes never launch deletion")
+        var pathCommand = ""
+        let path = "/tmp/fixture \"quoted\".keychain-db"
+        var pathProbes = 0
+        let scoped = try githubAuthSecurityDelete(service: service, generation: generation, keychainPath: path,
+            run: { _, line in pathCommand = line; return .success }, attributes: {
+                pathProbes += 1; return pathProbes == 1 ? .success : .missing
+            })
+        let expectedPath = String(expected.dropLast()) + " \"/tmp/fixture \\\"quoted\\\".keychain-db\"\n"
+        check(scoped == .success && pathCommand == expectedPath,
+              "K341-delete quotes isolated keychain path with the writer's interactive-parser escaping")
+        for invalid in ["legacy", "not-a-uuid", generation.uppercased(), generation + "\nquit"] {
+            var ran = false, probed = false
+            do {
+                _ = try githubAuthSecurityDelete(service: service, generation: invalid,
+                    run: { _, _ in ran = true; return .success }, attributes: { probed = true; return .missing })
+                check(false, "K341-delete rejects noncanonical generation")
+            } catch {
+                check(!ran && !probed, "K341-delete validates UUID before any process or attributes query")
+            }
+        }
+    } catch { check(false, "K341-delete valid synthetic command unexpectedly rejected") }
     for language in ["ru", "en"] {
         let permission = language == "en"
             ? "Keychain needs permission. Click Retry Keychain access, then choose “Always Allow” in the “security” prompt"
@@ -1820,29 +1936,36 @@ func github341PartitionMarkerCount(_ dump: Data, marker: String = "apple-tool:")
 private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) -> Void) {
 #if os(macOS)
     guard FileManager.default.isExecutableFile(atPath: "/usr/bin/security") else {
-        print("K341 TEMP KEYCHAIN: SKIP (security tool unavailable)"); return
+        print("K341 TEMP KEYCHAIN: SKIP (security tool unavailable)")
+        print("K341 TEMP DELETE: SKIP (security tool unavailable)"); return
     }
     let fm = FileManager.default
     let root = fm.temporaryDirectory.appendingPathComponent("ccl-keychain-341-" + UUID().uuidString, isDirectory: true)
     do { try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
-    catch { print("K341 TEMP KEYCHAIN: SKIP (temporary directory unavailable)"); return }
+    catch {
+        print("K341 TEMP KEYCHAIN: SKIP (temporary directory unavailable)")
+        print("K341 TEMP DELETE: SKIP (temporary directory unavailable)"); return
+    }
     defer { try? fm.removeItem(at: root) }
     let path = root.appendingPathComponent("fixture.keychain-db").path
     let password = UUID().uuidString + UUID().uuidString
     let created = github341TemporarySecurity(["create-keychain", "-p", password, path]).0
     guard created == .success else {
-        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain creation unavailable)"); return
+        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain creation unavailable)")
+        print("K341 TEMP DELETE: SKIP (temporary keychain creation unavailable)"); return
     }
     defer {
         check(github341TemporarySecurity(["delete-keychain", path]).0 == .success,
               "K341-integration deletes only its temporary keychain")
     }
     guard github341TemporarySecurity(["unlock-keychain", "-p", password, path]).0 == .success else {
-        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain unlock unavailable)"); return
+        print("K341 TEMP KEYCHAIN: SKIP (temporary keychain unlock unavailable)")
+        print("K341 TEMP DELETE: SKIP (temporary keychain unlock unavailable)"); return
     }
     var opened: SecKeychain?
     let openStatus = path.withCString { SecKeychainOpen($0, &opened) }
     guard openStatus == errSecSuccess, let keychain = opened else {
+        print("K341 TEMP DELETE: SKIP (temporary keychain open unavailable)")
         check(false, "K341-integration open created temporary keychain for scoped attributes"); return
     }
     let generation = UUID().uuidString.lowercased(), service = "CCL isolated 3.4.1 probe " + UUID().uuidString
@@ -1852,15 +1975,25 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
     guard let encoded = try? JSONEncoder().encode(credential) else { check(false, "K341-integration fixture encoding"); return }
     let envelope = encoded.base64EncodedString().replacingOccurrences(of: "+", with: "-")
         .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
-    func attributes() -> SyncKeychainStatus {
+    func attributeQuery(all: Bool) -> [String: Any] {
         // Explicit search list and UI-fail: never consult the user's keychains.
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+        return [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service, kSecAttrAccount as String: generation,
             kSecMatchSearchList as String: [keychain], kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: all ? kSecMatchLimitAll : kSecMatchLimitOne,
             kSecUseAuthenticationUI as String: kSecUseAuthenticationUIFail]
+    }
+    func attributes() -> SyncKeychainStatus {
         var resultAttributes: CFTypeRef?
-        let result = SecItemCopyMatching(query as CFDictionary, &resultAttributes)
+        let result = SecItemCopyMatching(attributeQuery(all: false) as CFDictionary, &resultAttributes)
         return result == errSecSuccess ? .success : result == errSecItemNotFound ? .missing : .failure(result)
+    }
+    func copyCount() -> Int? {
+        var resultAttributes: CFTypeRef?
+        let result = SecItemCopyMatching(attributeQuery(all: true) as CFDictionary, &resultAttributes)
+        if result == errSecItemNotFound { return 0 }
+        guard result == errSecSuccess, let copies = resultAttributes as? [[String: Any]] else { return nil }
+        return copies.count
     }
     do {
         let status = try githubAuthSecurityWrite(service: service, generation: generation, envelope: envelope, keychainPath: path,
@@ -1888,6 +2021,35 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         check(duplicateReadStatus == .success
               && (duplicateReadback == Data(envelope.utf8) || duplicateReadback == Data((envelope + "\n").utf8)),
               "K341-integration duplicate preserves exact original immutable envelope and readable ACL")
+        // Both writes used the same generation. Some file keychains enforce
+        // service/account uniqueness; observe the actual number, never assume two.
+        let copiesBeforeDelete = copyCount()
+        var flags: SecKeychainStatus = 0
+        let checked = SecKeychainGetStatus(keychain, &flags)
+        let unlocked = checked == errSecSuccess && flags & SecKeychainStatus(kSecUnlockStateStatus) != 0
+        if unlocked {
+            let existed = attributes() == .success
+            let removed = try githubAuthSecurityDelete(service: service, generation: generation, keychainPath: path,
+                run: githubAuthRunSecurityWriter, attributes: attributes)
+            let missing = attributes() == .missing
+            check(existed && removed == .success && missing,
+                  "K341-delete production writer item is removed by security and quiet attributes confirm missing")
+            if let count = copiesBeforeDelete, count >= 2 {
+                check(removed == .success && missing && copyCount() == 0,
+                      "K341-delete all same-generation temporary-keychain copies are removed")
+            } else {
+                print("K341 TEMP DELETE: duplicate setup unavailable (same-generation add-only writes did not expose two attribute matches)")
+            }
+            var absentRuns = 0
+            let absent = try githubAuthSecurityDelete(service: service, generation: generation, keychainPath: path,
+                run: { args, line in
+                    absentRuns += 1; return githubAuthRunSecurityWriter(arguments: args, input: line)
+                }, attributes: attributes)
+            check(absent == .success && absentRuns == 0 && attributes() == .missing,
+                  "K341-delete absent temporary-keychain generation succeeds without an error or child")
+        } else {
+            print("K341 TEMP DELETE: SKIP (temporary-keychain unlocked preflight unavailable)")
+        }
         // The real `security -i` exit code against an absent keychain is the evidence here;
         // the stubbed attributes alone would make any outcome look like a failure.
         let missingPath = root.appendingPathComponent("absent.keychain-db").path
@@ -1909,8 +2071,9 @@ private func runGitHubKeychain341TemporaryKeychainProbe(check: (Bool, String) ->
         let writerFailed: Bool
         if case .failure(let code) = failure { writerFailed = code != 0 } else { writerFailed = false }
         check(writerFailed, "K341-integration failed add to an absent keychain is reported by the writer as a nonzero failure")
-    } catch { check(false, "K341-integration production writer rejected isolated fixture") }
+    } catch { check(false, "K341-integration production writer/delete adapter rejected isolated fixture") }
 #else
     print("K341 TEMP KEYCHAIN: SKIP (requires macOS temporary-keychain capability)")
+    print("K341 TEMP DELETE: SKIP (requires macOS temporary-keychain capability)")
 #endif
 }

@@ -538,6 +538,8 @@ final class GitHubAuthOwner {
             if m.uncertainRefs.contains(ref), dependencies.settled(ref) {
                 m.uncertainRefs.removeAll { $0 == ref }; try saveManifest(&m)
             }
+            // For UUID generations, deleteStore succeeds only after attributes
+            // confirm that every matching copy is missing.
             let status = preflight == .success ? dependencies.deleteStore(ref) : preflight
             guard try dependencies.loadManifest() == m else { return }
             m.cleanupRefs.removeAll { $0 == ref }
@@ -919,12 +921,12 @@ final class GitHubAuthOwner {
         do {
             if resumed {
                 // A late or earlier write may already hold the copy; add-only never overwrites.
-                switch try readStore(t.to) {
+                switch optionalReadStore(t.to) {
                 case .ready(let stored):
                     if stored == candidate { return try publishSecurityMigration(&m, candidate: candidate) }
                     return try failSecurityMigration(&m, active: c, permanent: true)
                 case .missing: break
-                default: return try failSecurityMigration(&m, active: c, permanent: true)
+                default: return try failSecurityMigration(&m, active: c, permanent: false)
                 }
             }
             let status = try optionalStage(t.to, candidate, manifest: &m)
@@ -935,15 +937,21 @@ final class GitHubAuthOwner {
             case .inputTooLarge, .failed: return try failSecurityMigration(&m, active: c, permanent: true)
             case .locked, .timeout, .unreachable: return try failSecurityMigration(&m, active: c, permanent: false)
             }
-            guard case .ready(let stored) = try readStore(t.to) else {
+            guard case .ready(let stored) = optionalReadStore(t.to) else {
                 return try failSecurityMigration(&m, active: c, permanent: false)
             }
             guard stored == candidate else { return try failSecurityMigration(&m, active: c, permanent: true) }
             return try publishSecurityMigration(&m, candidate: candidate)
         } catch GitHubStoreUnavailable.access(_) {
-            // A gated readback is not a migration verdict; the active read already succeeded.
+            // Optional staging can lose store admission after the active read.
             return try failSecurityMigration(&m, active: c, permanent: false)
         }
+    }
+    private func optionalReadStore(_ ref: GitHubAuthRef) -> GitHubAuthRead {
+        // The source was already read successfully. A quiet candidate readback
+        // must not consume permission or change the active credential's store gate.
+        guard dependencies.storeIdle() else { return .timeout }
+        return dependencies.readStore(ref)
     }
     private func optionalStage(_ ref: GitHubAuthRef, _ credential: GitHubCredentialV2,
                                manifest m: inout GitHubAuthManifest) throws -> GitHubAuthStoreStatus {
