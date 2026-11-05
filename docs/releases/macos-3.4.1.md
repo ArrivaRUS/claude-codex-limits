@@ -25,7 +25,7 @@ Claude Code → 15 минут (vps)
 
 macOS 13+, Apple Silicon.
 
-DMG SHA-256: `<SHA>`
+DMG SHA-256: `c346ed6bbb4b422e710070efa42887d32eae54aa42f5ddde27e1db5487719c7e`
 
 <!--EN-->
 **Stats no longer disappear after a restart.** In 3.4.0, cards could fail to load after restarting the Mac with “Keychain did not respond”: macOS opened a Keychain access prompt that stayed hidden under the panel. The GitHub sign-in item is now saved so that the system tool reads it without asking, and the prompt no longer appears.
@@ -52,4 +52,4 @@ Panel tooltips now appear on hover, without a click.
 
 macOS 13+, Apple Silicon.
 
-DMG SHA-256: `<SHA>`
+DMG SHA-256: `c346ed6bbb4b422e710070efa42887d32eae54aa42f5ddde27e1db5487719c7e`
