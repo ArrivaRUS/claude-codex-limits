@@ -246,6 +246,8 @@ def _accept(product, local_id, bucket, data):
     bucket["retryUntil"] = _time(data.server_retry_at)
     bucket["errorClass"] = data.failure_kind if data.failure_kind in (
         "network", "http", "auth", "credentials", "invalid_response", "busy") else None
+    # A provider result supersedes the temporary preflight status.
+    bucket.pop("policyBlocked", None)
     cache = _dict(common.read_json(common.CACHE_PATH, {}))
     snapshot = {} if bucket["status"] == "signed_out" else _dict(bucket.get("snapshot"))
     cache[product] = dict(snapshot, accountId=local_id)
@@ -424,9 +426,18 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
             # Publish the existing auth-failure wire state, retaining the last
             # successful snapshot just as for a provider 401. This is not a
             # provider attempt: leave its reservation, schedule and budget alone.
+            bucket.setdefault("policyBlocked", {key: bucket[key] for key in
+                              ("status", "expiredReason", "errorClass") if key in bucket})
             bucket.update(status="expired", expiredReason="signin_required", errorClass="auth")
             _skip(result, product, "token_policy")
             continue
+        if product == "claude" and "policyBlocked" in bucket:
+            previous = _dict(bucket.pop("policyBlocked"))
+            for key in ("status", "expiredReason", "errorClass"):
+                if key in previous:
+                    bucket[key] = previous[key]
+                else:
+                    bucket.pop(key, None)
         # Eligibility is frozen before GET, alongside the durable tick journal.
         # A product becoming due during a slow read waits for the next pass;
         # it must not start an unjournalled attempt at the end of this one.
