@@ -15,9 +15,9 @@ Linux-порт macOS-приложения из этого репозитория
 Для предыдущей 0.4.5 CI и QA пакета пройдены; живая проверка ALSE/ThinkPad не подтверждена. Код совместим
 с Python 3.7, который стоит в Astra 1.7. Никаких `pip install` не требуется.
 
-## Linux 0.5.0
+## Linux 0.5.1
 
-Издатель передаёт лимиты и расход с других компьютеров через секретный gist GitHub; Mac показывает расход по подпискам в «Истории и деньгах». [Заметки выпуска RU/EN](../docs/releases/linux-0.5.0.md). Linux выпускается без пометки Latest.
+Издатель передаёт лимиты и расход с других компьютеров через секретный gist GitHub; Mac показывает расход по подпискам в «Истории и деньгах». [Заметки выпуска RU/EN](../docs/releases/linux-0.5.1.md). Linux выпускается без пометки Latest.
 
 ## История выпусков — Linux 0.4.5
 
@@ -31,16 +31,16 @@ Linux-порт macOS-приложения из этого репозитория
 
 **Manual refresh:** bypass the local Auto/fixed schedule and error backoff while keeping the selected mode. Each provider has a 30-second guard and at most one request in flight; results appear independently, with retry for just the failed provider. Respect actual Retry-After deadlines. An unchanged live answer is a success; fallback keeps the old data timestamp. Show guidance for the affected CLI without automatic login or permission prompts; Linux does not use macOS Keychain permits. [RU/EN release notes and installation](../docs/linux-compact-refresh-release.md).
 
-## Установка 0.5.0
+## Установка 0.5.1
 
 ### Пакет .deb (рекомендуется)
 
-1. Скачайте `claude-codex-limits_0.5.0_all.deb` из
-   [Linux 0.5.0](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.0).
+1. Скачайте `claude-codex-limits_0.5.1_all.deb` из
+   [Linux 0.5.1](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.1).
 2. Откройте файл двойным щелчком и нажмите «Установить» (нужен пароль администратора) или
    поставьте из терминала:
    ```sh
-   sudo apt install ./claude-codex-limits_0.5.0_all.deb
+   sudo apt install ./claude-codex-limits_0.5.1_all.deb
    ```
    Зависимости `python3-pyqt5` и `python3-dbus` apt возьмёт из репозитория ОС.
 3. Запустите **Claude Codex Limits** из меню приложений. При первом запуске значок включает себе
@@ -90,7 +90,7 @@ sh linux/install.sh
 Режим появился в Linux 0.5.0. Ставится из клона репозитория, а не из пакета .deb.
 
 ```sh
-git clone --branch linux-v0.5.0 https://github.com/ArrivaRUS/claude-codex-limits.git
+git clone --branch linux-v0.5.1 https://github.com/ArrivaRUS/claude-codex-limits.git
 cd claude-codex-limits
 sh linux/install.sh --publisher --no-tray --name vps
 ccl-sync login     # один раз; без входа в GitHub опросов нет
@@ -180,7 +180,7 @@ Linux 0.4.3 опубликован; код, DEB и публичный скача
 
 ## Выбор подписок и интервал обновления
 
-Инструкция для **0.5.0**. В настройках есть блок **«Собирать и показывать»** с отдельными
+Инструкция для **0.5.1**. В настройках есть блок **«Собирать и показывать»** с отдельными
 переключателями Claude Code и Codex. Чтобы оставить только Codex, выключите Claude Code.
 Выбор сохраняется на этом компьютере и действует для простого и расширенного вида, трея,
 уведомлений и фонового сборщика `ccl-sync`. Можно выключить обе подписки; настройки останутся

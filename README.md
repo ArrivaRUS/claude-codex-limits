@@ -31,7 +31,7 @@ Only a machine where the Claude Code or Codex CLI is signed in can read that acc
    Under **Poll on this computer**, keep on only the products whose CLI is signed in on this Mac. When a product is off, this Mac does not read its sign-in or logs and does not request its limits; accounts from other computers stay visible. Example: with no Claude subscription on the Mac, turn Claude off — the Claude card from the VPS still appears.
 2. **On each Linux server or laptop that should publish (the publisher).** Sign in to the Claude Code and/or Codex CLI there, then install from a checkout of the release and sign in to the same GitHub account:
    ```sh
-   git clone --branch linux-v0.5.0 https://github.com/ArrivaRUS/claude-codex-limits.git
+   git clone --branch linux-v0.5.1 https://github.com/ArrivaRUS/claude-codex-limits.git
    cd claude-codex-limits
    sh linux/install.sh --publisher --no-tray --name vps
    ccl-sync login --no-browser
@@ -46,7 +46,7 @@ Only a machine where the Claude Code or Codex CLI is signed in can read that acc
 
    Commands, modes and rollback: [Linux publisher guide](linux/README.md#режим-издателя-сервер-без-трея) (in Russian).
 
-Machines on older versions (macOS ≤ 3.2.7, Linux ≤ 0.4.5) keep syncing usage with newer ones; they publish no limits and show no account cards. The Linux tray app 0.5.0 also shows no cards from other machines; it shows account captions in `ccl-sync status` and its tooltip.
+Machines on older versions (macOS ≤ 3.2.7, Linux ≤ 0.4.5) keep syncing usage with newer ones; they publish no limits and show no account cards. The Linux tray app 0.5.1 also shows no cards from other machines; it shows account captions in `ccl-sync status` and its tooltip.
 
 ### What you see on the Mac
 
@@ -182,7 +182,7 @@ See [RU/EN release notes and verification limits](docs/keychain-quiet-release.md
 
 ## Features
 
-Refresh and interval instructions cover macOS 3.4.0 and **Linux 0.5.0**.
+Refresh and interval instructions cover macOS 3.4.1 and **Linux 0.5.1**.
 
 - **Two products, one glance** — Claude Code (orange) stacked over Codex, `session / weekly` percentages.
 - **Live data** — both read usage from the same backends their CLIs use. When a fresh reading is unavailable, the card marks retained data as stale.
@@ -294,7 +294,7 @@ you turn it on in Settings.
 
 ### 2. From the .dmg
 
-1. Download `ClaudeCodexLimits-3.4.0.dmg` from the [macOS 3.4.0 release](../../releases/tag/v3.4.0).
+1. Download `ClaudeCodexLimits-3.4.1.dmg` from the [macOS 3.4.1 release](../../releases/tag/v3.4.1).
 2. Open it and drag **Claude Codex Limits** into **Applications**.
 3. Launch it. The build isn't notarized, so on **macOS Sequoia / Tahoe** the first
    launch is blocked. Do this once:
@@ -332,14 +332,14 @@ Keep its secrets out of commits and shared artifacts. Details: [build guide](doc
 
 ### Linux (Astra Linux)
 
-Linux **0.5.0** is the current Linux release. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
+Linux **0.5.1** is the current Linux release. Earlier versions were tested on Astra Linux SE 1.8 (KDE / Fly). The port gives a tray icon with the same
 percentages, the popover with the simple and Advanced views, and usage sync with the Mac through
 the same gist.
 
-1. Download `claude-codex-limits_0.5.0_all.deb` from [Linux 0.5.0](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.0). Linux releases are not marked Latest; Latest is macOS 3.4.0.
+1. Download `claude-codex-limits_0.5.1_all.deb` from [Linux 0.5.1](https://github.com/ArrivaRUS/claude-codex-limits/releases/tag/linux-v0.5.1). Linux releases are not marked Latest; Latest is macOS 3.4.1.
 2. Double-click it and press Install, or install it from a terminal:
    ```bash
-   sudo apt install ./claude-codex-limits_0.5.0_all.deb
+   sudo apt install ./claude-codex-limits_0.5.1_all.deb
    ```
    apt pulls the dependencies (`python3-pyqt5`, `python3-dbus`) from the OS repository.
 3. Start **Claude Codex Limits** from the application menu. From then on it starts at login.
@@ -350,7 +350,7 @@ Details: [linux/README.md](linux/README.md) (in Russian).
 
 ## Usage
 
-For macOS 3.4.0 and **Linux 0.5.0**. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
+For macOS 3.4.1 and **Linux 0.5.1**. Enable the required subscriptions in Settings and sign in through the corresponding CLI.
 
 - **Left‑click** the tray icon → open/close the popover.
 - **Click a card** → open that product's limits page in the browser.
@@ -370,7 +370,7 @@ Opening the panel in Auto keeps its schedule. Errors and cached responses extend
 ## Build a release
 
 ```bash
-./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.4.0.dmg
+./scripts/make-dmg.sh     # → dist/ClaudeCodexLimits-3.4.1.dmg
 ```
 
 ## Project layout
