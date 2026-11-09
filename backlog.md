@@ -1,5 +1,7 @@
 # Бэклог
 
+- 09.11, Claude `token_policy`: исправлено в рабочем дереве — публикуется существующий `expired` + `signin_required`, кэш и бюджет опросов сохранены. До выпуска: ревью Юрки и живая проверка Linux → macOS 3.4.1; установленная Linux 0.4.5 требует обновления издателя. План и проверки: [token-policy-auth-status](docs/token-policy-auth-status.md).
+
 - C6: локально подготовлены macOS 3.4.0 / Linux 0.5.0, T3 m6/m7/m8/m10 и П6-б; RU/EN заметки — `docs/releases/`. Остаток — Mac build/selftest/strict signing и выпуск после релизных гейтов. Текущий бриф запрещает Git-мутации и агентов.
 - C5: постоянная clone-local подпись перенесена из C6 и реализована в build.sh; `.signing/` сохранять. Shellcheck/syntax/isolated OpenSSL+mocked signing PASS; остаток — две Mac-сборки с одинаковым leaf/DR и живая проверка Связки после последнего Allow Always. S1–S5 прошлого брифа не менялись.
 

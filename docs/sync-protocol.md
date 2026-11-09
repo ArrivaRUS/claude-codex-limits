@@ -535,6 +535,11 @@ The optional root `captions` object maps that key to `{"text": "Team", "setAt": 
 
 - A machine publishes readings of **its own** accounts, including retained last-success values after a failed
   attempt with their original `asOf`; other machines' readings are never republished.
+- Linux Claude preflight `token_policy` (`credential_write: never`, spent/missing access token in an OAuth
+  block) publishes `status: expired`, `expiredReason: signin_required`, retaining the previous successful
+  values and `asOf`, as for an auth failure. It makes no provider request or poll reservation and leaves the
+  poll schedule/budget unchanged. The ordinary metadata hash and 600 s heartbeat govern publication;
+  a subsequent successful poll replaces this status with `ok` and clears `expiredReason`.
 - **Three independent write triggers** (Linux `sync-state.json`; macOS UserDefaults keys
   `syncPushHash`, `syncMetaHash`, `syncPushedAt`, `syncHeartbeatAt`); if none is due, no PATCH:
   1. `pushHash` = sha1(root `days`) — usage: on change and `now − pushedAt ≥ 570 s` (the v1 floor);

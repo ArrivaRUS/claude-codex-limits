@@ -421,6 +421,10 @@ def _locked(kind, ix, result, reopened=False, due_at_start=None, prior=None):
             _skip(result, product, "no_login" if reason == "no_login" else "no_label")
             continue
         if product == "claude" and limits.claude_token_policy_blocks(now):
+            # Publish the existing auth-failure wire state, retaining the last
+            # successful snapshot just as for a provider 401. This is not a
+            # provider attempt: leave its reservation, schedule and budget alone.
+            bucket.update(status="expired", expiredReason="signin_required", errorClass="auth")
             _skip(result, product, "token_policy")
             continue
         # Eligibility is frozen before GET, alongside the durable tick journal.

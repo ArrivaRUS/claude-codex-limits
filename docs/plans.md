@@ -1,5 +1,7 @@
 # REMOTE-LIMITS · 2026-10-12
 
+> 2026-11-09: узкая правка Claude `token_policy` — [план и проверки](token-policy-auth-status.md). Без Swift-правок, Git-команд изменения состояния и публикации; ревью/живую проверку организует Юрка.
+
 > Источник правды исполнения (скилл execution-pack). Канонические входы: PRD [prd-remote-limits.md](prd-remote-limits.md) (G1, решения владельца 1–7), UX [../design/remote-limits-ux.md](../design/remote-limits-ux.md) (G2b), архитектура [../arch/plan-synth.md](../arch/plan-synth.md) v2 (G4; челлендж Astra 14/14 закрыт), модель угроз T1 [security-remote-limits.md](security-remote-limits.md) (вердикт «можно дальше» при включении П2-в, П3-а/б/в/д, П4-а, П5 а–е, П7, §5). База кода `c950fb1` (macOS 3.2.7, Linux 0.4.5). Тест-план пишет Tester отдельно — [test-plan-remote-limits.md](test-plan-remote-limits.md) (строки Т1–Т36 из T1 §6 и проверки §G synth v2); здесь он не дублируется. Живой статус — [status.md](status.md). Обновлено: 2026-10-12.
 
 ## Допущения
