@@ -17,7 +17,7 @@ sudo apt install ./claude-codex-limits_0.5.1_all.deb
 
 Linux-релиз не получает пометку Latest. Latest остаётся macOS 3.4.1.
 
-DEB SHA-256: `<SHA>`
+DEB SHA-256: `8a119a25e0356856c585a74f4af7047b741246146cdd782f69a2594b6287b9ab`
 
 <!--EN-->
 **An expired Claude Code sign-in is now visible.** If the Claude Code CLI sign-in on a machine has expired and the app cannot use it, the `ccl-sync` publisher reports “sign-in expired”. By default the app does not refresh CLI tokens. On a Mac running macOS 3.4.1, the card says “Claude Code sign-in expired on `<name>` — sign in again there” instead of the grey “Data is stale” message.
@@ -36,4 +36,4 @@ sudo apt install ./claude-codex-limits_0.5.1_all.deb
 
 The Linux release is not marked Latest. Latest remains macOS 3.4.1.
 
-DEB SHA-256: `<SHA>`
+DEB SHA-256: `8a119a25e0356856c585a74f4af7047b741246146cdd782f69a2594b6287b9ab`
