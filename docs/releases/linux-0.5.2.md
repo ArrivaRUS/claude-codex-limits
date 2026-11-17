@@ -13,7 +13,7 @@ sudo apt install ./claude-codex-limits_0.5.2_all.deb
 
 Linux-релиз не получает пометку Latest. Latest остаётся macOS 3.4.2.
 
-DEB SHA-256: `<SHA>`
+DEB SHA-256: `a59dc0aba0c9d7ff25dfc77bc44af7ca73c86eab72f79c418a553ebddffff3fc`
 
 <!--EN-->
 **The publisher log keeps more history.** The file `~/.local/state/claude-codex-limits/publisher.jsonl` now keeps about 45 days of records instead of one week, up to 3 MB. When the app version changes, a line with the version is added to the log.
@@ -28,4 +28,4 @@ sudo apt install ./claude-codex-limits_0.5.2_all.deb
 
 The Linux release is not marked Latest. Latest remains macOS 3.4.2.
 
-DEB SHA-256: `<SHA>`
+DEB SHA-256: `a59dc0aba0c9d7ff25dfc77bc44af7ca73c86eab72f79c418a553ebddffff3fc`

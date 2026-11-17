@@ -11,7 +11,7 @@
 
 macOS 13+, Apple Silicon. Этот выпуск получает пометку Latest.
 
-DMG SHA-256: `<SHA>`
+DMG SHA-256: `3198709f91ffc1b92583e4cade0bd2dbf2852d6224e28db50810aa98187bc2b6`
 
 <!--EN-->
 **The card explains where sync has stopped more accurately.** After sleep, wake or a network outage, an account card from another machine no longer blames that machine when the Mac itself has not received fresh data. If the Mac has not received data from GitHub for more than 12 minutes, the card says that this Mac is not syncing. The other machine is shown as offline only when the Mac has recently received data showing that the other machine has been silent for more than 30 minutes.
@@ -24,4 +24,4 @@ DMG SHA-256: `<SHA>`
 
 macOS 13+, Apple Silicon. This release is marked Latest.
 
-DMG SHA-256: `<SHA>`
+DMG SHA-256: `3198709f91ffc1b92583e4cade0bd2dbf2852d6224e28db50810aa98187bc2b6`
