@@ -4762,7 +4762,7 @@ func panelMainHeight(_ claude: LimitData, _ codex: LimitData) -> CGFloat {
     return CGFloat(remoteSimplePanelLayout(views: views, now: remoteRenderNow()).windowHeight)
 }
 enum PanelMode { case main, settings, sounds, whatsnew, claudeFix }
-let APP_VERSION = "3.4.1"
+let APP_VERSION = "3.4.2"
 let APP_AUTHOR = "Alex Kovalev"
 /// Poll only at one of the offered intervals. Old 1/5-minute settings migrate to 30 minutes.
 let POLL_DEFAULT: TimeInterval = 1800
