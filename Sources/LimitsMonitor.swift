@@ -3880,15 +3880,86 @@ private func localHistoryKey(_ product: String) -> String {
 let POLL_LOG_PATH = DATA_DIR + "/poll-log.jsonl"
 private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
 
+private struct PollLogCardKey: Hashable {
+    var path: String
+    var product: String
+    var identity: String
+}
+private struct PollLogReaderRow {
+    var label: String?
+    var state: Int
+    var writtenAt: ContinuousClock.Instant
+    var order: UInt64
+}
+// Queue-confined, process-only metadata; none of these keys enter the journal.
+private var pollLogReaderRows: [PollLogCardKey: PollLogReaderRow] = [:]
+private var pollLogDisplayedCards: [PollLogCardKey: PollLogReaderRow] = [:]
+private var pollLogReaderOrder: UInt64 = 0
+
+private func pollLogReaderKey(_ event: [String: Any], path: String) -> PollLogCardKey? {
+    guard event["ev"] as? String == "reader_card_state", let product = event["product"] as? String,
+          event["state"] is Int else { return nil }
+    return PollLogCardKey(path: path, product: product, identity: event["label"] as? String ?? "unlabelled")
+}
+
 @discardableResult func appendPollLog(_ events: [[String: Any]], path: String = POLL_LOG_PATH) -> Bool {
-    pollLogQueue.sync {
+    pollLogQueue.sync { appendPollLogOnQueue(events, path: path) }
+}
+
+func appendPollLogAsync(_ events: [[String: Any]], path: String = POLL_LOG_PATH) {
+    pollLogQueue.async { _ = appendPollLogOnQueue(events, path: path) }
+}
+
+func appendDisplayedReaderCardStates(_ views: [AccountView], now: Date, path: String = POLL_LOG_PATH) {
+    pollLogQueue.async {
+        let events = readerCardStateEvents(views, now: now)
+        let clock = ContinuousClock() // includes sleep; wall-clock changes cannot extend the throttle
+        var pending: [[String: Any]] = []
+        var cards: [(PollLogCardKey, PollLogCardKey)] = []
+        for (view, event) in zip(views, events) {
+            guard let rowKey = pollLogReaderKey(event, path: path), let state = event["state"] as? Int else { continue }
+            let cardKey = PollLogCardKey(path: path, product: view.product, identity: view.historyKey)
+            // A sync may have logged this label since the previous display. A
+            // stable local history key also lets us notice a changed/null label.
+            let last = [pollLogReaderRows[rowKey], pollLogDisplayedCards[cardKey]].compactMap { $0 }
+                .max { $0.order < $1.order }
+            if let last = last {
+                pollLogDisplayedCards[cardKey] = last
+                if last.state == state, last.label == (event["label"] as? String),
+                   last.writtenAt.duration(to: clock.now) < .seconds(60) { continue }
+            }
+            pending.append(event); cards.append((cardKey, rowKey))
+        }
+        guard !pending.isEmpty, appendPollLogOnQueue(pending, path: path) else { return }
+        for (cardKey, rowKey) in cards { pollLogDisplayedCards[cardKey] = pollLogReaderRows[rowKey] }
+    }
+}
+
+// All entry points arrive on pollLogQueue; synchronous callers retain their Bool result.
+private func appendPollLogOnQueue(_ events: [[String: Any]], path: String) -> Bool {
+    let written = { () -> Bool in
         var payload = Data()
         for event in events {
             guard let line = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) else { return false }
             payload.append(line); payload.append(10)
         }
         do {
-            try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            let directory = (path as NSString).deletingLastPathComponent
+            try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            let lockFD = open(directory + "/poll-log.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+            guard lockFD >= 0 else { return false }
+            defer { close(lockFD) }
+            var lockInfo = stat()
+            guard fstat(lockFD, &lockInfo) == 0, (lockInfo.st_mode & S_IFMT) == S_IFREG,
+                  fchmod(lockFD, 0o600) == 0 else { return false }
+            let clock = ContinuousClock()
+            let deadline = clock.now.advanced(by: .seconds(2))
+            while flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+                guard (errno == EWOULDBLOCK || errno == EINTR), clock.now < deadline else { return false }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+            defer { flock(lockFD, LOCK_UN) }
+            // Open only after locking: a concurrent rotation may replace the inode.
             let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
             guard fd >= 0 else { return false }
             defer { close(fd) }
@@ -3978,7 +4049,6 @@ private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
                     kept.append(contentsOf: line); kept.append(10)
                 }
                 kept.append(payload)
-                let directory = (path as NSString).deletingLastPathComponent
                 let temporary = directory + "/.poll-log-" + UUID().uuidString
                 let output = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
                 guard output >= 0 else { return false }
@@ -3996,7 +4066,16 @@ private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
             if !written { _ = truncate(to: validEnd) }
             return written
         } catch { return false }
+    }()
+    if written {
+        for event in events {
+            guard let key = pollLogReaderKey(event, path: path), let state = event["state"] as? Int else { continue }
+            pollLogReaderOrder += 1
+            pollLogReaderRows[key] = PollLogReaderRow(label: event["label"] as? String, state: state,
+                writtenAt: ContinuousClock().now, order: pollLogReaderOrder)
+        }
     }
+    return written
 }
 
 // MARK: - Severity & colors
@@ -8942,7 +9021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ note: Notification) {
         if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
             let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? APP_VERSION
-            _ = appendPollLog([["ev": "app_start", "version": version, "ts": Date().timeIntervalSince1970]])
+            appendPollLogAsync([["ev": "app_start", "version": version, "ts": Date().timeIntervalSince1970]])
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "…"
@@ -8956,7 +9035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panelCtrl.onRefresh = { [weak self] in self?.doRefresh(live: true) }
         if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
             panelCtrl.view.onAccountsDisplayed = { views, now in
-                appendPollLog(readerCardStateEvents(views, now: now))
+                appendDisplayedReaderCardStates(views, now: now)
             }
         }
         panelCtrl.view.onRefreshProduct = { [weak self] product in self?.doRefresh(live: true, only: product) }

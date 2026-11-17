@@ -354,6 +354,7 @@ def _o1_append(record):
         return False
     if changed:
         # Commit the marker only after its journal row is durable.
+        # A crash before this save can repeat app_version; delivery is at least once.
         write_json(version_path, {"version": APP_VERSION})
     return True
 

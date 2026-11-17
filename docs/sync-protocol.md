@@ -750,16 +750,28 @@ the new record included, so the result is **≤ 3 MiB**. Compaction then does no
 4 MiB. Appends and compaction hold one lock (`publisher-journal`), so no event is lost to a concurrent rotation.
 
 The version row and incoming event share one append/rotation payload. Version metadata is separate from
-`publisher-state.json`, whose quota snapshots can be saved or rolled back independently.
+`publisher-state.json`, whose quota snapshots can be saved or rolled back independently. Version delivery is
+**at least once**: a crash after the journal fsync and before the marker save can repeat `app_version` on retry.
+That harmless duplicate is accepted; an unchanged saved version normally suppresses the row.
 
 On macOS, `poll-log.jsonl` is compacted over **40 MiB** to **≤ 30 MiB**, including incoming events, with the same
 whole-line/45-day retention. Recovery of an incomplete trailing line precedes compaction. All work runs under
-`pollLogQueue`; replacement uses a private same-directory temporary file, fsync and rename. App launch adds
-`app_start` with the bundle short version and epoch `ts`; `reader_card_state` keeps its six-field C2 contract.
+`pollLogQueue`; replacement uses a private same-directory temporary file, fsync and rename. Every append takes
+an exclusive `flock` on the separate `poll-log.lock` (0600, `O_NOFOLLOW`) before opening the journal and holds it
+through append/recovery/rotation. Contention is bounded to 2 seconds; timeout refuses the write without opening
+the journal. The lock file is never replaced or removed by a writer.
+
+App launch adds `app_start` with the bundle short version and epoch `ts`. Launch and panel display enqueue work
+asynchronously on `pollLogQueue`; CLI/selftest callers retain synchronous `appendPollLog` and its Bool result.
+`reader_card_state` keeps its six-field C2 contract. Successful sync reads still log every card. Panel display
+logs a card only when its state or label differs from its last successfully written row, or at least 60 seconds
+have elapsed. Process-only metadata on the same queue observes successful writes from both paths; it uses a
+continuous clock (including sleep) and a stable local history key to detect label changes. No throttling metadata
+is added to the journal or persisted across restarts.
 
 | Event | Fields | When |
 |---|---|---|
-| `app_version` | `version` (application `APP_VERSION`) | first O1 event after a version change; saved in `publisher-journal-state.json` under the journal lock |
+| `app_version` | `version` (application `APP_VERSION`) | at least once after a version change; saved in `publisher-journal-state.json` under the journal lock; crash-retry duplicates accepted |
 | `poll_attempt` | `product`, `kind` (`auto`·`manual`), `attemptAt` | provider request about to be made |
 | `poll_result` | `product`, `httpStatus`, `result` (`ok`·`failed`) | provider answer accepted |
 | `poll_skipped` | `product`, `reason` | product not polled on this tick; `reason` ∈ `not_due` · `fresh_remote` · `remote_attempt` · `tie_break` · `retry_after` · `no_github` · `no_login` · `no_label` · `state_unsaved` · `publish_failed` · `token_policy` · `busy` |
