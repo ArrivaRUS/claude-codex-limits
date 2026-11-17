@@ -760,6 +760,123 @@ func runRemoteLimitsC3SelfTests() -> Int {
     defer { try? FileManager.default.removeItem(atPath: root) }
     c3C301(expect); c3C302(expect); c3C303(root, expect); c3C304(expect); c3C305(expect); c3C307(expect); c3C311(expect); c3C312(expect); c3C313(expect); c3C314(root, expect)
     c3Release341Cooldown(expect)
+    k342ReaderFreshnessTests(root, expect)
     print("\(failures == 0 ? "OK" : "FAIL") C3 model tests: \(checks) checks; \(failures) failures")
     return failures
+}
+
+// K342 V5 regressions, through the resolver (RemoteLimitsWire.state is private)
+// and the presentation entry point. Runs before AppKit; fixed clocks, memory
+// defaults, scripted credentials/HTTP and temporary cache only. 22 checks.
+private func k342ReaderFreshnessTests(_ root: String, _ expect: C3Expect) {
+    let now = C3_NOW
+    func cache(heartbeat: TimeInterval, status: String = "ok", retry: Bool = false, stale: Bool = false) -> SyncRemoteCache {
+        var account = RemoteAccount(product: "claude", label: C3_LABEL, status: status)
+        account.asOf = now.addingTimeInterval(stale ? -10000 : -60)
+        account.attemptAt = now; account.machineId = "k342-vps"; account.machineName = "vps"
+        account.machineLastSeenAt = now.addingTimeInterval(-heartbeat)
+        account.windows = RemoteWindows(session: RemoteWindow(pct: 42.5), weekly: RemoteWindow(pct: 61))
+        account.schedule = RemoteSchedule(mode: "auto", interval: 900)
+        if retry { account.retryUntil = now.addingTimeInterval(600) }
+        var value = SyncRemoteCache(); value.accounts = [account]; return value
+    }
+    func resolve(_ value: SyncRemoteCache, _ sync: ReaderSyncState) -> AccountView? {
+        resolveAccounts(local: (c3Absent(), c3Absent()), localIds: [:], remote: value,
+                        hidden: [], menu: [:], sync: sync, now: now).first
+    }
+    let freshRead = ReaderSyncState(phase: .on, lastReadOkAt: now)
+    let oldRead = ReaderSyncState(phase: .on, lastReadOkAt: now.addingTimeInterval(-721))
+    let oldCache = cache(heartbeat: 7200, stale: true)
+    let oldView = resolve(oldCache, oldRead)
+    expect(oldRead.warning == nil && oldView?.state == .syncStalled,
+           "K342-V5-old-cache silent old read is state 6, never state 5")
+    expect(oldView?.data.session == 42.5 && oldView?.data.weekly == 61
+           && oldView?.data.asOf == now.addingTimeInterval(-10000), "K342-V5-old-cache original values and timestamp survive")
+
+    for age in [1800.0, 1801.0] {
+        expect(resolve(cache(heartbeat: age), freshRead)?.state == (age == 1800 ? .fresh : .offline),
+               "K342-V5-heartbeat fresh read, source age \(Int(age)): boundary is strict > 1800")
+    }
+    for (status, retry, stale, lower) in [("expired", false, false, RemoteCardState.signInRequired),
+                                         ("ok", true, false, .serviceWait), ("ok", false, true, .stale)] {
+        expect(resolve(cache(heartbeat: 1801, status: status, retry: retry, stale: stale), freshRead)?.state == .offline,
+               "K342-V5-priority state 5 wins over \(lower.rawValue) after fresh read")
+        expect(resolve(cache(heartbeat: 1800, status: status, retry: retry, stale: stale), freshRead)?.state == lower,
+               "K342-V5-priority at 1800 seconds lower state \(lower.rawValue) remains visible")
+    }
+    for age in [720.0, 721.0] {
+        let sync = ReaderSyncState(phase: .on, lastReadOkAt: now.addingTimeInterval(-age))
+        expect(sync.isStalled(now: now) == (age > 720)
+               && resolve(cache(heartbeat: 1801), sync)?.state == (age == 720 ? .offline : .syncStalled),
+               "K342-V5-read-boundary \(Int(age)) seconds uses 720-second allowance")
+    }
+    expect(resolve(cache(heartbeat: 0), ReaderSyncState(phase: .on))?.state == .syncStalled,
+           "K342-V5-start no successful read yet is state 6")
+    expect(resolve(cache(heartbeat: 0), ReaderSyncState(phase: .on, warning: "synthetic warning", lastReadOkAt: now))?.state == .syncStalled,
+           "K342-V5-warning fresh read does not hide a sync warning")
+    for phase in [SyncPhase.off, .revoked] {
+        let sync = ReaderSyncState(phase: phase, lastReadOkAt: now.addingTimeInterval(-7200))
+        let view = remotePresentationView(c3View(state: .offline), sync: sync, now: now)
+        expect(view.state == .signedOut && sync.isStalled(now: now)
+               && resolve(oldCache, sync) == nil, "K342-V5-signed-out \(phase) wins over old read: state 7; resolver hides remote cache")
+    }
+
+    let raw = resolve(cache(heartbeat: 0), freshRead)
+    if let raw = raw {
+        let deadline = remoteMenuRefreshDeadline(views: [raw], sync: freshRead, now: now)
+        expect(deadline.map { abs($0.timeIntervalSince(now) - 720.001) < 0.00001 } == true,
+               "K342-V5-deadline includes read freshness before later source/snapshot boundaries")
+        let edge = ReaderSyncState(phase: .on, lastReadOkAt: now.addingTimeInterval(-720))
+        expect(remoteMenuRefreshDeadline(views: [raw], sync: edge, now: now)
+            .map { abs($0.timeIntervalSince(now) - 0.001) < 0.00001 } == true,
+               "K342-V5-deadline exact 720-second edge schedules just after strict boundary")
+    } else {
+        expect(false, "K342-V5-deadline remote fixture"); expect(false, "K342-V5-deadline boundary fixture")
+    }
+
+    // Wake with an old persisted read, then successful GET followed by failed PATCH.
+    // Derive reader state from real sync.ui, including warning/lastSync, as runtime does.
+    let defaults = MemorySelfTestDefaults(), gistId = "k342-synthetic-gist"
+    defaults.set("selftest", forKey: "syncLogin"); defaults.set(gistId, forKey: "syncGistId")
+    defaults.set(now, forKey: "syncDiscoveredAt"); defaults.set(now.addingTimeInterval(-7200), forKey: "syncLastOkAt")
+    let path = root + "/k342-wake-cache.json"
+    do { try JSONEncoder().encode(oldCache).write(to: URL(fileURLWithPath: path)) }
+    catch { expect(false, "K342-V5-wake cache fixture"); return }
+    let file = """
+    {"schema":1,"machine":{"id":"k342-vps","name":"vps","os":"Test"},"updated":"2026-10-12T16:00:00Z","lastSeenAt":"2026-10-12T16:00:00Z","days":{},"accounts":[{"product":"claude","label":"c300000000000001","status":"ok","asOf":"2026-10-12T15:59:00Z","windows":{"session":{"pct":42.5},"weekly":{"pct":61}},"schedule":{"mode":"auto","interval":900}}]}
+    """
+    let gist: [String: Any] = ["id": gistId, "public": false,
+        "files": [SYNC_MANIFEST: ["content": "{}"], "machine-k342-vps.json": ["content": file],
+                  "machine-k342-mac.json": ["content": "{}"]]]
+    let body = (try? JSONSerialization.data(withJSONObject: gist)) ?? Data()
+    let http = SelfTestHTTP { call in
+        guard call.url == "https://api.github.com/gists/" + gistId else {
+            return (599, nil, "K342 unexpected HTTP blocked", [:])
+        }
+        if call.method == "GET" { return (200, body, nil, [:]) }
+        if call.method == "PATCH" { return (503, nil, "K342 synthetic upload failure", [:]) }
+        return (599, nil, "K342 unexpected method blocked", [:])
+    }
+    let keys = SelfTestKeychainStore("k342-synthetic-token")
+    let sync = GitHubSync(transport: http.transport, keychain: ScriptedSyncKeychain(store: keys), defaults: defaults,
+                          remotePath: path, machineId: "k342-mac", revokeRecheckDelay: 0, clock: { now },
+                          publisherSnapshot: { C4PublisherSnapshot(days: [:], accountByDay: [:], localId: nil,
+                              codex: LimitData(present: false), poll: AutoPollState()) }, pollLogPath: root + "/k342-wake-log.jsonl")
+    func readerState() -> ReaderSyncState {
+        let ui = sync.ui
+        return ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now), lastReadOkAt: ui.lastSync)
+    }
+    sync.loadSynchronously()
+    expect(resolve(sync.remoteSnapshot(), readerState())?.state == .syncStalled,
+           "K342-V5-wake before first read old cache is state 6")
+    var onReadState: RemoteCardState?
+    sync.onRead = { value, _ in onReadState = resolve(value, readerState())?.state }
+    defer { sync.onRead = nil }
+    _ = sync.syncSynchronously()
+    expect(onReadState == .fresh, "K342-V5-wake successful read with fresh heartbeat immediately becomes state 1")
+    expect(sync.ui.lastError != nil && sync.ui.lastSync == now && readerState().warning == nil
+           && resolve(sync.remoteSnapshot(), readerState())?.state == .fresh,
+           "K342-V5-wake failed upload after read does not restore state 6")
+    expect(http.calls.map { $0.method } == ["GET", "PATCH"] && keys.writes == 0 && keys.deletes == 0,
+           "K342-V5-wake offline trap proves successful GET/failed PATCH with no credential mutation")
 }

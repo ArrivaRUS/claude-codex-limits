@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 // MARK: - REMOTE-LIMITS C2 selftests (tester, 2026-10-21; written red before the code, P13)
 //
@@ -828,9 +829,162 @@ func runRemoteLimitsC2SelfTests(defaults: MemorySelfTestDefaults, select: (Bool,
     c2C207(fixture, defaults, expect)
     c2C208(root, fixture, expect)
     c2C209(root, expect)
+    k342PollLogTests(root, expect)
     for key in ["claudeTier", "subClaude", "hiddenAccounts", "menuAccount"] { defaults.removeObject(forKey: key) }
     select(true, true)
     try? FileManager.default.removeItem(atPath: root)
     print(failures == 0 ? "OK C2 remote-limits: all \(checks) checks passed" : "FAIL C2 remote-limits: \(failures) of \(checks) checks failed")
     return failures
+}
+
+// K342 journal regressions. Registered above in C2, before NSApplication.shared.
+// Real 40/30 MiB thresholds; all files and lock descriptors are disposable.
+// 23 checks on the successful fixture path, including queue barriers (no sleeps for throttle).
+private func k342PollLogTests(_ root: String, _ expect: C2Expect) {
+    let fm = FileManager.default, now = Date(), mib = 1024 * 1024
+    let directory = root + "/K342-log"
+    do { try fm.createDirectory(atPath: directory, withIntermediateDirectories: true) }
+    catch { expect(false, "K342-log temporary directory"); return }
+
+    func bytes(_ object: [String: Any]) -> Data {
+        var data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
+        data.append(10); return data
+    }
+    func drain(_ path: String) { _ = appendPollLog([], path: path) }
+
+    // K342-rotation: 40 MiB trigger, 30 MiB budget, whole rows and 45-day filter.
+    let log = directory + "/rotation.jsonl", count = 40 * mib / 8192 + 1
+    var seed = Data()
+    for index in 0..<count {
+        var line = bytes(["ev": "poll_result", "ts": now.timeIntervalSince1970, "seq": index])
+        line.removeLast()
+        line.append(Data(repeating: 32, count: 8191 - line.count)); line.append(10)
+        seed.append(line)
+    }
+    let old = now.addingTimeInterval(-46 * 86400), fresh = now.addingTimeInterval(-44 * 86400)
+    let iso = ISO8601DateFormatter()
+    let fractional = ISO8601DateFormatter(); fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    for (tag, stamp) in [("expired-number", old.timeIntervalSince1970 as Any),
+                         ("expired-iso", iso.string(from: old) as Any),
+                         ("fresh-iso", iso.string(from: fresh) as Any),
+                         ("fresh-fraction", fractional.string(from: fresh) as Any)] {
+        seed.append(bytes(["ev": "poll_result", "ts": stamp, "tag": tag]))
+    }
+    seed.append(Data("{broken-json}\n".utf8))
+    do { try seed.write(to: URL(fileURLWithPath: log)); try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: log) }
+    catch { expect(false, "K342-rotation seed write"); return }
+    expect(seed.count > 40 * mib, "K342-rotation fixture exceeds production 40 MiB trigger")
+    expect(appendPollLog([["ev": "poll_result", "ts": now.timeIntervalSince1970, "tag": "incoming"]], path: log),
+           "K342-rotation append succeeds")
+    let rotated = fm.contents(atPath: log) ?? Data()
+    let lines = rotated.split(separator: 10, omittingEmptySubsequences: false).dropLast()
+    let rows = lines.compactMap { (try? JSONSerialization.jsonObject(with: Data($0))) as? [String: Any] }
+    expect(!rotated.isEmpty && rotated.count <= 30 * mib, "K342-rotation output is at most 30 MiB")
+    expect(rotated.last == 10 && rows.count == lines.count, "K342-rotation every retained line is complete JSON")
+    expect(rows.last?["tag"] as? String == "incoming" && rows.contains { $0["seq"] as? Int == count - 1 },
+           "K342-rotation newest old row and incoming event survive")
+    let tags = Set(rows.compactMap { $0["tag"] as? String })
+    expect(!tags.contains("expired-number") && !tags.contains("expired-iso")
+           && tags.contains("fresh-iso") && tags.contains("fresh-fraction"), "K342-rotation 45-day cutoff handles numeric/ISO/fractional timestamps")
+    expect(c2Mode(log) == 0o600, "K342-rotation replaces existing 0644 file with 0600")
+
+    // A symlink is refused without changing either its destination or the link.
+    let target = directory + "/target", link = directory + "/symlink.jsonl", sentinel = Data("sentinel\n".utf8)
+    do { try sentinel.write(to: URL(fileURLWithPath: target)); try fm.createSymbolicLink(atPath: link, withDestinationPath: target) }
+    catch { expect(false, "K342-symlink fixture"); return }
+    expect(!appendPollLog([["ev": "app_start"]], path: link), "K342-symlink append refused")
+    expect(fm.contents(atPath: target) == sentinel && (try? fm.destinationOfSymbolicLink(atPath: link)) == target,
+           "K342-symlink target and link remain unchanged")
+
+    // A separate open file description holds flock. Checking mode as well as bytes
+    // detects an early open/fchmod even when a writer does not append anything.
+    let lockedLog = directory + "/locked.jsonl"
+    do { try sentinel.write(to: URL(fileURLWithPath: lockedLog)); try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockedLog) }
+    catch { expect(false, "K342-lock log fixture"); return }
+    let fd = open(directory + "/poll-log.lock", O_RDWR | O_CREAT | O_NOFOLLOW, 0o600)
+    guard fd >= 0 else { expect(false, "K342-lock open fixture descriptor"); return }
+    defer { close(fd) }
+    guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { expect(false, "K342-lock acquire fixture descriptor"); return }
+    defer { flock(fd, LOCK_UN) }
+    let before = (try? fm.attributesOfItem(atPath: lockedLog)) ?? [:]
+    let started = ContinuousClock().now
+    let blocked = appendPollLog([["ev": "app_start"]], path: lockedLog)
+    let elapsed = started.duration(to: ContinuousClock().now)
+    expect(!blocked && elapsed >= .milliseconds(1800) && elapsed < .seconds(6), "K342-lock returns false after about 2 seconds")
+    let after = (try? fm.attributesOfItem(atPath: lockedLog)) ?? [:]
+    expect(fm.contents(atPath: lockedLog) == sentinel && c2Mode(lockedLog) == 0o644
+           && (before[.systemFileNumber] as? NSNumber) == (after[.systemFileNumber] as? NSNumber)
+           && (before[.modificationDate] as? Date) == (after[.modificationDate] as? Date),
+           "K342-lock contention leaves contents/inode/mtime/mode unchanged")
+    let missingLog = directory + "/must-not-open.jsonl"
+    expect(!appendPollLog([["ev": "app_start"]], path: missingLog) && !fm.fileExists(atPath: missingLog),
+           "K342-lock contention never creates a missing journal")
+    _ = flock(fd, LOCK_UN)
+    expect(appendPollLog([["ev": "app_start"]], path: lockedLog) && c2Lines(lockedLog).count == 1,
+           "K342-lock appends after other descriptor releases lock")
+
+    // Exercise the exact Foundation helper called by applicationDidFinishLaunching.
+    // Deliberately use a bundle version different from the compiled APP_VERSION.
+    let bundlePath = directory + "/K342.bundle", launchLog = directory + "/launch.jsonl"
+    do {
+        try fm.createDirectory(atPath: bundlePath + "/Contents", withIntermediateDirectories: true)
+        let info: [String: Any] = ["CFBundleIdentifier": "invalid.selftest.k342", "CFBundlePackageType": "BNDL",
+                                   "CFBundleShortVersionString": "0.0.0-k342"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: URL(fileURLWithPath: bundlePath + "/Contents/Info.plist"))
+    } catch { expect(false, "K342-start bundle fixture"); return }
+    guard let bundle = Bundle(path: bundlePath) else { expect(false, "K342-start bundle loads"); return }
+    appendAppStartLog(bundle: bundle, path: launchLog, now: now); drain(launchLog)
+    let launches = c2Lines(launchLog)
+    expect(launches.count == 1 && launches[0]["ev"] as? String == "app_start"
+           && launches[0]["version"] as? String == "0.0.0-k342"
+           && launches[0]["ts"] as? Double == now.timeIntervalSince1970, "K342-start exactly one event with bundle version")
+
+    // Real displayed-card path; only monotonic time is injected. A wall-clock jump
+    // in the event timestamp cannot release the 60-second throttle.
+    let displayLog = directory + "/display.jsonl", base = ContinuousClock().now
+    var data = LimitData(present: true); data.session = 42.5; data.asOf = now
+    var a = AccountView(product: "claude", label: "3420000000000001", historyKey: "stable-a", caption: "A",
+                        data: data, isLocal: false, tier: nil, usageDays: [:], machines: [], state: .fresh)
+    let b = AccountView(product: "claude", label: "3420000000000002", historyKey: "stable-b", caption: "B",
+                        data: data, isLocal: false, tier: nil, usageDays: [:], machines: [], state: .fresh)
+    func show(_ views: [AccountView], _ seconds: Double, wall: Date? = nil) {
+        let instant = base.advanced(by: .nanoseconds(Int64(seconds * 1_000_000_000)))
+        appendDisplayedReaderCardStates(views, now: wall ?? now, path: displayLog, clockNow: { instant }); drain(displayLog)
+    }
+    show([a, b], 0)
+    expect(c2Lines(displayLog).count == 2, "K342-throttle first display logs each card")
+    show([a, b], 59.999, wall: now.addingTimeInterval(86400))
+    expect(c2Lines(displayLog).count == 2, "K342-throttle unchanged cards suppressed before 60 seconds despite wall-clock jump")
+    show([a, b], 60)
+    expect(c2Lines(displayLog).count == 4, "K342-throttle unchanged cards log at exactly 60 seconds")
+    a.state = .stale; show([a, b], 60)
+    expect(c2Lines(displayLog).count == 5 && c2Lines(displayLog).last?["state"] as? Int == 2,
+           "K342-throttle state change logs immediately for one card")
+    a.label = "3420000000000003"; show([a, b], 60)
+    expect(c2Lines(displayLog).count == 6 && c2Lines(displayLog).last?["label"] as? String == a.label,
+           "K342-throttle label change logs immediately with stable history key")
+
+    let syncLog = directory + "/sync.jsonl", history = UsageHistory(path: directory + "/history.jsonl")
+    var account = RemoteAccount(product: "claude", label: "3420000000000004", status: "ok")
+    account.asOf = now; account.attemptAt = now; account.machineId = "k342-vps"; account.machineName = "vps"
+    account.machineLastSeenAt = now; account.windows = RemoteWindows(session: RemoteWindow(pct: 42.5))
+    var cache = SyncRemoteCache(); cache.accounts = [account]
+    let views = c2Resolve(cache, now: now)
+    let oldInstant = ContinuousClock().now.advanced(by: .seconds(-61))
+    appendDisplayedReaderCardStates(views, now: now, path: syncLog, clockNow: { oldInstant }); drain(syncLog)
+    expect(c2Lines(syncLog).count == 1, "K342-sync display fixture has one card")
+    for _ in 0..<2 {
+        readerDidSync(cache, at: now, local: (c2Absent(), c2Absent()), localIds: [:], hidden: [],
+                      sync: ReaderSyncState(phase: .on, lastReadOkAt: now), history: history, pollLog: syncLog)
+    }
+    let syncedAt = ContinuousClock().now
+    expect(c2Lines(syncLog).count == 3, "K342-sync readerDidSync always logs unchanged state, including repeated reads")
+    let beforeMinute = syncedAt.advanced(by: .seconds(59))
+    appendDisplayedReaderCardStates(views, now: now, path: syncLog, clockNow: { beforeMinute }); drain(syncLog)
+    expect(c2Lines(syncLog).count == 3, "K342-sync read resets display throttle despite expired previous display")
+    let afterMinute = syncedAt.advanced(by: .seconds(61))
+    appendDisplayedReaderCardStates(views, now: now, path: syncLog, clockNow: { afterMinute }); drain(syncLog)
+    expect(c2Lines(syncLog).count == 4, "K342-sync unchanged display logs again 60 seconds after read")
+    _ = history.samples("claude", acct: account.label ?? "", since: .distantPast) // Drain async history before C2 removes root.
 }

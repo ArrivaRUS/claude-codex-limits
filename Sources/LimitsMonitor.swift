@@ -3910,10 +3910,17 @@ func appendPollLogAsync(_ events: [[String: Any]], path: String = POLL_LOG_PATH)
     pollLogQueue.async { _ = appendPollLogOnQueue(events, path: path) }
 }
 
-func appendDisplayedReaderCardStates(_ views: [AccountView], now: Date, path: String = POLL_LOG_PATH) {
+// Shared launch writer; bundle/path/time parameters keep selftests out of the live journal.
+func appendAppStartLog(bundle: Bundle = .main, path: String = POLL_LOG_PATH, now: Date = Date()) {
+    let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? APP_VERSION
+    appendPollLogAsync([["ev": "app_start", "version": version, "ts": now.timeIntervalSince1970]], path: path)
+}
+
+func appendDisplayedReaderCardStates(_ views: [AccountView], now: Date, path: String = POLL_LOG_PATH,
+                                     clockNow: @escaping () -> ContinuousClock.Instant = { ContinuousClock().now }) {
     pollLogQueue.async {
         let events = readerCardStateEvents(views, now: now)
-        let clock = ContinuousClock() // includes sleep; wall-clock changes cannot extend the throttle
+        // Continuous time includes sleep; wall-clock changes cannot extend the throttle.
         var pending: [[String: Any]] = []
         var cards: [(PollLogCardKey, PollLogCardKey)] = []
         for (view, event) in zip(views, events) {
@@ -3926,17 +3933,18 @@ func appendDisplayedReaderCardStates(_ views: [AccountView], now: Date, path: St
             if let last = last {
                 pollLogDisplayedCards[cardKey] = last
                 if last.state == state, last.label == (event["label"] as? String),
-                   last.writtenAt.duration(to: clock.now) < .seconds(60) { continue }
+                   last.writtenAt.duration(to: clockNow()) < .seconds(60) { continue }
             }
             pending.append(event); cards.append((cardKey, rowKey))
         }
-        guard !pending.isEmpty, appendPollLogOnQueue(pending, path: path) else { return }
+        guard !pending.isEmpty, appendPollLogOnQueue(pending, path: path, clockNow: clockNow) else { return }
         for (cardKey, rowKey) in cards { pollLogDisplayedCards[cardKey] = pollLogReaderRows[rowKey] }
     }
 }
 
 // All entry points arrive on pollLogQueue; synchronous callers retain their Bool result.
-private func appendPollLogOnQueue(_ events: [[String: Any]], path: String) -> Bool {
+private func appendPollLogOnQueue(_ events: [[String: Any]], path: String,
+                                 clockNow: () -> ContinuousClock.Instant = { ContinuousClock().now }) -> Bool {
     let written = { () -> Bool in
         var payload = Data()
         for event in events {
@@ -4072,7 +4080,7 @@ private func appendPollLogOnQueue(_ events: [[String: Any]], path: String) -> Bo
             guard let key = pollLogReaderKey(event, path: path), let state = event["state"] as? Int else { continue }
             pollLogReaderOrder += 1
             pollLogReaderRows[key] = PollLogReaderRow(label: event["label"] as? String, state: state,
-                writtenAt: ContinuousClock().now, order: pollLogReaderOrder)
+                writtenAt: clockNow(), order: pollLogReaderOrder)
         }
     }
     return written
@@ -9020,8 +9028,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ note: Notification) {
         if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
-            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? APP_VERSION
-            appendPollLogAsync([["ev": "app_start", "version": version, "ts": Date().timeIntervalSince1970]])
+            appendAppStartLog()
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "…"
