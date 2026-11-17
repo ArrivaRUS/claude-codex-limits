@@ -26,6 +26,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from ccl import APP_VERSION
+
 HOME = os.path.expanduser("~")
 APP_ID = "claude-codex-limits"
 CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config"), APP_ID)
@@ -266,7 +268,7 @@ class CredentialPolicyRefused(Exception):
 O1_EVENTS = frozenset((
     "poll_attempt", "poll_result", "poll_skipped", "pass_skipped", "pass_failed", "token_refresh", "publish",
     "clock_skew", "label_changed", "identity_changed", "remote_retry_capped", "policy_forced_never",
-    "policy_violation", "pending_rotation_lost", "accounts_days_dropped", "rollback_invalid"))
+    "policy_violation", "pending_rotation_lost", "accounts_days_dropped", "rollback_invalid", "app_version"))
 O1_SKIP_REASONS = frozenset((
     "not_due", "fresh_remote", "remote_attempt", "tie_break", "retry_after", "no_github", "no_login", "no_label",
     "state_unsaved", "publish_failed", "token_policy", "busy"))
@@ -320,6 +322,8 @@ def _o1_record(ev, fields):
             valid = valid and (value is None or isinstance(value, str) and bool(re.fullmatch(r"[0-9a-f]{16}", value)))
         elif key == "class":
             valid = valid and isinstance(value, str) and bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", value))
+        elif key == "version":
+            valid = valid and ev == "app_version" and value == APP_VERSION
         else:
             valid = False
         if isinstance(value, str):
@@ -335,8 +339,30 @@ def _o1_record(ev, fields):
 
 def _o1_append(record):
     """Caller holds publisher-journal: no append can be lost to concurrent rotation."""
+    # Keep journal metadata separate from publisher-state.json: the publisher can
+    # save/roll back that file under a different lock, including stale snapshots.
+    version_path = os.path.join(STATE_DIR, "publisher-journal-state.json")
+    try:
+        previous = json.loads(_rotation_read(version_path))
+    except (FileNotFoundError, ValueError, UnicodeError):
+        previous = {}
+    changed = not isinstance(previous, dict) or previous.get("version") != APP_VERSION
+    records = [record]
+    if changed:
+        records.insert(0, _o1_record("app_version", {"version": APP_VERSION}))
+    if not _o1_append_records(records, durable=changed):
+        return False
+    if changed:
+        # Commit the marker only after its journal row is durable.
+        write_json(version_path, {"version": APP_VERSION})
+    return True
+
+
+def _o1_append_records(records, *, durable=False):
+    """Same journal lock; version and incoming event share one rotation payload."""
     path = os.path.join(STATE_DIR, "publisher.jsonl")
-    data = (json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    data = b"".join((json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+                    for record in records)
     # Existing files and restrictive umasks get exactly the same private modes.
     os.chmod(STATE_DIR, 0o700)
     fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
@@ -345,11 +371,11 @@ def _o1_append(record):
             raise OSError("O1 journal is not a regular file")
         os.fchmod(fd, 0o600)
         size = os.fstat(fd).st_size
-        if size + len(data) > 1024 * 1024:
+        if size + len(data) > 4 * 1024 * 1024:
             # Read only the newest bounded tail, keeping whole JSON lines. The
             # incoming record is part of the atomic replacement: even just after
-            # this append the journal is <= 512 KiB, with room before rotation.
-            budget = 512 * 1024 - len(data)
+            # this append the journal is <= 3 MiB, with room before rotation.
+            budget = 3 * 1024 * 1024 - len(data)
             offset = max(0, size - budget)
             os.lseek(fd, offset, os.SEEK_SET)
             tail = os.read(fd, budget)
@@ -375,6 +401,8 @@ def _o1_append(record):
             if not written:
                 raise OSError("O1 append failed")
             view = view[written:]
+        if durable:
+            os.fsync(fd)
         return True
     finally:
         if fd is not None:
@@ -388,7 +416,8 @@ def o1_event(ev, **fields):
     class is an exception class NAME, never exception text. label/oldLabel/newLabel
     accept only 16 hex gist-scoped labels. Numeric/bool/None fields: seconds, skew,
     credentialWrite, changed, ok, httpStatus, interval, count, age, retryUntil,
-    firstSeenAt, until, attemptAt, nextAt, asOf. No identifiers or free text.
+    firstSeenAt, until, attemptAt, nextAt, asOf. app_version uses only APP_VERSION
+    as version. No identifiers or free text.
     Invalid events/fields raise ValueError; ev and ts cannot be supplied as fields.
     All writers and rotation share one cross-process lock, including policy events.
     """

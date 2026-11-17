@@ -246,7 +246,7 @@ STATE_FILES = ("state.json", "publisher-state.json")
 O1_EVENTS = frozenset((
     "poll_attempt", "poll_result", "poll_skipped", "pass_skipped", "pass_failed", "token_refresh", "publish",
     "clock_skew", "label_changed", "identity_changed", "remote_retry_capped", "policy_forced_never",
-    "policy_violation", "pending_rotation_lost", "accounts_days_dropped"))
+    "policy_violation", "pending_rotation_lost", "accounts_days_dropped", "app_version"))
 SKIP_REASONS = frozenset((
     "not_due", "fresh_remote", "remote_attempt", "tie_break", "retry_after", "no_github", "no_login", "no_label",
     "state_unsaved", "publish_failed", "token_policy", "busy"))

@@ -3887,10 +3887,24 @@ private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
         }
         do {
             try FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
-            let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600)
+            let fd = open(path, O_RDWR | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
             guard fd >= 0 else { return false }
             defer { close(fd) }
+            var info = stat()
+            guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return false }
             guard fchmod(fd, 0o600) == 0 else { return false }
+            func writeAll(_ output: Int32, _ data: Data) -> Bool {
+                data.withUnsafeBytes { bytes -> Bool in
+                    var offset = 0
+                    while offset < bytes.count {
+                        let n = Darwin.write(output, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                        if n < 0 && errno == EINTR { continue }
+                        guard n > 0 else { return false }
+                        offset += n
+                    }
+                    return true
+                }
+            }
             func truncate(to length: off_t) -> Bool {
                 while ftruncate(fd, length) != 0 {
                     if errno != EINTR { return false }
@@ -3925,16 +3939,58 @@ private let pollLogQueue = DispatchQueue(label: "ccl.poll-log")
                 cursor = start
             }
             guard validEnd == end || truncate(to: validEnd) else { return false }
-            let written = payload.withUnsafeBytes { bytes -> Bool in
-                var offset = 0
-                while offset < bytes.count {
-                    let n = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
-                    if n < 0 && errno == EINTR { continue }
-                    guard n > 0 else { return false }
-                    offset += n
+            if validEnd + off_t(payload.count) > 40 * 1024 * 1024 {
+                // Include incoming events in the 30 MiB budget, as on Linux.
+                let budget = 30 * 1024 * 1024 - payload.count
+                guard budget >= 0 else { return false }
+                let start = max(0, validEnd - off_t(budget))
+                var tail = Data(count: Int(validEnd - start))
+                let readOK = tail.withUnsafeMutableBytes { bytes -> Bool in
+                    var offset = 0
+                    while offset < bytes.count {
+                        let n = pread(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset, start + off_t(offset))
+                        if n < 0 && errno == EINTR { continue }
+                        guard n > 0 else { return false }
+                        offset += n
+                    }
+                    return true
                 }
-                return true
+                guard readOK else { return false }
+                if start > 0 {
+                    if let newline = tail.firstIndex(of: 10) { tail = Data(tail.suffix(from: newline + 1)) }
+                    else { tail = Data() }
+                }
+                let cutoff = Date().timeIntervalSince1970 - 45 * 86400
+                let iso = ISO8601DateFormatter()
+                let fractionalISO = ISO8601DateFormatter()
+                fractionalISO.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                var kept = Data()
+                for line in tail.split(separator: 10) {
+                    guard let row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
+                    let stamp: TimeInterval?
+                    if let number = row["ts"] as? NSNumber { stamp = number.doubleValue }
+                    else if let text = row["ts"] as? String {
+                        stamp = (iso.date(from: text) ?? fractionalISO.date(from: text))?.timeIntervalSince1970
+                    } else { stamp = nil }
+                    guard let stamp = stamp, stamp.isFinite, stamp >= cutoff else { continue }
+                    kept.append(contentsOf: line); kept.append(10)
+                }
+                kept.append(payload)
+                let directory = (path as NSString).deletingLastPathComponent
+                let temporary = directory + "/.poll-log-" + UUID().uuidString
+                let output = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+                guard output >= 0 else { return false }
+                defer { close(output); unlink(temporary) }
+                guard fchmod(output, 0o600) == 0, writeAll(output, kept), fsync(output) == 0 else { return false }
+                // Same-directory rename never exposes partial contents or follows
+                // a destination symlink. Until this succeeds, the old log survives.
+                guard rename(temporary, path) == 0 else { return false }
+                let directoryFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                guard directoryFD >= 0 else { return false }
+                defer { close(directoryFD) }
+                return fsync(directoryFD) == 0
             }
+            let written = writeAll(fd, payload)
             if !written { _ = truncate(to: validEnd) }
             return written
         } catch { return false }
@@ -8882,6 +8938,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var trayAppearanceObs: NSKeyValueObservation?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        if !CommandLine.arguments.contains(where: { $0.contains("selftest") || $0.contains("preview") }) {
+            let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? APP_VERSION
+            _ = appendPollLog([["ev": "app_start", "version": version, "ts": Date().timeIntervalSince1970]])
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "…"
         statusItem.button?.target = self

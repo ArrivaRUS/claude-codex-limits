@@ -7,7 +7,7 @@ IDs (A3-34…A3-38 keep the numbering proposed in T2 §6):
   A3-35 S2  read phase ≤ 60 s (rest skipped, session partial, PATCH №1 passes); one session reopen when PATCH №1 is
             refused as stale; ≥ 3 publish_failed ticks in a row or now − last_attempt ≥ max(I, 24 h) → own schedule;
             failure visible: `publisher --now` exit ≠ 0, sync-state lastError.
-  A3-36 S3  O1 rotation compacts to ≤ 512 KiB (hysteresis: later appends do not rewrite); clock_skew ≤ 1 per pass,
+  A3-36 S3  O1 rotation compacts to ≤ 3 MiB (hysteresis: later appends do not rewrite); clock_skew ≤ 1 per pass,
             sync-state.json written for the skew ≤ 1 per pass.
   A3-37 S4/m5  `publisher --now` with publisher != true → refusal, rc ≠ 0; manual `push` on a publisher machine →
             run_pass("manual"), the accounts block survives.
@@ -274,17 +274,17 @@ class TestA336JournalCompaction(Base):
             f.write(line * (size // len(line)))
         os.chmod(self.path(), 0o600)
 
-    def test_recent_3mib_compacted_to_512kib(self):
-        self.fill_recent(3 * MiB)
+    def test_recent_5mib_compacted_to_3mib(self):
+        self.fill_recent(5 * MiB)
         self.assertTrue(common.o1_event("poll_skipped", product="codex", reason="busy"))
         size = os.path.getsize(self.path())
-        self.assertLessEqual(size, 512 * KiB, "ротация сжимает до ≤ 512 КиБ независимо от возраста строк (%d)" % size)
+        self.assertLessEqual(size, 3 * MiB, "ротация сжимает до ≤ 3 МиБ независимо от возраста строк (%d)" % size)
         self.assertEqual(os.stat(self.path()).st_mode & 0o777, 0o600)
         lines = self.o1()                                      # every line is whole JSON (cut on a line boundary)
         self.assertEqual((lines[-1].get("product"), lines[-1].get("reason")), ("codex", "busy"), "последняя строка цела")
 
     def test_later_appends_do_not_rewrite(self):
-        self.fill_recent(3 * MiB)
+        self.fill_recent(5 * MiB)
         common.o1_event("poll_skipped", product="claude", reason="busy")
         st = os.stat(self.path())
         size = st.st_size
@@ -293,7 +293,7 @@ class TestA336JournalCompaction(Base):
         after = os.stat(self.path())
         self.assertEqual(after.st_ino, st.st_ino, "гистерезис: после сжатия запись — только O_APPEND, без переписывания")
         self.assertGreater(after.st_size, size)
-        self.assertLessEqual(after.st_size, 512 * KiB + 20 * 256)
+        self.assertLessEqual(after.st_size, 3 * MiB + 20 * 256)
 
 
 class TestA336ClockSkewOncePerPass(Base):

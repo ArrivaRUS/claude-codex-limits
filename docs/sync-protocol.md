@@ -744,13 +744,22 @@ directory 0700, file 0600, append-only, one JSON object per line with `ev` and `
 16-hex labels, numbers or an exception **class name** — never identifiers, URLs, paths or error text. The allow-list
 lives in `linux/ccl/common.py` (`O1_EVENTS`, `O1_SKIP_REASONS`, `_O1_ENUMS`); an unknown event or field raises.
 
-**Rotation (compaction with hysteresis).** When an append would take the file over **1 MiB**, the journal is rewritten
+**Rotation (compaction with hysteresis).** When an append would take the file over **4 MiB**, the journal is rewritten
 atomically from its newest tail: only whole lines, only records younger than 45 days (unparsable lines dropped), with
-the new record included, so the result is **≤ 512 KiB**. Compaction then does not run again until the file grows past
-1 MiB. Appends and compaction hold one lock (`publisher-journal`), so no event is lost to a concurrent rotation.
+the new record included, so the result is **≤ 3 MiB**. Compaction then does not run again until the file grows past
+4 MiB. Appends and compaction hold one lock (`publisher-journal`), so no event is lost to a concurrent rotation.
+
+The version row and incoming event share one append/rotation payload. Version metadata is separate from
+`publisher-state.json`, whose quota snapshots can be saved or rolled back independently.
+
+On macOS, `poll-log.jsonl` is compacted over **40 MiB** to **≤ 30 MiB**, including incoming events, with the same
+whole-line/45-day retention. Recovery of an incomplete trailing line precedes compaction. All work runs under
+`pollLogQueue`; replacement uses a private same-directory temporary file, fsync and rename. App launch adds
+`app_start` with the bundle short version and epoch `ts`; `reader_card_state` keeps its six-field C2 contract.
 
 | Event | Fields | When |
 |---|---|---|
+| `app_version` | `version` (application `APP_VERSION`) | first O1 event after a version change; saved in `publisher-journal-state.json` under the journal lock |
 | `poll_attempt` | `product`, `kind` (`auto`·`manual`), `attemptAt` | provider request about to be made |
 | `poll_result` | `product`, `httpStatus`, `result` (`ok`·`failed`) | provider answer accepted |
 | `poll_skipped` | `product`, `reason` | product not polled on this tick; `reason` ∈ `not_due` · `fresh_remote` · `remote_attempt` · `tie_break` · `retry_after` · `no_github` · `no_login` · `no_label` · `state_unsaved` · `publish_failed` · `token_policy` · `busy` |

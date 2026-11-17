@@ -21,7 +21,7 @@ Contract for the developer (names the synth leaves open are tester's choice — 
   SyncResult.partial: True when the cycle merged but skipped a file (size/raw refusal); `ccl-sync push` exits 0 then
       and does not print «Sync failed / Ошибка синхронизации».
   sync-state.json rejectedRaw = {sha256(raw_url)[:16]: refusal ts}, 24 h, ≤ 64 (oldest evicted), no URL/gist id/sha (N9, Q4).
-  Files: <STATE>/publisher.jsonl (O1, 0600, O_APPEND|O_CREAT, rotation > 1 MiB drops lines older than 45 days, atomic),
+  Files: <STATE>/publisher.jsonl (O1, 0600, O_APPEND|O_CREAT, rotation > 4 MiB keeps ≤ 3 MiB/45 days, atomic),
       <STATE>/publisher-state.json, state.json (autoPollState / quotaServerRetryAt — never a foreign deadline).
   O1 line = {"ev": <event>, "ts": ISO, scalar enumerated fields}; events — rl.O1_EVENTS, poll_skipped reasons —
       rl.SKIP_REASONS; caught exception → {"ev": "pass_failed", "class": <ExceptionClass>} (no text);
@@ -617,11 +617,11 @@ class TestA317Journal(Base):
         old = json.dumps({"ev": "poll_attempt", "ts": rl.iso(NOW - 50 * DAY), "product": "claude"}) + "\n"
         recent = json.dumps({"ev": "poll_attempt", "ts": rl.iso(NOW - DAY), "product": "claude"}) + "\n"
         with open(self.path(), "w", encoding="utf-8") as f:
-            f.write(old * (1100 * 1024 // len(old)) + recent * 50)
+            f.write(old * (4200 * 1024 // len(old)) + recent * 50)
         os.chmod(self.path(), 0o600)
         self.tick()
         size = os.path.getsize(self.path())
-        self.assertLess(size, 1024 * 1024, "ротация > 1 МБ")
+        self.assertLessEqual(size, 3 * MiB, "ротация > 4 МиБ оставляет ≤ 3 МиБ")
         lines = self.o1()                                       # every line still valid JSON
         self.assertFalse([e for e in lines if ts(e.get("ts")) is not None and ts(e["ts"]) < NOW - 45 * DAY],
                          "строки старше 45 дней отброшены")
@@ -838,12 +838,12 @@ class TestA324PolicyEventRotation(t.Base):
         path = os.path.join(common.STATE_DIR, "publisher.jsonl")
         old = json.dumps({"ev": "policy_violation", "ts": rl.iso(NOW - 50 * DAY)}) + "\n"
         with open(path, "w", encoding="utf-8") as f:
-            f.write(old * (1100 * 1024 // len(old)))
+            f.write(old * (4200 * 1024 // len(old)))
         os.chmod(path, 0o600)
         common.credential_policy_event("pending_rotation_lost", product="claude")
-        self.assertLess(os.path.getsize(path), 1024 * 1024)
+        self.assertLessEqual(os.path.getsize(path), 3 * MiB)
         events = rl.read_o1()
-        self.assertEqual([e.get("ev") for e in events], ["pending_rotation_lost"])
+        self.assertEqual([e.get("ev") for e in events], ["app_version", "pending_rotation_lost"])
         self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
 

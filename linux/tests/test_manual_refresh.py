@@ -522,7 +522,8 @@ class TestCredentialWriteback(SyntheticCase):
     def writeback(self, product, first, current, rotated, writer):
         path = self.credential_path if product == "claude" else self.auth_path
         with patch.object(limits, "_read_json_retry", return_value=copy.deepcopy(current)) as reader, \
-             patch.object(limits, "_rewrite_json", writer):
+             patch.object(limits, "_rewrite_json", writer), \
+             patch.object(common, "o1_event", return_value=True):  # journal/version state is outside this RAM-only fixture
             if product == "claude":
                 outcome = limits._save_claude_tokens(path, "fixture-old-refresh", rotated, NOW, copy.deepcopy(first))
             else:
