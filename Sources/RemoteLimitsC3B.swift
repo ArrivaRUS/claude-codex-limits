@@ -489,7 +489,7 @@ func remotePresentationView(_ raw: AccountView, sync: ReaderSyncState, now: Date
     switch sync.phase {
     case .off, .revoked, .awaitingCode: view.state = .signedOut
     case .on:
-        if sync.warning != nil { view.state = .syncStalled }
+        if sync.isStalled(now: now) { view.state = .syncStalled }
     }
     if view.state == .signedOut {
         view.data.session = nil; view.data.sessionReset = nil
@@ -809,12 +809,15 @@ func remotePollTooltip(_ sec: TimeInterval, views: [AccountView], enabled: Set<S
 
 // Time-driven tray redraws do not depend on a local provider poll. Strict `>`
 // freshness boundaries get a millisecond so the redraw observes the new state.
-func remoteMenuRefreshDeadline(views: [AccountView], now: Date) -> Date? {
+func remoteMenuRefreshDeadline(views: [AccountView], sync: ReaderSyncState, now: Date) -> Date? {
     var dates: [Date] = []
     func add(_ date: Date?, after: Bool = false) {
         guard let date = date, date.timeIntervalSince1970.isFinite else { return }
         let boundary = after ? date.addingTimeInterval(0.001) : date
         if boundary > now { dates.append(boundary) }
+    }
+    if sync.phase == .on && !sync.isStalled(now: now) && views.contains(where: { !$0.isLocal }) {
+        add(sync.readFreshUntil, after: true)
     }
     for view in views {
         let data = view.data

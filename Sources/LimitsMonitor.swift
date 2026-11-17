@@ -1519,6 +1519,7 @@ let MACHINE_ID_PATH = DATA_DIR + "/machine-id"
 let SYNC_KEEP_DAYS: Double = 45
 let SYNC_MANIFEST = "ccl-sync.json"
 let SYNC_KEYCHAIN_BACKOFF: TimeInterval = 30 * 60
+let SYNC_INTERVAL: TimeInterval = 600
 
 private func syncAPIOrigin(_ url: String) -> Bool {
     guard let c = URLComponents(string: url), c.scheme == "https",
@@ -3870,8 +3871,9 @@ func readLocalAccountIds(products: Set<String> = ["claude", "codex"], paths: [St
 private func localHistoryKey(_ product: String) -> String {
     let snapshot = readerLocalSnapshot.snapshot()
     // Hidden labels and the active gist must not change the local history identity.
+    // Identity-only resolution has no remote accounts or successful read to report.
     let views = resolveAccounts(local: (LimitData(), LimitData()), localIds: snapshot.ids, remote: SyncRemoteCache(),
-                                hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: Date())
+                                hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: nil), now: Date())
     return views.first { $0.product == product && $0.isLocal }?.historyKey ?? "l:legacy"
 }
 
@@ -4453,7 +4455,7 @@ struct SyncUIState {
     var login: String? = nil
     var userCode: String? = nil
     var machines: [SyncMachine] = []
-    var lastSync: Date? = nil              // last full cycle that read the gist (syncLastOkAt)
+    var lastSync: Date? = nil              // last successful gist read, before upload (syncLastOkAt)
     var error: String? = nil               // sign-in flow only
     var lastAttemptAt: Date? = nil         // syncLastAttemptAt
     var firstAttemptAt: Date? = nil        // this process only; never restored from defaults
@@ -5287,7 +5289,7 @@ func localAccountIntervals(auto: Bool, states: [String: AutoPollState], manual: 
 private func captureAccountFrame(_ claude: LimitData, _ codex: LimitData, now: Date) -> RemoteAccountFrame {
     let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
     let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
-    let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now))
+    let sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: now), lastReadOkAt: ui.lastSync)
     let hidden = hiddenAccounts(), menu = menuAccountSelection()
     if let all = REMOTE_ACCOUNT_VIEWS_PREVIEW {
         let all = applyingLocalCaptions(all, now: now).map { remotePresentationView($0, sync: sync, now: now) }
@@ -5351,7 +5353,7 @@ func cardPresentation(_ view: AccountView, narrow: Bool, now: Date = Date(),
     else {
         let isolated = CommandLine.arguments.contains { $0.contains("selftest") || $0.contains("preview") }
         let ui = isolated ? (SYNC_PREVIEW ?? SyncUIState()) : syncUIState()
-        sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at))
+        sync = ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at), lastReadOkAt: ui.lastSync)
     }
     let readerPhase = REMOTE_RENDER_ISOLATED ? REMOTE_READER_MANUAL_PHASE : remoteManualRefresh?.phase(now: at)
     let manualPhase = REMOTE_RENDER_ISOLATED ? REMOTE_MANUAL_PHASE
@@ -8388,12 +8390,12 @@ func runCaptionEditorAppKitSelfTests(report: ((Bool, String) -> Void)? = nil) ->
     let account = AccountView(product: "codex", label: label, historyKey: label, caption: "Team",
         data: LimitData(session: 20, weekly: 40, asOf: now), isLocal: false, tier: nil,
         usageDays: [:], machines: ["vps"], state: .fresh)
-    let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+    let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on, lastReadOkAt: now),
         allViews: [account], visibleViews: [account], displayedViews: [account])
     // NSView.draw captures a NEW frame; the bitmap-only scoped frame alone is
     // insufficient. Keep the same account/sync in the real view's capture seam.
     REMOTE_ACCOUNT_VIEWS_PREVIEW = [account]
-    SYNC_PREVIEW = SyncUIState(phase: .on)
+    SYNC_PREVIEW = SyncUIState(phase: .on, lastSync: now)
     var activationAvailable = false
     func waitFor(_ ready: () -> Bool) {
         let end = Date().addingTimeInterval(1)
@@ -8680,7 +8682,7 @@ func runGitHubKeychainRetryAppKitSelfTests(check: (Bool, String) -> Void) {
                                     "C5-14 reason-only fixture has no persisted error fallback")
                           }
                           SYNC_PREVIEW = state
-                          let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+                          let frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on, lastReadOkAt: now),
                               allViews: [], visibleViews: [], displayedViews: [])
                           withRemoteRenderScene(frame: frame, timeZone: TimeZone(secondsFromGMT: 0)!, manual: .idle) {
                               let height = settingsTotalHeight(AboutState())
@@ -9034,7 +9036,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let snapshot = readerLocalSnapshot.snapshot()
             let ui = GitHubSync.shared.ui
             readerDidSync(cache, at: at, local: snapshot.local, localIds: snapshot.ids, hidden: hiddenAccounts(),
-                          sync: ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at)),
+                          sync: ReaderSyncState(phase: ui.phase, warning: syncWarning(ui, now: at), lastReadOkAt: ui.lastSync),
                           history: .shared, pollLog: POLL_LOG_PATH)
         }
         GitHubSync.shared.onActivityRead = { [weak self] cache, _ in
@@ -9087,7 +9089,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var logsTimer: Timer?
     func startLogsTimer() {
         logsTimer?.invalidate()
-        let t = Timer(timeInterval: 600, repeats: true) { [weak self] _ in
+        let t = Timer(timeInterval: SYNC_INTERVAL, repeats: true) { [weak self] _ in
             GitHubSync.shared.syncNow()
             guard advancedEnabled() else { return }
             UsageLogs.shared.scanAsync { changed in
@@ -10739,7 +10741,7 @@ if CommandLine.arguments.contains("--subscriptions-selftest") {
         }
         func legendFooter(_ views: [AccountView], _ intervals: [String: TimeInterval], png: String? = nil)
             -> (ctx: CGContext, hits: [Hit], lines: [AutoLegendLine])? {
-            let frame = RemoteAccountFrame(now: legendNow, sync: ReaderSyncState(phase: .on),
+            let frame = RemoteAccountFrame(now: legendNow, sync: ReaderSyncState(phase: .on, lastReadOkAt: legendNow),
                                            allViews: views, visibleViews: views, displayedViews: views)
             return withRemoteRenderScene(frame: frame, timeZone: legendZone, manual: .idle) { () -> (ctx: CGContext, hits: [Hit], lines: [AutoLegendLine])? in
                 guard let ctx = appKitBitmap(720, 80, "Auto legend footer") else { return nil }

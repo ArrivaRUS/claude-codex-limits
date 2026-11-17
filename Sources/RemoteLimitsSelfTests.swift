@@ -30,7 +30,7 @@ import Foundation
 //   struct RemoteModel { name: String; pct: Double; resetAt: Date? }
 //   struct RemoteSchedule { mode: String; interval: Int; nextAt: Date?; backoff: Bool? }
 //   struct RemoteCaption { text: String; setAt: Date? }
-//   struct ReaderSyncState { phase: SyncPhase; warning: String? }
+//   struct ReaderSyncState { phase: SyncPhase; warning: String?; lastReadOkAt: Date?; readFreshnessAllowance: TimeInterval }
 //   func resolveAccounts(local: (LimitData, LimitData), localIds: [String: String], remote: SyncRemoteCache,
 //                        hidden: Set<String>, menu: [String: String], sync: ReaderSyncState, now: Date) -> [AccountView]
 //   struct AccountView { product: String; label: String?; historyKey: String; caption: String; data: LimitData;
@@ -232,7 +232,7 @@ private func rlResolve(_ cache: SyncRemoteCache, claude: LimitData = rlAbsent(),
                        ids: [String: String] = [:], hidden: Set<String> = [], phase: SyncPhase = .on,
                        warning: String? = nil, now: Date) -> [AccountView] {
     resolveAccounts(local: (claude, codex), localIds: ids, remote: cache, hidden: hidden, menu: [:],
-                    sync: ReaderSyncState(phase: phase, warning: warning), now: now)
+                    sync: ReaderSyncState(phase: phase, warning: warning, lastReadOkAt: now), now: now)
 }
 private func rlKey(_ v: AccountView) -> String { v.product + ":" + (v.isLocal ? "local" : (v.label ?? "nil")) }
 
@@ -774,6 +774,7 @@ private func rlC106(_ expect: RLExpect) {
         let seen = now.addingTimeInterval(flags.contains(5) ? -40 * 60 : -5 * 60)
         return rlMachineFile("fixturevps", name: "vps", updated: seen, lastSeenAt: seen, accounts: [record])
     }
+    // rlResolve supplies lastReadOkAt = at: source-offline checks require a fresh reader.
     func state(_ text: String, at: Date, warning: String? = nil) -> (Int?, RemoteSource?) {
         let views = rlResolve(rlCache(["machine-fixturevps.json": text], now: at), warning: warning, now: at)
         let card = views.filter { $0.product == "claude" && $0.label == RL_CLAUDE_V11 && !$0.isLocal }
@@ -1427,7 +1428,7 @@ private func rlC119(_ defaults: MemorySelfTestDefaults, _ root: String, _ expect
     var mine = LimitData(); mine.session = 10; mine.asOf = now.addingTimeInterval(-30); mine.apiFresh = true
     let views = decoded.map {
         resolveAccounts(local: (mine, rlAbsent()), localIds: ["claude": RL_UUID_A], remote: $0, hidden: [], menu: [:],
-                        sync: ReaderSyncState(phase: .on), now: now).filter { $0.product == "claude" }
+                        sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now).filter { $0.product == "claude" }
     } ?? []
     c.add("after a restart (decode) the local Claude still groups with the vps record",
           views.count == 1 && views.first?.isLocal == true && views.first?.label == label && views.first?.machines.contains("vps") == true)

@@ -90,7 +90,7 @@ private func c5C501(_ check: C5Check) {
                   "C5-01 own-file caption participation does not import own usage, account or machine")
         }
         let views = resolveAccounts(local: (LimitData(), LimitData()), localIds: [:], remote: cache,
-            hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: now)
+            hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now)
         guard let view = views.first(where: { $0.label == label }) else {
             check(false, "C5-01 \(id): golden account reaches resolver"); continue
         }
@@ -409,7 +409,7 @@ private func c5DateView(_ at: Date, state: RemoteCardState = .offline, machine: 
 
 private func c5C506(_ check: C5Check) {
     let now = c5ISO("2026-10-12T16:00:00Z")!, yesterday = c5ISO("2026-10-11T15:00:00Z")!
-    let zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on, lastReadOkAt: now)
     let view = c5DateView(yesterday)
     let narrow = remotePresentationCard(view, sync: sync, language: "en", narrow: true, now: now, timeZone: zone)
     let wide = remotePresentationCard(view, sync: sync, language: "en", narrow: false, now: now, timeZone: zone)
@@ -525,7 +525,7 @@ private func c5C509(_ check: C5Check) {
     }
     let view = c5DateView(C5_NOW.addingTimeInterval(-86400))
     for narrow in [true, false] {
-        let p = remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: "en", narrow: narrow,
+        let p = remotePresentationCard(view, sync: ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW), language: "en", narrow: narrow,
             now: C5_NOW, timeZone: TimeZone(secondsFromGMT: 0)!)
         check(remoteVisibleSourceLine(p, advanced: false).isEmpty
               && remoteVisibleSourceLine(p, advanced: true).isEmpty && !p.statusLine.isEmpty,
@@ -610,7 +610,7 @@ private func c5C511(_ check: C5Check) {
     cache.accounts = [datedPeer]
     let own = LimitData(session: 20, asOf: C5_NOW.addingTimeInterval(-800), apiFresh: true)
     let frame = remoteAccountFrame(local: (LimitData(present: false), own), localIds: ["codex": id], remote: cache,
-        hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: C5_NOW,
+        hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW), now: C5_NOW,
         localMachineName: "macbook", localMachineId: "mac", localIntervals: ["codex": 900])
     let resolved = frame.allViews.first { $0.label == label }
     check(resolved?.sourceReadings.map { $0.asOf } == [own.asOf, datedPeer.asOf]
@@ -820,7 +820,7 @@ private func c5C519(_ check: C5Check) {
     let otherLabel = accountLabel(product: "codex", localId: "c519-other-account", gistId: gist)!
     let ownAt = C5_NOW.addingTimeInterval(-9000), peerAt = C5_NOW.addingTimeInterval(-300)
     let reset = C5_NOW.addingTimeInterval(4 * 86400)
-    let sync = ReaderSyncState(phase: .on), zone = TimeZone(secondsFromGMT: 0)!
+    let sync = ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW), zone = TimeZone(secondsFromGMT: 0)!
     let own = LimitData(weekly: 49, weeklyReset: reset, plan: "pro", asOf: ownAt, apiFresh: true)
     // c4CacheQuotaCompletion persists accountId beside ld2dict's values.
     var entry = ld2dict(own); entry["accountId"] = id
@@ -892,7 +892,7 @@ private func c5C520(_ check: C5Check) {
     let label = accountLabel(product: "codex", localId: id, gistId: gist)!
     let ownAt = C5_NOW.addingTimeInterval(-4 * 3600), peerAt = C5_NOW.addingTimeInterval(-360)
     let reset = C5_NOW.addingTimeInterval(4 * 86400)
-    let sync = ReaderSyncState(phase: .on), zone = TimeZone(secondsFromGMT: 0)!
+    let sync = ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW), zone = TimeZone(secondsFromGMT: 0)!
     let own = LimitData(weekly: 65, weeklyReset: reset, plan: "pro", asOf: ownAt, apiFresh: true)
     var entry = ld2dict(own); entry["accountId"] = id
     let store = ReaderLocalSnapshot(); store.restore(cache: ["codex": entry])
@@ -980,7 +980,7 @@ private func c5C520(_ check: C5Check) {
 private func c5C521(_ check: C5Check) {
     // 3.4.1 (owner 2026-11-02, as linux paced_limits): Codex shows a session row
     // only while the service reports a session value; Claude always keeps it.
-    let zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW)
     typealias Scene = (rows: [String], height: Double, sessionUsed: Double?)
     func scene(_ view: AccountView) -> Scene {
         let frame = RemoteAccountFrame(now: C5_NOW, sync: sync, allViews: [view], visibleViews: [view], displayedViews: [view])
@@ -1126,7 +1126,7 @@ private func c5C524Fixture() -> (UsageIndex, SyncRemoteCache, [AccountView]) {
     var local = UsageIndex(); var usage = DayModelUsage(); usage.input = 1_000_000; usage.turns = 1
     local.add("codex", day, "gpt-6.1-sol", usage); local.accountByDay = ["codex": [day: ""]]
     let views = resolveAccounts(local: (LimitData(present: false), LimitData(plan: "pro", asOf: C5_NOW)),
-        localIds: ["codex": "c524-own-codex"], remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: C5_NOW)
+        localIds: ["codex": "c524-own-codex"], remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: C5_NOW), now: C5_NOW)
     return (local, cache, views)
 }
 private func c5C524(_ check: C5Check) {

@@ -378,16 +378,17 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     var remote = c3bView()
     remote.data.source?.freshUntil = now.addingTimeInterval(60)
     remote.data.sessionReset = now.addingTimeInterval(30)
-    expect(remoteMenuRefreshDeadline(views: [remote], now: now) == now.addingTimeInterval(30),
+    expect(remoteMenuRefreshDeadline(views: [remote], sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now) == now.addingTimeInterval(30),
            "C3-17/A3: tray refresh deadline chooses reset before source freshness boundary")
     remote.data.sessionReset = now.addingTimeInterval(600)
-    expect(remoteMenuRefreshDeadline(views: [remote], now: now).map { abs($0.timeIntervalSince(now) - 60.001) < 0.00001 } == true,
+    expect(remoteMenuRefreshDeadline(views: [remote], sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now).map { abs($0.timeIntervalSince(now) - 60.001) < 0.00001 } == true,
            "C3-17/A3: tray refresh deadline follows source horizon without a local poll")
-    expect(remoteMenuRefreshDeadline(views: [], now: now) == nil,
+    expect(remoteMenuRefreshDeadline(views: [], sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now) == nil,
            "C3-17/A3: no accounts require no freshness timer")
     var noValues = c3bView(); noValues.data = LimitData(present: false)
-    expect(remoteMenuRefreshDeadline(views: [noValues], now: now) == nil,
-           "C3-17/A3: account without values or timestamps needs no freshness timer")
+    expect(remoteMenuRefreshDeadline(views: [noValues], sync: ReaderSyncState(phase: .on, lastReadOkAt: now), now: now)
+           == now.addingTimeInterval(SYNC_INTERVAL + 120 + 0.001),
+           "C3-17/A3: foreign account without source timestamps still redraws when reader freshness expires")
     let exactBoundary = now.addingTimeInterval(60)
     expect(!metricIsStale(remote.data, metric: "weekly", now: exactBoundary)
            && metricIsStale(remote.data, metric: "weekly", now: exactBoundary.addingTimeInterval(0.001)),
@@ -403,7 +404,7 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     if let bytes = try? JSONSerialization.data(withJSONObject: object) {
         let cache = mergeV11(["machine-c318-vps.json": String(decoding: bytes, as: UTF8.self)], excluding: "c318-mac", now: now)
         let wireViews = resolveAccounts(local: (LimitData(present: false), LimitData(present: false)), localIds: [:],
-            remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: now)
+            remote: cache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), now: now)
         let expected = "A" + String(repeating: "Z", count: 31)
         expect(cache.captions?[captionLabel]?.text == expected && wireViews.first?.caption == expected
                && c3bMenu(wireViews).lines.first?.caption == expected && c3bSettings(wireViews).accounts.first?.title == expected,
@@ -501,15 +502,19 @@ private func c3bReviewRegressions(_ expect: C3BExpect) {
     let connectedLocal = remotePresentationView(c3bView(local: true), sync: disconnected, now: now)
     expect(connectedLocal.state == .fresh && connectedLocal.data.session == 20 && connectedLocal.data.weekly == 40,
            "C3-26/V4: GitHub reader sign-out preserves this-machine signed-in values")
-    let warning = ReaderSyncState(phase: .on, warning: "Fixture warning")
-    expect([c3bView(), c3bView(1, product: "codex")].allSatisfy {
-        remotePresentationView($0, sync: warning, now: now).state == .syncStalled
-    }, "C3-26/V4: sync warning governs every foreign account, including fresh neighbouring fixtures")
+    let stalledReaders = [ReaderSyncState(phase: .on, warning: "Fixture warning", lastReadOkAt: now),
+                          ReaderSyncState(phase: .on, lastReadOkAt: now.addingTimeInterval(-(SYNC_INTERVAL + 121))),
+                          ReaderSyncState(phase: .on, lastReadOkAt: nil)]
+    expect(stalledReaders.allSatisfy { sync in
+        [c3bView(), c3bView(1, product: "codex")].allSatisfy {
+            remotePresentationView($0, sync: sync, now: now).state == .syncStalled
+        }
+    }, "C3-26/V4: warning, old or missing successful read governs every foreign account")
     let poll = RemoteManualPhase.pollAllowed(now.addingTimeInterval(900))
-    let foreignPoll = remotePresentationCard(c3bView(), sync: ReaderSyncState(phase: .on), language: "en", narrow: true, now: now, timeZone: zone, manual: poll)
+    let foreignPoll = remotePresentationCard(c3bView(), sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: "en", narrow: true, now: now, timeZone: zone, manual: poll)
     expect(!foreignPoll.statusLine.contains("Poll allowed"), "C3-26/V8: provider pollAllowed status never appears on foreign account")
     var local = c3bView(local: true)
-    let localSource = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: "ru", narrow: false, now: now, timeZone: zone)
+    let localSource = remotePresentationCard(local, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: "ru", narrow: false, now: now, timeZone: zone)
     expect(localSource.sourceLine == "Данные 15:50", "C3-26/V7: this-machine snapshot source omits remote machine phrase")
     local.isLocal = false; local.data.source = c3bView().data.source
     let short = remotePresentationSourceLine(local, language: "ru", narrow: true, now: now, timeZone: zone)
@@ -686,7 +691,7 @@ private func c3bC328(_ expect: C3BExpect) {
 }
 
 private func c3bC329(_ expect: C3BExpect) {
-    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on, lastReadOkAt: c3bNow())
     let local = c3bView(product: "codex", local: true)
     for language in ["ru", "en"] {
         let single = remotePresentationCard(local, sync: ReaderSyncState(phase: .off), language: language, narrow: true,
@@ -782,7 +787,7 @@ private func c3bC331(_ expect: C3BExpect) {
         var view = c3bView()
         let raw = language == "ru" ? "Рабочая подписка для больших задач" : "Work subscription for large tasks"
         view.caption = String(raw.prefix(32))
-        let card = remotePresentationCard(view, sync: ReaderSyncState(phase: .on), language: language,
+        let card = remotePresentationCard(view, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: language,
             narrow: false, now: now, timeZone: zone)
         expect(view.caption.unicodeScalars.count == 32 && card.simpleTitle == view.caption
                && card.advancedTitle == view.caption && card.accessibilityLabel == view.caption,
@@ -836,11 +841,11 @@ private func c3bC333(_ expect: C3BExpect) {
         clock = checkedAt.addingTimeInterval(age)
         let readerPhase = reader.phase(now: clock)
         for language in ["ru", "en"] {
-            let localCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: language,
+            let localCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: language,
                 narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
-            let foreignCard = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on), language: language,
+            let foreignCard = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: language,
                 narrow: true, now: clock, timeZone: zone, manual: pollAllowed, readerManual: readerPhase)
-            let idleCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on), language: language,
+            let idleCard = remotePresentationCard(local, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: language,
                 narrow: true, now: clock, timeZone: zone, manual: .idle, readerManual: readerPhase)
             let noDeadline = !localCard.statusLine.contains("Опрос можно") && !localCard.statusLine.contains("Poll allowed")
             expect(localCard.statusLine == idleCard.statusLine && noDeadline,
@@ -852,7 +857,7 @@ private func c3bC333(_ expect: C3BExpect) {
                    "C3-33/Q6: \(language) every foreign card shows successful read for exactly 60 seconds")
         }
     }
-    let orphan = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on), language: "en", narrow: true,
+    let orphan = remotePresentationCard(foreign, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: "en", narrow: true,
         now: checkedAt, timeZone: zone, manual: pollAllowed)
     expect(orphan.statusLine.isEmpty, "C3-33/Q6: provider cooldown without a reader result never fabricates GitHub checked")
 }
@@ -881,7 +886,7 @@ private func c3bC334(_ expect: C3BExpect) {
 }
 
 private func c3bC335(_ expect: C3BExpect) {
-    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on)
+    let now = c3bNow(), zone = TimeZone(secondsFromGMT: 0)!, sync = ReaderSyncState(phase: .on, lastReadOkAt: c3bNow())
     let localID = "c3350000-1111-4222-8333-444455556666"
     guard let key = accountLabelKey(gistId: "c335-synthetic-gist"),
           let label = accountLabel(product: "codex", localId: localID, labelKey: key) else {
@@ -942,7 +947,8 @@ private func c3bC336(_ expect: C3BExpect) {
             var view = c3bView(state: state)
             view.data.asOf = seen; view.data.source?.asOf = seen; view.data.source?.lastSeenAt = seen
             let warning = language == "ru" ? "Синхронизация стоит с 11.10 15:00: тестовая ошибка" : "Sync stalled since 11.10 15:00: synthetic error"
-            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil,
+                                       lastReadOkAt: state == .syncStalled ? nil : now)
             let narrow = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
             let wide = remotePresentationCard(view, sync: sync, language: language, narrow: false, now: now, timeZone: zone)
             expect(remoteVisibleSourceLine(narrow, advanced: false).isEmpty
@@ -975,7 +981,7 @@ private func c3bC336(_ expect: C3BExpect) {
             expect(advanced == wide.sourceLine, "C3-36/D1: fitted Advanced source retains HH:mm")
         }
         let today = c3bView(state: .offline)
-        let card = remotePresentationCard(today, sync: ReaderSyncState(phase: .on), language: language,
+        let card = remotePresentationCard(today, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: language,
             narrow: true, now: now, timeZone: zone)
         expect(card.sourceLine == (language == "ru" ? "Данные с vps от 15:50" : "Data from vps at 15:50")
                && card.statusLine == (language == "ru" ? "vps не на связи с 16:00" : "vps offline since 16:00"),
@@ -984,7 +990,7 @@ private func c3bC336(_ expect: C3BExpect) {
     var independent = c3bView(state: .offline)
     independent.data.asOf = seen.addingTimeInterval(-86400)
     independent.data.source?.asOf = independent.data.asOf; independent.data.source?.lastSeenAt = seen
-    let distinct = remotePresentationCard(independent, sync: ReaderSyncState(phase: .on), language: "en",
+    let distinct = remotePresentationCard(independent, sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), language: "en",
         narrow: true, now: now, timeZone: zone)
     expect(distinct.sourceLine == "From vps on 10.10" && distinct.statusLine == "vps offline since 11.10 ›"
            && distinct.tooltip.contains("10.10 15:00") && distinct.tooltip.contains("11.10 15:00"),
@@ -993,7 +999,7 @@ private func c3bC336(_ expect: C3BExpect) {
     let midnight = now.addingTimeInterval(-15.5 * 3600), late = midnight.addingTimeInterval(-90 * 60)
     var boundary = c3bView(state: .offline)
     boundary.data.asOf = late; boundary.data.source?.asOf = late; boundary.data.source?.lastSeenAt = late
-    let shifted = remotePresentationCard(boundary, sync: ReaderSyncState(phase: .on), language: "en", narrow: true,
+    let shifted = remotePresentationCard(boundary, sync: ReaderSyncState(phase: .on, lastReadOkAt: midnight), language: "en", narrow: true,
         now: midnight, timeZone: TimeZone(secondsFromGMT: 3 * 3600)!)
     expect(shifted.sourceLine == "Data from vps at 02:00" && shifted.statusLine == "vps offline since 02:00",
            "C3-36/D1: 'today' follows injected timezone rather than UTC/host day")
@@ -1055,7 +1061,8 @@ private func c3bC339(_ expect: C3BExpect) {
             view.data.source?.statusMachineName = machine
             view.data.asOf = seen; view.data.source?.asOf = seen; view.data.source?.lastSeenAt = seen
             let warning = language == "ru" ? "Синхронизация стоит с 11.10 15:00" : "Sync stalled since 11.10 15:00"
-            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil,
+                                       lastReadOkAt: state == .syncStalled ? nil : now)
             let card = remotePresentationCard(view, sync: sync, language: language, narrow: true, now: now, timeZone: zone)
             let status = remoteFittedStatusLine(view, presentation: card, language: language, narrow: true,
                 now: now, timeZone: zone, availableWidth: 130, measure: measure)
@@ -1238,7 +1245,7 @@ private func c3bAutoLegend(_ expect: C3BExpect) {
         for localAge in [600.0, 30.0] {
             var own = codex.data; own.asOf = now.addingTimeInterval(-localAge)
             let frame = remoteAccountFrame(local: (LimitData(present: false), own), localIds: ["codex": localID],
-                remote: mergedCache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: now,
+                remote: mergedCache, hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: c3bNow()), now: now,
                 localMachineName: "macbook", localMachineId: "c3b-mac", localIntervals: ["codex": 1800])
             guard let merged = frame.displayedViews.first(where: { $0.product == "codex" }) else {
                 expect(false, "Legend-merged-peer \(language): merged Codex exists"); continue

@@ -186,6 +186,16 @@ struct RemoteSource: Codable {
 struct ReaderSyncState {
     var phase: SyncPhase
     var warning: String? = nil
+    var lastReadOkAt: Date? = nil
+    var readFreshnessAllowance: TimeInterval = SYNC_INTERVAL + 120
+
+    var readFreshUntil: Date? { lastReadOkAt?.addingTimeInterval(readFreshnessAllowance) }
+
+    // Card-only freshness: the global sync banner keeps its error/timing rule.
+    func isStalled(now: Date) -> Bool {
+        guard warning == nil, let until = readFreshUntil else { return true }
+        return now > until
+    }
 }
 
 enum RemoteCardState: Int {
@@ -865,7 +875,7 @@ private extension RemoteLimitsWire {
 
     static func state(_ source: RemoteSource, sync: ReaderSyncState, now: Date) -> RemoteCardState {
         switch sync.phase { case .off, .revoked, .awaitingCode: return .signedOut; case .on: break }
-        if sync.warning != nil { return .syncStalled }
+        if sync.isStalled(now: now) { return .syncStalled }
         if let last = source.lastSeenAt, last < now.addingTimeInterval(-1800) { return .offline }
         if ["expired", "signed_out"].contains(source.status) { return .signInRequired }
         if let retry = source.retryUntil, retry > now { return .serviceWait }

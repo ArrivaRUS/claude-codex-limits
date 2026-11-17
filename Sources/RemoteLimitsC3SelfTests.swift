@@ -82,9 +82,9 @@ private func c3View(state: RemoteCardState = .fresh, status: String = "ok", prod
                        data: d, isLocal: false, tier: "default_claude_max_20x", usageDays: [:], machines: ["vps"], state: state)
 }
 private func c3Presentation(_ view: AccountView, language: String = "ru", narrow: Bool = true,
-                            now: Date = C3_NOW, sync: ReaderSyncState = ReaderSyncState(phase: .on),
+                            now: Date = C3_NOW, sync: ReaderSyncState? = nil,
                             manual: RemoteManualPhase = .idle) -> RemoteCardPresentation {
-    remoteCardPresentation(view, sync: sync, language: language, narrow: narrow, now: now, timeZone: C3_ZONE, manual: manual)
+    remoteCardPresentation(view, sync: sync ?? ReaderSyncState(phase: .on, lastReadOkAt: now), language: language, narrow: narrow, now: now, timeZone: C3_ZONE, manual: manual)
 }
 private func c3Cache(_ view: AccountView) -> SyncRemoteCache {
     var a = RemoteAccount(product: view.product, label: view.label, status: view.data.source?.status ?? "ok")
@@ -98,7 +98,7 @@ private func c3Cache(_ view: AccountView) -> SyncRemoteCache {
 }
 private func c3Resolve(_ cache: SyncRemoteCache, now: Date, phase: SyncPhase = .on) -> [AccountView] {
     resolveAccounts(local: (c3Absent(), c3Absent()), localIds: [:], remote: cache, hidden: [], menu: [:],
-                    sync: ReaderSyncState(phase: phase), now: now)
+                    sync: ReaderSyncState(phase: phase, lastReadOkAt: now), now: now)
 }
 
 // C3-01 / Т16, 012: untrusted captions never select an action or destination.
@@ -144,7 +144,8 @@ private func c3C302(_ expect: C3Expect) {
         guard let state = RemoteCardState(rawValue: g.state) else { expect(false, "C3-02 valid golden state"); continue }
         var v = c3View(state: state, status: g.status)
         let sync = ReaderSyncState(phase: state == .signedOut ? .off : .on,
-                                   warning: state == .syncStalled ? (g.language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.") : nil)
+                                   warning: state == .syncStalled ? (g.language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.") : nil,
+                                   lastReadOkAt: state == .syncStalled || state == .signedOut ? nil : C3_NOW)
         if state == .signedOut { v.data = LimitData(present: true) }
         let p = c3Presentation(v, language: g.language, narrow: g.narrow, sync: sync)
         let key = "C3-02 V5 \(g.case)/\(g.language)/\(g.narrow ? "narrow" : "wide")"
@@ -328,15 +329,19 @@ private func c3C304(_ expect: C3Expect) {
     seed.data.asOf = C3_NOW.addingTimeInterval(-1500); seed.data.source?.asOf = seed.data.asOf
     seed.data.source?.interval = 900; seed.data.source?.nextAt = C3_NOW.addingTimeInterval(-600)
     let frozen = c3Cache(seed) // lastSeenAt = C3_NOW; freshUntil = C3_NOW + 600.
-    let transitions: [(TimeInterval, RemoteCardState)] = [(0, .fresh), (600, .fresh), (601, .stale), (1800, .stale), (1801, .offline)]
-    for (elapsed, expected) in transitions {
+    let transitions: [(TimeInterval, Date?, RemoteCardState)] = [
+        (0, C3_NOW, .fresh), (600, C3_NOW, .fresh), (601, C3_NOW, .stale),
+        (1800, C3_NOW, .syncStalled), (1801, C3_NOW, .syncStalled),
+        (1801, C3_NOW.addingTimeInterval(1801), .offline)
+    ]
+    for (elapsed, lastRead, expected) in transitions {
         let tick = C3_NOW.addingTimeInterval(elapsed)
         let frame = remoteAccountFrame(local: (c3Absent(), c3Absent()), localIds: [:], remote: frozen,
-                                       hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: tick)
+                                       hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: lastRead), now: tick)
         let views = frame.displayedViews
         let events = readerCardStateEvents(frame.displayedViews, now: frame.now)
         expect(frame.now == tick && views.count == 1 && views.first?.state == expected && views.first?.data.session == 42.5,
-               "C3-04 unchanged cache + clock \(Int(elapsed)) seconds: correct state; last values retained")
+               "C3-04 unchanged cache + clock \(Int(elapsed)) seconds: state \(expected.rawValue) by reader freshness; last values retained")
         expect(events.count == 1 && (events.first?["state"] as? Int) == views.first?.state.rawValue
                && (events.first?["state"] as? Int) == expected.rawValue
                && (events.first?["age"] as? Int) == Int(1500 + elapsed)
@@ -401,7 +406,7 @@ private func c3C307(_ expect: C3Expect) {
         var cache = SyncRemoteCache(); cache.gistId = gist; cache.labelKey = key
         let localCodex = LimitData(session: 25, sessionReset: C3_NOW.addingTimeInterval(3600),
                                    asOf: C3_NOW, apiFresh: true)
-        let sync = ReaderSyncState(phase: .on)
+        let sync = ReaderSyncState(phase: .on, lastReadOkAt: C3_NOW)
         let hiddenFrame = remoteAccountFrame(local: (c3Absent(), localCodex), localIds: ["codex": localId],
                                              remote: cache, hidden: [hiddenLabel], menu: [:], sync: sync, now: C3_NOW)
         let unfilteredFrame = remoteAccountFrame(local: (c3Absent(), localCodex), localIds: ["codex": localId],
@@ -444,7 +449,7 @@ private func c3C313(_ expect: C3Expect) {
     var missingLogin = LimitData(present: true)
     missingLogin.auth = .loggedOut
     let cache = c3Cache(c3View())
-    let sync = ReaderSyncState(phase: .on)
+    let sync = ReaderSyncState(phase: .on, lastReadOkAt: C3_NOW)
     let frame = remoteAccountFrame(local: (missingLogin, c3Absent()), localIds: [:], remote: cache,
                                    hidden: [], menu: [:], sync: sync, now: C3_NOW)
     expect(frame.allViews.count == 1 && frame.visibleViews.count == 1 && frame.displayedViews.count == 1,
@@ -582,7 +587,7 @@ private func c3C314(_ root: String, _ expect: C3Expect) {
         if succeeds {
             let remote = sync.remoteSnapshot()
             let frame = remoteAccountFrame(local: (c3Absent(), c3Absent()), localIds: [:], remote: remote,
-                                           hidden: [], menu: [:], sync: ReaderSyncState(phase: .on), now: C3_NOW)
+                                           hidden: [], menu: [:], sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_NOW), now: C3_NOW)
             expect(frame.displayedViews.count == 1 && frame.displayedViews.first?.isLocal == false
                    && frame.displayedViews.first?.data.asOf == c3Date("2026-10-12T15:43:00Z")
                    && frame.displayedViews.first?.data.session == 42.5,
@@ -730,7 +735,7 @@ private func c3Release341Cooldown(_ expect: C3Expect) {
                     }
                 }
                 for phase in [SyncPhase.on, .revoked] {
-                    let sync = ReaderSyncState(phase: phase)
+                    let sync = ReaderSyncState(phase: phase, lastReadOkAt: C3_NOW)
                     let idle = c3Presentation(v, language: lang, sync: sync, manual: .idle)
                     let cooling = c3Presentation(v, language: lang, sync: sync, manual: .cooldown(12))
                     expect(cooling.statusLine == idle.statusLine && cooling.tooltip == idle.tooltip

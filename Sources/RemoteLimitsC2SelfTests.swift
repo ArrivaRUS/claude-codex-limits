@@ -202,7 +202,7 @@ private func c2Local(_ pct: Double, asOf: Date) -> LimitData {
 private func c2Resolve(_ cache: SyncRemoteCache, claude: LimitData = c2Absent(), codex: LimitData = c2Absent(),
                        ids: [String: String] = [:], hidden: Set<String> = [], phase: SyncPhase = .on, now: Date) -> [AccountView] {
     resolveAccounts(local: (claude, codex), localIds: ids, remote: cache, hidden: hidden, menu: [:],
-                    sync: ReaderSyncState(phase: phase), now: now)
+                    sync: ReaderSyncState(phase: phase, lastReadOkAt: now), now: now)
 }
 private func c2Key(_ v: AccountView?) -> String {
     guard let v = v else { return "none" }
@@ -336,11 +336,11 @@ private func c2C201(_ root: String, _ fixture: String?, _ select: (Bool, Bool) -
     }
     let local = (off, c2Absent())
     readerDidSync(vps(t1, 40), at: t1.addingTimeInterval(300), local: local, localIds: [:], hidden: [],
-                  sync: ReaderSyncState(phase: .on), history: history, pollLog: pollLog)
+                  sync: ReaderSyncState(phase: .on, lastReadOkAt: t1.addingTimeInterval(300)), history: history, pollLog: pollLog)
     readerDidSync(vps(t2, 42.5), at: now, local: local, localIds: [:], hidden: [],
-                  sync: ReaderSyncState(phase: .on), history: history, pollLog: pollLog)
+                  sync: ReaderSyncState(phase: .on, lastReadOkAt: now), history: history, pollLog: pollLog)
     readerDidSync(vps(t2, 42.5), at: now, local: local, localIds: [:], hidden: [],
-                  sync: ReaderSyncState(phase: .on), history: history, pollLog: pollLog)   // the same reading again
+                  sync: ReaderSyncState(phase: .on, lastReadOkAt: now), history: history, pollLog: pollLog)   // the same reading again
     let samples = history.samples("claude", acct: C2_CLAUDE, since: c2Date("2026-10-12T09:00:00Z"))
     let rate = history.recentRate("claude", acct: C2_CLAUDE, metric: { $0.session }, minutes: 60, now: now)
     var h = C2Checks()
@@ -645,7 +645,7 @@ private func c2C208(_ root: String, _ fixture: String?, _ expect: C2Expect) {
     let ok = c2SyncOnce(root: root, files: [C2_VPS_FILE: file], now: now, onRead: { cache, at in
         reads += 1
         readerDidSync(cache, at: at, local: (c2Absent(), c2Absent()), localIds: [:], hidden: [C2_CODEX_C],
-                      sync: ReaderSyncState(phase: .on), history: history, pollLog: log)
+                      sync: ReaderSyncState(phase: .on, lastReadOkAt: at), history: history, pollLog: log)
     })
     let lines = c2Lines(log)
     let text = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
@@ -676,7 +676,7 @@ private func c2C208(_ root: String, _ fixture: String?, _ expect: C2Expect) {
     _ = c2SyncOnce(root: root, files: [C2_VPS_FILE: file], now: now, gistStatus: 500, onRead: { cache, at in
         failedReads += 1
         readerDidSync(cache, at: at, local: (c2Absent(), c2Absent()), localIds: [:], hidden: [],
-                      sync: ReaderSyncState(phase: .on), history: history, pollLog: log)
+                      sync: ReaderSyncState(phase: .on, lastReadOkAt: at), history: history, pollLog: log)
     })
     let after = ((try? String(contentsOfFile: log, encoding: .utf8)) ?? "").utf8.count
     expect(failedReads == 0 && after == sizeBefore,
@@ -779,7 +779,7 @@ private func c2C209(_ root: String, _ expect: C2Expect) {
         if let local = local { history.record(data, product: product, acct: local.historyKey, now: now) }
         let log = root + "/c2-09-" + product + "-poll.jsonl"
         readerDidSync(cache, at: now, local: selected.local, localIds: selected.ids, hidden: [],
-                      sync: ReaderSyncState(phase: .on), history: history, pollLog: log)
+                      sync: ReaderSyncState(phase: .on, lastReadOkAt: now), history: history, pollLog: log)
         let after = history.samples(product, acct: keyA, since: .distantPast)   // flush both history consumers
         let afterLines = c2Lines(path).filter { ($0["a"] as? String) == keyA }.map { c2JSON($0) }
         let rows = c2Lines(log).filter { ($0["product"] as? String) == product }

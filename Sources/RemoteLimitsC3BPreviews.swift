@@ -152,7 +152,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         defaults.setVolatileDomain(preferences, forName: UserDefaults.argumentDomain)
         SYNC_PREVIEW = SyncUIState(phase: sync.phase, login: sync.phase == .on ? "fixture-account" : nil,
             machines: [SyncMachine(name: "mac", os: "macOS", updated: C3_PREVIEW_NOW, isSelf: true),
-                       SyncMachine(name: "vps", os: "Linux", updated: C3_PREVIEW_NOW, isSelf: false)], lastSync: C3_PREVIEW_NOW)
+                       SyncMachine(name: "vps", os: "Linux", updated: C3_PREVIEW_NOW, isSelf: false)], lastSync: sync.lastReadOkAt)
         REMOTE_ACCOUNT_VIEWS_PREVIEW = views
     }
     func render(_ name: String, language: String, view: String, accounts: [AccountView], sync: ReaderSyncState,
@@ -167,7 +167,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         configure(language, advanced: advanced, views: accounts, sync: sync, hidden: hidden, expanded: expanded)
         if let settingsState = settingsState { SYNC_PREVIEW = settingsState }
         let visible = accounts.filter { !remoteAccountIsHidden($0, hidden: hidden) }
-        if sync.phase != .on || sync.warning != nil {
+        if sync.phase != .on || sync.isStalled(now: now) {
             check(accounts.filter { !$0.isLocal }.allSatisfy {
                 sync.phase == .on ? $0.state == .syncStalled
                     : ($0.state == .signedOut && $0.data.session == nil && $0.data.weekly == nil && $0.data.scoped == nil)
@@ -354,7 +354,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 }
                 let account = c3PreviewView(state: state, status: row.status)
                 let sync = ReaderSyncState(phase: name == "7-revoked" ? .revoked : (state == .signedOut ? .off : .on),
-                    warning: state == .syncStalled ? (language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.") : nil)
+                    warning: state == .syncStalled ? (language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.") : nil,
+                    lastReadOkAt: state == .syncStalled || state == .signedOut ? nil : C3_PREVIEW_NOW)
                 let presentation = remotePresentationCard(account, sync: sync, language: language, narrow: row.narrow,
                     now: C3_PREVIEW_NOW, timeZone: C3_PREVIEW_ZONE, manual: .idle)
                 if name != "7-revoked" {
@@ -408,7 +409,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             account.caption = "Claude Max 20x · mac, vps"
         default: check(false, "C3-10 unknown manual golden phase"); continue
         }
-        let now = c3PreviewDate("2026-10-12T15:45:59Z"), sync = ReaderSyncState(phase: .on)
+        let now = c3PreviewDate("2026-10-12T15:45:59Z"), sync = ReaderSyncState(phase: .on, lastReadOkAt: now)
         let readerManual: RemoteManualPhase? = row.phase == "pollAllowed"
             ? .checked(c3PreviewDate("2026-10-12T15:45:00Z")) : nil
         for view in ["simple-narrow", "simple-wide", "advanced"] {
@@ -439,20 +440,20 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         for language in ["ru", "en"] {
             for view in ["simple", "advanced"] {
                 render("c3-layout-\(name)-\(language)-\(view).png", language: language, view: view,
-                    accounts: accounts, sync: ReaderSyncState(phase: .on))
+                    accounts: accounts, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW))
             }
             render("c3-history-\(name)-\(language)-advanced.png", language: language, view: "advanced",
-                accounts: accounts, sync: ReaderSyncState(phase: .on), expanded: true)
+                accounts: accounts, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), expanded: true)
         }
     }
     let usageOnly = HistorySubscription(product: "codex", title: "Codex",
         usageDays: ["2026-10-12": ["gpt-6.1-sol": DayModelUsage(input: 10000, output: 2000, turns: 3)]], accounts: [])
     for language in ["ru", "en"] {
         render("c5-history-only-product-\(language)-advanced.png", language: language, view: "advanced",
-            accounts: [], sync: ReaderSyncState(phase: .on), expanded: true, subscriptions: [usageOnly])
+            accounts: [], sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), expanded: true, subscriptions: [usageOnly])
         let accounts = [c3PreviewView(state: .syncStalled, product: "codex", identity: 11),
                         c3PreviewView(state: .syncStalled, product: "codex", identity: 12, machines: ["desktop"])]
-        let sync = ReaderSyncState(phase: .on, warning: language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.")
+        let sync = ReaderSyncState(phase: .on, warning: language == "ru" ? "Нет связи с GitHub." : "GitHub is unreachable.", lastReadOkAt: nil)
         for view in ["simple", "advanced"] {
             render("c3-actions-two-codex-\(language)-\(view).png", language: language, view: view, accounts: accounts, sync: sync)
         }
@@ -504,7 +505,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         }
         for language in ["ru", "en"] {
             for view in ["simple-narrow", "simple-wide", "advanced"] {
-                let p = remotePresentationCard(account, sync: ReaderSyncState(phase: .on), language: language,
+                let p = remotePresentationCard(account, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), language: language,
                     narrow: view == "simple-narrow", now: C3_PREVIEW_NOW, timeZone: C3_PREVIEW_ZONE, manual: .idle)
                 check(p.sourceLine.contains(timestamp), "C3-10 coherent " + condition + " preserves source timestamp")
                 if condition == "stale" {
@@ -519,7 +520,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                 if condition == "reset" { check(p.sessionDimmed, "C3-10 coherent reset presentation dims session") }
                 if condition == "future-asOf" { check(p.paceNotice != nil, "C3-10 coherent future presentation has pace notice") }
                 render("c3-data-\(condition)-\(language)-\(view).png", language: language, view: view,
-                    accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on))
+                    accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW))
             }
         }
     }
@@ -528,7 +529,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             for view in ["simple", "advanced"] {
                 let accounts = name == "on" ? [c3PreviewView(), localCodex, remoteCodex] : []
                 render("c3-settings-\(name)-\(language)-\(view).png", language: language, view: view,
-                    accounts: accounts, sync: ReaderSyncState(phase: name == "on" ? .on : (name == "off" ? .off : .revoked)), settings: true)
+                    accounts: accounts, sync: ReaderSyncState(phase: name == "on" ? .on : (name == "off" ? .off : .revoked),
+                        lastReadOkAt: name == "on" ? C3_PREVIEW_NOW : nil), settings: true)
             }
         }
     }
@@ -548,7 +550,8 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
             account.data.scoped?.reset = c3PreviewDate("2026-11-02T07:00:00Z")
             let warning = language == "ru" ? "Синхронизация стоит с 28.10 19:30: нет связи с GitHub."
                 : "Sync stalled since 28.10 19:30: GitHub is unreachable."
-            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil)
+            let sync = ReaderSyncState(phase: .on, warning: state == .syncStalled ? warning : nil,
+                                       lastReadOkAt: state == .syncStalled ? nil : datedNow)
             let p = remotePresentationCard(account, sync: sync, language: language, narrow: true,
                 now: datedNow, timeZone: C3_PREVIEW_ZONE)
             check(remoteVisibleSourceLine(p, advanced: false).isEmpty
@@ -582,7 +585,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                        SyncMachine(name: "vps", os: "Linux", updated: C3_PREVIEW_NOW, isSelf: false)],
             lastSync: C3_PREVIEW_NOW, lastError: error, lastErrorAt: c3PreviewDate("2026-10-12T15:38:00Z"))
         render("c3-settings-long-error-\(language)-simple.png", language: language, view: "simple",
-            accounts: [c3PreviewView(), localCodex], sync: ReaderSyncState(phase: .on), settings: true, settingsState: state)
+            accounts: [c3PreviewView(), localCodex], sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), settings: true, settingsState: state)
     }
     // §11.13: 32-scalar custom title and a long source name share the real card
     // layout. Only the source name may shorten; the HH:mm source time must survive.
@@ -592,23 +595,23 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         let machine = "build-machine-with-an-intentionally-long-source-name"
         account.machines = [machine]; account.data.source?.machineName = machine
         for view in ["simple-narrow", "simple-wide", "advanced"] {
-            let p = remotePresentationCard(account, sync: ReaderSyncState(phase: .on), language: language,
+            let p = remotePresentationCard(account, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), language: language,
                 narrow: view == "simple-narrow", now: C3_PREVIEW_NOW, timeZone: C3_PREVIEW_ZONE, manual: .idle)
             check(p.accessibilityLabel == account.caption && p.sourceLine.contains("15:43"),
                   "C3-10 long caption/source retains full AX label and source time")
             render("c3-long-names-\(language)-\(view).png", language: language, view: view,
-                accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on), expanded: view == "advanced")
+                accounts: sceneAccounts(account, view: view), sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), expanded: view == "advanced")
         }
         let hiddenClaude = c3PreviewView()
         let accounts = [hiddenClaude, localCodex, remoteCodex]
         let hidden: Set<String> = [hiddenClaude.historyKey]
         for view in ["simple", "advanced"] {
             let model = remoteSettingsModel(views: accounts, hidden: hidden, polling: ["claude": false, "codex": true],
-                sync: ReaderSyncState(phase: .on), advanced: view == "advanced", language: language)
+                sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), advanced: view == "advanced", language: language)
             check(model.accounts.contains { $0.historyKey == hiddenClaude.historyKey && !$0.visible }
                   && model.menuProducts.contains("codex"), "C3-10 settings hidden accounts and chooser fixture")
             render("c3-settings-accounts-\(language)-\(view).png", language: language, view: view,
-                accounts: accounts, sync: ReaderSyncState(phase: .on), settings: true, hidden: hidden)
+                accounts: accounts, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW), settings: true, hidden: hidden)
         }
     }
     // D5 regression: both rows in each narrow card show the longest reset value.
@@ -621,7 +624,7 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
                   "C5/D5 both windows reset in narrow " + language)
         }
         render("c5-both-reset-\(language)-simple-narrow.png", language: language, view: "simple-narrow",
-            accounts: accounts, sync: ReaderSyncState(phase: .on))
+            accounts: accounts, sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW))
     }
     // C5 freshness: every card has exactly two source dots. Two wide variants
     // cover all three age colors without inventing a third source.
@@ -644,11 +647,11 @@ func runRemoteLimitsC3BPreviews(previewDir: URL, files: inout [String], check: (
         let old = freshnessAccount(product: "codex", identity: 92, ages: [86401, 60])
         for view in ["simple-narrow", "advanced"] {
             render("c5-freshness-\(language)-\(view).png", language: language, view: view,
-                accounts: [timely, old], sync: ReaderSyncState(phase: .on))
+                accounts: [timely, old], sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW))
         }
         for (variant, account) in [("late", timely), ("old", old)] {
             render("c5-freshness-\(variant)-\(language)-simple-wide.png", language: language, view: "simple-wide",
-                accounts: [account], sync: ReaderSyncState(phase: .on))
+                accounts: [account], sync: ReaderSyncState(phase: .on, lastReadOkAt: C3_PREVIEW_NOW))
         }
         let header = remoteSourceHeader(timely, now: C3_PREVIEW_NOW, language: language, timeZone: C3_PREVIEW_ZONE)
         check(header.sources.map { $0.tone } == [.fresh, .late], "C5-08 preview has independent green/orange sources")
@@ -834,7 +837,7 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
         preferences["hiddenAccounts"] = [String](); preferences["localAccountCaptions"] = [String: String]()
         for (key, value) in extra { preferences[key] = value }
         defaults.setVolatileDomain(preferences, forName: UserDefaults.argumentDomain)
-        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on, lastReadOkAt: now),
             allViews: views, visibleViews: views, displayedViews: views)
         frame.subscriptions = historySubscriptions(views: views, index: historyPreviewIndex(views), now: now, language: language)
         return withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) {
@@ -969,7 +972,7 @@ func runRemoteLimitsC5AppKitTests(previewDir: URL, files: inout [String], check:
         arguments.removeValue(forKey: "productSubscriptionUSD")
         defaults.setVolatileDomain(arguments, forName: UserDefaults.argumentDomain)
         defaults.removeObject(forKey: "productSubscriptionUSD")
-        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on),
+        var frame = RemoteAccountFrame(now: now, sync: ReaderSyncState(phase: .on, lastReadOkAt: now),
             allViews: accounts, visibleViews: accounts, displayedViews: accounts)
         frame.subscriptions = historySubscriptions(views: accounts, index: historyPreviewIndex(accounts), now: now, language: language)
         withRemoteRenderScene(frame: frame, timeZone: zone, manual: .idle) {
